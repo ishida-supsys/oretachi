@@ -90,7 +90,6 @@ const loadingWorktrees = reactive(new Map<string, string>());
 const showRemoveDialog = ref(false);
 const removeTargetWorktree = ref<{ id: string; name: string; branchName: string } | null>(null);
 const removeBranches = ref<string[]>([]);
-const removingWorktree = ref(false);
 
 // IDE 選択ダイアログ
 const showIdeDialog = ref(false);
@@ -302,7 +301,9 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
     return;
   }
 
-  removingWorktree.value = true;
+  showRemoveDialog.value = false;
+  removeTargetWorktree.value = null;
+  removeBranches.value = [];
   loadingWorktrees.set(worktreeId, "削除中...");
   try {
     // detached の場合はサブウィンドウを閉じる
@@ -339,11 +340,7 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
       await message(`削除に失敗しました: ${e}`, { kind: "error" });
     }
   } finally {
-    removingWorktree.value = false;
     loadingWorktrees.delete(worktreeId);
-    showRemoveDialog.value = false;
-    removeTargetWorktree.value = null;
-    removeBranches.value = [];
   }
 }
 
@@ -1231,7 +1228,6 @@ onMounted(async () => {
       :worktree-name="removeTargetWorktree.name"
       :branch-name="removeTargetWorktree.branchName"
       :branches="removeBranches"
-      :submitting="removingWorktree"
       @confirm="onRemoveWorktreeConfirm"
       @cancel="showRemoveDialog = false"
     />
