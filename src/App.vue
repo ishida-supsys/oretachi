@@ -526,7 +526,7 @@ async function onTrayButtonClick() {
       const terminals: TrayTerminalData[] = worktree.terminals.map((t) => {
         const termRef = terminalRefs.get(t.id);
         const sessionId = termRef?.sessionId ?? null;
-        const snapshot = sessionId !== null ? (termRef?.serializeBuffer(200) ?? "") : "";
+        const snapshot = sessionId !== null ? (termRef?.serializeBuffer(300) ?? "") : "";
         const termObj = termRef?.getTerminal();
         return {
           id: t.id,
