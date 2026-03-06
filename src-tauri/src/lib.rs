@@ -3,10 +3,8 @@ mod git_worktree;
 mod ide_launcher;
 pub mod mcp_server;
 mod pty_manager;
-mod script_runner;
 mod settings;
 
-use std::collections::HashMap;
 use pty_manager::PtyManager;
 use settings::{AppSettings, SettingsManager};
 use tauri::{Manager, State};
@@ -101,15 +99,6 @@ fn open_in_ide(command: String, path: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn execute_script(
-    script_path: String,
-    cwd: String,
-    envs: HashMap<String, String>,
-) -> Result<script_runner::ScriptResult, String> {
-    script_runner::execute_script(&script_path, &cwd, &envs)
-}
-
-#[tauri::command]
 fn get_mcp_status(state: State<mcp_server::McpServerManager>) -> mcp_server::McpStatus {
     state.get_status()
 }
@@ -169,7 +158,6 @@ pub fn run() {
             git_worktree_remove,
             detect_ides,
             open_in_ide,
-            execute_script,
             get_mcp_status,
             restart_mcp_server,
             ai_judge::judge_approval,

@@ -20,7 +20,7 @@ import { useNotifications } from "./composables/useNotifications";
 import { useTrayPopup } from "./composables/useTrayPopup";
 import { useWindowFocus } from "./composables/useWindowFocus";
 import type { TrayWorktreeData, TrayTerminalData } from "./composables/useTrayPopup";
-import type { WorktreeEntry } from "./types/settings";
+import type { WorktreeEntry, Repository } from "./types/settings";
 import type { FrameNode } from "./types/frame";
 import { useHotkeyListener, bindingToAccelerator } from "./composables/useHotkeys";
 import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
@@ -71,6 +71,9 @@ const thumbnailUrls = reactive(new Map<number, string>());
 // terminalId → worktreeId のマッピング（ターミナルがどのワークツリーに属するか）
 const terminalWorktreeMap = new Map<number, string>();
 
+// worktreeId → 実行待ちスクリプトコマンド文字列
+const pendingScripts = new Map<string, string>();
+
 // ワークツリー追加ダイアログ
 const showAddDialog = ref(false);
 const addingWorktree = ref(false);
@@ -115,11 +118,19 @@ function setTerminalRef(terminalId: number, el: unknown) {
   }
 }
 
-function onTerminalReady(terminalId: number) {
+async function onTerminalReady(terminalId: number) {
   const ref = terminalRefs.get(terminalId);
   if (ref) {
     terminalRefs.delete(terminalId);
     terminalRefs.set(terminalId, ref);
+  }
+  const worktreeId = terminalWorktreeMap.get(terminalId);
+  if (worktreeId) {
+    const command = pendingScripts.get(worktreeId);
+    if (command) {
+      pendingScripts.delete(worktreeId);
+      await ref?.write(command);
+    }
   }
 }
 
@@ -179,6 +190,24 @@ function goSettings() {
 
 function resolveShell(_worktreeId: string): string | undefined {
   return settings.value.terminal.shell || undefined;
+}
+
+function buildScriptCommand(repo: Repository, entry: WorktreeEntry): string {
+  const scriptPath = repo.execScript!;
+  const shell = resolveShell(entry.id);
+  const repoName = repo.name;
+  const wtName = entry.name;
+  const shellLower = (shell ?? '').toLowerCase();
+  const isCmd = shellLower.includes('cmd');
+  const isPowerShell = !isCmd && (shellLower.includes('powershell') || shellLower.includes('pwsh') || shell === undefined);
+
+  if (isCmd) {
+    return `set ORETACHI_REPO_NAME=${repoName} && set ORETACHI_WORKTREE_NAME=${wtName} && powershell -ExecutionPolicy Bypass -File "${scriptPath}"\r`;
+  } else if (isPowerShell) {
+    return `$env:ORETACHI_REPO_NAME="${repoName}"; $env:ORETACHI_WORKTREE_NAME="${wtName}"; & "${scriptPath}"\r`;
+  } else {
+    return `ORETACHI_REPO_NAME="${repoName}" ORETACHI_WORKTREE_NAME="${wtName}" sh "${scriptPath}"\r`;
+  }
 }
 
 async function onAddTerminal(worktreeId: string) {
@@ -316,23 +345,10 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry) {
     await addWorktree(entry);
     tryAutoAssignHotkey(entry.id);
 
-    // スクリプト実行
+    // スクリプトがあればターミナルで実行するためにペンディング登録
     const repo = settings.value.repositories.find((r) => r.id === entry.repositoryId);
     if (repo?.execScript) {
-      const result = await invoke<{ success: boolean; stdout: string; stderr: string }>(
-        "execute_script",
-        {
-          scriptPath: repo.execScript,
-          cwd: entry.path,
-          envs: {
-            ORETACHI_REPO_NAME: repo.name,
-            ORETACHI_WORKTREE_NAME: entry.name,
-          },
-        }
-      );
-      if (!result.success) {
-        await message(`スクリプト実行に失敗しました:\n${result.stderr}`, { kind: "warning" });
-      }
+      pendingScripts.set(entry.id, buildScriptCommand(repo, entry));
     }
 
     // ワークツリー作成後、自動でターミナルを1つ追加
