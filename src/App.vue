@@ -610,6 +610,12 @@ async function onFocusSubWindow(worktreeId: string) {
   await focusSubWindow(worktreeId);
 }
 
+async function onFocusAllSubWindows() {
+  for (const worktreeId of detachedWorktrees) {
+    await focusSubWindow(worktreeId);
+  }
+}
+
 function onSetHotkeyChar(worktreeId: string) {
   hotkeyCharTargetId.value = worktreeId;
   showHotkeyCharDialog.value = true;
@@ -1173,6 +1179,7 @@ onMounted(async () => {
         @move-to-sub-window="onMoveToSubWindow"
         @move-to-main-window="onMoveToMainWindow"
         @focus-sub-window="onFocusSubWindow"
+        @focus-all-sub-windows="onFocusAllSubWindows"
         @set-hotkey-char="onSetHotkeyChar"
         @toggle-auto-approval="onToggleAutoApproval"
         @cancel-ai-judging="onCancelAiJudging"
