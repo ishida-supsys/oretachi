@@ -36,6 +36,7 @@ export interface HotkeySettings {
   terminalAdd: HotkeyBinding;   // デフォルト: { ctrl: true, key: "t" }
   terminalClose: HotkeyBinding; // デフォルト: { ctrl: true, key: "q" }
   trayNext: HotkeyBinding;      // デフォルト: { ctrl: true, key: "n" }
+  focusMainWindow: HotkeyBinding; // デフォルト: { alt: true, key: "m" }
 }
 
 export interface AppSettings {
@@ -45,6 +46,7 @@ export interface AppSettings {
   terminal: TerminalSettings;
   hotkeys: HotkeySettings;
   alwaysOnTop: boolean;
+  enableOsNotification?: boolean;
   autoAssignHotkey?: boolean;
   detachedWorktreeIds?: string[];
 }

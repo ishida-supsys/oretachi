@@ -74,6 +74,10 @@ fn default_tray_next() -> HotkeyBinding {
     }
 }
 
+fn default_focus_main_window() -> HotkeyBinding {
+    HotkeyBinding { ctrl: false, meta: false, shift: false, alt: true, key: "m".to_string() }
+}
+
 fn default_global_tray_popup() -> HotkeyBinding {
     if cfg!(target_os = "macos") {
         HotkeyBinding { ctrl: false, meta: true, shift: true, alt: false, key: "o".to_string() }
@@ -116,6 +120,8 @@ pub struct HotkeySettings {
     pub terminal_close: HotkeyBinding,
     #[serde(default = "default_tray_next", rename = "trayNext")]
     pub tray_next: HotkeyBinding,
+    #[serde(default = "default_focus_main_window", rename = "focusMainWindow")]
+    pub focus_main_window: HotkeyBinding,
 }
 
 impl Default for HotkeySettings {
@@ -127,6 +133,7 @@ impl Default for HotkeySettings {
             terminal_add: default_terminal_add(),
             terminal_close: default_terminal_close(),
             tray_next: default_tray_next(),
+            focus_main_window: default_focus_main_window(),
         }
     }
 }
@@ -164,6 +171,8 @@ pub struct AppSettings {
     pub hotkeys: HotkeySettings,
     #[serde(default, rename = "alwaysOnTop")]
     pub always_on_top: bool,
+    #[serde(default, rename = "enableOsNotification")]
+    pub enable_os_notification: bool,
     #[serde(default, rename = "autoAssignHotkey")]
     pub auto_assign_hotkey: bool,
     #[serde(default, rename = "detachedWorktreeIds")]
@@ -179,6 +188,7 @@ impl Default for AppSettings {
             terminal: TerminalSettings::default(),
             hotkeys: HotkeySettings::default(),
             always_on_top: false,
+            enable_os_notification: false,
             auto_assign_hotkey: false,
             detached_worktree_ids: Vec::new(),
         }

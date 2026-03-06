@@ -639,6 +639,23 @@ useHotkeyListener(() => {
   return actions;
 });
 
+// Alt+[char] ワークツリーフォーカス用の共通ロジック
+function focusWorktreeByChar(char: string) {
+  const wt = worktrees.value.find((w) => {
+    const entry = settings.value.worktrees.find((e) => e.id === w.id);
+    return entry?.hotkeyChar === char;
+  });
+  if (!wt) return;
+
+  if (isDetached(wt.id)) {
+    focusSubWindow(wt.id);
+  } else if (wt.terminals.length > 0) {
+    switchToTerminal(wt.terminals[0].id);
+  } else {
+    onAddTerminal(wt.id);
+  }
+}
+
 // Alt+[char] ワークツリーフォーカス用の keydown リスナー
 function handleAltCharKey(event: KeyboardEvent) {
   if (event.type !== "keydown") return;
@@ -655,14 +672,7 @@ function handleAltCharKey(event: KeyboardEvent) {
 
   event.preventDefault();
   event.stopPropagation();
-
-  if (isDetached(wt.id)) {
-    focusSubWindow(wt.id);
-  } else if (wt.terminals.length > 0) {
-    switchToTerminal(wt.terminals[0].id);
-  } else {
-    onAddTerminal(wt.id);
-  }
+  focusWorktreeByChar(char);
 }
 
 let globalShortcutRegistered = false;
@@ -790,7 +800,7 @@ onMounted(async () => {
     }
     if (!approved && !isWorktreeFocused(wt.id)) {
       await debug(`[AutoApproval] local: not approved → addNotification(${wt.id})`);
-      addNotification(wt.id);
+      addNotification(wt.id, wt.name);
     }
   });
 
@@ -799,7 +809,8 @@ onMounted(async () => {
     const { worktreeId: wid, approved } = event.payload;
     await debug(`[AutoApproval] sub-auto-approve-result worktreeId=${wid} approved=${approved}`);
     if (!approved && !isWorktreeFocused(wid)) {
-      addNotification(wid);
+      const wtName = worktrees.value.find((w) => w.id === wid)?.name;
+      addNotification(wid, wtName);
     }
   });
 
@@ -888,6 +899,11 @@ onMounted(async () => {
   // サブウィンドウでのターミナルフォーカス時の通知クリア
   await listen<{ worktreeId: string }>("sub-clear-notification", (event) => {
     clearNotification(event.payload.worktreeId);
+  });
+
+  // サブウィンドウからの Alt+char ワークツリーフォーカス委譲
+  await listen<{ char: string }>("sub-alt-char-focus", (event) => {
+    focusWorktreeByChar(event.payload.char);
   });
 
   // トレイポップアップ閉鎖通知

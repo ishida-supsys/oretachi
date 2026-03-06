@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, nextTick, markRaw, watch } from "vue";
+import { ref, reactive, onMounted, onUnmounted, nextTick, markRaw, watch, computed } from "vue";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import TerminalView from "./components/TerminalView.vue";
 import FrameContainer from "./components/FrameContainer.vue";
 import { useFrameLayout } from "./composables/useFrameLayout";
@@ -293,12 +294,23 @@ async function onTabEdgeDrop(
 
 const { settings, loadSettings } = useSettings();
 
+// このサブウィンドウのホットキー文字
+const hotkeyChar = computed(() =>
+  settings.value.worktrees.find((w) => w.id === worktreeId)?.hotkeyChar
+);
+
 // サブウィンドウのホットキーリスナー
 useHotkeyListener(() => {
   const hk = settings.value.hotkeys;
   if (!hk || !initialized.value) return [];
 
   return [
+    {
+      binding: hk.focusMainWindow,
+      handler: () => {
+        WebviewWindow.getByLabel("main").then((w) => w?.setFocus());
+      },
+    },
     {
       binding: hk.terminalNext,
       handler: () => {
@@ -343,6 +355,22 @@ useHotkeyListener(() => {
   ];
 });
 
+// Alt+[char] を受けてメインに委譲
+function handleAltCharKey(event: KeyboardEvent) {
+  if (event.type !== "keydown") return;
+  if (event.isComposing || event.keyCode === 229) return;
+  if (!event.altKey || event.ctrlKey || event.shiftKey) return;
+  if (event.key.length !== 1) return;
+
+  const char = event.key.toLowerCase();
+  // 自分自身のホットキー文字は無視
+  if (char === hotkeyChar.value?.toLowerCase()) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  emitTo("main", "sub-alt-char-focus", { char });
+}
+
 let unlistenInit: UnlistenFn | null = null;
 let unlistenAddResponse: UnlistenFn | null = null;
 let unlistenFocusTerminal: UnlistenFn | null = null;
@@ -357,6 +385,7 @@ let closingByMain = false;
 
 onMounted(async () => {
   await loadSettings();
+  window.addEventListener("keydown", handleAltCharKey, true);
 
   unlistenSettingsChanged = await listen("settings-changed", async () => {
     await loadSettings();
@@ -579,6 +608,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  window.removeEventListener("keydown", handleAltCharKey, true);
   if (thumbnailInterval) clearInterval(thumbnailInterval);
   unlistenInit?.();
   unlistenAddResponse?.();
@@ -625,6 +655,11 @@ function getFirstLeafId(): string {
           >
             {{ worktreeName }}
           </span>
+          <span
+            v-if="hotkeyChar"
+            class="text-[10px] px-1.5 py-0.5 rounded font-mono font-medium"
+            style="background: rgba(203,166,247,0.15); color: #cba6f7; border: 1px solid rgba(203,166,247,0.3)"
+          >Alt+{{ hotkeyChar.toUpperCase() }}</span>
           <span
             v-if="autoApproval"
             class="text-[10px] px-1.5 py-0.5 rounded font-medium"

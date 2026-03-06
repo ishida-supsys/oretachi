@@ -13,6 +13,7 @@ const defaultHotkeys = () => ({
   terminalAdd: isMac ? { meta: true, key: "t" } : { ctrl: true, key: "t" },
   terminalClose: isMac ? { meta: true, key: "w" } : { ctrl: true, key: "w" },
   trayNext: isMac ? { meta: true, key: "n" } : { ctrl: true, key: "n" },
+  focusMainWindow: { alt: true, key: "m" },
 });
 
 function migrateHotkeys(hotkeys: HotkeySettings): boolean {

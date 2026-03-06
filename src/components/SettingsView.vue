@@ -272,6 +272,15 @@ function clearExecScript(repoId: string) {
               />
             </td>
           </tr>
+          <tr>
+            <td class="hotkey-td-label">メインウィンドウにフォーカス (サブウィンドウ用)</td>
+            <td class="hotkey-td-input">
+              <HotkeyInput
+                :model-value="settings.hotkeys.focusMainWindow"
+                @update:model-value="(v) => { settings.hotkeys.focusMainWindow = v; scheduleSave(); }"
+              />
+            </td>
+          </tr>
         </tbody>
       </table>
     </div>
