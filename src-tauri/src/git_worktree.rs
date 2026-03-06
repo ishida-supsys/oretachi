@@ -87,6 +87,135 @@ pub fn worktree_add(
     }
 }
 
+pub fn list_branches(repo_path: &str) -> Result<Vec<String>, String> {
+    let output = make_command("git")
+        .args(["branch", "--format=%(refname:short)"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git branch failed: {}", stderr));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let branches = stdout
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    Ok(branches)
+}
+
+fn find_branch_worktree(repo_path: &str, branch_name: &str) -> Result<Option<String>, String> {
+    let output = make_command("git")
+        .args(["worktree", "list", "--porcelain"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git worktree list failed: {}", stderr));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut current_path: Option<String> = None;
+
+    for line in stdout.lines() {
+        if line.starts_with("worktree ") {
+            current_path = Some(line["worktree ".len()..].to_string());
+        } else if line.starts_with("branch refs/heads/") {
+            let b = &line["branch refs/heads/".len()..];
+            if b == branch_name {
+                return Ok(current_path);
+            }
+        }
+    }
+    Ok(None)
+}
+
+pub fn merge_branch(repo_path: &str, source_branch: &str, target_branch: &str) -> Result<(), String> {
+    if let Some(target_worktree_path) = find_branch_worktree(repo_path, target_branch)? {
+        // target_branch がチェックアウトされているワークツリーで直接 merge
+        let merge_output = make_command("git")
+            .args(["merge", source_branch, "--no-edit"])
+            .current_dir(&target_worktree_path)
+            .output()
+            .map_err(|e| format!("git command error: {}", e))?;
+
+        if !merge_output.status.success() {
+            let _ = make_command("git")
+                .args(["merge", "--abort"])
+                .current_dir(&target_worktree_path)
+                .output();
+            let stderr = String::from_utf8_lossy(&merge_output.stderr);
+            return Err(format!("git merge failed: {}", stderr));
+        }
+    } else {
+        // target_branch がどのワークツリーにもチェックアウトされていない → repo_path で checkout して merge
+        let head_output = make_command("git")
+            .args(["rev-parse", "--abbrev-ref", "HEAD"])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| format!("git command error: {}", e))?;
+        let original_branch = String::from_utf8_lossy(&head_output.stdout).trim().to_string();
+
+        let checkout_output = make_command("git")
+            .args(["checkout", target_branch])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| format!("git command error: {}", e))?;
+
+        if !checkout_output.status.success() {
+            let stderr = String::from_utf8_lossy(&checkout_output.stderr);
+            return Err(format!("git checkout failed: {}", stderr));
+        }
+
+        let merge_output = make_command("git")
+            .args(["merge", source_branch, "--no-edit"])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| format!("git command error: {}", e))?;
+
+        if !merge_output.status.success() {
+            let _ = make_command("git")
+                .args(["merge", "--abort"])
+                .current_dir(repo_path)
+                .output();
+            let _ = make_command("git")
+                .args(["checkout", &original_branch])
+                .current_dir(repo_path)
+                .output();
+            let stderr = String::from_utf8_lossy(&merge_output.stderr);
+            return Err(format!("git merge failed: {}", stderr));
+        }
+
+        let _ = make_command("git")
+            .args(["checkout", &original_branch])
+            .current_dir(repo_path)
+            .output();
+    }
+
+    Ok(())
+}
+
+pub fn delete_branch(repo_path: &str, branch_name: &str) -> Result<(), String> {
+    let output = make_command("git")
+        .args(["branch", "-d", branch_name])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git branch -d failed: {}", stderr));
+    }
+
+    Ok(())
+}
+
 pub fn worktree_remove(repo_path: &str, worktree_path: &str) -> Result<(), String> {
     let output = make_command("git")
         .args(["worktree", "remove", "--force", "--force", worktree_path])

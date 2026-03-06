@@ -89,6 +89,33 @@ async fn git_worktree_remove(repo_path: String, worktree_path: String) -> Result
 }
 
 #[tauri::command]
+async fn git_list_branches(repo_path: String) -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || git_worktree::list_branches(&repo_path))
+        .await
+        .map_err(|e| format!("task join error: {}", e))?
+}
+
+#[tauri::command]
+async fn git_merge_branch(
+    repo_path: String,
+    source_branch: String,
+    target_branch: String,
+) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || {
+        git_worktree::merge_branch(&repo_path, &source_branch, &target_branch)
+    })
+    .await
+    .map_err(|e| format!("task join error: {}", e))?
+}
+
+#[tauri::command]
+async fn git_delete_branch(repo_path: String, branch_name: String) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || git_worktree::delete_branch(&repo_path, &branch_name))
+        .await
+        .map_err(|e| format!("task join error: {}", e))?
+}
+
+#[tauri::command]
 fn detect_ides() -> Vec<ide_launcher::IdeInfo> {
     ide_launcher::detect_ides()
 }
@@ -156,6 +183,9 @@ pub fn run() {
             git_validate_repo,
             git_worktree_add,
             git_worktree_remove,
+            git_list_branches,
+            git_merge_branch,
+            git_delete_branch,
             detect_ides,
             open_in_ide,
             get_mcp_status,

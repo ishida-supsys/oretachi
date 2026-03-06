@@ -17,25 +17,42 @@ function loadWorktreesFromSettings() {
   }));
 }
 
-/** ワークツリーを作成して設定に保存 */
-async function addWorktree(entry: WorktreeEntry): Promise<boolean> {
-  const lfsSkipped = await invoke<boolean>("git_worktree_add", {
-    repoPath: entry.repositoryId, // repositoryId にリポジトリパスを使用
+/** ワークツリーを UI 一覧に仮追加（バックエンド処理前） */
+function addWorktreePlaceholder(entry: WorktreeEntry): void {
+  const worktree: Worktree = { ...entry, terminals: [] };
+  worktrees.value.push(worktree);
+}
+
+/** ワークツリーをバックエンドで作成（git worktree add） */
+async function invokeWorktreeAdd(entry: WorktreeEntry): Promise<boolean> {
+  return invoke<boolean>("git_worktree_add", {
+    repoPath: entry.repositoryId,
     worktreePath: entry.path,
     branchName: entry.branchName,
   });
+}
 
-  const worktree: Worktree = { ...entry, terminals: [] };
-  worktrees.value.push(worktree);
-
+/** ワークツリーを設定に永続化（成功時に呼ぶ） */
+function commitWorktree(entry: WorktreeEntry): void {
   settings.value.worktrees.push(entry);
   scheduleSave();
+}
 
-  return lfsSkipped;
+/** 仮追加したワークツリーを一覧から削除（失敗時ロールバック用） */
+function rollbackWorktree(worktreeId: string): void {
+  const index = worktrees.value.findIndex((w) => w.id === worktreeId);
+  if (index !== -1) {
+    worktrees.value.splice(index, 1);
+  }
+}
+
+interface RemoveWorktreeOptions {
+  mergeTo?: string;
+  deleteBranch?: boolean;
 }
 
 /** ワークツリーを削除（git worktree remove + 設定から削除） */
-async function removeWorktree(worktreeId: string): Promise<void> {
+async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOptions): Promise<void> {
   const index = worktrees.value.findIndex((w) => w.id === worktreeId);
   if (index === -1) return;
 
@@ -46,10 +63,25 @@ async function removeWorktree(worktreeId: string): Promise<void> {
     (r) => r.id === worktree.repositoryId
   );
   if (repoEntry) {
+    if (options?.mergeTo) {
+      await invoke("git_merge_branch", {
+        repoPath: repoEntry.path,
+        sourceBranch: worktree.branchName,
+        targetBranch: options.mergeTo,
+      });
+    }
+
     await invoke("git_worktree_remove", {
       repoPath: repoEntry.path,
       worktreePath: worktree.path,
     });
+
+    if (options?.deleteBranch) {
+      await invoke("git_delete_branch", {
+        repoPath: repoEntry.path,
+        branchName: worktree.branchName,
+      });
+    }
   }
 
   worktrees.value.splice(index, 1);
@@ -57,6 +89,13 @@ async function removeWorktree(worktreeId: string): Promise<void> {
     (w) => w.id !== worktreeId
   );
   scheduleSave();
+}
+
+/** ローカルブランチ一覧を取得 */
+async function listBranches(repositoryId: string): Promise<string[]> {
+  const repoEntry = settings.value.repositories.find((r) => r.id === repositoryId);
+  if (!repoEntry) return [];
+  return invoke<string[]>("git_list_branches", { repoPath: repoEntry.path });
 }
 
 /** ターミナルを追加 */
@@ -97,8 +136,12 @@ export function useWorktrees() {
   return {
     worktrees,
     loadWorktreesFromSettings,
-    addWorktree,
+    addWorktreePlaceholder,
+    invokeWorktreeAdd,
+    commitWorktree,
+    rollbackWorktree,
     removeWorktree,
+    listBranches,
     addTerminal,
     removeTerminal,
     updateTerminalTitle,

@@ -49,4 +49,5 @@ export interface AppSettings {
   enableOsNotification?: boolean;
   autoAssignHotkey?: boolean;
   detachedWorktreeIds?: string[];
+  focusMainOnEmptyTray?: boolean;
 }

@@ -7,10 +7,11 @@ import TerminalView from "./components/TerminalView.vue";
 import HomeView from "./components/HomeView.vue";
 import SettingsView from "./components/SettingsView.vue";
 import AddWorktreeDialog from "./components/AddWorktreeDialog.vue";
+import RemoveWorktreeDialog from "./components/RemoveWorktreeDialog.vue";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import HotkeyCharDialog from "./components/HotkeyCharDialog.vue";
 import TrayButton from "./components/TrayButton.vue";
-import { confirm, message } from "@tauri-apps/plugin-dialog";
+import { message } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import type { IdeInfo } from "./types/ide";
 import { useSettings } from "./composables/useSettings";
@@ -45,7 +46,7 @@ const subWindowFocusMap = reactive(new Map<string, boolean>());
 type ViewMode = "home" | "settings" | "terminal";
 
 const { settings, loadSettings, scheduleSave } = useSettings();
-const { worktrees, loadWorktreesFromSettings, addWorktree, removeWorktree, addTerminal, removeTerminal, updateTerminalTitle } = useWorktrees();
+const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, removeWorktree, listBranches, addTerminal, removeTerminal, updateTerminalTitle } = useWorktrees();
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, closeAllSubWindows } = useSubWindows();
 const { notifications, initNotificationListener, addNotification, clearNotification, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
 const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees } = useTrayPopup();
@@ -77,10 +78,16 @@ const pendingScripts = new Map<string, string>();
 
 // ワークツリー追加ダイアログ
 const showAddDialog = ref(false);
-const addingWorktree = ref(false);
+
 
 // 削除中のワークツリー ID セット
-const loadingWorktrees = reactive(new Set<string>());
+const loadingWorktrees = reactive(new Map<string, string>());
+
+// ワークツリー削除ダイアログ
+const showRemoveDialog = ref(false);
+const removeTargetWorktree = ref<{ id: string; name: string; branchName: string } | null>(null);
+const removeBranches = ref<string[]>([]);
+const removingWorktree = ref(false);
 
 // IDE 選択ダイアログ
 const showIdeDialog = ref(false);
@@ -267,13 +274,32 @@ async function onRemoveWorktree(worktreeId: string) {
   const worktree = worktrees.value.find((w) => w.id === worktreeId);
   if (!worktree) return;
 
-  const confirmed = await confirm(
-    `git worktree remove が実行されます。`,
-    { title: `ワークツリー「${worktree.name}」を削除しますか？`, kind: "warning" }
-  );
-  if (!confirmed) return;
+  // ブランチ一覧を取得してダイアログ表示
+  let branches: string[] = [];
+  try {
+    const all = await listBranches(worktree.repositoryId);
+    branches = all.filter((b) => b !== worktree.branchName);
+  } catch {
+    branches = [];
+  }
 
-  loadingWorktrees.add(worktreeId);
+  removeTargetWorktree.value = { id: worktree.id, name: worktree.name, branchName: worktree.branchName };
+  removeBranches.value = branches;
+  showRemoveDialog.value = true;
+}
+
+async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch: boolean }) {
+  if (!removeTargetWorktree.value) return;
+  const { id: worktreeId } = removeTargetWorktree.value;
+
+  const worktree = worktrees.value.find((w) => w.id === worktreeId);
+  if (!worktree) {
+    showRemoveDialog.value = false;
+    return;
+  }
+
+  removingWorktree.value = true;
+  loadingWorktrees.set(worktreeId, "削除中...");
   try {
     // detached の場合はサブウィンドウを閉じる
     if (isDetached(worktreeId)) {
@@ -301,12 +327,19 @@ async function onRemoveWorktree(worktreeId: string) {
     }
 
     try {
-      await removeWorktree(worktreeId);
+      await removeWorktree(worktreeId, {
+        mergeTo: options.mergeTo || undefined,
+        deleteBranch: options.deleteBranch,
+      });
     } catch (e) {
       await message(`削除に失敗しました: ${e}`, { kind: "error" });
     }
   } finally {
+    removingWorktree.value = false;
     loadingWorktrees.delete(worktreeId);
+    showRemoveDialog.value = false;
+    removeTargetWorktree.value = null;
+    removeBranches.value = [];
   }
 }
 
@@ -344,9 +377,16 @@ async function onIdeSelected(ide: IdeInfo) {
 }
 
 async function onAddWorktreeConfirm(entry: WorktreeEntry) {
-  addingWorktree.value = true;
+  // ダイアログを即閉じ、一覧に仮エントリを表示
+  showAddDialog.value = false;
+  addWorktreePlaceholder(entry);
+  loadingWorktrees.set(entry.id, "作成中...");
+
   try {
-    const lfsSkipped = await addWorktree(entry);
+    const lfsSkipped = await invokeWorktreeAdd(entry);
+
+    // 成功時: 設定に永続化
+    commitWorktree(entry);
     tryAutoAssignHotkey(entry.id);
 
     // スクリプトがあればターミナルで実行するためにペンディング登録
@@ -365,10 +405,10 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry) {
       );
     }
   } catch (e) {
+    rollbackWorktree(entry.id);
     await message(`ワークツリーの作成に失敗しました: ${e}`, { kind: "error" });
   } finally {
-    addingWorktree.value = false;
-    showAddDialog.value = false;
+    loadingWorktrees.delete(entry.id);
   }
 }
 
@@ -478,7 +518,15 @@ async function onMoveToMainWindow(worktreeId: string) {
 
 async function onTrayButtonClick() {
   const worktreeIds = getNotifiedWorktreeIds();
-  if (worktreeIds.length === 0) return;
+  if (worktreeIds.length === 0) {
+    if (settings.value.focusMainOnEmptyTray) {
+      const win = getCurrentWindow();
+      await win.show();
+      await win.unminimize();
+      await win.setFocus();
+    }
+    return;
+  }
 
   const worktreeDataList: TrayWorktreeData[] = [];
 
@@ -1072,9 +1120,20 @@ onMounted(async () => {
       v-if="showAddDialog"
       :repositories="settings.repositories"
       :worktree-base-dir="settings.worktreeBaseDir"
-      :submitting="addingWorktree"
+      :submitting="false"
       @confirm="onAddWorktreeConfirm"
       @cancel="showAddDialog = false"
+    />
+
+    <!-- ワークツリー削除ダイアログ -->
+    <RemoveWorktreeDialog
+      v-if="showRemoveDialog && removeTargetWorktree"
+      :worktree-name="removeTargetWorktree.name"
+      :branch-name="removeTargetWorktree.branchName"
+      :branches="removeBranches"
+      :submitting="removingWorktree"
+      @confirm="onRemoveWorktreeConfirm"
+      @cancel="showRemoveDialog = false"
     />
 
     <!-- IDE 選択ダイアログ -->
