@@ -256,7 +256,8 @@ async function handleTabActivated() {
         }
         terminal.refresh(0, terminal.rows - 1);
         terminal.scrollToBottom();
-        // DOM reparenting後のIME textarea位置を再同期
+        // DOM reparenting後のIME textarea位置を再同期（blur→focusで強制再計算）
+        terminal.blur();
         terminal.focus();
       }
     });
