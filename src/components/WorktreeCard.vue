@@ -12,6 +12,7 @@ const props = defineProps<{
   notificationCount?: number;
   hotkeyChar?: string;
   loading?: boolean;
+  loadingText?: string;
   autoApproval?: boolean;
   aiJudging?: boolean;
 }>();
@@ -157,7 +158,7 @@ const terminalList = computed(() =>
     <!-- ローディングオーバーレイ -->
     <div v-if="loading" class="loading-overlay">
       <span class="pi pi-spinner pi-spin loading-icon" />
-      <span class="loading-text">削除中...</span>
+      <span class="loading-text">{{ loadingText ?? '削除中...' }}</span>
     </div>
   </div>
 </template>

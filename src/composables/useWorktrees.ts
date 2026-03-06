@@ -17,21 +17,33 @@ function loadWorktreesFromSettings() {
   }));
 }
 
-/** ワークツリーを作成して設定に保存 */
-async function addWorktree(entry: WorktreeEntry): Promise<boolean> {
-  const lfsSkipped = await invoke<boolean>("git_worktree_add", {
-    repoPath: entry.repositoryId, // repositoryId にリポジトリパスを使用
+/** ワークツリーを UI 一覧に仮追加（バックエンド処理前） */
+function addWorktreePlaceholder(entry: WorktreeEntry): void {
+  const worktree: Worktree = { ...entry, terminals: [] };
+  worktrees.value.push(worktree);
+}
+
+/** ワークツリーをバックエンドで作成（git worktree add） */
+async function invokeWorktreeAdd(entry: WorktreeEntry): Promise<boolean> {
+  return invoke<boolean>("git_worktree_add", {
+    repoPath: entry.repositoryId,
     worktreePath: entry.path,
     branchName: entry.branchName,
   });
+}
 
-  const worktree: Worktree = { ...entry, terminals: [] };
-  worktrees.value.push(worktree);
-
+/** ワークツリーを設定に永続化（成功時に呼ぶ） */
+function commitWorktree(entry: WorktreeEntry): void {
   settings.value.worktrees.push(entry);
   scheduleSave();
+}
 
-  return lfsSkipped;
+/** 仮追加したワークツリーを一覧から削除（失敗時ロールバック用） */
+function rollbackWorktree(worktreeId: string): void {
+  const index = worktrees.value.findIndex((w) => w.id === worktreeId);
+  if (index !== -1) {
+    worktrees.value.splice(index, 1);
+  }
 }
 
 interface RemoveWorktreeOptions {
@@ -124,7 +136,10 @@ export function useWorktrees() {
   return {
     worktrees,
     loadWorktreesFromSettings,
-    addWorktree,
+    addWorktreePlaceholder,
+    invokeWorktreeAdd,
+    commitWorktree,
+    rollbackWorktree,
     removeWorktree,
     listBranches,
     addTerminal,

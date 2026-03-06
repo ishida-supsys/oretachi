@@ -46,7 +46,7 @@ const subWindowFocusMap = reactive(new Map<string, boolean>());
 type ViewMode = "home" | "settings" | "terminal";
 
 const { settings, loadSettings, scheduleSave } = useSettings();
-const { worktrees, loadWorktreesFromSettings, addWorktree, removeWorktree, listBranches, addTerminal, removeTerminal, updateTerminalTitle } = useWorktrees();
+const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, removeWorktree, listBranches, addTerminal, removeTerminal, updateTerminalTitle } = useWorktrees();
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, closeAllSubWindows } = useSubWindows();
 const { notifications, initNotificationListener, addNotification, clearNotification, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
 const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees } = useTrayPopup();
@@ -78,10 +78,10 @@ const pendingScripts = new Map<string, string>();
 
 // ワークツリー追加ダイアログ
 const showAddDialog = ref(false);
-const addingWorktree = ref(false);
+
 
 // 削除中のワークツリー ID セット
-const loadingWorktrees = reactive(new Set<string>());
+const loadingWorktrees = reactive(new Map<string, string>());
 
 // ワークツリー削除ダイアログ
 const showRemoveDialog = ref(false);
@@ -299,7 +299,7 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
   }
 
   removingWorktree.value = true;
-  loadingWorktrees.add(worktreeId);
+  loadingWorktrees.set(worktreeId, "削除中...");
   try {
     // detached の場合はサブウィンドウを閉じる
     if (isDetached(worktreeId)) {
@@ -377,9 +377,16 @@ async function onIdeSelected(ide: IdeInfo) {
 }
 
 async function onAddWorktreeConfirm(entry: WorktreeEntry) {
-  addingWorktree.value = true;
+  // ダイアログを即閉じ、一覧に仮エントリを表示
+  showAddDialog.value = false;
+  addWorktreePlaceholder(entry);
+  loadingWorktrees.set(entry.id, "作成中...");
+
   try {
-    const lfsSkipped = await addWorktree(entry);
+    const lfsSkipped = await invokeWorktreeAdd(entry);
+
+    // 成功時: 設定に永続化
+    commitWorktree(entry);
     tryAutoAssignHotkey(entry.id);
 
     // スクリプトがあればターミナルで実行するためにペンディング登録
@@ -398,10 +405,10 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry) {
       );
     }
   } catch (e) {
+    rollbackWorktree(entry.id);
     await message(`ワークツリーの作成に失敗しました: ${e}`, { kind: "error" });
   } finally {
-    addingWorktree.value = false;
-    showAddDialog.value = false;
+    loadingWorktrees.delete(entry.id);
   }
 }
 
@@ -1114,7 +1121,7 @@ onMounted(async () => {
       v-if="showAddDialog"
       :repositories="settings.repositories"
       :worktree-base-dir="settings.worktreeBaseDir"
-      :submitting="addingWorktree"
+      :submitting="false"
       @confirm="onAddWorktreeConfirm"
       @cancel="showAddDialog = false"
     />

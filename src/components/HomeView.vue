@@ -10,7 +10,7 @@ const props = defineProps<{
   detachedWorktrees: Set<string>;
   notifications: Map<string, number>;
   hotkeyChars: Map<string, string>;
-  loadingWorktrees: Set<string>;
+  loadingWorktrees: Map<string, string>;
   autoApprovals: Map<string, boolean>;
   aiJudgingWorktrees: Set<string>;
 }>();
@@ -73,6 +73,7 @@ const { containerRef, columns } = useMasonryLayout(worktreesRef, { minColumnWidt
           :notification-count="notifications.get(worktree.id) ?? 0"
           :hotkey-char="hotkeyChars.get(worktree.id)"
           :loading="loadingWorktrees.has(worktree.id)"
+          :loading-text="loadingWorktrees.get(worktree.id)"
           :auto-approval="autoApprovals.get(worktree.id) ?? false"
           :ai-judging="aiJudgingWorktrees.has(worktree.id)"
           @select-terminal="emit('selectTerminal', $event)"
