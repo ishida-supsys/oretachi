@@ -807,7 +807,7 @@ onMounted(async () => {
     }
     if (!approved && !isWorktreeFocused(wt.id)) {
       await debug(`[AutoApproval] local: not approved → addNotification(${wt.id})`);
-      addNotification(wt.id, wt.name);
+      addNotification(wt.id);
     }
   });
 
@@ -816,8 +816,7 @@ onMounted(async () => {
     const { worktreeId: wid, approved } = event.payload;
     await debug(`[AutoApproval] sub-auto-approve-result worktreeId=${wid} approved=${approved}`);
     if (!approved && !isWorktreeFocused(wid)) {
-      const wtName = worktrees.value.find((w) => w.id === wid)?.name;
-      addNotification(wid, wtName);
+      addNotification(wid);
     }
   });
 
