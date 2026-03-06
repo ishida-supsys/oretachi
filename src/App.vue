@@ -511,7 +511,15 @@ async function onMoveToMainWindow(worktreeId: string) {
 
 async function onTrayButtonClick() {
   const worktreeIds = getNotifiedWorktreeIds();
-  if (worktreeIds.length === 0) return;
+  if (worktreeIds.length === 0) {
+    if (settings.value.focusMainOnEmptyTray) {
+      const win = getCurrentWindow();
+      await win.show();
+      await win.unminimize();
+      await win.setFocus();
+    }
+    return;
+  }
 
   const worktreeDataList: TrayWorktreeData[] = [];
 

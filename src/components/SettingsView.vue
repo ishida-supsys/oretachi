@@ -155,6 +155,16 @@ function clearExecScript(repoId: string) {
         />
         <label for="enable-os-notification" class="inline-label toggle-label">通知時にOSのデスクトップ通知を表示</label>
       </div>
+      <div class="row-input row-input--inline mt-8">
+        <input
+          id="focus-main-on-empty-tray"
+          type="checkbox"
+          class="toggle-checkbox"
+          :checked="settings.focusMainOnEmptyTray"
+          @change="(e) => { settings.focusMainOnEmptyTray = (e.target as HTMLInputElement).checked; scheduleSave(); }"
+        />
+        <label for="focus-main-on-empty-tray" class="inline-label toggle-label">通知がない時にトレイホットキーでメインウィンドウにフォーカス</label>
+      </div>
     </div>
 
     <!-- ターミナル設定 -->

@@ -177,6 +177,8 @@ pub struct AppSettings {
     pub auto_assign_hotkey: bool,
     #[serde(default, rename = "detachedWorktreeIds")]
     pub detached_worktree_ids: Vec<String>,
+    #[serde(default, rename = "focusMainOnEmptyTray")]
+    pub focus_main_on_empty_tray: bool,
 }
 
 impl Default for AppSettings {
@@ -191,6 +193,7 @@ impl Default for AppSettings {
             enable_os_notification: false,
             auto_assign_hotkey: false,
             detached_worktree_ids: Vec::new(),
+            focus_main_on_empty_tray: false,
         }
     }
 }
