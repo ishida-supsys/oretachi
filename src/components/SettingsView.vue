@@ -85,6 +85,10 @@ function removeRepository(id: string) {
   scheduleSave();
 }
 
+function hasWorktrees(repoId: string): boolean {
+  return settings.value.worktrees.some((w) => w.repositoryId === repoId);
+}
+
 async function selectExecScript(repoId: string) {
   const selected = await open({
     multiple: false,
@@ -140,6 +144,16 @@ function clearExecScript(repoId: string) {
           @change="(e) => { settings.alwaysOnTop = (e.target as HTMLInputElement).checked; scheduleSave(); }"
         />
         <label for="always-on-top" class="inline-label toggle-label">常に手前に表示</label>
+      </div>
+      <div class="row-input row-input--inline mt-8">
+        <input
+          id="enable-os-notification"
+          type="checkbox"
+          class="toggle-checkbox"
+          :checked="settings.enableOsNotification"
+          @change="(e) => { settings.enableOsNotification = (e.target as HTMLInputElement).checked; scheduleSave(); }"
+        />
+        <label for="enable-os-notification" class="inline-label toggle-label">通知時にOSのデスクトップ通知を表示</label>
       </div>
     </div>
 
@@ -283,7 +297,7 @@ function clearExecScript(repoId: string) {
           <div class="repo-row-main">
             <span class="repo-name">{{ repo.name }}</span>
             <span class="repo-path">{{ repo.path }}</span>
-            <button class="btn-remove" @click="removeRepository(repo.id)">×</button>
+            <button class="btn-remove" :disabled="hasWorktrees(repo.id)" :title="hasWorktrees(repo.id) ? 'ワークツリーが存在するため削除できません' : undefined" @click="removeRepository(repo.id)">×</button>
           </div>
           <div class="repo-row-script">
             <span class="script-label">実行スクリプト</span>
@@ -459,6 +473,11 @@ function clearExecScript(repoId: string) {
 
 .btn-remove:hover {
   color: #f38ba8;
+}
+
+.btn-remove:disabled {
+  color: #313244;
+  cursor: not-allowed;
 }
 
 .empty-state {
