@@ -346,7 +346,7 @@ async function onIdeSelected(ide: IdeInfo) {
 async function onAddWorktreeConfirm(entry: WorktreeEntry) {
   addingWorktree.value = true;
   try {
-    await addWorktree(entry);
+    const lfsSkipped = await addWorktree(entry);
     tryAutoAssignHotkey(entry.id);
 
     // スクリプトがあればターミナルで実行するためにペンディング登録
@@ -357,6 +357,13 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry) {
 
     // ワークツリー作成後、自動でターミナルを1つ追加
     await onAddTerminal(entry.id);
+
+    if (lfsSkipped) {
+      await message(
+        "Git LFS のファイル取得に失敗したため、LFS ファイルをスキップしてワークツリーを作成しました。\nLFS ファイルが必要な場合は git lfs pull を実行してください。",
+        { kind: "warning" }
+      );
+    }
   } catch (e) {
     await message(`ワークツリーの作成に失敗しました: ${e}`, { kind: "error" });
   } finally {

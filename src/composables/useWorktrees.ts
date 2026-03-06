@@ -18,8 +18,8 @@ function loadWorktreesFromSettings() {
 }
 
 /** ワークツリーを作成して設定に保存 */
-async function addWorktree(entry: WorktreeEntry): Promise<void> {
-  await invoke("git_worktree_add", {
+async function addWorktree(entry: WorktreeEntry): Promise<boolean> {
+  const lfsSkipped = await invoke<boolean>("git_worktree_add", {
     repoPath: entry.repositoryId, // repositoryId にリポジトリパスを使用
     worktreePath: entry.path,
     branchName: entry.branchName,
@@ -30,6 +30,8 @@ async function addWorktree(entry: WorktreeEntry): Promise<void> {
 
   settings.value.worktrees.push(entry);
   scheduleSave();
+
+  return lfsSkipped;
 }
 
 /** ワークツリーを削除（git worktree remove + 設定から削除） */

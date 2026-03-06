@@ -71,7 +71,7 @@ async fn git_worktree_add(
     repo_path: String,
     worktree_path: String,
     branch_name: String,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     tokio::task::spawn_blocking(move || {
         git_worktree::worktree_add(&repo_path, &worktree_path, &branch_name)
     })

@@ -27,7 +27,7 @@ pub fn worktree_add(
     repo_path: &str,
     worktree_path: &str,
     branch_name: &str,
-) -> Result<(), String> {
+) -> Result<bool, String> {
     let output = make_command("git")
         .args(["worktree", "add", "-b", branch_name, worktree_path])
         .current_dir(repo_path)
@@ -35,10 +35,55 @@ pub fn worktree_add(
         .map_err(|e| format!("git command error: {}", e))?;
 
     if output.status.success() {
-        Ok(())
+        return Ok(false);
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // LFS smudge filterエラーでなければそのまま返す
+    if !stderr.contains("smudge") && !stderr.contains("filter") {
+        return Err(format!("git worktree add failed: {}", stderr));
+    }
+
+    log::warn!(
+        "git worktree add failed due to LFS smudge filter, retrying with GIT_LFS_SKIP_SMUDGE=1: {}",
+        stderr
+    );
+
+    // クリーンアップ: 失敗したワークツリーとブランチを除去
+    let _ = make_command("git")
+        .args(["worktree", "remove", "--force", worktree_path])
+        .current_dir(repo_path)
+        .output();
+
+    let path = std::path::Path::new(worktree_path);
+    if path.exists() {
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    let _ = make_command("git")
+        .args(["worktree", "prune"])
+        .current_dir(repo_path)
+        .output();
+
+    let _ = make_command("git")
+        .args(["branch", "-D", branch_name])
+        .current_dir(repo_path)
+        .output();
+
+    // LFS smudgeをスキップしてリトライ
+    let retry_output = make_command("git")
+        .args(["worktree", "add", "-b", branch_name, worktree_path])
+        .current_dir(repo_path)
+        .env("GIT_LFS_SKIP_SMUDGE", "1")
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+
+    if retry_output.status.success() {
+        Ok(true)
     } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("git worktree add failed: {}", stderr))
+        let retry_stderr = String::from_utf8_lossy(&retry_output.stderr);
+        Err(format!("git worktree add failed: {}", retry_stderr))
     }
 }
 
