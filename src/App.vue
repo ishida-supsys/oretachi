@@ -526,7 +526,7 @@ async function onTrayButtonClick() {
       const terminals: TrayTerminalData[] = worktree.terminals.map((t) => {
         const termRef = terminalRefs.get(t.id);
         const sessionId = termRef?.sessionId ?? null;
-        const snapshot = sessionId !== null ? (termRef?.serializeBuffer(200) ?? "") : "";
+        const snapshot = sessionId !== null ? (termRef?.serializeBuffer(300) ?? "") : "";
         const termObj = termRef?.getTerminal();
         return {
           id: t.id,
@@ -722,7 +722,7 @@ onMounted(async () => {
   for (const worktreeId of savedDetachedIds) {
     const wt = worktrees.value.find((w) => w.id === worktreeId);
     if (wt) {
-      await moveToSubWindow(wt.id, wt.name, [], false, true, wt.path);
+      await moveToSubWindow(wt.id, wt.name, [], autoApprovalMap.get(wt.id) ?? false, true, wt.path);
     }
   }
 
