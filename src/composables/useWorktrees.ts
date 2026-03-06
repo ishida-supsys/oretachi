@@ -34,8 +34,13 @@ async function addWorktree(entry: WorktreeEntry): Promise<boolean> {
   return lfsSkipped;
 }
 
+interface RemoveWorktreeOptions {
+  mergeTo?: string;
+  deleteBranch?: boolean;
+}
+
 /** ワークツリーを削除（git worktree remove + 設定から削除） */
-async function removeWorktree(worktreeId: string): Promise<void> {
+async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOptions): Promise<void> {
   const index = worktrees.value.findIndex((w) => w.id === worktreeId);
   if (index === -1) return;
 
@@ -46,10 +51,25 @@ async function removeWorktree(worktreeId: string): Promise<void> {
     (r) => r.id === worktree.repositoryId
   );
   if (repoEntry) {
+    if (options?.mergeTo) {
+      await invoke("git_merge_branch", {
+        repoPath: repoEntry.path,
+        sourceBranch: worktree.branchName,
+        targetBranch: options.mergeTo,
+      });
+    }
+
     await invoke("git_worktree_remove", {
       repoPath: repoEntry.path,
       worktreePath: worktree.path,
     });
+
+    if (options?.deleteBranch) {
+      await invoke("git_delete_branch", {
+        repoPath: repoEntry.path,
+        branchName: worktree.branchName,
+      });
+    }
   }
 
   worktrees.value.splice(index, 1);
@@ -57,6 +77,13 @@ async function removeWorktree(worktreeId: string): Promise<void> {
     (w) => w.id !== worktreeId
   );
   scheduleSave();
+}
+
+/** ローカルブランチ一覧を取得 */
+async function listBranches(repositoryId: string): Promise<string[]> {
+  const repoEntry = settings.value.repositories.find((r) => r.id === repositoryId);
+  if (!repoEntry) return [];
+  return invoke<string[]>("git_list_branches", { repoPath: repoEntry.path });
 }
 
 /** ターミナルを追加 */
@@ -99,6 +126,7 @@ export function useWorktrees() {
     loadWorktreesFromSettings,
     addWorktree,
     removeWorktree,
+    listBranches,
     addTerminal,
     removeTerminal,
     updateTerminalTitle,
