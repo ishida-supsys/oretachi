@@ -722,7 +722,7 @@ onMounted(async () => {
   for (const worktreeId of savedDetachedIds) {
     const wt = worktrees.value.find((w) => w.id === worktreeId);
     if (wt) {
-      await moveToSubWindow(wt.id, wt.name, [], false, true, wt.path);
+      await moveToSubWindow(wt.id, wt.name, [], autoApprovalMap.get(wt.id) ?? false, true, wt.path);
     }
   }
 
