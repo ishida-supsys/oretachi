@@ -28,6 +28,7 @@ import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
 import { getRecentLines, analyzeForApproval, hasApprovalPrompt, cancelApproval } from "./composables/useAutoApproval";
 import { useAutoHotkey } from "./composables/useAutoHotkey";
 import { debug } from "@tauri-apps/plugin-log";
+import { platform } from "@tauri-apps/plugin-os";
 
 // ウィンドウのフォーカス状態
 const { isWindowFocused } = useWindowFocus();
@@ -198,11 +199,14 @@ function buildScriptCommand(repo: Repository, entry: WorktreeEntry): string {
   const repoName = repo.name;
   const wtName = entry.name;
   const shellLower = (shell ?? '').toLowerCase();
-  const isCmd = shellLower.includes('cmd');
-  const isPowerShell = !isCmd && (shellLower.includes('powershell') || shellLower.includes('pwsh') || shell === undefined);
+
+  // pty_manager.rs と同じロジック: 未指定時は Windows→COMSPEC(cmd.exe)、それ以外→SHELL
+  const isWindows = platform() === "windows";
+  const isCmd = shellLower.includes('cmd') || (shell === undefined && isWindows);
+  const isPowerShell = !isCmd && (shellLower.includes('powershell') || shellLower.includes('pwsh'));
 
   if (isCmd) {
-    return `set ORETACHI_REPO_NAME=${repoName} && set ORETACHI_WORKTREE_NAME=${wtName} && powershell -ExecutionPolicy Bypass -File "${scriptPath}"\r`;
+    return `set ORETACHI_REPO_NAME=${repoName}&& set ORETACHI_WORKTREE_NAME=${wtName}&& call "${scriptPath}"\r`;
   } else if (isPowerShell) {
     return `$env:ORETACHI_REPO_NAME="${repoName}"; $env:ORETACHI_WORKTREE_NAME="${wtName}"; & "${scriptPath}"\r`;
   } else {
