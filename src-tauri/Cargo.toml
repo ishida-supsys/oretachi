@@ -39,3 +39,6 @@ tokio = { version = "1", features = ["net", "sync", "time", "process", "io-util"
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 libc = "0.2"
 
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.58", features = ["Win32_UI_Shell"] }
+

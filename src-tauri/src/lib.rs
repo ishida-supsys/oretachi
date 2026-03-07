@@ -153,6 +153,17 @@ async fn restart_mcp_server(app_handle: tauri::AppHandle) -> Result<mcp_server::
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Windows: tauri-plugin-notification はパスが \target\release で終わる場合に
+    // AUMID を設定しないため、PowerShell として通知が表示される問題を回避する。
+    #[cfg(target_os = "windows")]
+    {
+        use windows::core::HSTRING;
+        use windows::Win32::UI::Shell::SetCurrentProcessExplicitAppUserModelID;
+        unsafe {
+            let _ = SetCurrentProcessExplicitAppUserModelID(&HSTRING::from("com.ia.oretachi"));
+        }
+    }
+
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_cli::init())

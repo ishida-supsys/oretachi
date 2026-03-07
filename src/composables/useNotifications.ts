@@ -4,6 +4,7 @@ import {
   isPermissionGranted,
   requestPermission,
   sendNotification,
+  onAction,
 } from "@tauri-apps/plugin-notification";
 
 interface NotificationEntry {
@@ -27,7 +28,7 @@ export async function sendOsNotification(worktreeName: string) {
     permitted = permission === "granted";
   }
   if (permitted) {
-    sendNotification({ title: "Worktree通知", body: worktreeName });
+    sendNotification({ title: "Worktree通知", body: worktreeName, extra: { worktreeName } });
   }
 }
 
@@ -39,7 +40,8 @@ export function useNotifications() {
   async function initNotificationListener(
     resolveWorktreeId: (name: string) => string | undefined,
     shouldHold?: (worktreeId: string) => boolean,
-    isOsNotificationEnabledFn?: () => boolean
+    isOsNotificationEnabledFn?: () => boolean,
+    focusWorktree?: (worktreeId: string) => void
   ) {
     if (initialized) return;
     initialized = true;
@@ -52,6 +54,14 @@ export function useNotifications() {
         if (shouldHold?.(id)) return;
         addNotification(id);
         await sendOsNotification(worktreeName);
+      }
+    });
+
+    await onAction((notification) => {
+      const name = notification.extra?.worktreeName as string | undefined;
+      if (name && focusWorktree) {
+        const id = resolveWorktreeId(name);
+        if (id) focusWorktree(id);
       }
     });
   }
