@@ -105,6 +105,9 @@ pub struct NotifyWorktreeParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListRepositoryParams {}
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetWorktreeStatusParams {}
+
 // ─── MCP Service ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -132,6 +135,35 @@ impl NotifyService {
             .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
         log::info!("[mcp] notify_worktree: {}", worktree_name);
         Ok(CallToolResult::success(vec![Content::text("ok")]))
+    }
+
+    #[tool(description = "登録済みワークツリーのステータス一覧を取得する")]
+    fn oretachi_get_worktree_status(
+        &self,
+        Parameters(_params): Parameters<GetWorktreeStatusParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+        let detached: std::collections::HashSet<&str> =
+            settings.detached_worktree_ids.iter().map(|s| s.as_str()).collect();
+
+        let results: Vec<serde_json::Value> = settings
+            .worktrees
+            .iter()
+            .map(|wt| {
+                serde_json::json!({
+                    "name": wt.name,
+                    "branchName": wt.branch_name,
+                    "isDetached": detached.contains(wt.id.as_str()),
+                    "autoApproval": wt.auto_approval,
+                })
+            })
+            .collect();
+
+        let json = serde_json::to_string_pretty(&results)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        log::info!("[mcp] oretachi_get_worktree_status: {} entries", results.len());
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
     #[tool(description = "List all registered repositories with their names and git remote URLs")]
