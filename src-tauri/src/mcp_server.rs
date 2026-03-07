@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, sync::{Arc, Mutex}};
+use std::{fs, path::PathBuf, process::Command, sync::{Arc, Mutex}};
 
 use axum::{extract::State, http::StatusCode, routing::post, Json};
 use rmcp::{
@@ -13,6 +13,46 @@ use rmcp::{
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::watch;
+
+use crate::settings::SettingsManager;
+
+#[cfg(target_os = "windows")]
+use std::os::windows::process::CommandExt;
+
+#[cfg(target_os = "windows")]
+const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+fn make_git_command() -> Command {
+    let mut cmd = Command::new("git");
+    #[cfg(target_os = "windows")]
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    cmd
+}
+
+fn get_git_remotes(repo_path: &str) -> Vec<serde_json::Value> {
+    let output = make_git_command()
+        .args(["remote", "-v"])
+        .current_dir(repo_path)
+        .output();
+
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let mut seen = std::collections::HashMap::<String, String>::new();
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    seen.entry(parts[0].to_string())
+                        .or_insert_with(|| parts[1].to_string());
+                }
+            }
+            seen.into_iter()
+                .map(|(name, url)| serde_json::json!({"name": name, "url": url}))
+                .collect()
+        }
+        _ => vec![],
+    }
+}
 
 const PORT_FILE: &str = "mcp-port";
 
@@ -62,6 +102,9 @@ pub struct NotifyWorktreeParams {
     pub worktree_name: String,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListRepositoryParams {}
+
 // ─── MCP Service ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -89,6 +132,27 @@ impl NotifyService {
             .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
         log::info!("[mcp] notify_worktree: {}", worktree_name);
         Ok(CallToolResult::success(vec![Content::text("ok")]))
+    }
+
+    #[tool(description = "List all registered repositories with their names and git remote URLs")]
+    fn oretachi_list_repository(
+        &self,
+        Parameters(_params): Parameters<ListRepositoryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+        let repos: Vec<serde_json::Value> = settings
+            .repositories
+            .iter()
+            .map(|repo| {
+                let remotes = get_git_remotes(&repo.path);
+                serde_json::json!({ "name": repo.name, "remotes": remotes })
+            })
+            .collect();
+        let json = serde_json::to_string_pretty(&repos)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        log::info!("[mcp] oretachi_list_repository: {} repos", repos.len());
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 }
 

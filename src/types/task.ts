@@ -1,0 +1,34 @@
+export type AddWorktreeTaskCode = {
+  type: "add_worktree";
+  repository: string;
+  branch: string;
+};
+
+export type AgentWorktreeTaskCode = {
+  type: "agent_worktree";
+  repository: string;
+  branch: string;
+  prompt: string;
+};
+
+export type TaskCode = AddWorktreeTaskCode | AgentWorktreeTaskCode;
+export type TaskProcessCode = { code: TaskCode[] };
+
+export type TaskStepStatus = "pending" | "running" | "done" | "error";
+
+export interface TaskStep {
+  code: TaskCode;
+  status: TaskStepStatus;
+  error?: string;
+}
+
+export type TaskStatus = "generating" | "executing" | "completed" | "error";
+
+export interface TaskItem {
+  id: string;
+  prompt: string;
+  createdAt: number;
+  status: TaskStatus;
+  steps: TaskStep[];
+  error?: string;
+}
