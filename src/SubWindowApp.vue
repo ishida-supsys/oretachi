@@ -526,7 +526,7 @@ onMounted(async () => {
     const layout = JSON.parse(JSON.stringify(root.value));
     const terminals = Array.from(terminalEntries.values()).map((entry) => {
       const termRef = terminalRefs.get(entry.id);
-      const snapshot = termRef?.serializeBuffer(200) ?? entry.snapshot;
+      const snapshot = termRef?.serializeBuffer(300) ?? entry.snapshot;
       const termObj = termRef?.getTerminal();
       return {
         id: entry.id,
