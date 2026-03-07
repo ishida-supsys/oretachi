@@ -31,6 +31,7 @@ const emit = defineEmits<{
   exit: [];
   ready: [];
   "title-change": [title: string];
+  "exit-code-change": [exitCode: number];
   focus: [];
 }>();
 
@@ -127,6 +128,15 @@ function initTerminal() {
 
   terminal.onTitleChange((title) => {
     emit("title-change", title);
+  });
+
+  terminal.parser.registerOscHandler(777, (data: string) => {
+    const match = data.match(/^exit_code;(\d+)$/);
+    if (match) {
+      emit("exit-code-change", parseInt(match[1], 10));
+      return true;
+    }
+    return false;
   });
 
   terminal.textarea?.addEventListener("focus", () => {

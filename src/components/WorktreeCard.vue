@@ -132,7 +132,7 @@ const terminalList = computed(() =>
       <div class="popup-menu">
         <button
           class="popup-item"
-          :style="autoApproval ? 'color: #a6e3a1' : ''"
+          :style="autoApproval ? 'color: var(--p-green-400)' : ''"
           :disabled="loading"
           @click="emit('toggleAutoApproval', worktree.id)"
         >
@@ -307,7 +307,7 @@ const terminalList = computed(() =>
   padding: 8px 12px;
   background: none;
   border: none;
-  color: #cdd6f4;
+  color: var(--p-text-color);
   font-size: 13px;
   cursor: pointer;
   border-radius: 4px;
@@ -316,20 +316,20 @@ const terminalList = computed(() =>
 }
 
 .popup-item:hover {
-  background: #313244;
+  background: var(--p-content-hover-background);
 }
 
 .popup-item-danger {
-  color: #f38ba8;
+  color: var(--p-red-400);
 }
 
 .popup-item-danger:hover {
-  background: rgba(243, 139, 168, 0.15);
+  background: color-mix(in srgb, var(--p-red-400) 15%, transparent);
 }
 
 .popup-divider {
   height: 1px;
-  background: #313244;
+  background: var(--p-content-border-color);
   margin: 4px 0;
 }
 

@@ -1,4 +1,5 @@
 mod ai_judge;
+mod ai_provider;
 mod git_worktree;
 mod ide_launcher;
 pub mod mcp_server;
@@ -122,6 +123,11 @@ fn detect_ides() -> Vec<ide_launcher::IdeInfo> {
 }
 
 #[tauri::command]
+fn detect_ai_agents() -> Vec<ai_provider::AiAgentInfo> {
+    ai_provider::detect_ai_agents()
+}
+
+#[tauri::command]
 fn open_in_ide(command: String, path: String) -> Result<(), String> {
     ide_launcher::open_in_ide(&command, &path)
 }
@@ -189,6 +195,7 @@ pub fn run() {
             git_merge_branch,
             git_delete_branch,
             detect_ides,
+            detect_ai_agents,
             open_in_ide,
             get_mcp_status,
             restart_mcp_server,
