@@ -46,6 +46,11 @@ export interface AiAgentSettings {
   approvalAgent?: AiAgentKind;
 }
 
+export interface WorktreeDefaults {
+  openInSubWindow?: boolean;
+  autoApproval?: boolean;
+}
+
 export interface AppSettings {
   repositories: Repository[];
   worktreeBaseDir: string;
@@ -58,4 +63,5 @@ export interface AppSettings {
   detachedWorktreeIds?: string[];
   focusMainOnEmptyTray?: boolean;
   aiAgent?: AiAgentSettings;
+  worktreeDefaults?: WorktreeDefaults;
 }

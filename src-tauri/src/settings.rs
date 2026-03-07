@@ -178,6 +178,15 @@ pub struct AiAgentSettings {
     pub approval_agent: Option<AiAgentKind>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WorktreeDefaults {
+    #[serde(default)]
+    pub open_in_sub_window: bool,
+    #[serde(default)]
+    pub auto_approval: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub repositories: Vec<Repository>,
@@ -200,6 +209,8 @@ pub struct AppSettings {
     pub focus_main_on_empty_tray: bool,
     #[serde(default, rename = "aiAgent")]
     pub ai_agent: Option<AiAgentSettings>,
+    #[serde(default, rename = "worktreeDefaults")]
+    pub worktree_defaults: Option<WorktreeDefaults>,
 }
 
 impl Default for AppSettings {
@@ -216,6 +227,7 @@ impl Default for AppSettings {
             detached_worktree_ids: Vec::new(),
             focus_main_on_empty_tray: false,
             ai_agent: None,
+            worktree_defaults: None,
         }
     }
 }
