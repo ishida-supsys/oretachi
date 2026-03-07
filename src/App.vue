@@ -50,7 +50,7 @@ type ViewMode = "home" | "settings" | "terminal";
 
 const { settings, loadSettings, scheduleSave } = useSettings();
 const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, removeWorktree, listBranches, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
-const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, closeAllSubWindows } = useSubWindows();
+const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, closeAllSubWindows } = useSubWindows();
 const { notifications, initNotificationListener, addNotification, clearNotification, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
 const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees } = useTrayPopup();
 const { tryAutoAssignHotkey } = useAutoHotkey();
@@ -552,9 +552,6 @@ async function executeAgentWorktree(code: AgentWorktreeTaskCode): Promise<void> 
 
   const terminal = wt.terminals[0];
   const termRef = terminalRefs.get(terminal.id);
-  if (!termRef) {
-    throw new Error(`ターミナルが見つかりません: ${wt.name}`);
-  }
 
   // 一時ファイルにプロンプトを書き出し
   const tempPath = await invoke<string>("write_temp_prompt", { content: code.prompt });
@@ -580,7 +577,20 @@ async function executeAgentWorktree(code: AgentWorktreeTaskCode): Promise<void> 
     command = `${agentCmd} "$(cat "${tempPath}")"; rm "${tempPath}"\r`;
   }
 
-  await termRef.write(command);
+  if (termRef) {
+    await termRef.write(command);
+  } else if (isDetached(wt.id)) {
+    // サブウィンドウに移動済みの場合: pty_write で直接PTYに書き込む
+    // サブウィンドウ側の TerminalView は pty-output イベントで自動的に表示する
+    const sid = getDetachedSessionId(terminal.id);
+    if (sid === null) {
+      throw new Error(`セッションIDが見つかりません: ${wt.name}`);
+    }
+    const bytes = Array.from(new TextEncoder().encode(command));
+    await invoke("pty_write", { sessionId: sid, data: bytes });
+  } else {
+    throw new Error(`ターミナルが見つかりません: ${wt.name}`);
+  }
 }
 
 async function executeTaskSteps(taskId: string): Promise<void> {
