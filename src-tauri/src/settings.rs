@@ -79,6 +79,14 @@ fn default_focus_main_window() -> HotkeyBinding {
     HotkeyBinding { ctrl: false, meta: false, shift: false, alt: true, key: "m".to_string() }
 }
 
+fn default_add_task() -> HotkeyBinding {
+    if cfg!(target_os = "macos") {
+        HotkeyBinding { ctrl: false, meta: true, shift: true, alt: false, key: "n".to_string() }
+    } else {
+        HotkeyBinding { ctrl: true, meta: false, shift: true, alt: false, key: "n".to_string() }
+    }
+}
+
 fn default_global_tray_popup() -> HotkeyBinding {
     if cfg!(target_os = "macos") {
         HotkeyBinding { ctrl: false, meta: true, shift: true, alt: false, key: "o".to_string() }
@@ -123,6 +131,8 @@ pub struct HotkeySettings {
     pub tray_next: HotkeyBinding,
     #[serde(default = "default_focus_main_window", rename = "focusMainWindow")]
     pub focus_main_window: HotkeyBinding,
+    #[serde(default = "default_add_task", rename = "addTask")]
+    pub add_task: HotkeyBinding,
 }
 
 impl Default for HotkeySettings {
@@ -135,6 +145,7 @@ impl Default for HotkeySettings {
             terminal_close: default_terminal_close(),
             tray_next: default_tray_next(),
             focus_main_window: default_focus_main_window(),
+            add_task: default_add_task(),
         }
     }
 }

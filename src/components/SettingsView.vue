@@ -349,6 +349,15 @@ function clearExecScript(repoId: string) {
               />
             </td>
           </tr>
+          <tr>
+            <td class="hotkey-td-label">タスク追加</td>
+            <td class="hotkey-td-input">
+              <HotkeyInput
+                :model-value="settings.hotkeys.addTask"
+                @update:model-value="(v) => { settings.hotkeys.addTask = v; scheduleSave(); }"
+              />
+            </td>
+          </tr>
         </tbody>
       </table>
     </div>

@@ -881,6 +881,16 @@ useHotkeyListener(() => {
     },
   });
 
+  // addTask: タスク追加ダイアログを開く
+  if (hk.addTask) {
+    actions.push({
+      binding: hk.addTask,
+      handler: () => {
+        showAddTaskDialog.value = true;
+      },
+    });
+  }
+
   // Alt+[char]: 対応するワークツリーにフォーカス
   // (matchesHotkey は使わず個別に処理するため空の binding で追加しない)
   // → 別途 keydown リスナーで対応

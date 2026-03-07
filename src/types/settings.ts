@@ -37,6 +37,7 @@ export interface HotkeySettings {
   terminalClose: HotkeyBinding; // デフォルト: { ctrl: true, key: "q" }
   trayNext: HotkeyBinding;      // デフォルト: { ctrl: true, key: "n" }
   focusMainWindow: HotkeyBinding; // デフォルト: { alt: true, key: "m" }
+  addTask: HotkeyBinding;       // デフォルト: { ctrl: true, shift: true, key: "n" }
 }
 
 export type AiAgentKind = 'claudeCode' | 'geminiCli' | 'codexCli' | 'clineCli';
