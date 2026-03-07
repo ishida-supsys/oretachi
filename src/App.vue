@@ -404,6 +404,13 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry) {
     commitWorktree(entry);
     tryAutoAssignHotkey(entry.id);
 
+    // デフォルト: 自動承認
+    if (settings.value.worktreeDefaults?.autoApproval) {
+      autoApprovalMap.set(entry.id, true);
+      const wtEntry = settings.value.worktrees.find((w) => w.id === entry.id);
+      if (wtEntry) wtEntry.autoApproval = true;
+    }
+
     // スクリプトがあればターミナルで実行するためにペンディング登録
     const repo = settings.value.repositories.find((r) => r.id === entry.repositoryId);
     if (repo?.execScript) {
@@ -412,6 +419,11 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry) {
 
     // ワークツリー作成後、自動でターミナルを1つ追加
     await onAddTerminal(entry.id);
+
+    // デフォルト: サブウィンドウで開く
+    if (settings.value.worktreeDefaults?.openInSubWindow) {
+      await onMoveToSubWindow(entry.id);
+    }
 
     if (lfsSkipped) {
       await message(
@@ -498,6 +510,13 @@ async function executeAddWorktree(code: AddWorktreeTaskCode): Promise<string> {
     commitWorktree(entry);
     tryAutoAssignHotkey(entry.id);
 
+    // デフォルト: 自動承認
+    if (settings.value.worktreeDefaults?.autoApproval) {
+      autoApprovalMap.set(entry.id, true);
+      const wtEntry = settings.value.worktrees.find((w) => w.id === entry.id);
+      if (wtEntry) wtEntry.autoApproval = true;
+    }
+
     if (repo.execScript) {
       pendingScripts.set(entry.id, buildScriptCommand(repo, entry));
     }
@@ -506,6 +525,11 @@ async function executeAddWorktree(code: AddWorktreeTaskCode): Promise<string> {
 
     if (repo.execScript) {
       await waitForScriptCompletion(entry.id);
+    }
+
+    // デフォルト: サブウィンドウで開く
+    if (settings.value.worktreeDefaults?.openInSubWindow) {
+      await onMoveToSubWindow(entry.id);
     }
   } catch (e) {
     rollbackWorktree(entry.id);

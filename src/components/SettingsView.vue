@@ -265,6 +265,39 @@ function clearExecScript(repoId: string) {
       </div>
     </div>
 
+    <!-- ワークツリー追加時のデフォルト動作 -->
+    <div class="field-group">
+      <label class="field-label">ワークツリー追加時のデフォルト動作</label>
+      <div class="row-input row-input--inline">
+        <input
+          id="worktree-default-subwindow"
+          type="checkbox"
+          class="toggle-checkbox"
+          :checked="settings.worktreeDefaults?.openInSubWindow"
+          @change="(e) => {
+            if (!settings.worktreeDefaults) settings.worktreeDefaults = {};
+            settings.worktreeDefaults.openInSubWindow = (e.target as HTMLInputElement).checked;
+            scheduleSave();
+          }"
+        />
+        <label for="worktree-default-subwindow" class="inline-label toggle-label">サブウィンドウで開く</label>
+      </div>
+      <div class="row-input row-input--inline mt-8">
+        <input
+          id="worktree-default-auto-approval"
+          type="checkbox"
+          class="toggle-checkbox"
+          :checked="settings.worktreeDefaults?.autoApproval"
+          @change="(e) => {
+            if (!settings.worktreeDefaults) settings.worktreeDefaults = {};
+            settings.worktreeDefaults.autoApproval = (e.target as HTMLInputElement).checked;
+            scheduleSave();
+          }"
+        />
+        <label for="worktree-default-auto-approval" class="inline-label toggle-label">自動承認を有効にする</label>
+      </div>
+    </div>
+
     <!-- ホットキー設定 -->
     <div class="field-group">
       <label class="field-label">ホットキー</label>
