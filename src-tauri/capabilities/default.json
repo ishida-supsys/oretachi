@@ -23,6 +23,7 @@
     "global-shortcut:allow-is-registered",
     "window-state:default",
     "os:default",
-    "notification:default"
+    "notification:default",
+    "notification:allow-register-listener"
   ]
 }

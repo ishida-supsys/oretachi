@@ -57,13 +57,17 @@ export function useNotifications() {
       }
     });
 
-    await onAction((notification) => {
-      const name = notification.extra?.worktreeName as string | undefined;
-      if (name && focusWorktree) {
-        const id = resolveWorktreeId(name);
-        if (id) focusWorktree(id);
-      }
-    });
+    try {
+      await onAction((notification) => {
+        const name = notification.extra?.worktreeName as string | undefined;
+        if (name && focusWorktree) {
+          const id = resolveWorktreeId(name);
+          if (id) focusWorktree(id);
+        }
+      });
+    } catch {
+      // notification:allow-register-listener が未許可の場合は無視
+    }
   }
 
   function addNotification(worktreeId: string) {

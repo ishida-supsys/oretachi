@@ -152,6 +152,11 @@ export function useSubWindows() {
 
     await Promise.all(closePromises);
 
+    // タイムアウト等で閉じられなかったサブウィンドウを強制破棄
+    for (const [, win] of subWindowMap) {
+      try { await win.destroy(); } catch { /* 既に閉じ済み */ }
+    }
+
     subWindowMap.clear();
     pendingInitData.clear();
     detachedWorktrees.clear();

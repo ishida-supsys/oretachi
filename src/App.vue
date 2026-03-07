@@ -1016,6 +1016,22 @@ onMounted(async () => {
     }
   }
 
+  // サブウィンドウ準備完了 → init データをイベントで送信（サブウィンドウ復元より前に登録必須）
+  await listen<{ worktreeId: string }>("sub-ready", async (event) => {
+    const { worktreeId } = event.payload;
+    // 新しいサブウィンドウは作成時にフォーカスされている
+    subWindowFocusMap.set(worktreeId, true);
+    const initData = getPendingInitData(worktreeId);
+    if (initData) {
+      await emitTo(`sub-${worktreeId}`, "sub-init", {
+        worktreeId,
+        terminals: initData.terminals,
+        autoApproval: initData.autoApproval,
+      });
+      clearPendingInitData(worktreeId);
+    }
+  });
+
   // サブウィンドウとして保存されていたワークツリーを復元
   for (const worktreeId of savedDetachedIds) {
     const wt = worktrees.value.find((w) => w.id === worktreeId);
@@ -1063,22 +1079,6 @@ onMounted(async () => {
       }
     }
   );
-
-  // サブウィンドウ準備完了 → init データをイベントで送信
-  await listen<{ worktreeId: string }>("sub-ready", async (event) => {
-    const { worktreeId } = event.payload;
-    // 新しいサブウィンドウは作成時にフォーカスされている
-    subWindowFocusMap.set(worktreeId, true);
-    const initData = getPendingInitData(worktreeId);
-    if (initData) {
-      await emitTo(`sub-${worktreeId}`, "sub-init", {
-        worktreeId,
-        terminals: initData.terminals,
-        autoApproval: initData.autoApproval,
-      });
-      clearPendingInitData(worktreeId);
-    }
-  });
 
   // notify-worktree → 自動承認チェック
   await listen<string>("notify-worktree", async (event) => {
