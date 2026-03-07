@@ -550,7 +550,7 @@ async function executeAgentWorktree(code: AgentWorktreeTaskCode): Promise<void> 
 
   let command: string;
   if (isPowerShell) {
-    command = `$p = Get-Content "${tempPath}" -Raw; ${agentCmd} $p; Remove-Item "${tempPath}"\r`;
+    command = `$p = Get-Content "${tempPath}" -Raw -Encoding UTF8; ${agentCmd} $p; Remove-Item "${tempPath}"\r`;
   } else {
     command = `${agentCmd} "$(cat "${tempPath}")"; rm "${tempPath}"\r`;
   }
