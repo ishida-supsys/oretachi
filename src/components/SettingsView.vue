@@ -4,8 +4,40 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, message } from "@tauri-apps/plugin-dialog";
 import { useSettings } from "../composables/useSettings";
 import HotkeyInput from "./HotkeyInput.vue";
+import type { AiAgentKind } from "../types/settings";
 
 const { settings, scheduleSave } = useSettings();
+
+// ─── AIエージェント ───────────────────────────────────────────────────────────
+
+interface AiAgentInfo {
+  kind: AiAgentKind;
+  name: string;
+  command: string;
+}
+
+const AI_AGENT_LABELS: Record<AiAgentKind, string> = {
+  claudeCode: "Claude Code",
+  geminiCli: "Gemini CLI",
+  codexCli: "Codex CLI",
+  clineCli: "Cline CLI",
+};
+
+const ALL_AGENT_KINDS: AiAgentKind[] = ["claudeCode", "geminiCli", "codexCli", "clineCli"];
+
+const detectedAgents = ref<AiAgentInfo[]>([]);
+
+onMounted(async () => {
+  try {
+    detectedAgents.value = await invoke<AiAgentInfo[]>("detect_ai_agents");
+  } catch (e) {
+    console.error("detect_ai_agents failed:", e);
+  }
+});
+
+function isAgentDetected(kind: AiAgentKind): boolean {
+  return detectedAgents.value.some((a) => a.kind === kind);
+}
 
 // ─── MCP サーバー ─────────────────────────────────────────────────────────────
 
@@ -164,6 +196,32 @@ function clearExecScript(repoId: string) {
           @change="(e) => { settings.focusMainOnEmptyTray = (e.target as HTMLInputElement).checked; scheduleSave(); }"
         />
         <label for="focus-main-on-empty-tray" class="inline-label toggle-label">通知がない時にトレイホットキーでメインウィンドウにフォーカス</label>
+      </div>
+    </div>
+
+    <!-- 自動承認 -->
+    <div class="field-group">
+      <label class="field-label">自動承認</label>
+      <div class="row-input row-input--inline">
+        <span class="inline-label">AIエージェント</span>
+        <select
+          class="text-input select-input"
+          :value="settings.aiAgent?.approvalAgent ?? ''"
+          @change="(e) => {
+            const v = (e.target as HTMLSelectElement).value;
+            if (!settings.aiAgent) settings.aiAgent = {};
+            settings.aiAgent.approvalAgent = v ? (v as AiAgentKind) : undefined;
+            scheduleSave();
+          }"
+        >
+          <option value="">(未設定)</option>
+          <option
+            v-for="kind in ALL_AGENT_KINDS"
+            :key="kind"
+            :value="kind"
+            :disabled="!isAgentDetected(kind)"
+          >{{ AI_AGENT_LABELS[kind] }}{{ !isAgentDetected(kind) ? ' (未検出)' : '' }}</option>
+        </select>
       </div>
     </div>
 
@@ -604,5 +662,11 @@ function clearExecScript(repoId: string) {
 .shell-input {
   font-size: 12px;
   font-family: monospace;
+}
+
+.select-input {
+  flex: unset;
+  min-width: 180px;
+  cursor: pointer;
 }
 </style>

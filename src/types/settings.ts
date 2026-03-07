@@ -39,6 +39,12 @@ export interface HotkeySettings {
   focusMainWindow: HotkeyBinding; // デフォルト: { alt: true, key: "m" }
 }
 
+export type AiAgentKind = 'claudeCode' | 'geminiCli' | 'codexCli' | 'clineCli';
+
+export interface AiAgentSettings {
+  approvalAgent?: AiAgentKind;
+}
+
 export interface AppSettings {
   repositories: Repository[];
   worktreeBaseDir: string;
@@ -50,4 +56,5 @@ export interface AppSettings {
   autoAssignHotkey?: boolean;
   detachedWorktreeIds?: string[];
   focusMainOnEmptyTray?: boolean;
+  aiAgent?: AiAgentSettings;
 }

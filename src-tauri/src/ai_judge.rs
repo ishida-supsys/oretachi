@@ -1,3 +1,5 @@
+use crate::ai_provider::{self, AiAgentKind};
+use crate::settings::SettingsManager;
 use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::State;
@@ -48,6 +50,7 @@ impl ApprovalManager {
 #[tauri::command]
 pub async fn judge_approval(
     state: State<'_, ApprovalManager>,
+    settings_state: State<'_, SettingsManager>,
     worktree_id: String,
     content: String,
     cwd: String,
@@ -62,37 +65,17 @@ pub async fn judge_approval(
 
     let prompt = PROMPT_TEMPLATE.replace("{{TERMINAL_OUTPUT}}", &content);
 
-    // Windows: cmd /c claude で .cmd ラッパーを経由
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = Command::new("cmd");
-        c.args([
-            "/c",
-            "claude",
-            "--model",
-            "haiku",
-            "-p",
-            "--output-format",
-            "json",
-            "--json-schema",
-            JSON_SCHEMA,
-        ]);
-        c
-    };
-    #[cfg(not(target_os = "windows"))]
-    let mut cmd = {
-        let mut c = Command::new("claude");
-        c.args([
-            "--model",
-            "haiku",
-            "-p",
-            "--output-format",
-            "json",
-            "--json-schema",
-            JSON_SCHEMA,
-        ]);
-        c
-    };
+    // 設定からAIエージェント種別を取得（デフォルト: ClaudeCode）
+    let agent_kind = settings_state
+        .get()
+        .ai_agent
+        .and_then(|s| s.approval_agent)
+        .unwrap_or(AiAgentKind::ClaudeCode);
+
+    let plan = ai_provider::build_execution_plan(&agent_kind, &prompt, JSON_SCHEMA, "haiku");
+
+    let mut cmd = Command::new(&plan.program);
+    cmd.args(&plan.args);
 
     // Windows: コンソールウィンドウを表示しない
     #[cfg(target_os = "windows")]
@@ -111,14 +94,16 @@ pub async fn judge_approval(
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("Failed to spawn claude: {}", e))?;
+        .map_err(|e| format!("Failed to spawn AI agent: {}", e))?;
 
     // stdin にプロンプトを送信して閉じる
-    if let Some(mut stdin) = child.stdin.take() {
-        stdin
-            .write_all(prompt.as_bytes())
-            .await
-            .map_err(|e| format!("Failed to write stdin: {}", e))?;
+    if !plan.stdin_content.is_empty() {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(plan.stdin_content.as_bytes())
+                .await
+                .map_err(|e| format!("Failed to write stdin: {}", e))?;
+        }
     }
 
     // PID を HashMap に登録 (cancel_approval から kill できるようにする)
@@ -142,26 +127,21 @@ pub async fn judge_approval(
     }
 
     let output = wait_result
-        .map_err(|_| format!("claude timed out after {}s", TIMEOUT_SECS))?
-        .map_err(|e| format!("Failed to wait for claude: {}", e))?;
+        .map_err(|_| format!("AI agent timed out after {}s", TIMEOUT_SECS))?
+        .map_err(|e| format!("Failed to wait for AI agent: {}", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!(
-            "claude exited with {}: {}",
+            "AI agent exited with {}: {}",
             output.status, stderr
         ));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    log::debug!("[AutoApproval] claude response: {}", stdout.trim());
+    log::debug!("[AutoApproval] AI agent response: {}", stdout.trim());
 
-    let response: serde_json::Value = serde_json::from_str(stdout.trim())
-        .map_err(|e| format!("Failed to parse JSON: {}", e))?;
-
-    // claude --output-format json はラッパー形式で structured_output にネストされる
-    // フォールバックとしてトップレベルも試行 (将来のCLI変更等に対応)
-    let structured = response.get("structured_output").unwrap_or(&response);
+    let structured = ai_provider::parse_response(&agent_kind, &stdout)?;
 
     let needs_permission = structured
         .get("needsPermission")

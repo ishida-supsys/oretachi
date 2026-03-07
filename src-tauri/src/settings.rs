@@ -1,3 +1,4 @@
+use crate::ai_provider::AiAgentKind;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -159,6 +160,13 @@ impl Default for TerminalSettings {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct AiAgentSettings {
+    #[serde(default)]
+    pub approval_agent: Option<AiAgentKind>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub repositories: Vec<Repository>,
@@ -179,6 +187,8 @@ pub struct AppSettings {
     pub detached_worktree_ids: Vec<String>,
     #[serde(default, rename = "focusMainOnEmptyTray")]
     pub focus_main_on_empty_tray: bool,
+    #[serde(default, rename = "aiAgent")]
+    pub ai_agent: Option<AiAgentSettings>,
 }
 
 impl Default for AppSettings {
@@ -194,6 +204,7 @@ impl Default for AppSettings {
             auto_assign_hotkey: false,
             detached_worktree_ids: Vec::new(),
             focus_main_on_empty_tray: false,
+            ai_agent: None,
         }
     }
 }
