@@ -8,6 +8,7 @@ let isDraggingTab = false;
 <script setup lang="ts">
 import { ref, computed } from "vue";
 import type { FrameLeaf } from "../types/frame";
+import type { SubTerminalEntry } from "../types/terminal";
 
 // ─── タブバーD&D ───────────────────────────────────────────────
 const tabDropIndicatorIndex = ref<number | null>(null);
@@ -17,13 +18,6 @@ const tabsScrollRef = ref<HTMLElement | null>(null);
 const tabDropIndicatorStyle = computed(() => ({
   left: `${tabDropIndicatorLeft.value}px`,
 }));
-
-interface SubTerminalEntry {
-  id: number;
-  title: string;
-  sessionId: number;
-  snapshot: string;
-}
 
 const props = defineProps<{
   leaf: FrameLeaf;

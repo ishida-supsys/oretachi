@@ -30,30 +30,6 @@ pub struct PtyExitPayload {
     pub session_id: u32,
 }
 
-fn kill_process_tree_by_pid(_pid: Option<u32>) {
-    #[cfg(target_os = "windows")]
-    if let Some(pid) = _pid {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        let _ = std::process::Command::new("taskkill")
-            .args(["/F", "/T", "/PID", &pid.to_string()])
-            .creation_flags(CREATE_NO_WINDOW)
-            .output();
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    if let Some(pid) = _pid {
-        // プロセスグループごと SIGTERM (負の PID でグループ指定)
-        unsafe {
-            libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
-        }
-        // フォールバック: プロセス単体も kill
-        let _ = std::process::Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .output();
-    }
-}
-
 impl PtyManager {
     pub fn new() -> Self {
         PtyManager {
@@ -281,7 +257,9 @@ impl PtyManager {
         if let Some(mut session) = sessions.remove(&session_id) {
             *session.alive.lock().unwrap() = false;
             // PID ベースで子プロセスツリーを kill
-            kill_process_tree_by_pid(session.child_pid);
+            if let Some(pid) = session.child_pid {
+                crate::process_utils::kill_process_tree(pid);
+            }
             // child_killer でバックアップ kill（child が監視スレッドに渡済みでも動作）
             let _ = session.child_killer.kill();
             // master を drop して reader に EOF を送る

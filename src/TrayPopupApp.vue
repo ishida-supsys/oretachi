@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, nextTick, markRaw, computed } from "vue";
+import { ref, reactive, onMounted, onUnmounted, nextTick, computed } from "vue";
 import { emitTo, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import TerminalView from "./components/TerminalView.vue";
@@ -7,17 +7,10 @@ import FrameContainer from "./components/FrameContainer.vue";
 import { useFrameLayout } from "./composables/useFrameLayout";
 import { useSettings } from "./composables/useSettings";
 import { useHotkeyListener } from "./composables/useHotkeys";
+import { useTerminalReparenting } from "./composables/useTerminalReparenting";
 import type { TrayWorktreeData } from "./composables/useTrayPopup";
 import type { FrameNode } from "./types/frame";
-
-interface TrayTerminalEntry {
-  id: number;
-  title: string;
-  sessionId: number;
-  snapshot: string;
-  rows: number;
-  cols: number;
-}
+import type { TrayTerminalEntry } from "./types/terminal";
 
 // フッター ref（ウィンドウサイズ補正用）
 const footerRef = ref<HTMLDivElement | null>(null);
@@ -37,40 +30,8 @@ const lastFocusedLeafId = ref<string>("");
 // TerminalView ref 管理
 const terminalRefs = reactive(new Map<number, InstanceType<typeof TerminalView>>());
 
-function setTerminalRef(terminalId: number, el: unknown) {
-  if (el) {
-    terminalRefs.set(terminalId, markRaw(el as InstanceType<typeof TerminalView>));
-  } else {
-    terminalRefs.delete(terminalId);
-  }
-}
-
-// ────────────────────────────────────────────────
-// DOM reparenting
-// ────────────────────────────────────────────────
-
-function returnAllToOffscreen(): void {
-  const offscreen = document.querySelector('[data-offscreen]');
-  if (!offscreen) return;
-  for (const [tid] of terminalEntries) {
-    const comp = terminalRefs.get(tid);
-    const el = comp?.containerRef;
-    if (el && el.parentElement !== offscreen) {
-      offscreen.appendChild(el);
-    }
-  }
-}
-
-function mountTerminalsToHosts(): void {
-  for (const [tid] of terminalEntries) {
-    const comp = terminalRefs.get(tid);
-    const el = comp?.containerRef;
-    const host = document.getElementById(`terminal-host-${tid}`);
-    if (el && host && el.parentElement !== host) {
-      host.appendChild(el);
-    }
-  }
-}
+const { setTerminalRef, returnAllToOffscreen, mountTerminalsToHosts } =
+  useTerminalReparenting(terminalEntries, terminalRefs);
 
 // ────────────────────────────────────────────────
 // 現在ワークツリーの表示

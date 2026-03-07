@@ -14,7 +14,7 @@ import HotkeyCharDialog from "./components/HotkeyCharDialog.vue";
 import TrayButton from "./components/TrayButton.vue";
 import { message } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
-import type { IdeInfo } from "./types/ide";
+import { useIdeSelect } from "./composables/useIdeSelect";
 import { useSettings } from "./composables/useSettings";
 import { useWorktrees } from "./composables/useWorktrees";
 import { useSubWindows } from "./composables/useSubWindows";
@@ -29,7 +29,7 @@ import type { FrameNode } from "./types/frame";
 import { useHotkeyListener, bindingToAccelerator } from "./composables/useHotkeys";
 import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
 import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
-import { getRecentLines, analyzeForApproval, hasApprovalPrompt, cancelApproval } from "./composables/useAutoApproval";
+import { getRecentLines, analyzeForApproval, hasApprovalPrompt, cancelApproval } from "./utils/autoApproval";
 import { useAutoHotkey } from "./composables/useAutoHotkey";
 import { debug } from "@tauri-apps/plugin-log";
 import { platform } from "@tauri-apps/plugin-os";
@@ -99,10 +99,8 @@ const showRemoveDialog = ref(false);
 const removeTargetWorktree = ref<{ id: string; name: string; branchName: string } | null>(null);
 const removeBranches = ref<string[]>([]);
 
-// IDE 選択ダイアログ
-const showIdeDialog = ref(false);
-const detectedIdes = ref<IdeInfo[]>([]);
-const ideTargetPath = ref("");
+// IDE 選択
+const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect();
 
 // ホットキー文字ダイアログ
 const showHotkeyCharDialog = ref(false);
@@ -361,34 +359,7 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
 async function onOpenInIde(worktreeId: string) {
   const worktree = worktrees.value.find((w) => w.id === worktreeId);
   if (!worktree) return;
-
-  const ides = await invoke<IdeInfo[]>("detect_ides");
-
-  if (ides.length === 0) {
-    await message("Cursor、VS Code、Antigravity のいずれもインストールされていません。", {
-      title: "IDE が見つかりません",
-      kind: "warning",
-    });
-    return;
-  }
-
-  if (ides.length === 1) {
-    await invoke("open_in_ide", { command: ides[0].command, path: worktree.path });
-    return;
-  }
-
-  detectedIdes.value = ides;
-  ideTargetPath.value = worktree.path;
-  showIdeDialog.value = true;
-}
-
-async function onIdeSelected(ide: IdeInfo) {
-  showIdeDialog.value = false;
-  try {
-    await invoke("open_in_ide", { command: ide.command, path: ideTargetPath.value });
-  } catch (e) {
-    await message(`IDE の起動に失敗しました: ${e}`, { kind: "error" });
-  }
+  await openInIde(worktree.path);
 }
 
 async function onAddWorktreeConfirm(entry: WorktreeEntry) {
@@ -1211,7 +1182,7 @@ onMounted(async () => {
     }
   }
 
-  // ローカルターミナル用サムネイル生成ループ
+  // ローカルターミナル用サムネイル生成ループ（変化があった場合のみ更新）
   setInterval(() => {
     for (const [id, ref] of terminalRefs) {
       const wtId = terminalWorktreeMap.get(id);
@@ -1219,7 +1190,7 @@ onMounted(async () => {
       const terminal = ref.getTerminal();
       if (terminal) {
         const url = renderToDataUrl(terminal);
-        if (url) thumbnailUrls.set(id, url);
+        if (url && url !== thumbnailUrls.get(id)) thumbnailUrls.set(id, url);
       }
     }
   }, 1000);

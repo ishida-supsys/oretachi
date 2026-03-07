@@ -1,16 +1,28 @@
-use std::process::Command;
+use crate::process_utils::make_command;
 
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
+pub fn get_git_remotes(repo_path: &str) -> Vec<serde_json::Value> {
+    let output = make_command("git")
+        .args(["remote", "-v"])
+        .current_dir(repo_path)
+        .output();
 
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-fn make_command(program: &str) -> Command {
-    let mut cmd = Command::new(program);
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd
+    match output {
+        Ok(out) if out.status.success() => {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            let mut seen = std::collections::HashMap::<String, String>::new();
+            for line in stdout.lines() {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() >= 2 {
+                    seen.entry(parts[0].to_string())
+                        .or_insert_with(|| parts[1].to_string());
+                }
+            }
+            seen.into_iter()
+                .map(|(name, url)| serde_json::json!({"name": name, "url": url}))
+                .collect()
+        }
+        _ => vec![],
+    }
 }
 
 pub fn validate_repo(path: &str) -> Result<bool, String> {

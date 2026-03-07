@@ -1,11 +1,5 @@
+use crate::process_utils::make_command;
 use serde::{Deserialize, Serialize};
-use std::process::Command;
-
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -52,13 +46,6 @@ const AI_AGENT_DEFINITIONS: &[AiAgentDef] = &[
         commands: &["cline.cmd", "cline"],
     },
 ];
-
-fn make_command(program: &str) -> Command {
-    let mut cmd = Command::new(program);
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd
-}
 
 pub fn detect_ai_agents() -> Vec<AiAgentInfo> {
     let mut result = Vec::new();

@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::State;
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
 const TIMEOUT_SECS: u64 = 30;
@@ -74,16 +73,8 @@ pub async fn judge_approval(
 
     let plan = ai_provider::build_execution_plan(&agent_kind, &prompt, JSON_SCHEMA, "haiku");
 
-    let mut cmd = Command::new(&plan.program);
+    let mut cmd = crate::process_utils::make_async_command(&plan.program);
     cmd.args(&plan.args);
-
-    // Windows: コンソールウィンドウを表示しない
-    #[cfg(target_os = "windows")]
-    {
-        const CREATE_NO_WINDOW: u32 = 0x08000000;
-        cmd.creation_flags(CREATE_NO_WINDOW);
-    }
-
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -168,22 +159,7 @@ pub async fn cancel_approval(
     if let Some(pid) = pid {
         log::debug!("[AutoApproval] cancel_approval: killing PID={} for worktree_id={}", pid, worktree_id);
 
-        #[cfg(target_os = "windows")]
-        {
-            use std::os::windows::process::CommandExt;
-            // Windows: cmd /c claude の場合、プロセスツリーごと強制終了
-            let _ = std::process::Command::new("taskkill")
-                .args(["/F", "/T", "/PID", &pid.to_string()])
-                .creation_flags(0x08000000) // CREATE_NO_WINDOW
-                .output();
-        }
-
-        #[cfg(not(target_os = "windows"))]
-        {
-            let _ = std::process::Command::new("kill")
-                .args(["-TERM", &pid.to_string()])
-                .output();
-        }
+        crate::process_utils::kill_process_tree(pid);
     } else {
         log::debug!("[AutoApproval] cancel_approval: no in-progress process for worktree_id={}", worktree_id);
     }
