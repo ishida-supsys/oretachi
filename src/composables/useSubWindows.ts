@@ -17,6 +17,8 @@ interface PendingInitData {
 const detachedWorktrees = reactive(new Set<string>());
 const subWindowMap = new Map<string, WebviewWindow>();
 const pendingInitData = new Map<string, PendingInitData>();
+const terminalSessionMap = new Map<number, number>(); // terminalId → sessionId
+const worktreeTerminalMap = new Map<string, number[]>(); // worktreeId → terminalId[]
 
 export function useSubWindows() {
   function isDetached(worktreeId: string): boolean {
@@ -65,6 +67,14 @@ export function useSubWindows() {
     // ターミナルデータはサブウィンドウ準備完了後にイベントで送る
     pendingInitData.set(worktreeId, { terminals, autoApproval });
 
+    // サブウィンドウ移動時のsessionIdマッピングを保持
+    const terminalIds: number[] = [];
+    for (const t of terminals) {
+      terminalSessionMap.set(t.id, t.sessionId);
+      terminalIds.push(t.id);
+    }
+    worktreeTerminalMap.set(worktreeId, terminalIds);
+
     subWindowMap.set(worktreeId, win);
     detachedWorktrees.add(worktreeId);
   }
@@ -98,6 +108,11 @@ export function useSubWindows() {
       subWindowMap.delete(worktreeId);
     }
     pendingInitData.delete(worktreeId);
+    // sessionIdマッピングをクリーンアップ
+    for (const terminalId of worktreeTerminalMap.get(worktreeId) ?? []) {
+      terminalSessionMap.delete(terminalId);
+    }
+    worktreeTerminalMap.delete(worktreeId);
     detachedWorktrees.delete(worktreeId);
   }
 
@@ -111,6 +126,10 @@ export function useSubWindows() {
   function unregisterSubWindow(worktreeId: string): void {
     subWindowMap.delete(worktreeId);
     pendingInitData.delete(worktreeId);
+    for (const terminalId of worktreeTerminalMap.get(worktreeId) ?? []) {
+      terminalSessionMap.delete(terminalId);
+    }
+    worktreeTerminalMap.delete(worktreeId);
     detachedWorktrees.delete(worktreeId);
   }
 
@@ -120,6 +139,10 @@ export function useSubWindows() {
 
   function clearPendingInitData(worktreeId: string): void {
     pendingInitData.delete(worktreeId);
+  }
+
+  function getDetachedSessionId(terminalId: number): number | null {
+    return terminalSessionMap.get(terminalId) ?? null;
   }
 
   async function closeAllSubWindows(): Promise<void> {
@@ -159,6 +182,8 @@ export function useSubWindows() {
 
     subWindowMap.clear();
     pendingInitData.clear();
+    terminalSessionMap.clear();
+    worktreeTerminalMap.clear();
     detachedWorktrees.clear();
   }
 
@@ -171,6 +196,7 @@ export function useSubWindows() {
     unregisterSubWindow,
     getPendingInitData,
     clearPendingInitData,
+    getDetachedSessionId,
     closeAllSubWindows,
   };
 }
