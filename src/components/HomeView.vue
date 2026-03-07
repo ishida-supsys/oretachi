@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import type { Worktree } from "../types/worktree";
+import type { TaskItem } from "../types/task";
 import WorktreeCard from "./WorktreeCard.vue";
+import TaskCard from "./TaskCard.vue";
 import { useMasonryLayout } from "../composables/useMasonryLayout";
-import { computed } from "vue";
+import { computed, ref } from "vue";
 
 const props = defineProps<{
   worktrees: Worktree[];
@@ -13,6 +15,7 @@ const props = defineProps<{
   loadingWorktrees: Map<string, string>;
   autoApprovals: Map<string, boolean>;
   aiJudgingWorktrees: Set<string>;
+  tasks: TaskItem[];
 }>();
 
 const emit = defineEmits<{
@@ -28,9 +31,12 @@ const emit = defineEmits<{
   setHotkeyChar: [worktreeId: string];
   toggleAutoApproval: [worktreeId: string];
   cancelAiJudging: [worktreeId: string];
+  addTask: [];
+  removeTask: [taskId: string];
 }>();
 
 const worktreesRef = computed(() => props.worktrees);
+const tasksRef = computed(() => props.tasks);
 
 // 各ワークツリーカードの自然幅（ターミナルサムネイル幅から計算）をもとに列幅を決定する
 const naturalCardWidth = computed(() => {
@@ -49,7 +55,10 @@ const naturalCardWidth = computed(() => {
   return max;
 });
 
+const TASK_CARD_WIDTH = ref(260);
+
 const { containerRef, columns } = useMasonryLayout(worktreesRef, { minColumnWidth: naturalCardWidth, gap: 12 });
+const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayout(tasksRef, { minColumnWidth: TASK_CARD_WIDTH, gap: 12 });
 </script>
 
 <template>
@@ -97,6 +106,39 @@ const { containerRef, columns } = useMasonryLayout(worktreesRef, { minColumnWidt
         />
       </div>
     </div>
+
+    <!-- タスク一覧 -->
+    <template v-if="tasks.length > 0">
+      <div class="section-header">
+        <span class="home-title">タスク一覧</span>
+        <div class="header-actions">
+          <button class="btn-icon-header" title="タスク追加" @click="emit('addTask')">
+            <i class="pi pi-plus"></i>
+          </button>
+        </div>
+      </div>
+
+      <div ref="taskContainerRef" class="worktree-list">
+        <div v-for="(col, colIndex) in taskColumns" :key="colIndex" class="masonry-column" :style="{ maxWidth: TASK_CARD_WIDTH + 'px' }">
+          <TaskCard
+            v-for="task in col"
+            :key="task.id"
+            :task="task"
+            @remove="emit('removeTask', $event)"
+          />
+        </div>
+      </div>
+    </template>
+
+    <!-- タスクなし時はアイコンボタンのみ（ワークツリー一覧ヘッダーに追加） -->
+    <template v-else>
+      <div class="task-add-bar">
+        <button class="btn-add-task" @click="emit('addTask')">
+          <i class="pi pi-bolt"></i>
+          タスクを追加
+        </button>
+      </div>
+    </template>
   </div>
 </template>
 
@@ -171,5 +213,38 @@ const { containerRef, columns } = useMasonryLayout(worktreesRef, { minColumnWidt
   height: calc(100% - 48px);
   color: #6c7086;
   font-size: 14px;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 20px;
+  margin-bottom: 12px;
+}
+
+.task-add-bar {
+  display: flex;
+  justify-content: center;
+  padding: 12px 0 4px;
+}
+
+.btn-add-task {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 1px dashed #45475a;
+  border-radius: 6px;
+  color: #6c7086;
+  font-size: 13px;
+  padding: 6px 16px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.btn-add-task:hover {
+  color: #cba6f7;
+  border-color: #cba6f7;
 }
 </style>

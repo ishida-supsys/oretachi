@@ -7,6 +7,7 @@ import TerminalView from "./components/TerminalView.vue";
 import HomeView from "./components/HomeView.vue";
 import SettingsView from "./components/SettingsView.vue";
 import AddWorktreeDialog from "./components/AddWorktreeDialog.vue";
+import AddTaskDialog from "./components/AddTaskDialog.vue";
 import RemoveWorktreeDialog from "./components/RemoveWorktreeDialog.vue";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import HotkeyCharDialog from "./components/HotkeyCharDialog.vue";
@@ -20,8 +21,10 @@ import { useSubWindows } from "./composables/useSubWindows";
 import { useNotifications } from "./composables/useNotifications";
 import { useTrayPopup } from "./composables/useTrayPopup";
 import { useWindowFocus } from "./composables/useWindowFocus";
+import { useTasks } from "./composables/useTasks";
 import type { TrayWorktreeData, TrayTerminalData } from "./composables/useTrayPopup";
 import type { WorktreeEntry, Repository } from "./types/settings";
+import type { AddWorktreeTaskCode, AgentWorktreeTaskCode, TaskProcessCode } from "./types/task";
 import type { FrameNode } from "./types/frame";
 import { useHotkeyListener, bindingToAccelerator } from "./composables/useHotkeys";
 import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
@@ -51,6 +54,8 @@ const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusS
 const { notifications, initNotificationListener, addNotification, clearNotification, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
 const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees } = useTrayPopup();
 const { tryAutoAssignHotkey } = useAutoHotkey();
+const { sortedTasks, addTask, setTaskSteps, updateStepStatus, updateTaskStatus, removeTask } = useTasks();
+const showAddTaskDialog = ref(false);
 
 // HomeView / WorktreeCard 向け: Map<string, number> 形式を維持
 const notificationCounts = computed(() => {
@@ -420,6 +425,179 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry) {
     loadingWorktrees.delete(entry.id);
   }
 }
+
+// ─── タスク実行 ───────────────────────────────────────────────────────────────
+
+function randomSuffix(): string {
+  return Math.random().toString(36).slice(2, 6);
+}
+
+async function waitForScriptCompletion(worktreeId: string, timeoutMs = 300_000): Promise<void> {
+  // sessionId が確定するまでポーリング
+  let sid: number | null = null;
+  for (let i = 0; i < 100; i++) {
+    const wt = worktrees.value.find((w) => w.id === worktreeId);
+    const t = wt?.terminals[0];
+    if (t) {
+      const ref = terminalRefs.get(t.id);
+      const s = ref?.sessionId;
+      if (s !== null && s !== undefined) {
+        sid = s;
+        break;
+      }
+    }
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  if (sid === null) return;
+
+  const targetSid = sid;
+  await new Promise<void>((resolve) => {
+    let timer: ReturnType<typeof setTimeout>;
+    let unlistenFn: (() => void) | null = null;
+
+    timer = setTimeout(() => {
+      unlistenFn?.();
+      resolve();
+    }, timeoutMs);
+
+    listen<{ sessionId: number; data: number[] }>("pty-output", (event) => {
+      if (event.payload.sessionId !== targetSid) return;
+      const text = new TextDecoder().decode(new Uint8Array(event.payload.data));
+      if (/\x1b\]777;exit_code;\d+/.test(text)) {
+        clearTimeout(timer);
+        unlistenFn?.();
+        resolve();
+      }
+    }).then((fn) => {
+      unlistenFn = fn;
+    });
+  });
+}
+
+async function executeAddWorktree(code: AddWorktreeTaskCode): Promise<string> {
+  const repo = settings.value.repositories.find((r) => r.name === code.repository);
+  if (!repo) throw new Error(`リポジトリが見つかりません: ${code.repository}`);
+
+  const suffix = randomSuffix();
+  const worktreeName = `${repo.name}-${suffix}`;
+  const entry: WorktreeEntry = {
+    id: `${Date.now()}-${suffix}`,
+    name: worktreeName,
+    repositoryId: repo.id,
+    repositoryName: repo.name,
+    path: `${settings.value.worktreeBaseDir}/${worktreeName}`,
+    branchName: code.branch,
+  };
+
+  addWorktreePlaceholder(entry);
+  loadingWorktrees.set(entry.id, "作成中...");
+
+  try {
+    await invokeWorktreeAdd(entry);
+    commitWorktree(entry);
+    tryAutoAssignHotkey(entry.id);
+
+    if (repo.execScript) {
+      pendingScripts.set(entry.id, buildScriptCommand(repo, entry));
+    }
+
+    await onAddTerminal(entry.id);
+
+    if (repo.execScript) {
+      await waitForScriptCompletion(entry.id);
+    }
+  } catch (e) {
+    rollbackWorktree(entry.id);
+    loadingWorktrees.delete(entry.id);
+    throw e;
+  }
+
+  loadingWorktrees.delete(entry.id);
+  return entry.id;
+}
+
+async function executeAgentWorktree(code: AgentWorktreeTaskCode): Promise<void> {
+  // 既存のワークツリーを repository名 + branch名 で検索
+  const wt = worktrees.value.find(
+    (w) => w.repositoryName === code.repository && w.branchName === code.branch
+  );
+  if (!wt || wt.terminals.length === 0) {
+    throw new Error(`ワークツリーが見つかりません: ${code.repository}/${code.branch}`);
+  }
+
+  const terminal = wt.terminals[0];
+  const termRef = terminalRefs.get(terminal.id);
+  if (!termRef) {
+    throw new Error(`ターミナルが見つかりません: ${wt.name}`);
+  }
+
+  // 一時ファイルにプロンプトを書き出し
+  const tempPath = await invoke<string>("write_temp_prompt", { content: code.prompt });
+
+  const agentKind = settings.value.aiAgent?.approvalAgent ?? "claudeCode";
+  const isWindows = platform() === "windows";
+  const shell = resolveShell(wt.id);
+  const shellLower = (shell ?? "").toLowerCase();
+  const isPowerShell =
+    shellLower.includes("powershell") ||
+    shellLower.includes("pwsh") ||
+    (shell === undefined && isWindows);
+
+  let agentCmd: string;
+  if (agentKind === "claudeCode") agentCmd = "claude --permission-mode plan";
+  else if (agentKind === "geminiCli") agentCmd = "gemini";
+  else agentCmd = agentKind;
+
+  let command: string;
+  if (isPowerShell) {
+    command = `$p = Get-Content "${tempPath}" -Raw; ${agentCmd} $p; Remove-Item "${tempPath}"\r`;
+  } else {
+    command = `${agentCmd} "$(cat "${tempPath}")"; rm "${tempPath}"\r`;
+  }
+
+  await termRef.write(command);
+}
+
+async function executeTaskSteps(taskId: string): Promise<void> {
+  const { tasks } = useTasks();
+  const task = tasks.value.find((t) => t.id === taskId);
+  if (!task) return;
+
+  for (let i = 0; i < task.steps.length; i++) {
+    const step = task.steps[i];
+    updateStepStatus(taskId, i, "running");
+    try {
+      if (step.code.type === "add_worktree") {
+        await executeAddWorktree(step.code);
+      } else if (step.code.type === "agent_worktree") {
+        await executeAgentWorktree(step.code);
+      }
+      updateStepStatus(taskId, i, "done");
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      updateStepStatus(taskId, i, "error", msg);
+      throw e;
+    }
+  }
+}
+
+async function onAddTaskConfirm(prompt: string): Promise<void> {
+  showAddTaskDialog.value = false;
+  const task = addTask(prompt);
+
+  try {
+    const result = await invoke<string>("task_generate", { prompt });
+    const taskProcessCode = JSON.parse(result) as TaskProcessCode;
+    setTaskSteps(task.id, taskProcessCode.code);
+    await executeTaskSteps(task.id);
+    updateTaskStatus(task.id, "completed");
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    updateTaskStatus(task.id, "error", msg);
+  }
+}
+
+// ─── ────────────────────────────────────────────────────────────────────────
 
 async function handleSubAddTerminalRequest(worktreeId: string) {
   const worktree = worktrees.value.find((w) => w.id === worktreeId);
@@ -1183,6 +1361,7 @@ onMounted(async () => {
         :loading-worktrees="loadingWorktrees"
         :auto-approvals="autoApprovalMap"
         :ai-judging-worktrees="aiJudgingWorktrees"
+        :tasks="sortedTasks"
         @select-terminal="switchToTerminal"
         @add-worktree="showAddDialog = true"
         @remove-worktree="onRemoveWorktree"
@@ -1195,6 +1374,8 @@ onMounted(async () => {
         @set-hotkey-char="onSetHotkeyChar"
         @toggle-auto-approval="onToggleAutoApproval"
         @cancel-ai-judging="onCancelAiJudging"
+        @add-task="showAddTaskDialog = true"
+        @remove-task="removeTask"
       />
 
       <!-- 設定ビュー -->
@@ -1227,6 +1408,13 @@ onMounted(async () => {
         </template>
       </template>
     </div>
+
+    <!-- タスク追加ダイアログ -->
+    <AddTaskDialog
+      v-if="showAddTaskDialog"
+      @confirm="onAddTaskConfirm"
+      @cancel="showAddTaskDialog = false"
+    />
 
     <!-- ワークツリー追加ダイアログ -->
     <AddWorktreeDialog

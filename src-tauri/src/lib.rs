@@ -5,6 +5,7 @@ mod ide_launcher;
 pub mod mcp_server;
 mod pty_manager;
 mod settings;
+mod task_executor;
 mod terminal_session;
 
 use pty_manager::PtyManager;
@@ -204,6 +205,8 @@ pub fn run() {
             terminal_session::save_terminal_session,
             terminal_session::load_terminal_session,
             terminal_session::delete_terminal_session,
+            task_executor::task_generate,
+            task_executor::write_temp_prompt,
         ])
         .setup(|app| {
             if let Ok(log_dir) = app.path().app_log_dir() {
