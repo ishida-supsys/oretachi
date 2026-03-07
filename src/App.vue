@@ -828,7 +828,8 @@ onMounted(async () => {
   // 通知リスナー初期化 (ワークツリー名 → ID 解決関数と自動承認中は保留するコールバックを渡す)
   await initNotificationListener(
     (name: string) => worktrees.value.find((w) => w.name === name)?.id,
-    (id: string) => autoApprovalMap.get(id) === true || isWorktreeFocused(id)
+    (id: string) => autoApprovalMap.get(id) === true || isWorktreeFocused(id),
+    () => settings.value.enableOsNotification === true
   );
 
   // サブウィンドウ準備完了 → init データをイベントで送信

@@ -1,5 +1,10 @@
 import { reactive } from "vue";
 import { listen } from "@tauri-apps/api/event";
+import {
+  isPermissionGranted,
+  requestPermission,
+  sendNotification,
+} from "@tauri-apps/plugin-notification";
 
 interface NotificationEntry {
   count: number;
@@ -17,17 +22,28 @@ export function useNotifications() {
    */
   async function initNotificationListener(
     resolveWorktreeId: (name: string) => string | undefined,
-    shouldHold?: (worktreeId: string) => boolean
+    shouldHold?: (worktreeId: string) => boolean,
+    isOsNotificationEnabled?: () => boolean
   ) {
     if (initialized) return;
     initialized = true;
 
-    await listen<string>("notify-worktree", (event) => {
+    await listen<string>("notify-worktree", async (event) => {
       const worktreeName = event.payload;
       const id = resolveWorktreeId(worktreeName);
       if (id) {
         if (shouldHold?.(id)) return;
         addNotification(id);
+        if (isOsNotificationEnabled?.()) {
+          let permitted = await isPermissionGranted();
+          if (!permitted) {
+            const permission = await requestPermission();
+            permitted = permission === "granted";
+          }
+          if (permitted) {
+            sendNotification({ title: "Worktree通知", body: worktreeName });
+          }
+        }
       }
     });
   }
