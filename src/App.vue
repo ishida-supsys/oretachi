@@ -1050,7 +1050,18 @@ onMounted(async () => {
   await initNotificationListener(
     (name: string) => worktrees.value.find((w) => w.name === name)?.id,
     (id: string) => autoApprovalMap.get(id) === true || isWorktreeFocused(id),
-    () => settings.value.enableOsNotification === true
+    () => settings.value.enableOsNotification === true,
+    (worktreeId: string) => {
+      if (isDetached(worktreeId)) {
+        focusSubWindow(worktreeId);
+      } else {
+        const wt = worktrees.value.find((w) => w.id === worktreeId);
+        if (wt && wt.terminals.length > 0) {
+          switchToTerminal(wt.terminals[0].id);
+        }
+        getCurrentWindow().setFocus();
+      }
+    }
   );
 
   // サブウィンドウ準備完了 → init データをイベントで送信
