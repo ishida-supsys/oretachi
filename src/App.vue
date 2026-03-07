@@ -334,9 +334,6 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
       terminalWorktreeMap.delete(terminal.id);
     }
 
-    // プロセスのファイルハンドル解放を待つ
-    await new Promise(resolve => setTimeout(resolve, 500));
-
     if (activeTerminalId.value !== null) {
       const activeWorktreeId = terminalWorktreeMap.get(activeTerminalId.value);
       if (activeWorktreeId === worktreeId) {
