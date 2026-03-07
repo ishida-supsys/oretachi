@@ -4,6 +4,7 @@ mod ide_launcher;
 pub mod mcp_server;
 mod pty_manager;
 mod settings;
+mod terminal_session;
 
 use pty_manager::PtyManager;
 use settings::{AppSettings, SettingsManager};
@@ -192,6 +193,9 @@ pub fn run() {
             restart_mcp_server,
             ai_judge::judge_approval,
             ai_judge::cancel_approval,
+            terminal_session::save_terminal_session,
+            terminal_session::load_terminal_session,
+            terminal_session::delete_terminal_session,
         ])
         .setup(|app| {
             if let Ok(log_dir) = app.path().app_log_dir() {

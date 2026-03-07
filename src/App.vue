@@ -46,7 +46,7 @@ const subWindowFocusMap = reactive(new Map<string, boolean>());
 type ViewMode = "home" | "settings" | "terminal";
 
 const { settings, loadSettings, scheduleSave } = useSettings();
-const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, removeWorktree, listBranches, addTerminal, removeTerminal, updateTerminalTitle } = useWorktrees();
+const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, removeWorktree, listBranches, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, closeAllSubWindows } = useSubWindows();
 const { notifications, initNotificationListener, addNotification, clearNotification, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
 const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees } = useTrayPopup();
@@ -76,6 +76,9 @@ const terminalWorktreeMap = new Map<number, string>();
 // worktreeId → 実行待ちスクリプトコマンド文字列
 const pendingScripts = new Map<string, string>();
 
+// terminalId → 復元スナップショット（起動時セッション復元用）
+const pendingSnapshots = new Map<number, string>();
+
 // ワークツリー追加ダイアログ
 const showAddDialog = ref(false);
 
@@ -87,7 +90,6 @@ const loadingWorktrees = reactive(new Map<string, string>());
 const showRemoveDialog = ref(false);
 const removeTargetWorktree = ref<{ id: string; name: string; branchName: string } | null>(null);
 const removeBranches = ref<string[]>([]);
-const removingWorktree = ref(false);
 
 // IDE 選択ダイアログ
 const showIdeDialog = ref(false);
@@ -132,6 +134,7 @@ async function onTerminalReady(terminalId: number) {
     terminalRefs.delete(terminalId);
     terminalRefs.set(terminalId, ref);
   }
+  pendingSnapshots.delete(terminalId);
   const worktreeId = terminalWorktreeMap.get(terminalId);
   if (worktreeId) {
     const command = pendingScripts.get(worktreeId);
@@ -298,7 +301,9 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
     return;
   }
 
-  removingWorktree.value = true;
+  showRemoveDialog.value = false;
+  removeTargetWorktree.value = null;
+  removeBranches.value = [];
   loadingWorktrees.set(worktreeId, "削除中...");
   try {
     // detached の場合はサブウィンドウを閉じる
@@ -335,11 +340,7 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
       await message(`削除に失敗しました: ${e}`, { kind: "error" });
     }
   } finally {
-    removingWorktree.value = false;
     loadingWorktrees.delete(worktreeId);
-    showRemoveDialog.value = false;
-    removeTargetWorktree.value = null;
-    removeBranches.value = [];
   }
 }
 
@@ -606,6 +607,12 @@ async function onFocusSubWindow(worktreeId: string) {
   await focusSubWindow(worktreeId);
 }
 
+async function onFocusAllSubWindows() {
+  for (const worktreeId of detachedWorktrees) {
+    await focusSubWindow(worktreeId);
+  }
+}
+
 function onSetHotkeyChar(worktreeId: string) {
   hotkeyCharTargetId.value = worktreeId;
   showHotkeyCharDialog.value = true;
@@ -767,11 +774,52 @@ onMounted(async () => {
 
   // 保存されたサブウィンドウを復元
   const savedDetachedIds = settings.value.detachedWorktreeIds ?? [];
+
+  // メインウィンドウのターミナルセッションを復元（detachedでないワークツリー）
+  for (const wt of worktrees.value) {
+    if (savedDetachedIds.includes(wt.id)) continue;
+    try {
+      const session = await loadTerminalSession(wt.id);
+      if (session && session.terminals.length > 0) {
+        for (const saved of session.terminals) {
+          const terminal = addTerminal(wt.id);
+          updateTerminalTitle(wt.id, terminal.id, saved.title);
+          terminalWorktreeMap.set(terminal.id, wt.id);
+          if (saved.buffer) {
+            pendingSnapshots.set(terminal.id, saved.buffer);
+          }
+        }
+      }
+    } catch {
+      // セッション読み込み失敗は無視
+    }
+  }
+
+  // サブウィンドウとして保存されていたワークツリーを復元
   for (const worktreeId of savedDetachedIds) {
     const wt = worktrees.value.find((w) => w.id === worktreeId);
-    if (wt) {
-      await moveToSubWindow(wt.id, wt.name, [], autoApprovalMap.get(wt.id) ?? false, true, wt.path);
+    if (!wt) continue;
+
+    // セッションファイルからターミナルデータを読み込み
+    let subTerminals: { id: number; title: string; sessionId: number; snapshot: string }[] = [];
+    try {
+      const session = await loadTerminalSession(worktreeId);
+      if (session && session.terminals.length > 0) {
+        for (const saved of session.terminals) {
+          const terminal = addTerminal(worktreeId);
+          updateTerminalTitle(worktreeId, terminal.id, saved.title);
+          terminalWorktreeMap.set(terminal.id, worktreeId);
+          const sid = await invoke<number>("pty_spawn", {
+            rows: 24, cols: 80, shell: resolveShell(worktreeId) ?? null, cwd: wt.path,
+          });
+          subTerminals.push({ id: terminal.id, title: saved.title, sessionId: sid, snapshot: saved.buffer });
+        }
+      }
+    } catch {
+      // セッション読み込み失敗は無視
     }
+
+    await moveToSubWindow(wt.id, wt.name, subTerminals, autoApprovalMap.get(wt.id) ?? false, true, wt.path);
   }
 
   // Alt+char ホットキーリスナー登録
@@ -996,7 +1044,54 @@ onMounted(async () => {
     settings.value.detachedWorktreeIds = Array.from(detachedWorktrees);
     await invoke("save_settings", { settings: settings.value });
 
-    // 3. 既存のシャットダウン処理
+    // 3. サブウィンドウのターミナルセッションを保存（closeAllSubWindows より前）
+    for (const wt of worktrees.value) {
+      if (!isDetached(wt.id)) continue;
+      try {
+        const response = await new Promise<{ terminals: { title: string; buffer: string }[] } | null>((resolve) => {
+          const timeout = setTimeout(() => { unlisten(); resolve(null); }, 3000);
+          let unlisten = () => {};
+          listen<{ worktreeId: string; terminals: { title: string; buffer: string }[] }>(
+            "sub-session-save-response",
+            (event) => {
+              if (event.payload.worktreeId === wt.id) {
+                clearTimeout(timeout);
+                unlisten();
+                resolve({ terminals: event.payload.terminals });
+              }
+            }
+          ).then((fn) => { unlisten = fn; });
+          emitTo(`sub-${wt.id}`, "sub-session-save-request", {}).catch(() => {
+            clearTimeout(timeout);
+            unlisten();
+            resolve(null);
+          });
+        });
+        if (response && response.terminals.length > 0) {
+          await saveTerminalSession(wt.id, response.terminals);
+        }
+      } catch {
+        // セッション保存失敗は無視
+      }
+    }
+
+    // 4. メインウィンドウのターミナルセッションを保存
+    for (const wt of worktrees.value) {
+      if (isDetached(wt.id)) continue;
+      try {
+        const terminals = wt.terminals.map((t) => {
+          const termRef = terminalRefs.get(t.id);
+          return { title: t.title, buffer: termRef?.serializeBuffer() ?? "" };
+        }).filter((t) => t.buffer !== "");
+        if (terminals.length > 0) {
+          await saveTerminalSession(wt.id, terminals);
+        }
+      } catch {
+        // セッション保存失敗は無視
+      }
+    }
+
+    // 5. 既存のシャットダウン処理
     await closeAllSubWindows();
     for (const [, term] of terminalRefs) {
       if (term?.isRunning) {
@@ -1081,6 +1176,7 @@ onMounted(async () => {
         @move-to-sub-window="onMoveToSubWindow"
         @move-to-main-window="onMoveToMainWindow"
         @focus-sub-window="onFocusSubWindow"
+        @focus-all-sub-windows="onFocusAllSubWindows"
         @set-hotkey-char="onSetHotkeyChar"
         @toggle-auto-approval="onToggleAutoApproval"
         @cancel-ai-judging="onCancelAiJudging"
@@ -1106,6 +1202,7 @@ onMounted(async () => {
               :auto-start="true"
               :cwd="wt.path"
               :shell="resolveShell(wt.id)"
+              :restore-snapshot="pendingSnapshots.get(terminal.id)"
               @exit="onSessionExit(terminal.id)"
               @ready="onTerminalReady(terminal.id)"
               @title-change="onTerminalTitleChange(terminal.id, $event)"
@@ -1131,7 +1228,6 @@ onMounted(async () => {
       :worktree-name="removeTargetWorktree.name"
       :branch-name="removeTargetWorktree.branchName"
       :branches="removeBranches"
-      :submitting="removingWorktree"
       @confirm="onRemoveWorktreeConfirm"
       @cancel="showRemoveDialog = false"
     />

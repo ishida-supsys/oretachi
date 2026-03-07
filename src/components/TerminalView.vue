@@ -18,6 +18,7 @@ const props = withDefaults(
     cwd?: string;
     initialSessionId?: number;
     initialSnapshot?: string;
+    restoreSnapshot?: string;
     noResize?: boolean;
   }>(),
   {
@@ -289,6 +290,9 @@ onMounted(async () => {
   if (props.initialSessionId !== undefined) {
     await attachPty(props.initialSessionId, props.initialSnapshot);
   } else if (props.autoStart) {
+    if (props.restoreSnapshot) {
+      terminal?.write(props.restoreSnapshot);
+    }
     await startPty();
   }
 });

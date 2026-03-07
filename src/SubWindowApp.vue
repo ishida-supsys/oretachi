@@ -380,6 +380,7 @@ let unlistenSetAutoApproval: UnlistenFn | null = null;
 let unlistenTryAutoApprove: UnlistenFn | null = null;
 let unlistenCancelAutoApprove: UnlistenFn | null = null;
 let unlistenSettingsChanged: UnlistenFn | null = null;
+let unlistenSessionSaveRequest: UnlistenFn | null = null;
 let thumbnailInterval: ReturnType<typeof setInterval> | null = null;
 let closingByMain = false;
 
@@ -603,6 +604,15 @@ onMounted(async () => {
     aiJudging.value = false;
   });
 
+  // セッション保存リクエスト
+  unlistenSessionSaveRequest = await appWindow.listen("sub-session-save-request", async () => {
+    const terminals = Array.from(terminalEntries.values()).map((entry) => {
+      const termRef = terminalRefs.get(entry.id);
+      return { title: entry.title, buffer: termRef?.serializeBuffer() ?? "" };
+    }).filter((t) => t.buffer !== "");
+    await emitTo("main", "sub-session-save-response", { worktreeId, terminals });
+  });
+
   // メインに準備完了を通知
   await emitTo("main", "sub-ready", { worktreeId });
 });
@@ -619,6 +629,7 @@ onUnmounted(() => {
   unlistenTryAutoApprove?.();
   unlistenCancelAutoApprove?.();
   unlistenSettingsChanged?.();
+  unlistenSessionSaveRequest?.();
 });
 
 async function onCancelAiJudging() {

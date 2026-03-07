@@ -24,6 +24,7 @@ const emit = defineEmits<{
   moveToSubWindow: [worktreeId: string];
   moveToMainWindow: [worktreeId: string];
   focusSubWindow: [worktreeId: string];
+  focusAllSubWindows: [];
   setHotkeyChar: [worktreeId: string];
   toggleAutoApproval: [worktreeId: string];
   cancelAiJudging: [worktreeId: string];
@@ -55,11 +56,18 @@ const { containerRef, columns } = useMasonryLayout(worktreesRef, { minColumnWidt
   <div class="home-view">
     <div class="home-header">
       <span class="home-title">ワークツリー一覧</span>
-      <button class="btn-add" @click="emit('addWorktree')">+ ワークツリー追加</button>
+      <div class="header-actions">
+        <button class="btn-icon-header" title="すべてのサブウィンドウを呼び出す" @click="emit('focusAllSubWindows')">
+          <i class="pi pi-window-maximize"></i>
+        </button>
+        <button class="btn-icon-header" title="ワークツリー追加" @click="emit('addWorktree')">
+          <i class="pi pi-plus"></i>
+        </button>
+      </div>
     </div>
 
     <div v-if="worktrees.length === 0" class="empty-state">
-      ワークツリーがありません。「+ ワークツリー追加」で作成してください。
+      ワークツリーがありません。右上の <i class="pi pi-plus"></i> ボタンで作成してください。
     </div>
 
     <div ref="containerRef" class="worktree-list">
@@ -115,19 +123,30 @@ const { containerRef, columns } = useMasonryLayout(worktreesRef, { minColumnWidt
   color: #cdd6f4;
 }
 
-.btn-add {
-  background: #cba6f7;
-  color: #1e1e2e;
-  border: none;
-  border-radius: 4px;
-  padding: 6px 14px;
-  font-size: 12px;
-  font-weight: 600;
-  cursor: pointer;
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
 }
 
-.btn-add:hover {
-  background: #b4befe;
+.btn-icon-header {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  background: transparent;
+  color: #6c7086;
+  border: none;
+  border-radius: 4px;
+  font-size: 14px;
+  cursor: pointer;
+  transition: color 0.15s, background 0.15s;
+}
+
+.btn-icon-header:hover {
+  color: #cba6f7;
+  background: #313244;
 }
 
 .worktree-list {

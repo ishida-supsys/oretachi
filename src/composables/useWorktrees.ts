@@ -1,6 +1,6 @@
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import type { Worktree, WorktreeTerminal } from "../types/worktree";
+import type { Worktree, WorktreeTerminal, SavedTerminal, TerminalSessionFile } from "../types/worktree";
 import type { WorktreeEntry } from "../types/settings";
 import { useSettings } from "./useSettings";
 
@@ -89,6 +89,13 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
     (w) => w.id !== worktreeId
   );
   scheduleSave();
+
+  // セッションファイルを削除
+  try {
+    await invoke("delete_terminal_session", { worktreeId });
+  } catch {
+    // ファイルが存在しない場合は無視
+  }
 }
 
 /** ローカルブランチ一覧を取得 */
@@ -123,6 +130,35 @@ function removeTerminal(worktreeId: string, terminalId: number) {
   }
 }
 
+/** ターミナルセッションを保存 */
+async function saveTerminalSession(worktreeId: string, terminals: SavedTerminal[]): Promise<void> {
+  const sessionFile: TerminalSessionFile = {
+    worktreeId,
+    terminals,
+    savedAt: new Date().toISOString(),
+  };
+  await invoke("save_terminal_session", {
+    worktreeId,
+    dataJson: JSON.stringify(sessionFile),
+  });
+}
+
+/** ターミナルセッションを読み込み */
+async function loadTerminalSession(worktreeId: string): Promise<TerminalSessionFile | null> {
+  const json = await invoke<string | null>("load_terminal_session", { worktreeId });
+  if (!json) return null;
+  try {
+    return JSON.parse(json) as TerminalSessionFile;
+  } catch {
+    return null;
+  }
+}
+
+/** ターミナルセッションを削除 */
+async function deleteTerminalSession(worktreeId: string): Promise<void> {
+  await invoke("delete_terminal_session", { worktreeId });
+}
+
 /** ターミナルタイトルを更新 */
 function updateTerminalTitle(worktreeId: string, terminalId: number, title: string) {
   const worktree = worktrees.value.find((w) => w.id === worktreeId);
@@ -145,5 +181,8 @@ export function useWorktrees() {
     addTerminal,
     removeTerminal,
     updateTerminalTitle,
+    saveTerminalSession,
+    loadTerminalSession,
+    deleteTerminalSession,
   };
 }

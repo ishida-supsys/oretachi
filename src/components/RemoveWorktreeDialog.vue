@@ -5,7 +5,6 @@ defineProps<{
   worktreeName: string;
   branchName: string;
   branches: string[];
-  submitting?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -26,7 +25,7 @@ function confirm() {
 </script>
 
 <template>
-  <div class="dialog-overlay" @click.self="!submitting && emit('cancel')">
+  <div class="dialog-overlay" @click.self="emit('cancel')">
     <div class="dialog">
       <h3 class="dialog-title">ワークツリー「{{ worktreeName }}」を削除</h3>
 
@@ -37,7 +36,7 @@ function confirm() {
 
       <div class="field">
         <label class="label">マージ先ブランチ（任意）</label>
-        <select v-model="mergeTo" class="select" :disabled="submitting">
+        <select v-model="mergeTo" class="select">
           <option value="">マージしない</option>
           <option v-for="b in branches" :key="b" :value="b">{{ b }}</option>
         </select>
@@ -48,7 +47,7 @@ function confirm() {
           <input
             v-model="deleteBranch"
             type="checkbox"
-            :disabled="!mergeTo || submitting"
+            :disabled="!mergeTo"
           />
           ブランチを削除する
         </label>
@@ -57,11 +56,8 @@ function confirm() {
       <p class="warn">⚠ git worktree remove が実行されます</p>
 
       <div class="dialog-actions">
-        <button class="btn-cancel" :disabled="submitting" @click="emit('cancel')">キャンセル</button>
-        <button class="btn-danger" :disabled="submitting" @click="confirm">
-          <span v-if="submitting" class="pi pi-spinner pi-spin" style="margin-right: 6px;" />
-          {{ submitting ? '削除中...' : '削除' }}
-        </button>
+        <button class="btn-cancel" @click="emit('cancel')">キャンセル</button>
+        <button class="btn-danger" @click="confirm">削除</button>
       </div>
     </div>
   </div>
