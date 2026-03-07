@@ -1,4 +1,4 @@
-import { ref, computed, isRef, watch, onMounted, onUnmounted } from "vue";
+import { ref, computed, isRef, watch, onMounted, onUnmounted, nextTick } from "vue";
 import type { Ref } from "vue";
 
 interface MasonryOptions {
@@ -41,7 +41,16 @@ export function useMasonryLayout<T>(
   }
 
   onMounted(() => {
-    if (containerRef.value) connect(containerRef.value);
+    if (containerRef.value) {
+      connect(containerRef.value);
+      // WebView2 の初期レンダリングで末尾カードが描画されないバグを回避:
+      // containerWidth が 0→実幅 に変わる2段階レンダリング後に強制 repaint を促す
+      nextTick(() => {
+        if (containerRef.value) {
+          containerWidth.value = containerRef.value.clientWidth;
+        }
+      });
+    }
   });
 
   watch(containerRef, (el) => {
