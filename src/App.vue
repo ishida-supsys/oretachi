@@ -18,7 +18,7 @@ import type { IdeInfo } from "./types/ide";
 import { useSettings } from "./composables/useSettings";
 import { useWorktrees } from "./composables/useWorktrees";
 import { useSubWindows } from "./composables/useSubWindows";
-import { useNotifications } from "./composables/useNotifications";
+import { useNotifications, sendOsNotification } from "./composables/useNotifications";
 import { useTrayPopup } from "./composables/useTrayPopup";
 import { useWindowFocus } from "./composables/useWindowFocus";
 import { useTasks } from "./composables/useTasks";
@@ -1092,6 +1092,7 @@ onMounted(async () => {
     if (!approved && !isWorktreeFocused(wt.id)) {
       await debug(`[AutoApproval] local: not approved → addNotification(${wt.id})`);
       addNotification(wt.id);
+      await sendOsNotification(wt.name);
     }
   });
 
@@ -1101,6 +1102,8 @@ onMounted(async () => {
     await debug(`[AutoApproval] sub-auto-approve-result worktreeId=${wid} approved=${approved}`);
     if (!approved && !isWorktreeFocused(wid)) {
       addNotification(wid);
+      const wtName = worktrees.value.find((w) => w.id === wid)?.name;
+      if (wtName) await sendOsNotification(wtName);
     }
   });
 
