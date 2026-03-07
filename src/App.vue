@@ -566,9 +566,13 @@ async function executeAgentWorktree(code: AgentWorktreeTaskCode): Promise<void> 
     (shell === undefined && isWindows);
 
   let agentCmd: string;
-  if (agentKind === "claudeCode") agentCmd = "claude --permission-mode plan";
-  else if (agentKind === "geminiCli") agentCmd = "gemini";
-  else agentCmd = agentKind;
+  switch (agentKind) {
+    case "claudeCode": agentCmd = "claude --permission-mode plan"; break;
+    case "geminiCli":  agentCmd = "gemini"; break;
+    case "codexCli":   agentCmd = "codex"; break;
+    case "clineCli":   agentCmd = "cline"; break;
+    default:           agentCmd = agentKind;
+  }
 
   let command: string;
   if (isPowerShell) {
