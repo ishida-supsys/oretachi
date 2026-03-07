@@ -14,6 +14,22 @@ interface NotificationEntry {
 // worktreeId → 未確認の通知エントリ
 const notifications = reactive(new Map<string, NotificationEntry>());
 let initialized = false;
+let osNotificationEnabled: (() => boolean) | undefined;
+
+/**
+ * OS通知を送信する。App.vue の自動承認不承認ハンドラからも呼ばれる。
+ */
+export async function sendOsNotification(worktreeName: string) {
+  if (!osNotificationEnabled?.()) return;
+  let permitted = await isPermissionGranted();
+  if (!permitted) {
+    const permission = await requestPermission();
+    permitted = permission === "granted";
+  }
+  if (permitted) {
+    sendNotification({ title: "Worktree通知", body: worktreeName });
+  }
+}
 
 export function useNotifications() {
   /**
@@ -23,10 +39,11 @@ export function useNotifications() {
   async function initNotificationListener(
     resolveWorktreeId: (name: string) => string | undefined,
     shouldHold?: (worktreeId: string) => boolean,
-    isOsNotificationEnabled?: () => boolean
+    isOsNotificationEnabledFn?: () => boolean
   ) {
     if (initialized) return;
     initialized = true;
+    osNotificationEnabled = isOsNotificationEnabledFn;
 
     await listen<string>("notify-worktree", async (event) => {
       const worktreeName = event.payload;
@@ -34,16 +51,7 @@ export function useNotifications() {
       if (id) {
         if (shouldHold?.(id)) return;
         addNotification(id);
-        if (isOsNotificationEnabled?.()) {
-          let permitted = await isPermissionGranted();
-          if (!permitted) {
-            const permission = await requestPermission();
-            permitted = permission === "granted";
-          }
-          if (permitted) {
-            sendNotification({ title: "Worktree通知", body: worktreeName });
-          }
-        }
+        await sendOsNotification(worktreeName);
       }
     });
   }
