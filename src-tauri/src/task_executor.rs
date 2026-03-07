@@ -151,7 +151,7 @@ pub async fn task_generate(
         let mcp_config = serde_json::json!({
             "mcpServers": {
                 "oretachi": {
-                    "type": "sse",
+                    "type": "http",
                     "url": format!("http://127.0.0.1:{}/mcp", port)
                 }
             }
