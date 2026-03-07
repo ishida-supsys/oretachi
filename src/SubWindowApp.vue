@@ -34,6 +34,9 @@ const worktreePath = params.get("worktreePath") ?? "";
 const terminalEntries = reactive(new Map<number, SubTerminalEntry>());
 const initialized = ref(false);
 
+// terminalId → 直近コマンドの終了コード
+const terminalExitCodes = reactive(new Map<number, number>());
+
 // 自動承認フラグ
 const autoApproval = ref(false);
 
@@ -133,6 +136,7 @@ async function closeTerminal(leafId: string, terminalId: number) {
   returnAllToOffscreen();
 
   terminalEntries.delete(terminalId);
+  terminalExitCodes.delete(terminalId);
   removeTerminalFromLeaf(leafId, terminalId);
   pruneTree();
 
@@ -700,6 +704,7 @@ function getFirstLeafId(): string {
         <FrameContainer
           :node="root"
           :terminal-entries="terminalEntries"
+          :terminal-exit-codes="terminalExitCodes"
           @switch-terminal="switchTerminal"
           @close-terminal="closeTerminal"
           @title-change="onTerminalTitleChange"
@@ -732,6 +737,7 @@ function getFirstLeafId(): string {
           @exit="handleTerminalExit(tid)"
           @title-change="onTerminalTitleChange(tid, $event)"
           @focus="() => onTerminalFocus(tid)"
+          @exit-code-change="(code: number) => terminalExitCodes.set(tid, code)"
         />
       </template>
     </div>

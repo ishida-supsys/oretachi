@@ -28,6 +28,7 @@ interface SubTerminalEntry {
 const props = defineProps<{
   leaf: FrameLeaf;
   terminalEntries: Map<number, SubTerminalEntry>;
+  terminalExitCodes?: Map<number, number>;
 }>();
 
 const emit = defineEmits<{
@@ -227,6 +228,11 @@ function overlayStyle(zone: DropZone): Record<string, string> {
           @click="emit('switchTerminal', leaf.id, tid)"
         >
           <span class="tab-title">{{ terminalEntries.get(tid)?.title ?? `Terminal ${tid}` }}</span>
+          <span
+            v-if="terminalExitCodes?.has(tid)"
+            class="w-2 h-2 rounded-full inline-block shrink-0"
+            :class="terminalExitCodes.get(tid) === 0 ? 'bg-[#89b4fa]' : 'bg-[#f38ba8]'"
+          />
           <span
             class="pi pi-times tab-close"
             @click.stop="emit('closeTerminal', leaf.id, tid)"

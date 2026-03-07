@@ -136,10 +136,13 @@ impl PtyManager {
             }
         } else if shell_name.contains("powershell") || shell_name.contains("pwsh") {
             // PowerShell: -NoExit -Command で prompt 関数をラップして注入
+            // 注意: portable-pty の CommandBuilder は Windows 標準の \" エスケープを行うが
+            // PowerShell は \" を認識しないため、スクリプト内でダブルクォートを使わない
+            // $? を [int]!$? で 0/1 に変換 ($LASTEXITCODE は cmdlet では更新されないため使わない)
             cmd.arg("-NoExit");
             cmd.arg("-Command");
             cmd.arg(
-                r#"$__p=$function:prompt;function prompt{$ec=$LASTEXITCODE;[Console]::Write([char]27+']777;exit_code;'+$ec+[char]7);if($__p){&$__p}else{"PS $($executionContext.SessionState.Path.CurrentLocation)$('>'*($nestedPromptLevel+1)) "}}"#,
+                r#"$__p=$function:prompt;function prompt{$code=[int]!$?;[Console]::Write([char]27+']777;exit_code;'+$code+[char]7);if($__p){&$__p}else{('PS '+$executionContext.SessionState.Path.CurrentLocation+('>'*($nestedPromptLevel+1))+' ')}}"#,
             );
         }
 

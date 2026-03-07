@@ -15,6 +15,7 @@ interface SubTerminalEntry {
 const props = defineProps<{
   node: FrameNode;
   terminalEntries: Map<number, SubTerminalEntry>;
+  terminalExitCodes?: Map<number, number>;
 }>();
 
 const emit = defineEmits<{
@@ -50,6 +51,7 @@ function onResizeEnd(event: { sizes: number[] }) {
     v-if="node.type === 'leaf'"
     :leaf="(node as FrameLeaf)"
     :terminal-entries="terminalEntries"
+    :terminal-exit-codes="terminalExitCodes"
     @switch-terminal="(leafId, terminalId) => emit('switchTerminal', leafId, terminalId)"
     @close-terminal="(leafId, terminalId) => emit('closeTerminal', leafId, terminalId)"
     @title-change="(terminalId, title) => emit('titleChange', terminalId, title)"
@@ -80,6 +82,7 @@ function onResizeEnd(event: { sizes: number[] }) {
       <FrameContainer
         :node="child"
         :terminal-entries="terminalEntries"
+        :terminal-exit-codes="terminalExitCodes"
         @switch-terminal="(leafId, terminalId) => emit('switchTerminal', leafId, terminalId)"
         @close-terminal="(leafId, terminalId) => emit('closeTerminal', leafId, terminalId)"
         @title-change="(terminalId, title) => emit('titleChange', terminalId, title)"
