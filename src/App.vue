@@ -304,7 +304,7 @@ async function onRemoveWorktree(worktreeId: string) {
   showRemoveDialog.value = true;
 }
 
-async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch: boolean }) {
+async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch: boolean; forceBranch: boolean }) {
   if (!removeTargetWorktree.value) return;
   const { id: worktreeId } = removeTargetWorktree.value;
 
@@ -348,6 +348,7 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
       await removeWorktree(worktreeId, {
         mergeTo: options.mergeTo || undefined,
         deleteBranch: options.deleteBranch,
+        forceBranch: options.forceBranch,
       });
     } catch (e) {
       await message(`削除に失敗しました: ${e}`, { kind: "error" });

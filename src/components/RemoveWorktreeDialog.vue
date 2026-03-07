@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, watch } from "vue";
+import { ref, computed } from "vue";
 
 defineProps<{
   worktreeName: string;
@@ -8,19 +8,21 @@ defineProps<{
 }>();
 
 const emit = defineEmits<{
-  confirm: [options: { mergeTo: string; deleteBranch: boolean }];
+  confirm: [options: { mergeTo: string; deleteBranch: boolean; forceBranch: boolean }];
   cancel: [];
 }>();
 
 const mergeTo = ref("");
 const deleteBranch = ref(false);
 
-watch(mergeTo, (val) => {
-  if (!val) deleteBranch.value = false;
-});
+const forceBranch = computed(() => deleteBranch.value && !mergeTo.value);
 
 function confirm() {
-  emit("confirm", { mergeTo: mergeTo.value, deleteBranch: deleteBranch.value });
+  emit("confirm", {
+    mergeTo: mergeTo.value,
+    deleteBranch: deleteBranch.value,
+    forceBranch: forceBranch.value,
+  });
 }
 </script>
 
@@ -43,17 +45,17 @@ function confirm() {
       </div>
 
       <div class="field checkbox-field">
-        <label :class="['checkbox-label', !mergeTo ? 'disabled' : '']">
+        <label class="checkbox-label">
           <input
             v-model="deleteBranch"
             type="checkbox"
-            :disabled="!mergeTo"
           />
           ブランチを削除する
         </label>
       </div>
 
       <p class="warn">⚠ git worktree remove が実行されます</p>
+      <p v-if="forceBranch" class="warn warn-force">⚠ マージ先未指定のため git branch -D で強制削除されます</p>
 
       <div class="dialog-actions">
         <button class="btn-cancel" @click="emit('cancel')">キャンセル</button>
@@ -147,18 +149,13 @@ function confirm() {
   user-select: none;
 }
 
-.checkbox-label.disabled {
-  color: #45475a;
-  cursor: not-allowed;
-}
-
 .checkbox-label input[type="checkbox"] {
   cursor: pointer;
   accent-color: #f38ba8;
 }
 
-.checkbox-label.disabled input[type="checkbox"] {
-  cursor: not-allowed;
+.warn-force {
+  color: #f38ba8;
 }
 
 .warn {

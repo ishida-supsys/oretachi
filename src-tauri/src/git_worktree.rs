@@ -201,16 +201,17 @@ pub fn merge_branch(repo_path: &str, source_branch: &str, target_branch: &str) -
     Ok(())
 }
 
-pub fn delete_branch(repo_path: &str, branch_name: &str) -> Result<(), String> {
+pub fn delete_branch(repo_path: &str, branch_name: &str, force: bool) -> Result<(), String> {
+    let flag = if force { "-D" } else { "-d" };
     let output = make_command("git")
-        .args(["branch", "-d", branch_name])
+        .args(["branch", flag, branch_name])
         .current_dir(repo_path)
         .output()
         .map_err(|e| format!("git command error: {}", e))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git branch -d failed: {}", stderr));
+        return Err(format!("git branch {} failed: {}", flag, stderr));
     }
 
     Ok(())

@@ -112,8 +112,8 @@ async fn git_merge_branch(
 }
 
 #[tauri::command]
-async fn git_delete_branch(repo_path: String, branch_name: String) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || git_worktree::delete_branch(&repo_path, &branch_name))
+async fn git_delete_branch(repo_path: String, branch_name: String, force: bool) -> Result<(), String> {
+    tokio::task::spawn_blocking(move || git_worktree::delete_branch(&repo_path, &branch_name, force))
         .await
         .map_err(|e| format!("task join error: {}", e))?
 }

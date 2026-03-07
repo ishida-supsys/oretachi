@@ -49,6 +49,7 @@ function rollbackWorktree(worktreeId: string): void {
 interface RemoveWorktreeOptions {
   mergeTo?: string;
   deleteBranch?: boolean;
+  forceBranch?: boolean;
 }
 
 /** ワークツリーを削除（git worktree remove + 設定から削除） */
@@ -80,6 +81,7 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
       await invoke("git_delete_branch", {
         repoPath: repoEntry.path,
         branchName: worktree.branchName,
+        force: options.forceBranch ?? false,
       });
     }
   }
