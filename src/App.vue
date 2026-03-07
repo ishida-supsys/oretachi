@@ -67,6 +67,9 @@ const activeTerminalId = ref<number | null>(null);
 // terminalId → TerminalView インスタンス
 const terminalRefs = reactive(new Map<number, InstanceType<typeof TerminalView>>());
 
+// terminalId → 直近コマンドの終了コード (null = 未実行)
+const terminalExitCodes = reactive(new Map<number, number>());
+
 // terminalId → サムネイル data URL
 const thumbnailUrls = reactive(new Map<number, string>());
 
@@ -247,12 +250,17 @@ async function onAddTerminal(worktreeId: string) {
   }
 }
 
+function onTerminalExitCodeChange(terminalId: number, exitCode: number) {
+  terminalExitCodes.set(terminalId, exitCode);
+}
+
 async function onRemoveTerminal(worktreeId: string, terminalId: number) {
   const term = terminalRefs.get(terminalId);
   if (term?.isRunning) {
     await term.kill();
   }
   terminalWorktreeMap.delete(terminalId);
+  terminalExitCodes.delete(terminalId);
   removeTerminal(worktreeId, terminalId);
 
   // アクティブターミナルが削除された場合、ホームへ
@@ -1147,6 +1155,12 @@ onMounted(async () => {
         >
           <span>{{ tab.label }}</span>
           <span
+            v-if="terminalExitCodes.has(tab.terminalId)"
+            class="w-2 h-2 rounded-full inline-block shrink-0"
+            :class="terminalExitCodes.get(tab.terminalId) === 0 ? 'bg-[#89b4fa]' : 'bg-[#f38ba8]'"
+            :title="'Exit: ' + terminalExitCodes.get(tab.terminalId)"
+          />
+          <span
             class="pi pi-times text-[10px] opacity-0 group-hover:opacity-100 hover:text-[#f38ba8] transition-opacity ml-1"
             @click.stop="onTabClose(tab.terminalId)"
           />
@@ -1206,6 +1220,7 @@ onMounted(async () => {
               @exit="onSessionExit(terminal.id)"
               @ready="onTerminalReady(terminal.id)"
               @title-change="onTerminalTitleChange(terminal.id, $event)"
+              @exit-code-change="onTerminalExitCodeChange(terminal.id, $event)"
             />
           </div>
         </template>

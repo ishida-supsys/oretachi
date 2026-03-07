@@ -96,6 +96,53 @@ impl PtyManager {
 
         let mut cmd = CommandBuilder::new(&shell_cmd);
         cmd.env("TERM", "xterm-256color");
+
+        // シェル統合: OSC 777 で終了コードをフロントエンドに通知
+        let shell_name = std::path::Path::new(&shell_cmd)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        if shell_name.contains("bash") {
+            // bash: PROMPT_COMMAND 経由で OSC シーケンスを出力
+            let existing = std::env::var("PROMPT_COMMAND").unwrap_or_default();
+            let hook = r#"printf '\033]777;exit_code;%s\007' "$?""#;
+            let prompt_cmd = if existing.is_empty() {
+                hook.to_string()
+            } else {
+                format!("{};{}", hook, existing)
+            };
+            cmd.env("PROMPT_COMMAND", prompt_cmd);
+        } else if shell_name.contains("zsh") {
+            // zsh: ZDOTDIR を一時ディレクトリに向けて precmd フックを注入
+            let integration_dir = std::env::temp_dir().join("omaera-zsh");
+            if std::fs::create_dir_all(&integration_dir).is_ok() {
+                let orig_zdotdir = std::env::var("ZDOTDIR").unwrap_or_else(|_| {
+                    std::env::var("HOME").unwrap_or_default()
+                });
+                let zshenv_content =
+                    "[ -n \"$OMAERA_ORIG_ZDOTDIR\" ] && [ -f \"$OMAERA_ORIG_ZDOTDIR/.zshenv\" ] && source \"$OMAERA_ORIG_ZDOTDIR/.zshenv\"\n";
+                let zshrc_content = concat!(
+                    "[ -n \"$OMAERA_ORIG_ZDOTDIR\" ] && [ -f \"$OMAERA_ORIG_ZDOTDIR/.zshrc\" ] && source \"$OMAERA_ORIG_ZDOTDIR/.zshrc\"\n",
+                    "__omaera_precmd() { printf '\\033]777;exit_code;%s\\007' \"$?\" }\n",
+                    "precmd_functions+=(__omaera_precmd)\n",
+                    "ZDOTDIR=\"$OMAERA_ORIG_ZDOTDIR\"\n",
+                );
+                let _ = std::fs::write(integration_dir.join(".zshenv"), zshenv_content);
+                let _ = std::fs::write(integration_dir.join(".zshrc"), zshrc_content);
+                cmd.env("OMAERA_ORIG_ZDOTDIR", orig_zdotdir);
+                cmd.env("ZDOTDIR", &integration_dir);
+            }
+        } else if shell_name.contains("powershell") || shell_name.contains("pwsh") {
+            // PowerShell: -NoExit -Command で prompt 関数をラップして注入
+            cmd.arg("-NoExit");
+            cmd.arg("-Command");
+            cmd.arg(
+                r#"$__p=$function:prompt;function prompt{$ec=$LASTEXITCODE;[Console]::Write([char]27+']777;exit_code;'+$ec+[char]7);if($__p){&$__p}else{"PS $($executionContext.SessionState.Path.CurrentLocation)$('>'*($nestedPromptLevel+1)) "}}"#,
+            );
+        }
+
         if let Some(dir) = cwd {
             cmd.cwd(dir);
         }
