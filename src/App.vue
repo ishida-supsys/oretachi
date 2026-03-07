@@ -213,10 +213,10 @@ function buildScriptCommand(repo: Repository, entry: WorktreeEntry): string {
   const wtName = entry.name;
   const shellLower = (shell ?? '').toLowerCase();
 
-  // pty_manager.rs と同じロジック: 未指定時は Windows→COMSPEC(cmd.exe)、それ以外→SHELL
+  // pty_manager.rs と同じロジック: 未指定時は Windows→powershell.exe、それ以外→SHELL
   const isWindows = platform() === "windows";
-  const isCmd = shellLower.includes('cmd') || (shell === undefined && isWindows);
-  const isPowerShell = !isCmd && (shellLower.includes('powershell') || shellLower.includes('pwsh'));
+  const isPowerShell = shellLower.includes('powershell') || shellLower.includes('pwsh') || (shell === undefined && isWindows);
+  const isCmd = !isPowerShell && shellLower.includes('cmd');
 
   if (isCmd) {
     return `set ORETACHI_REPO_NAME=${repoName}&& set ORETACHI_WORKTREE_NAME=${wtName}&& call "${scriptPath}"\r`;
