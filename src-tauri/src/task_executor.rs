@@ -29,8 +29,14 @@ request and repositories, and perform appropriate worktree operations.
   oretachi_list_repository to select the repository. Do NOT look into the issue or
   pull request contents - only compare repository names and remote information. Leave
   precise matching to later flows.
-- Output task content with minimal modification beyond splitting the user's request.
-  When only an issue is provided or context is unclear, pass the full text.
+- The "prompt" field in agent_worktree MUST contain the user's original words verbatim.
+  Do NOT rephrase, summarize, elaborate, or make the request more specific.
+- If the request maps to a single task, copy the entire user request as-is into the prompt field.
+- If splitting into multiple tasks, extract the relevant portion of the user's original text for each
+  task. Do not rewrite or interpret it.
+- NEVER generate your own instructions or ideas to put in the prompt. Your role is routing and
+  splitting only — the downstream AI agent will interpret the prompt.
+- When only an issue URL is provided or context is unclear, pass the full text as-is.
 
 ## Task Process Code Schema
 {
