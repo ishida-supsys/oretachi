@@ -64,7 +64,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
 <template>
   <div class="home-view">
     <div class="home-header">
-      <span class="home-title">ワークツリー一覧</span>
+      <span class="home-title">ワークツリー</span>
       <div class="header-actions">
         <button class="btn-icon-header" title="すべてのサブウィンドウを呼び出す" @click="emit('focusAllSubWindows')">
           <i class="pi pi-window-maximize"></i>
@@ -107,10 +107,10 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
       </div>
     </div>
 
-    <!-- タスク一覧 -->
+    <!-- タスク -->
     <template v-if="tasks.length > 0">
       <div class="section-header">
-        <span class="home-title">タスク一覧</span>
+        <span class="home-title">タスク</span>
         <div class="header-actions">
           <button class="btn-icon-header" title="タスク追加" @click="emit('addTask')">
             <i class="pi pi-plus"></i>
@@ -130,7 +130,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
       </div>
     </template>
 
-    <!-- タスクなし時はアイコンボタンのみ（ワークツリー一覧ヘッダーに追加） -->
+    <!-- タスクなし時はアイコンボタンのみ（ワークツリーヘッダーに追加） -->
     <template v-else>
       <div class="task-add-bar">
         <button class="btn-add-task" @click="emit('addTask')">
