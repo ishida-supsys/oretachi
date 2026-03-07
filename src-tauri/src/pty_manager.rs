@@ -10,6 +10,7 @@ struct PtySession {
     child_killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     child_pid: Option<u32>,
     alive: Arc<Mutex<bool>>,
+    watcher_handle: Option<std::thread::JoinHandle<()>>,
 }
 
 pub struct PtyManager {
@@ -192,7 +193,7 @@ impl PtyManager {
         let alive_watcher = alive.clone();
         let master_watcher = master_arc.clone();
         let child_watcher = child_arc.clone();
-        std::thread::spawn(move || {
+        let watcher_handle = std::thread::spawn(move || {
             let child_opt = child_watcher.lock().unwrap().take();
             if let Some(mut child) = child_opt {
                 let _ = child.wait();
@@ -231,6 +232,7 @@ impl PtyManager {
             child_killer,
             child_pid,
             alive,
+            watcher_handle: Some(watcher_handle),
         };
 
         self.sessions.lock().unwrap().insert(session_id, session);
@@ -277,16 +279,26 @@ impl PtyManager {
     }
 
     pub fn kill(&self, session_id: u32) -> Result<(), String> {
-        let mut sessions = self.sessions.lock().unwrap();
-        if let Some(mut session) = sessions.remove(&session_id) {
-            *session.alive.lock().unwrap() = false;
-            // PID ベースで子プロセスツリーを kill
-            kill_process_tree_by_pid(session.child_pid);
-            // child_killer でバックアップ kill（child が監視スレッドに渡済みでも動作）
-            let _ = session.child_killer.kill();
-            // master を drop して reader に EOF を送る
-            let _ = session.master.lock().unwrap().take();
-            drop(session.writer);
+        let watcher_handle = {
+            let mut sessions = self.sessions.lock().unwrap();
+            if let Some(mut session) = sessions.remove(&session_id) {
+                *session.alive.lock().unwrap() = false;
+                // PID ベースで子プロセスツリーを kill
+                kill_process_tree_by_pid(session.child_pid);
+                // child_killer でバックアップ kill（child が監視スレッドに渡済みでも動作）
+                let _ = session.child_killer.kill();
+                // master を drop して reader に EOF を送る
+                let _ = session.master.lock().unwrap().take();
+                drop(session.writer);
+                session.watcher_handle
+            } else {
+                None
+            }
+        };
+        // sessions ロック解放後に watcher スレッドの終了を待つ
+        // (watcher は child.wait() しているので、kill 後に即座に返る)
+        if let Some(handle) = watcher_handle {
+            let _ = handle.join();
         }
         Ok(())
     }
