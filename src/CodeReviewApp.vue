@@ -10,6 +10,7 @@ import MonacoFileViewer from "./components/codereview/MonacoFileViewer.vue";
 import MonacoDiffViewer from "./components/codereview/MonacoDiffViewer.vue";
 import { useCodeReviewTabs } from "./composables/useCodeReviewTabs";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const { t } = useI18n();
 const toast = useToast();
@@ -77,6 +78,12 @@ async function handleOpenDiff(payload: { filePath: string; staged: boolean }) {
 
 onMounted(() => {
   document.title = `Code Review - ${worktreeName}`;
+
+  const appWindow = getCurrentWindow();
+  appWindow.onCloseRequested(async (event) => {
+    event.preventDefault();
+    await appWindow.destroy();
+  });
 });
 </script>
 

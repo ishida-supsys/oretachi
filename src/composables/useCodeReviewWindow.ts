@@ -35,7 +35,7 @@ export function useCodeReviewWindow() {
       codeReviewWindowMap.delete(worktreeId);
     });
 
-    win.onCloseRequested(() => {
+    win.once("tauri://destroyed", () => {
       codeReviewWindowMap.delete(worktreeId);
     });
 
