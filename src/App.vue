@@ -54,7 +54,7 @@ type ViewMode = "home" | "settings" | "terminal";
 
 const { settings, loadSettings, scheduleSave } = useSettings();
 const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, removeWorktree, listBranches, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
-const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, closeAllSubWindows } = useSubWindows();
+const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, registerTerminalSession, closeAllSubWindows } = useSubWindows();
 const { notifications, initNotificationListener, addNotification, clearNotification, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
 const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees } = useTrayPopup();
 const { tryAutoAssignHotkey } = useAutoHotkey();
@@ -518,11 +518,13 @@ async function executeAgentWorktree(code: AgentWorktreeTaskCode): Promise<void> 
   const wt = worktrees.value.find(
     (w) => w.repositoryName === code.repository && w.branchName === code.branch
   );
-  if (!wt || wt.terminals.length === 0) {
+  if (!wt) {
     throw new Error(`ワークツリーが見つかりません: ${code.repository}/${code.branch}`);
   }
 
-  const terminal = wt.terminals[0];
+  // 新しいターミナルを追加してエージェントを起動
+  await onAddTerminal(wt.id);
+  const terminal = wt.terminals[wt.terminals.length - 1];
   const termRef = terminalRefs.get(terminal.id);
 
   // 一時ファイルにプロンプトを書き出し
@@ -665,6 +667,8 @@ async function handleSubAddTerminalRequest(worktreeId: string) {
   const sid = await invoke<number>("pty_spawn", {
     rows: 24, cols: 80, shell: resolveShell(worktreeId) ?? null, cwd: worktree.path,
   });
+
+  registerTerminalSession(worktreeId, terminal.id, sid);
 
   await emitTo(`sub-${worktreeId}`, "sub-add-terminal-response", {
     terminalId: terminal.id,

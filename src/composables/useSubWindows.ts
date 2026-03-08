@@ -145,6 +145,12 @@ export function useSubWindows() {
     return terminalSessionMap.get(terminalId) ?? null;
   }
 
+  function registerTerminalSession(worktreeId: string, terminalId: number, sessionId: number): void {
+    terminalSessionMap.set(terminalId, sessionId);
+    const existing = worktreeTerminalMap.get(worktreeId) ?? [];
+    worktreeTerminalMap.set(worktreeId, [...existing, terminalId]);
+  }
+
   async function closeAllSubWindows(): Promise<void> {
     const worktreeIds = Array.from(subWindowMap.keys());
     if (worktreeIds.length === 0) return;
@@ -197,6 +203,7 @@ export function useSubWindows() {
     getPendingInitData,
     clearPendingInitData,
     getDetachedSessionId,
+    registerTerminalSession,
     closeAllSubWindows,
   };
 }
