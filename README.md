@@ -30,13 +30,13 @@
 
 Submit a task such as an Issue/PR URL or a specific fix description, and it will automatically create a worktree and start working on it.
 
-<video src="https://github.com/user-attachments/assets/be44a731-a25e-41e6-ac03-502bf7a651eb" />
+https://github.com/user-attachments/assets/be44a731-a25e-41e6-ac03-502bf7a651eb
 
 ### Tray Popup
 
 Review worktrees that received notifications one by one via the tray popup.
 
-<video src="https://github.com/user-attachments/assets/23a0e4b5-6586-41ed-8d30-af0e4b641a36" />
+https://github.com/user-attachments/assets/23a0e4b5-6586-41ed-8d30-af0e4b641a36
 
 ### Code Reviewer
 
