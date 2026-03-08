@@ -105,6 +105,48 @@ async fn git_delete_branch(repo_path: String, branch_name: String, force: bool) 
     run_git(move || git_worktree::delete_branch(&repo_path, &branch_name, force)).await
 }
 
+// ─── コードレビュー用 Git コマンド ────────────────────────────────────────────
+
+#[tauri::command]
+async fn git_list_files(repo_path: String) -> Result<Vec<String>, String> {
+    run_git(move || git_worktree::list_tracked_files(&repo_path)).await
+}
+
+#[tauri::command]
+async fn git_read_file(
+    repo_path: String,
+    file_path: String,
+    revision: Option<String>,
+) -> Result<String, String> {
+    run_git(move || {
+        git_worktree::read_file_content(&repo_path, &file_path, revision.as_deref())
+    })
+    .await
+}
+
+#[tauri::command]
+async fn git_get_status(repo_path: String) -> Result<Vec<git_worktree::GitStatusEntry>, String> {
+    run_git(move || git_worktree::get_status(&repo_path)).await
+}
+
+#[tauri::command]
+async fn git_get_file_diff(
+    repo_path: String,
+    file_path: String,
+    staged: bool,
+) -> Result<git_worktree::FileDiff, String> {
+    run_git(move || git_worktree::get_file_diff(&repo_path, &file_path, staged)).await
+}
+
+#[tauri::command]
+async fn git_get_log(
+    repo_path: String,
+    skip: usize,
+    limit: usize,
+) -> Result<Vec<git_worktree::CommitEntry>, String> {
+    run_git(move || git_worktree::get_log(&repo_path, skip, limit)).await
+}
+
 // ─── IDE / AI エージェントコマンド ────────────────────────────────────────────
 
 #[tauri::command]
@@ -197,6 +239,11 @@ pub fn run() {
             git_list_branches,
             git_merge_branch,
             git_delete_branch,
+            git_list_files,
+            git_read_file,
+            git_get_status,
+            git_get_file_diff,
+            git_get_log,
             detect_ides,
             detect_ai_agents,
             open_in_ide,
