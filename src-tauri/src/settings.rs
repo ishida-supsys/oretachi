@@ -286,3 +286,85 @@ impl SettingsManager {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_app_settings_default_round_trip() {
+        let settings = AppSettings::default();
+        let json = serde_json::to_string(&settings).unwrap();
+        let restored: AppSettings = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.repositories.len(), settings.repositories.len());
+        assert_eq!(restored.worktrees.len(), settings.worktrees.len());
+        assert_eq!(restored.always_on_top, settings.always_on_top);
+        assert_eq!(restored.terminal.font_size, settings.terminal.font_size);
+    }
+
+    #[test]
+    fn test_settings_missing_optional_fields_use_defaults() {
+        let json = r#"{"repositories": [], "worktreeBaseDir": "", "worktrees": []}"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(!settings.always_on_top);
+        assert!(!settings.enable_os_notification);
+        assert_eq!(settings.terminal.font_size, 14);
+        assert!(settings.terminal.shell.is_none());
+    }
+
+    #[test]
+    fn test_deserialize_old_global_tray_popup_string() {
+        let json = r#"{
+            "repositories": [], "worktreeBaseDir": "", "worktrees": [],
+            "hotkeys": {"globalTrayPopup": "Ctrl+Shift+O"}
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        let expected = default_global_tray_popup();
+        assert_eq!(settings.hotkeys.global_tray_popup.key, expected.key);
+    }
+
+    #[test]
+    fn test_deserialize_global_tray_popup_null() {
+        let json = r#"{
+            "repositories": [], "worktreeBaseDir": "", "worktrees": [],
+            "hotkeys": {"globalTrayPopup": null}
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        let expected = default_global_tray_popup();
+        assert_eq!(settings.hotkeys.global_tray_popup.key, expected.key);
+    }
+
+    #[test]
+    fn test_deserialize_global_tray_popup_object() {
+        let json = r#"{
+            "repositories": [], "worktreeBaseDir": "", "worktrees": [],
+            "hotkeys": {"globalTrayPopup": {"ctrl": true, "meta": false, "shift": false, "alt": false, "key": "F1"}}
+        }"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.hotkeys.global_tray_popup.key, "F1");
+        assert!(settings.hotkeys.global_tray_popup.ctrl);
+    }
+
+    #[test]
+    fn test_hotkey_settings_default_terminal_next() {
+        let hotkeys = HotkeySettings::default();
+        assert_eq!(hotkeys.terminal_next.key, "Tab");
+        assert!(hotkeys.terminal_next.ctrl);
+        assert!(!hotkeys.terminal_next.shift);
+    }
+
+    #[test]
+    fn test_hotkey_settings_default_terminal_prev() {
+        let hotkeys = HotkeySettings::default();
+        assert_eq!(hotkeys.terminal_prev.key, "Tab");
+        assert!(hotkeys.terminal_prev.ctrl);
+        assert!(hotkeys.terminal_prev.shift);
+    }
+
+    #[test]
+    fn test_repository_exec_script_defaults_to_none() {
+        let json = r#"{"id": "1", "name": "repo", "path": "/path"}"#;
+        let repo: Repository = serde_json::from_str(json).unwrap();
+        assert!(repo.exec_script.is_none());
+    }
+}

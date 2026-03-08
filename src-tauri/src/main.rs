@@ -27,3 +27,44 @@ fn find_notify_arg(args: &[String]) -> Option<String> {
     }
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_find_notify_arg_long_space() {
+        let args = vec!["bin".to_string(), "--notify".to_string(), "myname".to_string()];
+        assert_eq!(find_notify_arg(&args), Some("myname".to_string()));
+    }
+
+    #[test]
+    fn test_find_notify_arg_long_eq() {
+        let args = vec!["bin".to_string(), "--notify=myname".to_string()];
+        assert_eq!(find_notify_arg(&args), Some("myname".to_string()));
+    }
+
+    #[test]
+    fn test_find_notify_arg_short() {
+        let args = vec!["bin".to_string(), "-n".to_string(), "myname".to_string()];
+        assert_eq!(find_notify_arg(&args), Some("myname".to_string()));
+    }
+
+    #[test]
+    fn test_find_notify_arg_none() {
+        let args = vec!["bin".to_string(), "--other".to_string()];
+        assert_eq!(find_notify_arg(&args), None);
+    }
+
+    #[test]
+    fn test_find_notify_arg_no_value() {
+        let args = vec!["bin".to_string(), "--notify".to_string()];
+        assert_eq!(find_notify_arg(&args), None);
+    }
+
+    #[test]
+    fn test_find_notify_arg_empty() {
+        let args: Vec<String> = vec!["bin".to_string()];
+        assert_eq!(find_notify_arg(&args), None);
+    }
+}

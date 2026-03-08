@@ -250,3 +250,54 @@ pub fn write_temp_prompt(content: String) -> Result<String, String> {
         .map_err(|e| format!("Failed to write temp file: {}", e))?;
     Ok(path.to_string_lossy().to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::settings::{AppSettings, WorktreeEntry};
+
+    fn make_worktree_entry(name: &str, repo_name: &str, branch: &str) -> WorktreeEntry {
+        WorktreeEntry {
+            id: "1".to_string(),
+            name: name.to_string(),
+            repository_id: "repo1".to_string(),
+            repository_name: repo_name.to_string(),
+            path: "/path".to_string(),
+            branch_name: branch.to_string(),
+            hotkey_char: None,
+            auto_approval: None,
+        }
+    }
+
+    #[test]
+    fn test_build_worktree_list_text_empty() {
+        let settings = AppSettings::default();
+        let text = build_worktree_list_text(&settings);
+        assert!(text.contains("(none)"));
+        assert!(text.contains("Existing worktrees:"));
+    }
+
+    #[test]
+    fn test_build_worktree_list_text_with_entries() {
+        let mut settings = AppSettings::default();
+        settings.worktrees = vec![make_worktree_entry("my-feature", "myrepo", "worktree/my-feature")];
+        let text = build_worktree_list_text(&settings);
+        assert!(text.contains("my-feature"));
+        assert!(text.contains("myrepo"));
+        assert!(!text.contains("(none)"));
+    }
+
+    #[test]
+    fn test_build_worktree_list_text_multiple_entries() {
+        let mut settings = AppSettings::default();
+        settings.worktrees = vec![
+            make_worktree_entry("feat-a", "repo-x", "worktree/feat-a"),
+            make_worktree_entry("feat-b", "repo-y", "worktree/feat-b"),
+        ];
+        let text = build_worktree_list_text(&settings);
+        assert!(text.contains("feat-a"));
+        assert!(text.contains("repo-x"));
+        assert!(text.contains("feat-b"));
+        assert!(text.contains("repo-y"));
+    }
+}
