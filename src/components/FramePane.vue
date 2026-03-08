@@ -9,6 +9,9 @@ let isDraggingTab = false;
 import { ref, computed } from "vue";
 import type { FrameLeaf } from "../types/frame";
 import type { SubTerminalEntry } from "../types/terminal";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 
 // ─── タブバーD&D ───────────────────────────────────────────────
 const tabDropIndicatorIndex = ref<number | null>(null);
@@ -242,7 +245,7 @@ function overlayStyle(zone: DropZone): Record<string, string> {
 
       <button
         class="add-button"
-        title="ターミナルを追加"
+        :title="t('addTerminal')"
         @click="emit('requestAddTerminal', leaf.id)"
       >+</button>
     </div>
@@ -259,7 +262,7 @@ function overlayStyle(zone: DropZone): Record<string, string> {
       </div>
 
       <div v-if="leaf.terminalIds.length === 0" class="empty-pane">
-        ターミナルがありません
+        {{ t('noTerminals') }}
       </div>
 
       <!-- ドロップゾーンオーバーレイ -->
@@ -400,3 +403,16 @@ function overlayStyle(zone: DropZone): Record<string, string> {
   transition: left 0.05s ease;
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "addTerminal": "Add terminal",
+    "noTerminals": "No terminals"
+  },
+  "ja": {
+    "addTerminal": "ターミナルを追加",
+    "noTerminals": "ターミナルがありません"
+  }
+}
+</i18n>

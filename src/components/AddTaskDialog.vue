@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { ref } from "vue";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 
 const emit = defineEmits<{
   confirm: [prompt: string];
@@ -25,29 +28,29 @@ function onKeydown(e: KeyboardEvent) {
 <template>
   <div class="dialog-overlay" @click.self="emit('cancel')">
     <div class="dialog">
-      <h3 class="dialog-title">タスクを追加</h3>
+      <h3 class="dialog-title">{{ t('addTitle') }}</h3>
 
       <div class="field">
-        <label class="label">プロンプト</label>
+        <label class="label">{{ t('prompt') }}</label>
         <textarea
           v-model="promptText"
           class="textarea"
-          placeholder="例: https://github.com/owner/repo/issues/123 を実装してください"
+          :placeholder="t('promptPlaceholder')"
           rows="5"
           autofocus
           @keydown="onKeydown"
         />
-        <p class="hint">Ctrl+Enter で送信</p>
+        <p class="hint">{{ t('submitHint') }}</p>
       </div>
 
       <div class="dialog-actions">
-        <button class="btn-cancel" @click="emit('cancel')">キャンセル</button>
+        <button class="btn-cancel" @click="emit('cancel')">{{ t('common.cancel') }}</button>
         <button
           class="btn-confirm"
           :disabled="!promptText.trim()"
           @click="confirm"
         >
-          追加
+          {{ t('add') }}
         </button>
       </div>
     </div>
@@ -158,3 +161,22 @@ function onKeydown(e: KeyboardEvent) {
   cursor: not-allowed;
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "addTitle": "Add Task",
+    "prompt": "Prompt",
+    "promptPlaceholder": "e.g. Implement https://github.com/owner/repo/issues/123",
+    "submitHint": "Ctrl+Enter to submit",
+    "add": "Add"
+  },
+  "ja": {
+    "addTitle": "タスクを追加",
+    "prompt": "プロンプト",
+    "promptPlaceholder": "例: https://github.com/owner/repo/issues/123 を実装してください",
+    "submitHint": "Ctrl+Enter で送信",
+    "add": "追加"
+  }
+}
+</i18n>

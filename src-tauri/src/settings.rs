@@ -211,6 +211,8 @@ pub struct AppSettings {
     pub ai_agent: Option<AiAgentSettings>,
     #[serde(default, rename = "worktreeDefaults")]
     pub worktree_defaults: Option<WorktreeDefaults>,
+    #[serde(default)]
+    pub locale: Option<String>,
 }
 
 impl Default for AppSettings {
@@ -228,6 +230,7 @@ impl Default for AppSettings {
             focus_main_on_empty_tray: false,
             ai_agent: None,
             worktree_defaults: None,
+            locale: None,
         }
     }
 }

@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import type { Worktree } from "../types/worktree";
 import type { TaskItem } from "../types/task";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 import WorktreeCard from "./WorktreeCard.vue";
 import TaskCard from "./TaskCard.vue";
 import { useMasonryLayout } from "../composables/useMasonryLayout";
@@ -68,20 +71,20 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   <div class="home-view">
     <div class="home-header">
       <select v-model="panelMode" class="panel-select">
-        <option value="worktree">ワークツリー</option>
-        <option value="task">タスク</option>
+        <option value="worktree">{{ t('worktreeTitle') }}</option>
+        <option value="task">{{ t('taskTitle') }}</option>
       </select>
       <div class="header-actions">
         <template v-if="panelMode === 'worktree'">
-          <button class="btn-icon-header" title="すべてのサブウィンドウを呼び出す" @click="emit('focusAllSubWindows')">
+          <button class="btn-icon-header" :title="t('focusAllSubWindows')" @click="emit('focusAllSubWindows')">
             <i class="pi pi-window-maximize"></i>
           </button>
-          <button class="btn-icon-header" title="ワークツリー追加" @click="emit('addWorktree')">
+          <button class="btn-icon-header" :title="t('addWorktreeButton')" @click="emit('addWorktree')">
             <i class="pi pi-plus"></i>
           </button>
         </template>
         <template v-else>
-          <button class="btn-icon-header" title="タスク追加" @click="emit('addTask')">
+          <button class="btn-icon-header" :title="t('addTaskButton')" @click="emit('addTask')">
             <i class="pi pi-plus"></i>
           </button>
         </template>
@@ -91,7 +94,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
     <!-- ワークツリーパネル -->
     <template v-if="panelMode === 'worktree'">
       <div v-if="worktrees.length === 0" class="empty-state">
-        ワークツリーがありません。右上の <i class="pi pi-plus"></i> ボタンで作成してください。
+        {{ t('worktreeEmpty') }}
       </div>
 
       <div ref="containerRef" class="worktree-list">
@@ -126,7 +129,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
     <!-- タスクパネル -->
     <template v-else>
       <div v-if="tasks.length === 0" class="empty-state">
-        タスクがありません。右上の <i class="pi pi-plus"></i> ボタンで追加してください。
+        {{ t('taskEmpty') }}
       </div>
 
       <div ref="taskContainerRef" class="worktree-list">
@@ -239,3 +242,26 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   font-size: 14px;
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "worktreeTitle": "Worktrees",
+    "worktreeEmpty": "No worktrees. Click the + button to create one.",
+    "focusAllSubWindows": "Bring all sub windows",
+    "addWorktreeButton": "Add worktree",
+    "taskTitle": "Tasks",
+    "taskEmpty": "No tasks. Click the + button to add one.",
+    "addTaskButton": "Add task"
+  },
+  "ja": {
+    "worktreeTitle": "ワークツリー",
+    "worktreeEmpty": "ワークツリーがありません。右上の + ボタンで作成してください。",
+    "focusAllSubWindows": "すべてのサブウィンドウを呼び出す",
+    "addWorktreeButton": "ワークツリー追加",
+    "taskTitle": "タスク",
+    "taskEmpty": "タスクがありません。+ ボタンで追加してください。",
+    "addTaskButton": "タスクを追加"
+  }
+}
+</i18n>

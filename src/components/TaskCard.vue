@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import type { TaskItem } from "../types/task";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 
 defineProps<{
   task: TaskItem;
@@ -11,18 +14,13 @@ const emit = defineEmits<{
 
 function stepLabel(code: TaskItem["steps"][number]["code"]): string {
   if (code.type === "add_worktree") {
-    return `WT追加: ${code.repository}/${code.branch}`;
+    return `${t("stepAddWorktree")}: ${code.repository}/${code.branch}`;
   }
-  return `エージェント: ${code.repository}/${code.branch}`;
+  return `${t("stepAgent")}: ${code.repository}/${code.branch}`;
 }
 
 function statusLabel(status: TaskItem["status"]): string {
-  switch (status) {
-    case "generating": return "生成中";
-    case "executing": return "実行中";
-    case "completed": return "完了";
-    case "error": return "エラー";
-  }
+  return t(`status.${status}`);
 }
 </script>
 
@@ -35,7 +33,7 @@ function statusLabel(status: TaskItem["status"]): string {
           class="task-badge"
           :class="`badge-${task.status}`"
         >{{ statusLabel(task.status) }}</span>
-        <button class="btn-remove" title="削除" @click="emit('remove', task.id)">
+        <button class="btn-remove" :title="t('removeTitle')" @click="emit('remove', task.id)">
           <i class="pi pi-times" />
         </button>
       </div>
@@ -45,13 +43,13 @@ function statusLabel(status: TaskItem["status"]): string {
       <!-- 生成中 -->
       <div v-if="task.status === 'generating'" class="generating">
         <i class="pi pi-spinner pi-spin" />
-        <span>タスク処理コード生成中...</span>
+        <span>{{ t('generating') }}</span>
       </div>
 
       <!-- エラー (ステップなし) -->
       <div v-else-if="task.status === 'error' && task.steps.length === 0" class="error-msg">
         <i class="pi pi-exclamation-circle" />
-        <span>{{ task.error ?? "エラーが発生しました" }}</span>
+        <span>{{ task.error ?? t('defaultError') }}</span>
       </div>
 
       <!-- ステップ一覧 -->
@@ -213,3 +211,34 @@ function statusLabel(status: TaskItem["status"]): string {
   margin-left: 4px;
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "removeTitle": "Remove",
+    "generating": "Generating task code...",
+    "defaultError": "An error occurred",
+    "stepAddWorktree": "Add WT",
+    "stepAgent": "Agent",
+    "status": {
+      "generating": "Generating",
+      "executing": "Executing",
+      "completed": "Completed",
+      "error": "Error"
+    }
+  },
+  "ja": {
+    "removeTitle": "削除",
+    "generating": "タスク処理コード生成中...",
+    "defaultError": "エラーが発生しました",
+    "stepAddWorktree": "WT追加",
+    "stepAgent": "エージェント",
+    "status": {
+      "generating": "生成中",
+      "executing": "実行中",
+      "completed": "完了",
+      "error": "エラー"
+    }
+  }
+}
+</i18n>

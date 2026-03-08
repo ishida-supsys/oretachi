@@ -17,6 +17,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { debug } from "@tauri-apps/plugin-log";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import type { SubTerminalEntry } from "./types/terminal";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 
 // クエリパラメータ
 const params = new URLSearchParams(window.location.search);
@@ -595,7 +598,7 @@ function getFirstLeafId(): string {
   <div class="h-screen flex flex-col bg-[#1e1e2e] text-[#cdd6f4] select-none">
     <!-- 初期化中 -->
     <div v-if="!initialized" class="flex items-center justify-center h-full text-[#6c7086] text-sm">
-      接続中...
+      {{ t('connecting') }}
     </div>
 
     <template v-else>
@@ -620,7 +623,7 @@ function getFirstLeafId(): string {
             v-if="autoApproval"
             class="text-[10px] px-1.5 py-0.5 rounded font-medium"
             style="background: rgba(166, 227, 161, 0.15); color: #a6e3a1; border: 1px solid rgba(166, 227, 161, 0.3)"
-          >自動承認</span>
+          >{{ t('autoApprovalBadge') }}</span>
           <button
             v-if="aiJudging"
             class="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-semibold cursor-pointer border-none"
@@ -628,12 +631,12 @@ function getFirstLeafId(): string {
             @click="onCancelAiJudging"
           >
             <span class="pi pi-spin pi-spinner" style="font-size: 9px" />
-            AI判定中
+            {{ t('aiJudgingBadge') }}
           </button>
         </div>
         <button
           class="flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
-          title="IDE で開く"
+          :title="t('openInIde')"
           @click="requestOpenInIde"
         >
           <span class="pi pi-code text-sm" />
@@ -684,3 +687,26 @@ function getFirstLeafId(): string {
     </div>
   </div>
 </template>
+
+<i18n lang="json">
+{
+  "en": {
+    "connecting": "Connecting...",
+    "autoApprovalBadge": "Auto approval",
+    "aiJudgingBadge": "AI judging",
+    "openInIde": "Open in IDE",
+    "ideNotInstalled": "None of Cursor, VS Code, Antigravity are installed.",
+    "ideNotInstalledTitle": "IDE not found",
+    "ideLaunchFailed": "Failed to launch IDE: {error}"
+  },
+  "ja": {
+    "connecting": "接続中...",
+    "autoApprovalBadge": "自動承認",
+    "aiJudgingBadge": "AI判定中",
+    "openInIde": "IDE で開く",
+    "ideNotInstalled": "Cursor、VS Code、Antigravity のいずれもインストールされていません。",
+    "ideNotInstalledTitle": "IDE が見つかりません",
+    "ideLaunchFailed": "IDE の起動に失敗しました: {error}"
+  }
+}
+</i18n>

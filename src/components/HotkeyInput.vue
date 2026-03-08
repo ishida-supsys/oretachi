@@ -2,6 +2,9 @@
 import { ref } from "vue";
 import type { HotkeyBinding } from "../types/settings";
 import { formatHotkey, eventToBinding } from "../composables/useHotkeys";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 
 defineProps<{
   modelValue: HotkeyBinding;
@@ -49,7 +52,7 @@ function onBlur() {
     @keydown="onKeydown"
     @blur="onBlur"
   >
-    {{ capturing ? 'キーを入力...' : formatHotkey(modelValue) }}
+    {{ capturing ? t('capturing') : formatHotkey(modelValue) }}
   </button>
 </template>
 
@@ -78,3 +81,14 @@ function onBlur() {
   color: #cba6f7;
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "capturing": "Press a key..."
+  },
+  "ja": {
+    "capturing": "キーを入力..."
+  }
+}
+</i18n>

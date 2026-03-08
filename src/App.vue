@@ -17,6 +17,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { useIdeSelect } from "./composables/useIdeSelect";
 import { useSettings } from "./composables/useSettings";
 import { useWorktrees } from "./composables/useWorktrees";
+import { useI18n } from "vue-i18n";
 import { useSubWindows } from "./composables/useSubWindows";
 import { useNotifications, sendOsNotification } from "./composables/useNotifications";
 import { useTrayPopup } from "./composables/useTrayPopup";
@@ -37,6 +38,8 @@ import Toast from "primevue/toast";
 import { useToast } from "primevue/usetoast";
 
 const toast = useToast();
+
+const { t } = useI18n();
 
 // ウィンドウのフォーカス状態
 const { isWindowFocused } = useWindowFocus();
@@ -319,7 +322,7 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
   showRemoveDialog.value = false;
   removeTargetWorktree.value = null;
   removeBranches.value = [];
-  loadingWorktrees.set(worktreeId, "削除中...");
+  loadingWorktrees.set(worktreeId, t("deletingText"));
   try {
     // detached の場合はサブウィンドウを閉じる
     if (isDetached(worktreeId)) {
@@ -353,7 +356,7 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
         forceBranch: options.forceBranch,
       });
     } catch (e) {
-      await message(`削除に失敗しました: ${e}`, { kind: "error" });
+      await message(t("deleteFailed", { error: e }), { kind: "error" });
     }
   } finally {
     loadingWorktrees.delete(worktreeId);
@@ -370,7 +373,7 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry) {
   // ダイアログを即閉じ、一覧に仮エントリを表示
   showAddDialog.value = false;
   addWorktreePlaceholder(entry);
-  loadingWorktrees.set(entry.id, "作成中...");
+  loadingWorktrees.set(entry.id, t("creatingText"));
 
   try {
     const lfsSkipped = await invokeWorktreeAdd(entry);
@@ -401,14 +404,11 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry) {
     }
 
     if (lfsSkipped) {
-      await message(
-        "Git LFS のファイル取得に失敗したため、LFS ファイルをスキップしてワークツリーを作成しました。\nLFS ファイルが必要な場合は git lfs pull を実行してください。",
-        { kind: "warning" }
-      );
+      await message(t("lfsWarning"), { kind: "warning" });
     }
   } catch (e) {
     rollbackWorktree(entry.id);
-    await message(`ワークツリーの作成に失敗しました: ${e}`, { kind: "error" });
+    await message(t("worktreeCreateFailed", { error: e }), { kind: "error" });
   } finally {
     loadingWorktrees.delete(entry.id);
   }
@@ -478,7 +478,7 @@ async function executeAddWorktree(code: AddWorktreeTaskCode): Promise<string> {
   };
 
   addWorktreePlaceholder(entry);
-  loadingWorktrees.set(entry.id, "作成中...");
+  loadingWorktrees.set(entry.id, t("creatingText"));
 
   try {
     await invokeWorktreeAdd(entry);
@@ -1115,7 +1115,8 @@ onMounted(async () => {
         }
         getCurrentWindow().setFocus();
       }
-    }
+    },
+    t("notification.title")
   );
 
   // notify-worktree → 自動承認チェック
@@ -1175,7 +1176,7 @@ onMounted(async () => {
     if (!approved && !isWorktreeFocused(wt.id)) {
       await debug(`[AutoApproval] local: not approved → addNotification(${wt.id})`);
       addNotification(wt.id);
-      await sendOsNotification(wt.name);
+      await sendOsNotification(wt.name, t("notification.title"));
     }
   });
 
@@ -1186,7 +1187,7 @@ onMounted(async () => {
     if (!approved && !isWorktreeFocused(wid)) {
       addNotification(wid);
       const wtName = worktrees.value.find((w) => w.id === wid)?.name;
-      if (wtName) await sendOsNotification(wtName);
+      if (wtName) await sendOsNotification(wtName, t("notification.title"));
     }
   });
 
@@ -1553,3 +1554,28 @@ onMounted(async () => {
     <Toast position="bottom-right" />
   </div>
 </template>
+
+<i18n lang="json">
+{
+  "en": {
+    "deletingText": "Deleting...",
+    "creatingText": "Creating...",
+    "deleteFailed": "Delete failed: {error}",
+    "ideNotInstalled": "None of Cursor, VS Code, Antigravity are installed.",
+    "ideNotInstalledTitle": "IDE not found",
+    "ideLaunchFailed": "Failed to launch IDE: {error}",
+    "lfsWarning": "Failed to fetch Git LFS files; worktree was created without LFS files.\nIf you need LFS files, run git lfs pull.",
+    "worktreeCreateFailed": "Failed to create worktree: {error}"
+  },
+  "ja": {
+    "deletingText": "削除中...",
+    "creatingText": "作成中...",
+    "deleteFailed": "削除に失敗しました: {error}",
+    "ideNotInstalled": "Cursor、VS Code、Antigravity のいずれもインストールされていません。",
+    "ideNotInstalledTitle": "IDE が見つかりません",
+    "ideLaunchFailed": "IDE の起動に失敗しました: {error}",
+    "lfsWarning": "Git LFS のファイル取得に失敗したため、LFS ファイルをスキップしてワークツリーを作成しました。\nLFS ファイルが必要な場合は git lfs pull を実行してください。",
+    "worktreeCreateFailed": "ワークツリーの作成に失敗しました: {error}"
+  }
+}
+</i18n>

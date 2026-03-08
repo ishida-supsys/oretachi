@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from "vue";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 
 const props = defineProps<{
   worktreeId: string;
@@ -29,7 +32,7 @@ function onKeydown(event: KeyboardEvent) {
   if (!/^[a-z0-9]$/.test(key)) return;
 
   if (props.usedChars.has(key)) {
-    error.value = `「${key}」は別のワークツリーに割り当て済みです`;
+    error.value = t("alreadyUsed", { key });
     return;
   }
 
@@ -48,26 +51,26 @@ onUnmounted(() => {
 <template>
   <div class="dialog-overlay" @click.self="emit('cancel')">
     <div class="dialog">
-      <h3 class="dialog-title">ホットキー割り当て</h3>
+      <h3 class="dialog-title">{{ t('assignTitle') }}</h3>
       <p class="dialog-sub">{{ worktreeName }}</p>
 
       <div class="current-info" v-if="currentChar">
-        現在の割り当て: <span class="key-badge">Alt+{{ currentChar }}</span>
+        {{ t('currentAssignment') }}: <span class="key-badge">Alt+{{ currentChar }}</span>
       </div>
 
-      <p class="hint">英数字キーを押してください</p>
-      <p class="hint-sub">割り当てると <strong>Alt+[文字]</strong> でこのワークツリーにフォーカスできます</p>
+      <p class="hint">{{ t('pressKey') }}</p>
+      <p class="hint-sub">{{ t('altKeyHint') }}</p>
 
       <p v-if="error" class="error-msg">{{ error }}</p>
 
       <div class="dialog-actions">
-        <button class="btn-cancel" @click="emit('cancel')">キャンセル</button>
+        <button class="btn-cancel" @click="emit('cancel')">{{ t('common.cancel') }}</button>
         <button
           v-if="currentChar"
           class="btn-clear"
           @click="emit('clear', worktreeId)"
         >
-          割り当て解除
+          {{ t('clearAssignment') }}
         </button>
       </div>
     </div>
@@ -183,3 +186,24 @@ onUnmounted(() => {
   background: rgba(243, 139, 168, 0.1);
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "assignTitle": "Assign Hotkey",
+    "currentAssignment": "Current assignment",
+    "pressKey": "Press an alphanumeric key",
+    "altKeyHint": "With Alt+[key] you can focus this worktree",
+    "alreadyUsed": "\"{key}\" is already assigned to another worktree",
+    "clearAssignment": "Clear assignment"
+  },
+  "ja": {
+    "assignTitle": "ホットキー割り当て",
+    "currentAssignment": "現在の割り当て",
+    "pressKey": "英数字キーを押してください",
+    "altKeyHint": "割り当てると Alt+[文字] でこのワークツリーにフォーカスできます",
+    "alreadyUsed": "「{key}」は別のワークツリーに割り当て済みです",
+    "clearAssignment": "割り当て解除"
+  }
+}
+</i18n>

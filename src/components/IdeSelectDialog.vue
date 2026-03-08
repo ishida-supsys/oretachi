@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import type { IdeInfo } from "../types/ide";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 
 defineProps<{
   ides: IdeInfo[];
@@ -14,7 +17,7 @@ const emit = defineEmits<{
 <template>
   <div class="dialog-overlay" @click.self="emit('cancel')">
     <div class="dialog">
-      <h3 class="dialog-title">IDE を選択</h3>
+      <h3 class="dialog-title">{{ t('select') }}</h3>
 
       <div class="ide-list">
         <button
@@ -29,7 +32,7 @@ const emit = defineEmits<{
       </div>
 
       <div class="dialog-actions">
-        <button class="btn-cancel" @click="emit('cancel')">キャンセル</button>
+        <button class="btn-cancel" @click="emit('cancel')">{{ t('common.cancel') }}</button>
       </div>
     </div>
   </div>
@@ -117,3 +120,14 @@ const emit = defineEmits<{
   background: #45475a;
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "select": "Select IDE"
+  },
+  "ja": {
+    "select": "IDE を選択"
+  }
+}
+</i18n>

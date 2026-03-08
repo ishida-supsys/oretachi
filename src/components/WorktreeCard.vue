@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
 import type { Worktree } from "../types/worktree";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 import TerminalThumbnail from "./TerminalThumbnail.vue";
 import Popover from "primevue/popover";
 import Badge from "primevue/badge";
@@ -80,27 +83,27 @@ const terminalList = computed(() =>
       <div class="card-info">
         <span class="card-name">{{ worktree.name }}</span>
         <span class="card-branch">{{ worktree.branchName }}</span>
-        <span v-if="detached" class="card-detached-badge">サブウィンドウ</span>
+        <span v-if="detached" class="card-detached-badge">{{ t('subWindowBadge') }}</span>
         <button
           v-if="aiJudging"
           class="ai-judging-badge"
           @click="emit('cancelAiJudging', worktree.id)"
         >
           <span class="pi pi-spin pi-spinner" style="font-size: 10px" />
-          AI判定中
+          {{ t('aiJudgingBadge') }}
         </button>
       </div>
       <div class="card-actions">
         <button
           class="btn-icon"
-          title="IDE で開く"
+          :title="t('openInIde')"
           :disabled="loading"
           @click="emit('openInIde', worktree.id)"
         ><span class="pi pi-code" /></button>
         <button
           v-if="!detached"
           class="btn-icon"
-          title="ターミナルを追加"
+          :title="t('addTerminal')"
           :disabled="loading"
           @click="emit('addTerminal', worktree.id)"
         >+</button>
@@ -115,7 +118,7 @@ const terminalList = computed(() =>
 
     <div class="terminals-row">
       <div v-if="terminalList.length === 0" class="empty-terminals">
-        ターミナルがありません
+        {{ t('noTerminals') }}
       </div>
       <TerminalThumbnail
         v-for="item in terminalList"
@@ -137,20 +140,20 @@ const terminalList = computed(() =>
           @click="emit('toggleAutoApproval', worktree.id)"
         >
           <span :class="autoApproval ? 'pi pi-check-circle' : 'pi pi-circle'" />
-          自動承認
+          {{ t('menu.autoApproval') }}
         </button>
         <button class="popup-item" :disabled="loading" @click="onSetHotkeyChar">
           <span class="pi pi-key" />
-          ホットキー割り当て
+          {{ t('menu.setHotkey') }}
         </button>
         <button class="popup-item" :disabled="loading" @click="onMoveWindow">
           <span :class="detached ? 'pi pi-window-maximize' : 'pi pi-external-link'" />
-          {{ detached ? 'メインウィンドウに戻す' : 'サブウィンドウに移動' }}
+          {{ detached ? t('menu.moveToMainWindow') : t('menu.moveToSubWindow') }}
         </button>
         <div class="popup-divider" />
         <button class="popup-item popup-item-danger" :disabled="loading" @click="onDelete">
           <span class="pi pi-trash" />
-          削除
+          {{ t('menu.delete') }}
         </button>
       </div>
     </Popover>
@@ -158,7 +161,7 @@ const terminalList = computed(() =>
     <!-- ローディングオーバーレイ -->
     <div v-if="loading" class="loading-overlay">
       <span class="pi pi-spinner pi-spin loading-icon" />
-      <span class="loading-text">{{ loadingText ?? '削除中...' }}</span>
+      <span class="loading-text">{{ loadingText ?? t('deletingText') }}</span>
     </div>
   </div>
 </template>
@@ -355,3 +358,40 @@ const terminalList = computed(() =>
   color: #a6adc8;
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "subWindowBadge": "Sub window",
+    "autoApprovalBadge": "Auto approval",
+    "aiJudgingBadge": "AI judging",
+    "openInIde": "Open in IDE",
+    "addTerminal": "Add terminal",
+    "noTerminals": "No terminals",
+    "deletingText": "Deleting...",
+    "menu": {
+      "autoApproval": "Auto approval",
+      "setHotkey": "Assign hotkey",
+      "moveToSubWindow": "Move to sub window",
+      "moveToMainWindow": "Move to main window",
+      "delete": "Delete"
+    }
+  },
+  "ja": {
+    "subWindowBadge": "サブウィンドウ",
+    "autoApprovalBadge": "自動承認",
+    "aiJudgingBadge": "AI判定中",
+    "openInIde": "IDE で開く",
+    "addTerminal": "ターミナルを追加",
+    "noTerminals": "ターミナルがありません",
+    "deletingText": "削除中...",
+    "menu": {
+      "autoApproval": "自動承認",
+      "setHotkey": "ホットキー割り当て",
+      "moveToSubWindow": "サブウィンドウに移動",
+      "moveToMainWindow": "メインウィンドウに戻す",
+      "delete": "削除"
+    }
+  }
+}
+</i18n>
