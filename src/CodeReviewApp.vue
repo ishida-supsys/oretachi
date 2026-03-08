@@ -31,10 +31,28 @@ const activePanel = ref<Panel>("files");
 const sidebarWidth = ref(250);
 const isResizing = ref(false);
 
-const { tabs, activeTabId, openFileTab, openDiffTab, closeTab, switchTab, activeTab, updateFileTab, updateDiffTab, getOpenTabs } =
+const { tabs, activeTabId, openFileTab, openDiffTab, openReviewTab, closeReviewTab, closeTab, switchTab, activeTab, updateFileTab, updateDiffTab, getOpenTabs } =
   useCodeReviewTabs();
 
-const { isReviewMode, startReview, refreshReviewFiles } = useReviewSession();
+const { isReviewMode, startReview, endReview, refreshReviewFiles } = useReviewSession();
+
+function handleStartReview() {
+  startReview(worktreePath);
+  openReviewTab();
+}
+
+function handleCloseTab(id: string) {
+  const tab = tabs.find((t) => t.id === id);
+  if (tab?.type === "review") {
+    endReview();
+  }
+  closeTab(id);
+}
+
+function handleReviewClose() {
+  endReview();
+  closeReviewTab();
+}
 
 // ─── サイドバーリサイズ ───────────────────────────────────────────────────────
 function startResize(e: MouseEvent) {
@@ -209,7 +227,7 @@ const { handleChatWithAgent } = useCodeReviewChat(worktreeId);
           v-else
           :repo-path="worktreePath"
           @open-diff="handleOpenDiff"
-          @start-review="startReview(worktreePath)"
+          @start-review="handleStartReview"
         />
       </div>
     </div>
@@ -223,40 +241,39 @@ const { handleChatWithAgent } = useCodeReviewChat(worktreeId);
 
     <!-- メインエリア -->
     <div class="flex-1 flex flex-col overflow-hidden">
-      <!-- レビューセッションビュー -->
-      <ReviewSessionView v-if="isReviewMode" :repo-path="worktreePath" />
-
-      <!-- 通常タブビュー -->
-      <template v-else>
-        <CodeReviewTabs
-          :tabs="tabs"
-          :active-tab-id="activeTabId"
-          @switch="switchTab"
-          @close="closeTab"
-        />
-        <div class="flex-1 overflow-hidden">
-          <template v-if="activeTab()">
-            <MonacoFileViewer
-              v-if="activeTab()!.type === 'file'"
-              :content="activeTab()!.content ?? ''"
-              :language="activeTab()!.language"
-              :file-path="activeTab()!.filePath"
-              @chat="handleChatWithAgent"
-            />
-            <MonacoDiffViewer
-              v-else
-              :old-content="activeTab()!.oldContent ?? ''"
-              :new-content="activeTab()!.newContent ?? ''"
-            />
-          </template>
-          <div
+      <CodeReviewTabs
+        :tabs="tabs"
+        :active-tab-id="activeTabId"
+        @switch="switchTab"
+        @close="handleCloseTab"
+      />
+      <div class="flex-1 overflow-hidden">
+        <template v-if="activeTab()">
+          <ReviewSessionView
+            v-if="activeTab()!.type === 'review'"
+            :repo-path="worktreePath"
+            @close="handleReviewClose"
+          />
+          <MonacoFileViewer
+            v-else-if="activeTab()!.type === 'file'"
+            :content="activeTab()!.content ?? ''"
+            :language="activeTab()!.language"
+            :file-path="activeTab()!.filePath"
+            @chat="handleChatWithAgent"
+          />
+          <MonacoDiffViewer
             v-else
-            class="flex items-center justify-center h-full text-surface-500 text-sm"
-          >
-            {{ t("editor.noFileOpen") }}
-          </div>
+            :old-content="activeTab()!.oldContent ?? ''"
+            :new-content="activeTab()!.newContent ?? ''"
+          />
+        </template>
+        <div
+          v-else
+          class="flex items-center justify-center h-full text-surface-500 text-sm"
+        >
+          {{ t("editor.noFileOpen") }}
         </div>
-      </template>
+      </div>
     </div>
   </div>
 </template>

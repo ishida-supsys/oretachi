@@ -9,8 +9,9 @@ const { t } = useI18n();
 const toast = useToast();
 
 const props = defineProps<{ repoPath: string }>();
+const emit = defineEmits<{ (e: "close"): void }>();
 
-const { reviewFiles, summary, endReview, toggleReviewed, toggleCollapsed, commitAll } = useReviewSession();
+const { reviewFiles, summary, toggleReviewed, toggleCollapsed, commitAll } = useReviewSession();
 
 // コミットポップオーバー
 const showCommitPanel = ref(false);
@@ -25,6 +26,7 @@ async function handleCommit() {
     commitMessage.value = "";
     showCommitPanel.value = false;
     toast.add({ severity: "success", summary: t("commitSuccess"), life: 3000 });
+    emit("close");
   } catch (e) {
     toast.add({ severity: "error", summary: t("commitFailed"), detail: String(e), life: 5000 });
   } finally {
@@ -60,7 +62,7 @@ async function handleCommit() {
         <!-- 閉じるボタン -->
         <button
           class="px-3 py-1 text-xs font-medium rounded bg-surface-700 hover:bg-surface-600 text-surface-200 transition-colors"
-          @click="endReview"
+          @click="emit('close')"
         >
           <i class="pi pi-times mr-1" />{{ t("close") }}
         </button>

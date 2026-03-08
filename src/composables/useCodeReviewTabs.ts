@@ -2,7 +2,7 @@ import { ref, reactive } from "vue";
 
 export interface CodeReviewTab {
   id: string;
-  type: "file" | "diff";
+  type: "file" | "diff" | "review";
   label: string;
   filePath: string;
   content?: string;
@@ -40,6 +40,22 @@ export function useCodeReviewTabs() {
     const label = `${filePath.split("/").pop() ?? filePath} (${staged ? "staged" : "changes"})`;
     tabs.push({ id, type: "diff", label, filePath: key, oldContent, newContent });
     activeTabId.value = id;
+  }
+
+  function openReviewTab(): void {
+    const existing = tabs.find((t) => t.type === "review");
+    if (existing) {
+      activeTabId.value = existing.id;
+      return;
+    }
+    const id = `tab-${++tabCounter}`;
+    tabs.push({ id, type: "review", label: "Review Session", filePath: "" });
+    activeTabId.value = id;
+  }
+
+  function closeReviewTab(): void {
+    const tab = tabs.find((t) => t.type === "review");
+    if (tab) closeTab(tab.id);
   }
 
   function closeTab(id: string): void {
@@ -86,5 +102,5 @@ export function useCodeReviewTabs() {
     });
   }
 
-  return { tabs, activeTabId, openFileTab, openDiffTab, closeTab, switchTab, activeTab, updateFileTab, updateDiffTab, getOpenTabs };
+  return { tabs, activeTabId, openFileTab, openDiffTab, openReviewTab, closeReviewTab, closeTab, switchTab, activeTab, updateFileTab, updateDiffTab, getOpenTabs };
 }
