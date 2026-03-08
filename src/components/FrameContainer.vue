@@ -4,13 +4,7 @@ import Splitter from "primevue/splitter";
 import SplitterPanel from "primevue/splitterpanel";
 import FramePane from "./FramePane.vue";
 import type { FrameNode, FrameLeaf } from "../types/frame";
-
-interface SubTerminalEntry {
-  id: number;
-  title: string;
-  sessionId: number;
-  snapshot: string;
-}
+import type { SubTerminalEntry } from "../types/terminal";
 
 const props = defineProps<{
   node: FrameNode;

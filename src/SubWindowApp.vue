@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, nextTick, markRaw, watch, computed } from "vue";
+import { ref, reactive, onMounted, onUnmounted, nextTick, watch, computed } from "vue";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
@@ -10,19 +10,13 @@ import { useSettings } from "./composables/useSettings";
 import { useHotkeyListener } from "./composables/useHotkeys";
 import { renderToDataUrl } from "./composables/useTerminalThumbnail";
 import { useWindowFocus } from "./composables/useWindowFocus";
-import { getRecentLines, analyzeForApproval, hasApprovalPrompt } from "./composables/useAutoApproval";
+import { getRecentLines, analyzeForApproval, hasApprovalPrompt } from "./utils/autoApproval";
+import { useTerminalReparenting } from "./composables/useTerminalReparenting";
+import { useIdeSelect } from "./composables/useIdeSelect";
 import { invoke } from "@tauri-apps/api/core";
 import { debug } from "@tauri-apps/plugin-log";
-import { message } from "@tauri-apps/plugin-dialog";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
-import type { IdeInfo } from "./types/ide";
-
-interface SubTerminalEntry {
-  id: number;
-  title: string;
-  sessionId: number;
-  snapshot: string;
-}
+import type { SubTerminalEntry } from "./types/terminal";
 
 // クエリパラメータ
 const params = new URLSearchParams(window.location.search);
@@ -40,10 +34,8 @@ const terminalExitCodes = reactive(new Map<number, number>());
 // 自動承認フラグ
 const autoApproval = ref(false);
 
-// IDE 選択ダイアログ
-const showIdeDialog = ref(false);
-const detectedIdes = ref<IdeInfo[]>([]);
-const ideTargetPath = ref("");
+// IDE 選択
+const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect();
 
 // AI判定進行中フラグ
 const aiJudging = ref(false);
@@ -65,38 +57,8 @@ const lastFocusedLeafId = ref<string>("");
 // TerminalView ref 管理
 const terminalRefs = reactive(new Map<number, InstanceType<typeof TerminalView>>());
 
-function setTerminalRef(terminalId: number, el: unknown) {
-  if (el) {
-    terminalRefs.set(terminalId, markRaw(el as InstanceType<typeof TerminalView>));
-  } else {
-    terminalRefs.delete(terminalId);
-  }
-}
-
-// TerminalView の DOM 要素をオフスクリーン div に退避
-function returnAllToOffscreen(): void {
-  const offscreen = document.querySelector('[data-offscreen]');
-  if (!offscreen) return;
-  for (const [tid] of terminalEntries) {
-    const comp = terminalRefs.get(tid);
-    const el = comp?.containerRef;
-    if (el && el.parentElement !== offscreen) {
-      offscreen.appendChild(el);
-    }
-  }
-}
-
-// TerminalView の DOM 要素を対応する terminal-host に移動
-function mountTerminalsToHosts(): void {
-  for (const [tid] of terminalEntries) {
-    const comp = terminalRefs.get(tid);
-    const el = comp?.containerRef;
-    const host = document.getElementById(`terminal-host-${tid}`);
-    if (el && host && el.parentElement !== host) {
-      host.appendChild(el);
-    }
-  }
-}
+const { setTerminalRef, returnAllToOffscreen, mountTerminalsToHosts } =
+  useTerminalReparenting(terminalEntries, terminalRefs);
 
 // PTY 終了時にリーフを特定して closeTerminal を呼ぶ
 function handleTerminalExit(tid: number) {
@@ -183,30 +145,7 @@ async function requestAddTerminal(leafId?: string) {
 }
 
 async function requestOpenInIde() {
-  const ides = await invoke<IdeInfo[]>("detect_ides");
-  if (ides.length === 0) {
-    await message("Cursor、VS Code、Antigravity のいずれもインストールされていません。", {
-      title: "IDE が見つかりません",
-      kind: "warning",
-    });
-    return;
-  }
-  if (ides.length === 1) {
-    await invoke("open_in_ide", { command: ides[0].command, path: worktreePath });
-    return;
-  }
-  detectedIdes.value = ides;
-  ideTargetPath.value = worktreePath;
-  showIdeDialog.value = true;
-}
-
-async function onIdeSelected(ide: IdeInfo) {
-  showIdeDialog.value = false;
-  try {
-    await invoke("open_in_ide", { command: ide.command, path: ideTargetPath.value });
-  } catch (e) {
-    await message(`IDE の起動に失敗しました: ${e}`, { kind: "error" });
-  }
+  await openInIde(worktreePath);
 }
 
 function onTerminalTitleChange(terminalId: number, title: string) {
@@ -507,14 +446,16 @@ onMounted(async () => {
     await appWindow.destroy();
   });
 
-  // サムネイル送信ループ
+  // サムネイル送信ループ（変化があった場合のみ送信）
+  const lastThumbnailUrls = new Map<number, string>();
   thumbnailInterval = setInterval(() => {
     for (const [id] of terminalEntries) {
       const ref = terminalRefs.get(id);
       const terminal = ref?.getTerminal();
       if (terminal) {
         const url = renderToDataUrl(terminal);
-        if (url) {
+        if (url && url !== lastThumbnailUrls.get(id)) {
+          lastThumbnailUrls.set(id, url);
           emitTo("main", "sub-thumbnail-update", { terminalId: id, imageUrl: url });
         }
       }

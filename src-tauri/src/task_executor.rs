@@ -3,14 +3,7 @@ use crate::mcp_server::McpServerManager;
 use crate::settings::SettingsManager;
 use tauri::{AppHandle, State};
 use tokio::io::AsyncWriteExt;
-use tokio::process::Command;
 use tokio::time::{timeout, Duration};
-
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
 
 const TIMEOUT_SECS: u64 = 120;
 
@@ -57,42 +50,6 @@ request and repositories, and perform appropriate worktree operations.
 
 const JSON_SCHEMA: &str = r#"{"type":"object","properties":{"code":{"type":"array","items":{"oneOf":[{"type":"object","properties":{"type":{"const":"add_worktree"},"repository":{"type":"string"},"branch":{"type":"string"}},"required":["type","repository","branch"]},{"type":"object","properties":{"type":{"const":"agent_worktree"},"repository":{"type":"string"},"branch":{"type":"string"},"prompt":{"type":"string"}},"required":["type","repository","branch","prompt"]}]}}},"required":["code"]}"#;
 
-fn get_git_remotes(repo_path: &str) -> Vec<serde_json::Value> {
-    use std::process::Command as StdCommand;
-
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = StdCommand::new("git");
-        c.creation_flags(CREATE_NO_WINDOW);
-        c
-    };
-    #[cfg(not(target_os = "windows"))]
-    let mut cmd = StdCommand::new("git");
-
-    let output = cmd
-        .args(["remote", "-v"])
-        .current_dir(repo_path)
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let mut seen = std::collections::HashMap::<String, String>::new();
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    seen.entry(parts[0].to_string())
-                        .or_insert_with(|| parts[1].to_string());
-                }
-            }
-            seen.into_iter()
-                .map(|(name, url)| serde_json::json!({"name": name, "url": url}))
-                .collect()
-        }
-        _ => vec![],
-    }
-}
-
 fn build_repo_list_text(settings: &crate::settings::AppSettings) -> String {
     if settings.repositories.is_empty() {
         return "Available repositories:\n(none)".to_string();
@@ -101,7 +58,7 @@ fn build_repo_list_text(settings: &crate::settings::AppSettings) -> String {
         .repositories
         .iter()
         .map(|repo| {
-            let remotes = get_git_remotes(&repo.path);
+            let remotes = crate::git_worktree::get_git_remotes(&repo.path);
             let remote_strs: Vec<String> = remotes
                 .iter()
                 .filter_map(|r| {
@@ -197,12 +154,8 @@ pub async fn task_generate(
 
     let worktree_base_dir = settings.worktree_base_dir.clone();
 
-    let mut cmd = Command::new(&program);
+    let mut cmd = crate::process_utils::make_async_command(&program);
     cmd.args(&args);
-
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

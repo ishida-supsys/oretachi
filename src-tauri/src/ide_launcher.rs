@@ -1,18 +1,5 @@
+use crate::process_utils::make_command;
 use serde::Serialize;
-use std::process::Command;
-
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-fn make_command(program: &str) -> Command {
-    let mut cmd = Command::new(program);
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd
-}
 
 #[derive(Serialize, Clone)]
 pub struct IdeInfo {

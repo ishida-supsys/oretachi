@@ -3,6 +3,7 @@ mod ai_provider;
 mod git_worktree;
 mod ide_launcher;
 pub mod mcp_server;
+mod process_utils;
 mod pty_manager;
 mod settings;
 mod task_executor;
@@ -12,6 +13,8 @@ use pty_manager::PtyManager;
 use settings::{AppSettings, SettingsManager};
 use tauri::{Manager, State};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
+
+// ─── PTY コマンド ────────────────────────────────────────────────────────────
 
 #[tauri::command]
 fn pty_spawn(
@@ -26,21 +29,12 @@ fn pty_spawn(
 }
 
 #[tauri::command]
-fn pty_write(
-    state: State<PtyManager>,
-    session_id: u32,
-    data: Vec<u8>,
-) -> Result<(), String> {
+fn pty_write(state: State<PtyManager>, session_id: u32, data: Vec<u8>) -> Result<(), String> {
     state.write(session_id, data)
 }
 
 #[tauri::command]
-fn pty_resize(
-    state: State<PtyManager>,
-    session_id: u32,
-    rows: u16,
-    cols: u16,
-) -> Result<(), String> {
+fn pty_resize(state: State<PtyManager>, session_id: u32, rows: u16, cols: u16) -> Result<(), String> {
     state.resize(session_id, rows, cols)
 }
 
@@ -49,24 +43,33 @@ fn pty_kill(state: State<PtyManager>, session_id: u32) -> Result<(), String> {
     state.kill(session_id)
 }
 
+// ─── 設定コマンド ────────────────────────────────────────────────────────────
+
 #[tauri::command]
 fn get_settings(state: State<SettingsManager>) -> AppSettings {
     state.get()
 }
 
 #[tauri::command]
-fn save_settings(
-    state: State<SettingsManager>,
-    settings: AppSettings,
-) -> Result<(), String> {
+fn save_settings(state: State<SettingsManager>, settings: AppSettings) -> Result<(), String> {
     state.save(settings)
+}
+
+// ─── Git コマンド ─────────────────────────────────────────────────────────────
+
+async fn run_git<F, T>(f: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tokio::task::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("task join error: {}", e))?
 }
 
 #[tauri::command]
 async fn git_validate_repo(path: String) -> Result<bool, String> {
-    tokio::task::spawn_blocking(move || git_worktree::validate_repo(&path))
-        .await
-        .map_err(|e| format!("task join error: {}", e))?
+    run_git(move || git_worktree::validate_repo(&path)).await
 }
 
 #[tauri::command]
@@ -75,27 +78,17 @@ async fn git_worktree_add(
     worktree_path: String,
     branch_name: String,
 ) -> Result<bool, String> {
-    tokio::task::spawn_blocking(move || {
-        git_worktree::worktree_add(&repo_path, &worktree_path, &branch_name)
-    })
-    .await
-    .map_err(|e| format!("task join error: {}", e))?
+    run_git(move || git_worktree::worktree_add(&repo_path, &worktree_path, &branch_name)).await
 }
 
 #[tauri::command]
 async fn git_worktree_remove(repo_path: String, worktree_path: String) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        git_worktree::worktree_remove(&repo_path, &worktree_path)
-    })
-    .await
-    .map_err(|e| format!("task join error: {}", e))?
+    run_git(move || git_worktree::worktree_remove(&repo_path, &worktree_path)).await
 }
 
 #[tauri::command]
 async fn git_list_branches(repo_path: String) -> Result<Vec<String>, String> {
-    tokio::task::spawn_blocking(move || git_worktree::list_branches(&repo_path))
-        .await
-        .map_err(|e| format!("task join error: {}", e))?
+    run_git(move || git_worktree::list_branches(&repo_path)).await
 }
 
 #[tauri::command]
@@ -104,19 +97,15 @@ async fn git_merge_branch(
     source_branch: String,
     target_branch: String,
 ) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || {
-        git_worktree::merge_branch(&repo_path, &source_branch, &target_branch)
-    })
-    .await
-    .map_err(|e| format!("task join error: {}", e))?
+    run_git(move || git_worktree::merge_branch(&repo_path, &source_branch, &target_branch)).await
 }
 
 #[tauri::command]
 async fn git_delete_branch(repo_path: String, branch_name: String, force: bool) -> Result<(), String> {
-    tokio::task::spawn_blocking(move || git_worktree::delete_branch(&repo_path, &branch_name, force))
-        .await
-        .map_err(|e| format!("task join error: {}", e))?
+    run_git(move || git_worktree::delete_branch(&repo_path, &branch_name, force)).await
 }
+
+// ─── IDE / AI エージェントコマンド ────────────────────────────────────────────
 
 #[tauri::command]
 fn detect_ides() -> Vec<ide_launcher::IdeInfo> {
@@ -132,6 +121,8 @@ fn detect_ai_agents() -> Vec<ai_provider::AiAgentInfo> {
 fn open_in_ide(command: String, path: String) -> Result<(), String> {
     ide_launcher::open_in_ide(&command, &path)
 }
+
+// ─── MCP コマンド ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
 fn get_mcp_status(state: State<mcp_server::McpServerManager>) -> mcp_server::McpStatus {

@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, process::Command, sync::{Arc, Mutex}};
+use std::{fs, path::PathBuf, sync::{Arc, Mutex}};
 
 use axum::{extract::State, http::StatusCode, routing::post, Json};
 use rmcp::{
@@ -14,45 +14,8 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::watch;
 
+use crate::git_worktree::get_git_remotes;
 use crate::settings::SettingsManager;
-
-#[cfg(target_os = "windows")]
-use std::os::windows::process::CommandExt;
-
-#[cfg(target_os = "windows")]
-const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-fn make_git_command() -> Command {
-    let mut cmd = Command::new("git");
-    #[cfg(target_os = "windows")]
-    cmd.creation_flags(CREATE_NO_WINDOW);
-    cmd
-}
-
-fn get_git_remotes(repo_path: &str) -> Vec<serde_json::Value> {
-    let output = make_git_command()
-        .args(["remote", "-v"])
-        .current_dir(repo_path)
-        .output();
-
-    match output {
-        Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let mut seen = std::collections::HashMap::<String, String>::new();
-            for line in stdout.lines() {
-                let parts: Vec<&str> = line.split_whitespace().collect();
-                if parts.len() >= 2 {
-                    seen.entry(parts[0].to_string())
-                        .or_insert_with(|| parts[1].to_string());
-                }
-            }
-            seen.into_iter()
-                .map(|(name, url)| serde_json::json!({"name": name, "url": url}))
-                .collect()
-        }
-        _ => vec![],
-    }
-}
 
 const PORT_FILE: &str = "mcp-port";
 
@@ -78,14 +41,15 @@ impl McpServerManager {
     }
 
     pub fn stop(&self) {
-        let guard = self.shutdown_tx.lock().unwrap();
-        if let Some(tx) = guard.as_ref() {
-            let _ = tx.send(true);
+        if let Ok(guard) = self.shutdown_tx.lock() {
+            if let Some(tx) = guard.as_ref() {
+                let _ = tx.send(true);
+            }
         }
     }
 
     pub fn get_status(&self) -> McpStatus {
-        self.status.lock().unwrap().clone()
+        self.status.lock().map(|s| s.clone()).unwrap_or(McpStatus { running: false, port: None })
     }
 }
 
@@ -271,7 +235,9 @@ pub fn start_mcp_server(app_handle: AppHandle) {
 
     // 新しいシャットダウンチャンネルを作成
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
-    *manager.shutdown_tx.lock().unwrap() = Some(shutdown_tx);
+    if let Ok(mut tx) = manager.shutdown_tx.lock() {
+        *tx = Some(shutdown_tx);
+    }
 
     // Arc クローンをタスクに渡す
     let status = Arc::clone(&manager.status);
@@ -312,8 +278,7 @@ pub fn start_mcp_server(app_handle: AppHandle) {
         log::info!("MCP server listening on http://127.0.0.1:{}/mcp", port);
 
         // ステータス: 起動中
-        {
-            let mut s = status.lock().unwrap();
+        if let Ok(mut s) = status.lock() {
             s.running = true;
             s.port = Some(port);
         }
@@ -332,8 +297,7 @@ pub fn start_mcp_server(app_handle: AppHandle) {
         log::info!("[mcp] Shutdown signal received, server stopped");
 
         // ステータス: 停止
-        {
-            let mut s = status.lock().unwrap();
+        if let Ok(mut s) = status.lock() {
             s.running = false;
             s.port = None;
         }
