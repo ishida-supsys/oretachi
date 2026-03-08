@@ -9,6 +9,7 @@ const { t } = useI18n();
 const props = defineProps<{ repoPath: string }>();
 const emit = defineEmits<{
   (e: "open-diff", payload: { filePath: string; staged: boolean }): void;
+  (e: "start-review"): void;
 }>();
 
 interface StatusEntry {
@@ -73,13 +74,25 @@ onUnmounted(() => {
     </div>
     <div v-else-if="error" class="text-red-400 text-xs p-2">{{ error }}</div>
     <template v-else>
-      <!-- リロードボタン -->
-      <button
-        class="mb-2 flex items-center gap-1 text-xs text-surface-400 hover:text-surface-200 transition-colors"
-        @click="loadStatus"
-      >
-        <i class="pi pi-refresh" />{{ t("refresh") }}
-      </button>
+      <!-- ツールバー -->
+      <div class="mb-2 flex items-center gap-2">
+        <button
+          class="flex items-center gap-1 text-xs text-surface-400 hover:text-surface-200 transition-colors"
+          @click="loadStatus"
+        >
+          <i class="pi pi-refresh" />{{ t("refresh") }}
+        </button>
+        <button
+          class="flex items-center gap-1 text-xs transition-colors"
+          :class="stagedChanges.length === 0 && unstagedChanges.length === 0
+            ? 'text-surface-600 cursor-not-allowed'
+            : 'text-surface-400 hover:text-surface-200'"
+          :disabled="stagedChanges.length === 0 && unstagedChanges.length === 0"
+          @click="emit('start-review')"
+        >
+          <i class="pi pi-eye" />{{ t("review") }}
+        </button>
+      </div>
 
       <!-- Staged Changes -->
       <div class="mb-3">
@@ -133,6 +146,7 @@ onUnmounted(() => {
   "en": {
     "loading": "Loading...",
     "refresh": "Refresh",
+    "review": "Review",
     "staged": "Staged Changes",
     "changes": "Changes",
     "noChanges": "No changes"
@@ -140,6 +154,7 @@ onUnmounted(() => {
   "ja": {
     "loading": "読み込み中...",
     "refresh": "更新",
+    "review": "レビュー",
     "staged": "ステージ済み",
     "changes": "変更",
     "noChanges": "変更なし"

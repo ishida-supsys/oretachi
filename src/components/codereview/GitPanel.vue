@@ -9,6 +9,7 @@ const { t } = useI18n();
 const props = defineProps<{ repoPath: string }>();
 const emit = defineEmits<{
   (e: "open-diff", payload: { filePath: string; staged: boolean }): void;
+  (e: "start-review"): void;
 }>();
 
 type GitTab = "changes" | "graph";
@@ -44,6 +45,7 @@ const activeTab = ref<GitTab>("changes");
         v-if="activeTab === 'changes'"
         :repo-path="props.repoPath"
         @open-diff="emit('open-diff', $event)"
+        @start-review="emit('start-review')"
       />
       <GitGraphPane
         v-else

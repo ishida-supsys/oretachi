@@ -163,6 +163,16 @@ async fn git_get_log(
     run_git(move || git_worktree::get_log(&repo_path, skip, limit)).await
 }
 
+#[tauri::command]
+async fn git_stage_all(repo_path: String) -> Result<(), String> {
+    run_git(move || git_worktree::stage_all(&repo_path)).await
+}
+
+#[tauri::command]
+async fn git_commit(repo_path: String, message: String) -> Result<String, String> {
+    run_git(move || git_worktree::commit(&repo_path, &message)).await
+}
+
 // ─── IDE / AI エージェントコマンド ────────────────────────────────────────────
 
 #[tauri::command]
@@ -279,6 +289,8 @@ pub fn run() {
             git_get_status,
             git_get_file_diff,
             git_get_log,
+            git_stage_all,
+            git_commit,
             detect_ides,
             detect_ai_agents,
             open_in_ide,

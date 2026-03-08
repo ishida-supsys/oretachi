@@ -460,6 +460,42 @@ pub fn get_log(repo_path: &str, skip: usize, limit: usize) -> Result<Vec<CommitE
     Ok(entries)
 }
 
+pub fn stage_all(repo_path: &str) -> Result<(), String> {
+    let output = make_command("git")
+        .args(["add", "-A"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git add -A failed: {}", stderr));
+    }
+    Ok(())
+}
+
+pub fn commit(repo_path: &str, message: &str) -> Result<String, String> {
+    let output = make_command("git")
+        .args(["commit", "-m", message])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git commit failed: {}", stderr));
+    }
+
+    // short hash を返す
+    let hash_output = make_command("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+
+    Ok(String::from_utf8_lossy(&hash_output.stdout).trim().to_string())
+}
+
 pub fn worktree_remove(repo_path: &str, worktree_path: &str) -> Result<(), String> {
     let output = make_command("git")
         .args(["worktree", "remove", "--force", "--force", worktree_path])

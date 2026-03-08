@@ -9,7 +9,9 @@ import GitPanel from "./components/codereview/GitPanel.vue";
 import CodeReviewTabs from "./components/codereview/CodeReviewTabs.vue";
 import MonacoFileViewer from "./components/codereview/MonacoFileViewer.vue";
 import MonacoDiffViewer from "./components/codereview/MonacoDiffViewer.vue";
+import ReviewSessionView from "./components/codereview/ReviewSessionView.vue";
 import { useCodeReviewTabs } from "./composables/useCodeReviewTabs";
+import { useReviewSession } from "./composables/useReviewSession";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -30,6 +32,8 @@ const isResizing = ref(false);
 
 const { tabs, activeTabId, openFileTab, openDiffTab, closeTab, switchTab, activeTab, updateFileTab, updateDiffTab, getOpenTabs } =
   useCodeReviewTabs();
+
+const { isReviewMode, startReview, refreshReviewFiles } = useReviewSession();
 
 // ─── サイドバーリサイズ ───────────────────────────────────────────────────────
 function startResize(e: MouseEvent) {
@@ -113,6 +117,9 @@ function scheduleRefresh() {
   refreshTimer = setTimeout(() => {
     refreshTimer = null;
     refreshOpenTabs();
+    if (isReviewMode.value) {
+      refreshReviewFiles(worktreePath);
+    }
   }, 300);
 }
 
@@ -199,6 +206,7 @@ onUnmounted(cleanup);
           v-else
           :repo-path="worktreePath"
           @open-diff="handleOpenDiff"
+          @start-review="startReview(worktreePath)"
         />
       </div>
     </div>
@@ -212,32 +220,38 @@ onUnmounted(cleanup);
 
     <!-- メインエリア -->
     <div class="flex-1 flex flex-col overflow-hidden">
-      <CodeReviewTabs
-        :tabs="tabs"
-        :active-tab-id="activeTabId"
-        @switch="switchTab"
-        @close="closeTab"
-      />
-      <div class="flex-1 overflow-hidden">
-        <template v-if="activeTab()">
-          <MonacoFileViewer
-            v-if="activeTab()!.type === 'file'"
-            :content="activeTab()!.content ?? ''"
-            :language="activeTab()!.language"
-          />
-          <MonacoDiffViewer
+      <!-- レビューセッションビュー -->
+      <ReviewSessionView v-if="isReviewMode" :repo-path="worktreePath" />
+
+      <!-- 通常タブビュー -->
+      <template v-else>
+        <CodeReviewTabs
+          :tabs="tabs"
+          :active-tab-id="activeTabId"
+          @switch="switchTab"
+          @close="closeTab"
+        />
+        <div class="flex-1 overflow-hidden">
+          <template v-if="activeTab()">
+            <MonacoFileViewer
+              v-if="activeTab()!.type === 'file'"
+              :content="activeTab()!.content ?? ''"
+              :language="activeTab()!.language"
+            />
+            <MonacoDiffViewer
+              v-else
+              :old-content="activeTab()!.oldContent ?? ''"
+              :new-content="activeTab()!.newContent ?? ''"
+            />
+          </template>
+          <div
             v-else
-            :old-content="activeTab()!.oldContent ?? ''"
-            :new-content="activeTab()!.newContent ?? ''"
-          />
-        </template>
-        <div
-          v-else
-          class="flex items-center justify-center h-full text-surface-500 text-sm"
-        >
-          {{ t("editor.noFileOpen") }}
+            class="flex items-center justify-center h-full text-surface-500 text-sm"
+          >
+            {{ t("editor.noFileOpen") }}
+          </div>
         </div>
-      </div>
+      </template>
     </div>
   </div>
 </template>
