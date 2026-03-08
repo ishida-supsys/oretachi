@@ -3,10 +3,12 @@ import { ref, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { useI18n } from "vue-i18n";
+import { useReviewSession } from "../../composables/useReviewSession";
 
 const { t } = useI18n();
 
 const props = defineProps<{ repoPath: string }>();
+const { isReviewMode } = useReviewSession();
 const emit = defineEmits<{
   (e: "open-diff", payload: { filePath: string; staged: boolean }): void;
   (e: "start-review"): void;
@@ -84,10 +86,10 @@ onUnmounted(() => {
         </button>
         <button
           class="flex items-center gap-1 text-xs transition-colors"
-          :class="stagedChanges.length === 0 && unstagedChanges.length === 0
+          :class="stagedChanges.length === 0 && unstagedChanges.length === 0 || isReviewMode
             ? 'text-surface-600 cursor-not-allowed'
             : 'text-surface-400 hover:text-surface-200'"
-          :disabled="stagedChanges.length === 0 && unstagedChanges.length === 0"
+          :disabled="stagedChanges.length === 0 && unstagedChanges.length === 0 || isReviewMode"
           @click="emit('start-review')"
         >
           <i class="pi pi-eye" />{{ t("review") }}
