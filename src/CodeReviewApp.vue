@@ -99,7 +99,7 @@ onMounted(() => {
         :title="t('panel.git')"
         @click="activePanel = 'git'"
       >
-        <i class="pi pi-code-branch text-lg" />
+        <i class="pi pi-share-alt text-lg" />
       </button>
     </div>
 

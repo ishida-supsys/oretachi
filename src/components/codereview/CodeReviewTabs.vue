@@ -26,7 +26,7 @@ const emit = defineEmits<{
         : 'text-surface-400 hover:bg-surface-800 hover:text-surface-200'"
       @click="emit('switch', tab.id)"
     >
-      <i :class="tab.type === 'file' ? 'pi pi-file text-xs' : 'pi pi-code-branch text-xs'" />
+      <i :class="tab.type === 'file' ? 'pi pi-file text-xs' : 'pi pi-share-alt text-xs'" />
       <span>{{ tab.label }}</span>
       <button
         class="ml-1 rounded hover:bg-surface-600 p-0.5 leading-none"
