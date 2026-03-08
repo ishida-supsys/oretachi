@@ -3,6 +3,10 @@
 @import "tailwindcss";
 @import "tailwindcss-primeui";
 
+.p-toast {
+  width: 260px;
+}
+
 @layer utilities {
   @keyframes gradient-x {
     0%, 100% {
