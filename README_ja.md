@@ -36,7 +36,7 @@ https://github.com/user-attachments/assets/be44a731-a25e-41e6-ac03-502bf7a651eb
 
 通知を受信したワークツリーをトレイポップアップで順番に確認することができます。
 
-https://github.com/user-attachments/assets/23a0e4b5-6586-41ed-8d30-af0e4b641a36"
+https://github.com/user-attachments/assets/23a0e4b5-6586-41ed-8d30-af0e4b641a36
 
 ### コードビューワー
 
