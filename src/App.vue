@@ -250,7 +250,7 @@ function buildScriptCommand(repo: Repository, entry: WorktreeEntry): string {
   if (isCmd) {
     return `set ORETACHI_REPO_NAME=${repoName}&& set ORETACHI_WORKTREE_NAME=${wtName}&& call "${scriptPath}"\r`;
   } else if (isPowerShell) {
-    return `$env:ORETACHI_REPO_NAME="${repoName}"; $env:ORETACHI_WORKTREE_NAME="${wtName}"; & "${scriptPath}"\r`;
+    return `$env:ORETACHI_REPO_NAME="${repoName}"; $env:ORETACHI_WORKTREE_NAME="${wtName}"; Set-ExecutionPolicy -Scope Process Bypass; & "${scriptPath}"\r`;
   } else {
     return `ORETACHI_REPO_NAME="${repoName}" ORETACHI_WORKTREE_NAME="${wtName}" sh "${scriptPath}"\r`;
   }
