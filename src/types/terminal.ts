@@ -4,6 +4,7 @@ export interface SubTerminalEntry {
   title: string;
   sessionId: number;
   snapshot: string;
+  isAiAgent?: boolean;
 }
 
 /** トレイポップアップ用ターミナルエントリ（PTYサイズ情報付き） */
