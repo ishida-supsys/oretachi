@@ -11,8 +11,8 @@ const SYSTEM_PROMPT_TEMPLATE: &str = r#"You are a task planner acting as both th
 for user requests. Follow these steps to understand the relationship between the
 request and repositories, and perform appropriate worktree operations.
 
-1. Retrieve the latest repository list: Use the oretachi_list_repository tool to get
-   the list of repositories where worktrees can be added.
+1. Retrieve current state: Use oretachi_list_repository to get available repositories,
+   and use oretachi_get_worktree_status to get the list of existing worktrees.
 2. Generate a list of specific tasks from the request and select the repository for
    each task.
 3. Generate the task process code and output it as JSON.
@@ -30,6 +30,11 @@ request and repositories, and perform appropriate worktree operations.
 - NEVER generate your own instructions or ideas to put in the prompt. Your role is routing and
   splitting only — the downstream AI agent will interpret the prompt.
 - When only an issue URL is provided or context is unclear, pass the full text as-is.
+- If a PR URL is specified, extract the branch name from the PR and check if an existing worktree
+  has a matching branchName. If a match exists, use that worktree (output only agent_worktree,
+  no add_worktree).
+- If an existing worktree already has the matching repository and branch, output only agent_worktree
+  (no add_worktree). Only output add_worktree when no matching worktree exists.
 
 ## Task Process Code Schema
 {
@@ -40,15 +45,28 @@ request and repositories, and perform appropriate worktree operations.
 }
 
 - add_worktree: Add a worktree for the specified repository and branch.
-- agent_worktree: Launch an AI agent on the worktree's initial terminal with the given prompt. The worktree must already exist (use add_worktree first with the same repository and branch).
-- When you want to add a worktree and launch an agent, output BOTH add_worktree and agent_worktree as separate entries in the code array, in order.
-- Branch names should follow the pattern "worktree/{descriptive-name}".
+- agent_worktree: Launch an AI agent on the worktree's terminal with the given prompt. The worktree must already exist (either pre-existing or created via add_worktree).
+- When you want to add a NEW worktree and launch an agent, output BOTH add_worktree and agent_worktree as separate entries in the code array, in order.
+- When targeting an EXISTING worktree, output only agent_worktree (no add_worktree needed).
+- Branch names for new worktrees should follow the pattern "worktree/{descriptive-name}".
 - Repository names must match exactly what is in the repository list.
 
 ## User Request
 {{USER_PROMPT}}"#;
 
 const JSON_SCHEMA: &str = r#"{"type":"object","properties":{"code":{"type":"array","items":{"oneOf":[{"type":"object","properties":{"type":{"const":"add_worktree"},"repository":{"type":"string"},"branch":{"type":"string"}},"required":["type","repository","branch"]},{"type":"object","properties":{"type":{"const":"agent_worktree"},"repository":{"type":"string"},"branch":{"type":"string"},"prompt":{"type":"string"}},"required":["type","repository","branch","prompt"]}]}}},"required":["code"]}"#;
+
+fn build_worktree_list_text(settings: &crate::settings::AppSettings) -> String {
+    if settings.worktrees.is_empty() {
+        return "Existing worktrees:\n(none)".to_string();
+    }
+    let lines: Vec<String> = settings
+        .worktrees
+        .iter()
+        .map(|wt| format!("- {} (repository: {}, branch: {})", wt.name, wt.repository_name, wt.branch_name))
+        .collect();
+    format!("Existing worktrees:\n{}", lines.join("\n"))
+}
 
 fn build_repo_list_text(settings: &crate::settings::AppSettings) -> String {
     if settings.repositories.is_empty() {
@@ -100,11 +118,16 @@ pub async fn task_generate(
         && mcp_status.running
         && mcp_status.port.is_some();
 
-    // For non-MCP agents, embed repo list directly in prompt
+    // For non-MCP agents, embed repo list and worktree list directly in prompt
     let final_prompt = if use_mcp {
         full_prompt
     } else {
-        format!("{}\n\n{}", full_prompt, build_repo_list_text(&settings))
+        format!(
+            "{}\n\n{}\n\n{}",
+            full_prompt,
+            build_repo_list_text(&settings),
+            build_worktree_list_text(&settings)
+        )
     };
 
     // Build command and args

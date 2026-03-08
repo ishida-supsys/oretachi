@@ -117,6 +117,7 @@ impl NotifyService {
             .map(|wt| {
                 serde_json::json!({
                     "name": wt.name,
+                    "repositoryName": wt.repository_name,
                     "branchName": wt.branch_name,
                     "isDetached": detached.contains(wt.id.as_str()),
                     "autoApproval": wt.auto_approval,
