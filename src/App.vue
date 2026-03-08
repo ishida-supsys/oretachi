@@ -33,6 +33,10 @@ import { getRecentLines, analyzeForApproval, hasApprovalPrompt, cancelApproval }
 import { useAutoHotkey } from "./composables/useAutoHotkey";
 import { debug } from "@tauri-apps/plugin-log";
 import { platform } from "@tauri-apps/plugin-os";
+import Toast from "primevue/toast";
+import { useToast } from "primevue/usetoast";
+
+const toast = useToast();
 
 // ウィンドウのフォーカス状態
 const { isWindowFocused } = useWindowFocus();
@@ -602,6 +606,16 @@ async function executeTaskSteps(taskId: string): Promise<void> {
   for (let i = 0; i < task.steps.length; i++) {
     const step = task.steps[i];
     updateStepStatus(taskId, i, "running");
+
+    const stepLabel = step.code.type === "add_worktree" ? "ワークツリー追加中" : "エージェント起動中";
+    toast.removeGroup(taskId);
+    toast.add({
+      group: taskId,
+      severity: "info",
+      summary: "タスク実行中",
+      detail: `ステップ ${i + 1}/${task.steps.length}: ${stepLabel}`,
+    });
+
     try {
       if (step.code.type === "add_worktree") {
         await executeAddWorktree(step.code);
@@ -621,15 +635,50 @@ async function onAddTaskConfirm(prompt: string): Promise<void> {
   showAddTaskDialog.value = false;
   const task = addTask(prompt);
 
+  toast.add({
+    group: task.id,
+    severity: "info",
+    summary: "タスク追加",
+    detail: "コード生成中...",
+  });
+
   try {
     const result = await invoke<string>("task_generate", { prompt });
     const taskProcessCode = JSON.parse(result) as TaskProcessCode;
     setTaskSteps(task.id, taskProcessCode.code);
+
+    const stepCount = taskProcessCode.code.length;
+    toast.removeGroup(task.id);
+    toast.add({
+      group: task.id,
+      severity: "info",
+      summary: "タスク実行中",
+      detail: `ステップ実行開始 (${stepCount}件)`,
+    });
+
     await executeTaskSteps(task.id);
     updateTaskStatus(task.id, "completed");
+
+    toast.removeGroup(task.id);
+    toast.add({
+      group: task.id,
+      severity: "success",
+      summary: "タスク完了",
+      detail: "すべてのステップが完了しました",
+      life: 3000,
+    });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     updateTaskStatus(task.id, "error", msg);
+
+    toast.removeGroup(task.id);
+    toast.add({
+      group: task.id,
+      severity: "error",
+      summary: "タスク失敗",
+      detail: msg,
+      life: 5000,
+    });
   }
 }
 
@@ -1521,5 +1570,8 @@ onMounted(async () => {
       :total-count="getTotalNotificationCount()"
       @click="onTrayButtonClick"
     />
+
+    <!-- タスク進捗トースト -->
+    <Toast position="bottom-right" />
   </div>
 </template>

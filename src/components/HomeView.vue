@@ -35,6 +35,9 @@ const emit = defineEmits<{
   removeTask: [taskId: string];
 }>();
 
+type PanelMode = "worktree" | "task";
+const panelMode = ref<PanelMode>("worktree");
+
 const worktreesRef = computed(() => props.worktrees);
 const tasksRef = computed(() => props.tasks);
 
@@ -64,58 +67,66 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
 <template>
   <div class="home-view">
     <div class="home-header">
-      <span class="home-title">ワークツリー</span>
+      <select v-model="panelMode" class="panel-select">
+        <option value="worktree">ワークツリー</option>
+        <option value="task">タスク</option>
+      </select>
       <div class="header-actions">
-        <button class="btn-icon-header" title="すべてのサブウィンドウを呼び出す" @click="emit('focusAllSubWindows')">
-          <i class="pi pi-window-maximize"></i>
-        </button>
-        <button class="btn-icon-header" title="ワークツリー追加" @click="emit('addWorktree')">
-          <i class="pi pi-plus"></i>
-        </button>
-      </div>
-    </div>
-
-    <div v-if="worktrees.length === 0" class="empty-state">
-      ワークツリーがありません。右上の <i class="pi pi-plus"></i> ボタンで作成してください。
-    </div>
-
-    <div ref="containerRef" class="worktree-list">
-      <div v-for="(col, colIndex) in columns" :key="colIndex" class="masonry-column" :style="{ maxWidth: naturalCardWidth + 'px' }">
-        <WorktreeCard
-          v-for="worktree in col"
-          :key="worktree.id"
-          :worktree="worktree"
-          :thumbnail-urls="thumbnailUrls"
-          :detached="detachedWorktrees.has(worktree.id)"
-          :notification-count="notifications.get(worktree.id) ?? 0"
-          :hotkey-char="hotkeyChars.get(worktree.id)"
-          :loading="loadingWorktrees.has(worktree.id)"
-          :loading-text="loadingWorktrees.get(worktree.id)"
-          :auto-approval="autoApprovals.get(worktree.id) ?? false"
-          :ai-judging="aiJudgingWorktrees.has(worktree.id)"
-          @select-terminal="emit('selectTerminal', $event)"
-          @add-terminal="emit('addTerminal', $event)"
-          @remove-worktree="emit('removeWorktree', $event)"
-          @open-in-ide="emit('openInIde', $event)"
-          @move-to-sub-window="emit('moveToSubWindow', $event)"
-          @move-to-main-window="emit('moveToMainWindow', $event)"
-          @focus-sub-window="emit('focusSubWindow', $event)"
-          @set-hotkey-char="emit('setHotkeyChar', $event)"
-          @toggle-auto-approval="emit('toggleAutoApproval', $event)"
-          @cancel-ai-judging="emit('cancelAiJudging', $event)"
-        />
-      </div>
-    </div>
-
-    <!-- タスク -->
-    <template v-if="tasks.length > 0">
-      <div class="section-header">
-        <span class="home-title">タスク</span>
-        <div class="header-actions">
+        <template v-if="panelMode === 'worktree'">
+          <button class="btn-icon-header" title="すべてのサブウィンドウを呼び出す" @click="emit('focusAllSubWindows')">
+            <i class="pi pi-window-maximize"></i>
+          </button>
+          <button class="btn-icon-header" title="ワークツリー追加" @click="emit('addWorktree')">
+            <i class="pi pi-plus"></i>
+          </button>
+        </template>
+        <template v-else>
           <button class="btn-icon-header" title="タスク追加" @click="emit('addTask')">
             <i class="pi pi-plus"></i>
           </button>
+        </template>
+      </div>
+    </div>
+
+    <!-- ワークツリーパネル -->
+    <template v-if="panelMode === 'worktree'">
+      <div v-if="worktrees.length === 0" class="empty-state">
+        ワークツリーがありません。右上の <i class="pi pi-plus"></i> ボタンで作成してください。
+      </div>
+
+      <div ref="containerRef" class="worktree-list">
+        <div v-for="(col, colIndex) in columns" :key="colIndex" class="masonry-column" :style="{ maxWidth: naturalCardWidth + 'px' }">
+          <WorktreeCard
+            v-for="worktree in col"
+            :key="worktree.id"
+            :worktree="worktree"
+            :thumbnail-urls="thumbnailUrls"
+            :detached="detachedWorktrees.has(worktree.id)"
+            :notification-count="notifications.get(worktree.id) ?? 0"
+            :hotkey-char="hotkeyChars.get(worktree.id)"
+            :loading="loadingWorktrees.has(worktree.id)"
+            :loading-text="loadingWorktrees.get(worktree.id)"
+            :auto-approval="autoApprovals.get(worktree.id) ?? false"
+            :ai-judging="aiJudgingWorktrees.has(worktree.id)"
+            @select-terminal="emit('selectTerminal', $event)"
+            @add-terminal="emit('addTerminal', $event)"
+            @remove-worktree="emit('removeWorktree', $event)"
+            @open-in-ide="emit('openInIde', $event)"
+            @move-to-sub-window="emit('moveToSubWindow', $event)"
+            @move-to-main-window="emit('moveToMainWindow', $event)"
+            @focus-sub-window="emit('focusSubWindow', $event)"
+            @set-hotkey-char="emit('setHotkeyChar', $event)"
+            @toggle-auto-approval="emit('toggleAutoApproval', $event)"
+            @cancel-ai-judging="emit('cancelAiJudging', $event)"
+          />
         </div>
+      </div>
+    </template>
+
+    <!-- タスクパネル -->
+    <template v-else>
+      <div v-if="tasks.length === 0" class="empty-state">
+        タスクがありません。右上の <i class="pi pi-plus"></i> ボタンで追加してください。
       </div>
 
       <div ref="taskContainerRef" class="worktree-list">
@@ -127,16 +138,6 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
             @remove="emit('removeTask', $event)"
           />
         </div>
-      </div>
-    </template>
-
-    <!-- タスクなし時はアイコンボタンのみ（ワークツリーヘッダーに追加） -->
-    <template v-else>
-      <div class="task-add-bar">
-        <button class="btn-add-task" @click="emit('addTask')">
-          <i class="pi pi-bolt"></i>
-          タスクを追加
-        </button>
       </div>
     </template>
   </div>
@@ -159,10 +160,33 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   margin-bottom: 16px;
 }
 
-.home-title {
+.panel-select {
   font-size: 15px;
   font-weight: 600;
   color: #cdd6f4;
+  background: transparent;
+  border: none;
+  outline: none;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='%236c7086'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 4px center;
+  padding-right: 20px;
+  transition: color 0.15s;
+}
+
+.panel-select:hover {
+  color: #cba6f7;
+}
+
+.panel-select option {
+  background: #1e1e2e;
+  color: #cdd6f4;
+  font-weight: 600;
 }
 
 .header-actions {
@@ -213,38 +237,5 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   height: calc(100% - 48px);
   color: #6c7086;
   font-size: 14px;
-}
-
-.section-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-top: 20px;
-  margin-bottom: 12px;
-}
-
-.task-add-bar {
-  display: flex;
-  justify-content: center;
-  padding: 12px 0 4px;
-}
-
-.btn-add-task {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  background: transparent;
-  border: 1px dashed #45475a;
-  border-radius: 6px;
-  color: #6c7086;
-  font-size: 13px;
-  padding: 6px 16px;
-  cursor: pointer;
-  transition: color 0.15s, border-color 0.15s;
-}
-
-.btn-add-task:hover {
-  color: #cba6f7;
-  border-color: #cba6f7;
 }
 </style>

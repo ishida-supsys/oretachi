@@ -1,6 +1,7 @@
 import { createApp } from "vue";
 import "./styles.css";
 import PrimeVue from "primevue/config";
+import ToastService from "primevue/toastservice";
 import Aura from "@primeuix/themes/aura";
 import { attachConsole } from "@tauri-apps/plugin-log";
 
@@ -31,6 +32,7 @@ async function mountApp() {
         },
       },
     })
+    .use(ToastService)
     .mount("#app");
 }
 
