@@ -1,5 +1,6 @@
 mod ai_judge;
 mod ai_provider;
+mod fs_watcher;
 mod git_worktree;
 mod ide_launcher;
 pub mod mcp_server;
@@ -9,6 +10,7 @@ mod settings;
 mod task_executor;
 mod terminal_session;
 
+use fs_watcher::FsWatcherManager;
 use pty_manager::{AiAgentChangedPayload, PtyManager};
 use settings::{AppSettings, SettingsManager};
 use tauri::{Emitter, Manager, State};
@@ -198,6 +200,23 @@ async fn restart_mcp_server(app_handle: tauri::AppHandle) -> Result<mcp_server::
     Ok(manager.get_status())
 }
 
+// ─── FS ウォッチャーコマンド ──────────────────────────────────────────────────
+
+#[tauri::command]
+fn start_fs_watch(
+    app_handle: tauri::AppHandle,
+    state: State<FsWatcherManager>,
+    worktree_id: String,
+    worktree_path: String,
+) -> Result<(), String> {
+    state.start_watching(app_handle, worktree_id, worktree_path)
+}
+
+#[tauri::command]
+fn stop_fs_watch(state: State<FsWatcherManager>, worktree_id: String) -> Result<(), String> {
+    state.stop_watching(&worktree_id)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Windows: tauri-plugin-notification はパスが \target\release で終わる場合に
@@ -240,6 +259,7 @@ pub fn run() {
         .manage(SettingsManager::new())
         .manage(mcp_server::McpServerManager::new())
         .manage(ai_judge::ApprovalManager::new())
+        .manage(FsWatcherManager::new())
         .invoke_handler(tauri::generate_handler![
             pty_spawn,
             pty_write,
@@ -271,6 +291,8 @@ pub fn run() {
             terminal_session::delete_terminal_session,
             task_executor::task_generate,
             task_executor::write_temp_prompt,
+            start_fs_watch,
+            stop_fs_watch,
         ])
         .setup(|app| {
             if let Ok(log_dir) = app.path().app_log_dir() {
@@ -302,6 +324,8 @@ pub fn run() {
             let mcp_manager = app_handle.state::<mcp_server::McpServerManager>();
             mcp_manager.stop();
             mcp_server::cleanup_port_file(app_handle);
+            let fs_watcher = app_handle.state::<FsWatcherManager>();
+            fs_watcher.stop_all();
         }
     });
 }

@@ -57,5 +57,34 @@ export function useCodeReviewTabs() {
 
   const activeTab = () => tabs.find((t) => t.id === activeTabId.value);
 
-  return { tabs, activeTabId, openFileTab, openDiffTab, closeTab, switchTab, activeTab };
+  function updateFileTab(filePath: string, content: string): void {
+    const tab = tabs.find((t) => t.type === "file" && t.filePath === filePath);
+    if (tab) {
+      tab.content = content;
+    }
+  }
+
+  function updateDiffTab(filePath: string, staged: boolean, oldContent: string, newContent: string): void {
+    const key = `${filePath}:${staged ? "staged" : "unstaged"}`;
+    const tab = tabs.find((t) => t.type === "diff" && t.filePath === key);
+    if (tab) {
+      tab.oldContent = oldContent;
+      tab.newContent = newContent;
+    }
+  }
+
+  function getOpenTabs(): Array<{ filePath: string; type: "file" | "diff"; staged?: boolean }> {
+    return tabs.map((t) => {
+      if (t.type === "file") {
+        return { filePath: t.filePath, type: "file" as const };
+      } else {
+        const colonIdx = t.filePath.lastIndexOf(":");
+        const actualPath = t.filePath.slice(0, colonIdx);
+        const staged = t.filePath.slice(colonIdx + 1) === "staged";
+        return { filePath: actualPath, type: "diff" as const, staged };
+      }
+    });
+  }
+
+  return { tabs, activeTabId, openFileTab, openDiffTab, closeTab, switchTab, activeTab, updateFileTab, updateDiffTab, getOpenTabs };
 }

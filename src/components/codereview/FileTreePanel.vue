@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import Tree from "primevue/tree";
 import type { TreeNode } from "primevue/treenode";
 import { useI18n } from "vue-i18n";
@@ -92,7 +93,16 @@ function onNodeSelect(node: TreeNode) {
   }
 }
 
-onMounted(loadFiles);
+let unlistenFsChanged: (() => void) | null = null;
+
+onMounted(async () => {
+  loadFiles();
+  unlistenFsChanged = await listen("codereview-fs-changed", loadFiles);
+});
+
+onUnmounted(() => {
+  unlistenFsChanged?.();
+});
 </script>
 
 <template>
