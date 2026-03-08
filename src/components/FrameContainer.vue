@@ -10,6 +10,7 @@ const props = defineProps<{
   node: FrameNode;
   terminalEntries: Map<number, SubTerminalEntry>;
   terminalExitCodes?: Map<number, number>;
+  terminalAgentStatus?: Map<number, boolean>;
 }>();
 
 const emit = defineEmits<{
@@ -46,6 +47,7 @@ function onResizeEnd(event: { sizes: number[] }) {
     :leaf="(node as FrameLeaf)"
     :terminal-entries="terminalEntries"
     :terminal-exit-codes="terminalExitCodes"
+    :terminal-agent-status="terminalAgentStatus"
     @switch-terminal="(leafId, terminalId) => emit('switchTerminal', leafId, terminalId)"
     @close-terminal="(leafId, terminalId) => emit('closeTerminal', leafId, terminalId)"
     @title-change="(terminalId, title) => emit('titleChange', terminalId, title)"
@@ -77,6 +79,7 @@ function onResizeEnd(event: { sizes: number[] }) {
         :node="child"
         :terminal-entries="terminalEntries"
         :terminal-exit-codes="terminalExitCodes"
+        :terminal-agent-status="terminalAgentStatus"
         @switch-terminal="(leafId, terminalId) => emit('switchTerminal', leafId, terminalId)"
         @close-terminal="(leafId, terminalId) => emit('closeTerminal', leafId, terminalId)"
         @title-change="(terminalId, title) => emit('titleChange', terminalId, title)"

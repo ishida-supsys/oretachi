@@ -9,9 +9,9 @@ mod settings;
 mod task_executor;
 mod terminal_session;
 
-use pty_manager::PtyManager;
+use pty_manager::{AiAgentChangedPayload, PtyManager};
 use settings::{AppSettings, SettingsManager};
-use tauri::{Manager, State};
+use tauri::{Emitter, Manager, State};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 // ─── PTY コマンド ────────────────────────────────────────────────────────────
@@ -41,6 +41,20 @@ fn pty_resize(state: State<PtyManager>, session_id: u32, rows: u16, cols: u16) -
 #[tauri::command]
 fn pty_kill(state: State<PtyManager>, session_id: u32) -> Result<(), String> {
     state.kill(session_id)
+}
+
+#[tauri::command]
+fn pty_set_ai_agent(
+    app_handle: tauri::AppHandle,
+    state: State<PtyManager>,
+    session_id: u32,
+    is_agent: bool,
+) -> Result<(), String> {
+    state.set_ai_agent(session_id, is_agent)?;
+    let mut sessions = std::collections::HashMap::new();
+    sessions.insert(session_id, is_agent);
+    let _ = app_handle.emit("pty-ai-agent-changed", AiAgentChangedPayload { sessions });
+    Ok(())
 }
 
 // ─── 設定コマンド ────────────────────────────────────────────────────────────
@@ -231,6 +245,7 @@ pub fn run() {
             pty_write,
             pty_resize,
             pty_kill,
+            pty_set_ai_agent,
             get_settings,
             save_settings,
             git_validate_repo,
@@ -263,6 +278,10 @@ pub fn run() {
             }
             let settings_manager = app.state::<SettingsManager>();
             settings_manager.init(app.handle());
+
+            // AIエージェントインジケーター用ポーリング起動
+            let pty_manager = app.state::<PtyManager>();
+            pty_manager.start_polling(app.handle().clone());
 
             // 通常モード: MCP サーバー起動 + ウィンドウ表示
             mcp_server::start_mcp_server(app.handle().clone());

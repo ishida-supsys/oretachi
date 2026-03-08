@@ -96,6 +96,9 @@ const terminalRefs = reactive(new Map<number, InstanceType<typeof TerminalView>>
 // terminalId → 直近コマンドの終了コード (null = 未実行)
 const terminalExitCodes = reactive(new Map<number, number>());
 
+// terminalId → AIエージェント稼働中フラグ
+const terminalAgentStatus = reactive(new Map<number, boolean>());
+
 // terminalId → サムネイル data URL
 const thumbnailUrls = reactive(new Map<number, string>());
 
@@ -285,6 +288,7 @@ async function onRemoveTerminal(worktreeId: string, terminalId: number) {
   }
   terminalWorktreeMap.delete(terminalId);
   terminalExitCodes.delete(terminalId);
+  terminalAgentStatus.delete(terminalId);
   removeTerminal(worktreeId, terminalId);
 
   // アクティブターミナルが削除された場合、ホームへ
@@ -581,13 +585,17 @@ async function executeAgentWorktree(code: AgentWorktreeTaskCode): Promise<void> 
     }
     const bytes = Array.from(new TextEncoder().encode(command));
     await invoke("pty_write", { sessionId: sid, data: bytes });
+    await invoke("pty_set_ai_agent", { sessionId: sid, isAgent: true });
   } else {
-    // メインウィンドウ: terminalRef 経由で書き込む（既にready済み）
+    // メインウィンドウ: terminalRef 経由で書き込む
     const termRef = terminalRefs.get(terminal.id);
     if (!termRef) {
       throw new Error(`ターミナルが見つかりません: ${wt.name}`);
     }
+    await termRef.waitForReady();
     await termRef.write(command);
+    const sid = termRef.sessionId;
+    if (sid != null) await invoke("pty_set_ai_agent", { sessionId: sid, isAgent: true });
   }
 }
 
@@ -1234,6 +1242,7 @@ onMounted(async () => {
     removeTerminal(worktreeId, terminalId);
     terminalWorktreeMap.delete(terminalId);
     thumbnailUrls.delete(terminalId);
+    terminalAgentStatus.delete(terminalId);
   });
 
   // サブウィンドウからのサムネイル受信
@@ -1252,6 +1261,27 @@ onMounted(async () => {
       updateTerminalTitle(worktreeId, terminalId, title);
     }
   );
+
+  // AIエージェントインジケーター: pty-ai-agent-changed を受信して terminalAgentStatus を更新
+  await listen<{ sessions: Record<number, boolean> }>("pty-ai-agent-changed", (event) => {
+    // sessionId → terminalId の逆引きマップを構築
+    const sessionToTerminal = new Map<number, number>();
+    for (const [tid, termRef] of terminalRefs) {
+      const sid = termRef?.sessionId;
+      if (sid != null) sessionToTerminal.set(sid, tid);
+    }
+    for (const [sessionIdStr, isAgent] of Object.entries(event.payload.sessions)) {
+      const sid = Number(sessionIdStr);
+      const tid = sessionToTerminal.get(sid);
+      if (tid != null) {
+        if (isAgent) {
+          terminalAgentStatus.set(tid, true);
+        } else {
+          terminalAgentStatus.delete(tid);
+        }
+      }
+    }
+  });
 
   // グローバルショートカット登録
   await registerGlobalShortcut();
@@ -1430,7 +1460,12 @@ onMounted(async () => {
         >
           <span>{{ tab.label }}</span>
           <span
-            v-if="terminalExitCodes.has(tab.terminalId)"
+            v-if="terminalAgentStatus.get(tab.terminalId)"
+            class="pi pi-microchip text-[10px] text-[#a6e3a1] shrink-0"
+            title="AI Agent"
+          />
+          <span
+            v-else-if="terminalExitCodes.has(tab.terminalId)"
             class="w-2 h-2 rounded-full inline-block shrink-0"
             :class="terminalExitCodes.get(tab.terminalId) === 0 ? 'bg-[#89b4fa]' : 'bg-[#f38ba8]'"
             :title="'Exit: ' + terminalExitCodes.get(tab.terminalId)"
