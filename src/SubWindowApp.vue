@@ -374,6 +374,9 @@ onMounted(async () => {
 
       for (const t of event.payload.terminals) {
         terminalEntries.set(t.id, { ...t });
+        if (t.isAiAgent) {
+          terminalAgentStatus.set(t.id, true);
+        }
       }
 
       const ids = event.payload.terminals.map((t) => t.id);

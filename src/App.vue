@@ -712,6 +712,7 @@ async function onMoveToSubWindow(worktreeId: string) {
       title: t.title,
       sessionId: sessionId ?? 0,
       snapshot,
+      isAiAgent: terminalAgentStatus.get(t.id) ?? false,
     };
   }).filter((t) => t.sessionId !== 0);
 
