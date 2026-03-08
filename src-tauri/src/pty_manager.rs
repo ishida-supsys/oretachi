@@ -4,6 +4,8 @@ use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
+const AI_AGENT_NAMES: &[&str] = &["claude", "gemini", "codex", "cline"];
+
 struct PtySession {
     writer: Box<dyn Write + Send>,
     master: Arc<Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>>,
@@ -11,11 +13,13 @@ struct PtySession {
     child_pid: Option<u32>,
     alive: Arc<Mutex<bool>>,
     watcher_handle: Option<std::thread::JoinHandle<()>>,
+    is_ai_agent: bool,
 }
 
 pub struct PtyManager {
-    sessions: Mutex<HashMap<u32, PtySession>>,
+    sessions: Arc<Mutex<HashMap<u32, PtySession>>>,
     next_id: Mutex<u32>,
+    polling_alive: Arc<Mutex<bool>>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -31,12 +35,191 @@ pub struct PtyExitPayload {
     pub session_id: u32,
 }
 
+#[derive(serde::Serialize, Clone)]
+pub struct AiAgentChangedPayload {
+    /// sessionId → isAiAgent のマップ
+    pub sessions: HashMap<u32, bool>,
+}
+
+/// 全プロセス一覧を (pid, parent_pid, name) のリストで返す
+fn scan_all_processes() -> Vec<(u32, u32, String)> {
+    #[cfg(target_os = "windows")]
+    {
+        let output = crate::process_utils::make_command("wmic")
+            .args(["process", "get", "Name,ProcessId,ParentProcessId", "/FORMAT:CSV"])
+            .output();
+        match output {
+            Ok(out) => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                let mut result = Vec::new();
+                for line in text.lines() {
+                    let line = line.trim();
+                    // Skip header and empty lines
+                    if line.is_empty() || line.starts_with("Node") {
+                        continue;
+                    }
+                    let parts: Vec<&str> = line.split(',').collect();
+                    // wmic CSV columns (alphabetical): Node, Name, ParentProcessId, ProcessId
+                    if parts.len() >= 4 {
+                        let name = parts[1].trim().to_string();
+                        if let (Ok(ppid), Ok(pid)) = (
+                            parts[2].trim().parse::<u32>(),
+                            parts[3].trim().parse::<u32>(),
+                        ) {
+                            if !name.is_empty() {
+                                result.push((pid, ppid, name));
+                            }
+                        }
+                    }
+                }
+                result
+            }
+            Err(_) => vec![],
+        }
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        let output = std::process::Command::new("ps")
+            .args(["axo", "pid,ppid,comm"])
+            .output();
+        match output {
+            Ok(out) => {
+                let text = String::from_utf8_lossy(&out.stdout);
+                let mut result = Vec::new();
+                for line in text.lines().skip(1) {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 3 {
+                        if let (Ok(pid), Ok(ppid)) = (
+                            parts[0].parse::<u32>(),
+                            parts[1].parse::<u32>(),
+                        ) {
+                            result.push((pid, ppid, parts[2].to_string()));
+                        }
+                    }
+                }
+                result
+            }
+            Err(_) => vec![],
+        }
+    }
+}
+
+/// 指定PIDのサブツリーにAIエージェントプロセスが含まれるか判定（最大depth段）
+fn has_ai_agent_in_subtree(
+    root_pid: u32,
+    children_map: &HashMap<u32, Vec<(u32, String)>>,
+    depth: u32,
+) -> bool {
+    if depth == 0 {
+        return false;
+    }
+    if let Some(children) = children_map.get(&root_pid) {
+        for (child_pid, child_name) in children {
+            let name_lower = child_name.to_lowercase();
+            let name_stem = name_lower.trim_end_matches(".exe");
+            if AI_AGENT_NAMES.iter().any(|&a| name_stem == a) {
+                return true;
+            }
+            if has_ai_agent_in_subtree(*child_pid, children_map, depth - 1) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 impl PtyManager {
     pub fn new() -> Self {
         PtyManager {
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
             next_id: Mutex::new(1),
+            polling_alive: Arc::new(Mutex::new(true)),
         }
+    }
+
+    /// AIエージェントフラグを明示的にセットする（executeAgentWorktree 用）
+    pub fn set_ai_agent(&self, session_id: u32, is_agent: bool) -> Result<(), String> {
+        let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+        if let Some(session) = sessions.get_mut(&session_id) {
+            session.is_ai_agent = is_agent;
+            Ok(())
+        } else {
+            Err(format!("Session {} not found", session_id))
+        }
+    }
+
+    /// バックグラウンドでポーリングスレッドを起動し、AIエージェント状態の変化をイベントで通知する
+    pub fn start_polling(&self, app_handle: AppHandle) {
+        let sessions_arc = self.sessions.clone();
+        let polling_alive = self.polling_alive.clone();
+
+        std::thread::spawn(move || {
+            let mut last_status: HashMap<u32, bool> = HashMap::new();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(10));
+
+                if !*polling_alive.lock().unwrap_or_else(|e| e.into_inner()) {
+                    break;
+                }
+
+                // セッション情報を取得
+                let session_pids: Vec<(u32, Option<u32>)> = {
+                    let sessions = match sessions_arc.lock() {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    sessions.iter().map(|(&id, s)| (id, s.child_pid)).collect()
+                };
+
+                if session_pids.is_empty() {
+                    last_status.clear();
+                    continue;
+                }
+
+                // プロセス一覧を一括取得して子プロセスマップを構築
+                let all_procs = scan_all_processes();
+                let mut children_map: HashMap<u32, Vec<(u32, String)>> = HashMap::new();
+                for (pid, ppid, name) in &all_procs {
+                    children_map.entry(*ppid).or_default().push((*pid, name.clone()));
+                }
+
+                let mut current_status: HashMap<u32, bool> = HashMap::new();
+                let mut new_statuses = Vec::new();
+
+                for (session_id, child_pid) in session_pids {
+                    let status = if let Some(pid) = child_pid {
+                        has_ai_agent_in_subtree(pid, &children_map, 4)
+                    } else {
+                        false
+                    };
+                    current_status.insert(session_id, status);
+                    new_statuses.push((session_id, status));
+                }
+
+                // 内部状態を更新
+                if let Ok(mut sessions) = sessions_arc.lock() {
+                    for (id, status) in &new_statuses {
+                        if let Some(session) = sessions.get_mut(id) {
+                            session.is_ai_agent = *status;
+                        }
+                    }
+                }
+
+                // 前回との差分を検出
+                let changed: HashMap<u32, bool> = current_status
+                    .iter()
+                    .filter(|(&id, &status)| last_status.get(&id) != Some(&status))
+                    .map(|(&id, &status)| (id, status))
+                    .collect();
+
+                if !changed.is_empty() {
+                    let _ = app_handle.emit("pty-ai-agent-changed", AiAgentChangedPayload { sessions: changed });
+                }
+
+                last_status = current_status;
+            }
+        });
     }
 
     pub fn spawn(
@@ -209,6 +392,7 @@ impl PtyManager {
             child_pid,
             alive,
             watcher_handle: Some(watcher_handle),
+            is_ai_agent: false,
         };
 
         self.sessions.lock().unwrap().insert(session_id, session);
@@ -291,6 +475,9 @@ impl PtyManager {
 
 impl Drop for PtyManager {
     fn drop(&mut self) {
+        if let Ok(mut alive) = self.polling_alive.lock() {
+            *alive = false;
+        }
         self.kill_all();
     }
 }

@@ -26,6 +26,7 @@ const props = defineProps<{
   leaf: FrameLeaf;
   terminalEntries: Map<number, SubTerminalEntry>;
   terminalExitCodes?: Map<number, number>;
+  terminalAgentStatus?: Map<number, boolean>;
 }>();
 
 const emit = defineEmits<{
@@ -226,7 +227,12 @@ function overlayStyle(zone: DropZone): Record<string, string> {
         >
           <span class="tab-title">{{ terminalEntries.get(tid)?.title ?? `Terminal ${tid}` }}</span>
           <span
-            v-if="terminalExitCodes?.has(tid)"
+            v-if="terminalAgentStatus?.get(tid)"
+            class="pi pi-microchip text-[10px] text-[#a6e3a1] shrink-0"
+            title="AI Agent"
+          />
+          <span
+            v-else-if="terminalExitCodes?.has(tid)"
             class="w-2 h-2 rounded-full inline-block shrink-0"
             :class="terminalExitCodes.get(tid) === 0 ? 'bg-[#89b4fa]' : 'bg-[#f38ba8]'"
           />

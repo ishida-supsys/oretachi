@@ -34,6 +34,9 @@ const initialized = ref(false);
 // terminalId → 直近コマンドの終了コード
 const terminalExitCodes = reactive(new Map<number, number>());
 
+// terminalId → AIエージェント稼働中フラグ
+const terminalAgentStatus = reactive(new Map<number, boolean>());
+
 // 自動承認フラグ
 const autoApproval = ref(false);
 
@@ -102,6 +105,7 @@ async function closeTerminal(leafId: string, terminalId: number) {
 
   terminalEntries.delete(terminalId);
   terminalExitCodes.delete(terminalId);
+  terminalAgentStatus.delete(terminalId);
   removeTerminalFromLeaf(leafId, terminalId);
   pruneTree();
 
@@ -327,6 +331,7 @@ let unlistenTryAutoApprove: UnlistenFn | null = null;
 let unlistenCancelAutoApprove: UnlistenFn | null = null;
 let unlistenSettingsChanged: UnlistenFn | null = null;
 let unlistenSessionSaveRequest: UnlistenFn | null = null;
+let unlistenAiAgentChanged: UnlistenFn | null = null;
 let thumbnailInterval: ReturnType<typeof setInterval> | null = null;
 let closingByMain = false;
 
@@ -336,6 +341,25 @@ onMounted(async () => {
 
   unlistenSettingsChanged = await listen("settings-changed", async () => {
     await loadSettings();
+  });
+
+  // AIエージェントインジケーター: sessionId → terminalId に変換して terminalAgentStatus を更新
+  unlistenAiAgentChanged = await listen<{ sessions: Record<number, boolean> }>("pty-ai-agent-changed", (event) => {
+    const sessionToTerminal = new Map<number, number>();
+    for (const [tid, entry] of terminalEntries) {
+      if (entry.sessionId) sessionToTerminal.set(entry.sessionId, tid);
+    }
+    for (const [sessionIdStr, isAgent] of Object.entries(event.payload.sessions)) {
+      const sid = Number(sessionIdStr);
+      const tid = sessionToTerminal.get(sid);
+      if (tid != null) {
+        if (isAgent) {
+          terminalAgentStatus.set(tid, true);
+        } else {
+          terminalAgentStatus.delete(tid);
+        }
+      }
+    }
   });
 
   const appWindow = getCurrentWindow();
@@ -578,6 +602,7 @@ onUnmounted(() => {
   unlistenCancelAutoApprove?.();
   unlistenSettingsChanged?.();
   unlistenSessionSaveRequest?.();
+  unlistenAiAgentChanged?.();
 });
 
 async function onCancelAiJudging() {
@@ -649,6 +674,7 @@ function getFirstLeafId(): string {
           :node="root"
           :terminal-entries="terminalEntries"
           :terminal-exit-codes="terminalExitCodes"
+          :terminal-agent-status="terminalAgentStatus"
           @switch-terminal="switchTerminal"
           @close-terminal="closeTerminal"
           @title-change="onTerminalTitleChange"
