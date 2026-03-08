@@ -539,10 +539,11 @@ async function executeAgentWorktree(code: AgentWorktreeTaskCode): Promise<void> 
     throw new Error(`ワークツリーが見つかりません: ${code.repository}/${code.branch}`);
   }
 
-  // 新しいターミナルを追加してエージェントを起動
-  await onAddTerminal(wt.id);
-  const terminal = wt.terminals[wt.terminals.length - 1];
-  const termRef = terminalRefs.get(terminal.id);
+  // 初期ターミナル（execScript完了後のプロンプトが出ている状態）を再利用
+  const terminal = wt.terminals[0];
+  if (!terminal) {
+    throw new Error(`ターミナルが見つかりません: ${wt.name}`);
+  }
 
   // 一時ファイルにプロンプトを書き出し
   const tempPath = await invoke<string>("write_temp_prompt", { content: code.prompt });
@@ -572,23 +573,21 @@ async function executeAgentWorktree(code: AgentWorktreeTaskCode): Promise<void> 
     command = `${agentCmd} "$(cat "${tempPath}")"; rm "${tempPath}"\r`;
   }
 
-  if (termRef) {
-    // PTY の起動完了 (sessionId がセットされるまで) を待ってからコマンドを送信
-    await termRef.waitForReady();
-    await termRef.write(command);
-  } else if (isDetached(wt.id)) {
+  if (isDetached(wt.id)) {
     // サブウィンドウに移動済みの場合: pty_write で直接PTYに書き込む
-    // サブウィンドウ側の TerminalView は pty-output イベントで自動的に表示する
     const sid = getDetachedSessionId(terminal.id);
     if (sid === null) {
       throw new Error(`セッションIDが見つかりません: ${wt.name}`);
     }
-    // シェルの初期化完了を待つ
-    await new Promise((resolve) => setTimeout(resolve, 500));
     const bytes = Array.from(new TextEncoder().encode(command));
     await invoke("pty_write", { sessionId: sid, data: bytes });
   } else {
-    throw new Error(`ターミナルが見つかりません: ${wt.name}`);
+    // メインウィンドウ: terminalRef 経由で書き込む（既にready済み）
+    const termRef = terminalRefs.get(terminal.id);
+    if (!termRef) {
+      throw new Error(`ターミナルが見つかりません: ${wt.name}`);
+    }
+    await termRef.write(command);
   }
 }
 
