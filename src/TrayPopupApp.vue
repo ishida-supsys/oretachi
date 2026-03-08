@@ -9,6 +9,9 @@ import { useSettings } from "./composables/useSettings";
 import { useHotkeyListener } from "./composables/useHotkeys";
 import type { TrayWorktreeData } from "./composables/useTrayPopup";
 import type { FrameNode } from "./types/frame";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 
 interface TrayTerminalEntry {
   id: number;
@@ -353,7 +356,7 @@ onUnmounted(() => {
       <div class="flex items-center gap-3 pointer-events-none">
         <span class="pi pi-bell text-[#cba6f7]" />
         <span class="text-sm font-semibold text-[#cba6f7]">
-          {{ currentWorktree?.worktreeName ?? '通知' }}
+          {{ currentWorktree?.worktreeName ?? t('tray.notification') }}
         </span>
         <span
           v-if="allWorktrees.length > 1"
@@ -364,7 +367,7 @@ onUnmounted(() => {
       </div>
       <button
         class="pointer-events-auto w-6 h-6 flex items-center justify-center rounded hover:bg-[#313244] text-[#6c7086] hover:text-[#f38ba8] transition-colors"
-        title="閉じる"
+        :title="t('tray.close')"
         @click="onClose"
       >
         <span class="pi pi-times text-xs" />
@@ -374,7 +377,7 @@ onUnmounted(() => {
     <!-- コンテンツ -->
     <div class="flex-1 min-h-0 overflow-hidden">
       <div v-if="!initialized" class="flex items-center justify-center h-full text-[#6c7086] text-sm">
-        読み込み中...
+        {{ t('tray.loading') }}
       </div>
 
       <FrameContainer
@@ -393,7 +396,7 @@ onUnmounted(() => {
       />
 
       <div v-else-if="initialized" class="flex items-center justify-center h-full text-[#6c7086] text-sm">
-        ターミナルがありません
+        {{ t('tray.noTerminals') }}
       </div>
     </div>
 
@@ -404,13 +407,13 @@ onUnmounted(() => {
         class="px-4 py-1.5 text-sm rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
         @click="onNext"
       >
-        次へ →
+        {{ t('tray.next') }}
       </button>
       <button
         class="px-4 py-1.5 text-sm rounded bg-[#a6e3a1] hover:bg-[#89c98a] text-[#1e1e2e] font-semibold transition-colors"
         @click="onDone"
       >
-        完了 ✓
+        {{ t('tray.done') }}
       </button>
     </div>
 

@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 
 defineProps<{
   worktreeName: string;
@@ -29,17 +32,17 @@ function confirm() {
 <template>
   <div class="dialog-overlay" @click.self="emit('cancel')">
     <div class="dialog">
-      <h3 class="dialog-title">ワークツリー「{{ worktreeName }}」を削除</h3>
+      <h3 class="dialog-title">{{ t('worktree.removeTitle', { name: worktreeName }) }}</h3>
 
       <div class="branch-info">
-        <span class="label">ブランチ:</span>
+        <span class="label">{{ t('worktree.branchLabel') }}:</span>
         <span class="branch-name">{{ branchName }}</span>
       </div>
 
       <div class="field">
-        <label class="label">マージ先ブランチ（任意）</label>
+        <label class="label">{{ t('worktree.mergeTo') }}</label>
         <select v-model="mergeTo" class="select">
-          <option value="">マージしない</option>
+          <option value="">{{ t('worktree.noMerge') }}</option>
           <option v-for="b in branches" :key="b" :value="b">{{ b }}</option>
         </select>
       </div>
@@ -50,16 +53,16 @@ function confirm() {
             v-model="deleteBranch"
             type="checkbox"
           />
-          ブランチを削除する
+          {{ t('worktree.deleteBranch') }}
         </label>
       </div>
 
-      <p class="warn">⚠ git worktree remove が実行されます</p>
-      <p v-if="forceBranch" class="warn warn-force">⚠ マージ先未指定のため git branch -D で強制削除されます</p>
+      <p class="warn">{{ t('worktree.removeWarning') }}</p>
+      <p v-if="forceBranch" class="warn warn-force">{{ t('worktree.forceDeleteWarning') }}</p>
 
       <div class="dialog-actions">
-        <button class="btn-cancel" @click="emit('cancel')">キャンセル</button>
-        <button class="btn-danger" @click="confirm">削除</button>
+        <button class="btn-cancel" @click="emit('cancel')">{{ t('common.cancel') }}</button>
+        <button class="btn-danger" @click="confirm">{{ t('common.delete') }}</button>
       </div>
     </div>
   </div>

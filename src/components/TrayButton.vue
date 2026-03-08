@@ -1,4 +1,8 @@
 <script setup lang="ts">
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
+
 defineProps<{
   totalCount: number;
 }>();
@@ -13,7 +17,7 @@ defineEmits<{
     v-if="totalCount > 0"
     class="tray-btn"
     :class="{ 'tray-btn--pulse': totalCount > 0 }"
-    :title="`通知: ${totalCount} 件`"
+    :title="t('trayButton.tooltip', { count: totalCount })"
     @click="$emit('click')"
   >
     <span class="pi pi-bell" style="font-size: 20px;" />

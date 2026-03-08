@@ -10,6 +10,10 @@ import { useSettings } from "../composables/useSettings";
 import { matchesHotkey } from "../composables/useHotkeys";
 import { useTerminalSearch } from "../composables/useTerminalSearch";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
+import { useI18n } from "vue-i18n";
+import { i18n } from "../i18n";
+
+const { t } = useI18n();
 
 const props = withDefaults(
   defineProps<{
@@ -212,7 +216,7 @@ async function startPty() {
       batcher.enqueue(data);
     },
     () => {
-      terminal?.write("\r\n\x1b[33m[プロセスが終了しました]\x1b[0m\r\n");
+      terminal?.write(`\r\n\x1b[33m[${i18n.global.t("terminal.processExited")}]\x1b[0m\r\n`);
       emit("exit");
     },
     props.shell,
@@ -236,7 +240,7 @@ async function attachPty(id: number, snapshot?: string) {
       batcher.enqueue(data);
     },
     () => {
-      terminal?.write("\r\n\x1b[33m[プロセスが終了しました]\x1b[0m\r\n");
+      terminal?.write(`\r\n\x1b[33m[${i18n.global.t("terminal.processExited")}]\x1b[0m\r\n`);
       emit("exit");
     }
   );
@@ -344,7 +348,7 @@ defineExpose({
           v-model="search.searchQuery.value"
           class="search-input"
           type="text"
-          placeholder="検索..."
+          :placeholder="t('terminal.searchPlaceholder')"
           @input="search.onSearchInput"
           @keydown="search.onSearchKeydown"
         />
@@ -352,13 +356,13 @@ defineExpose({
           {{ search.searchCountText.value }}
         </span>
       </div>
-      <button class="search-btn" title="前へ (Shift+Enter)" @click="search.findPrevious">
+      <button class="search-btn" :title="t('terminal.prevTitle')" @click="search.findPrevious">
         <span class="pi pi-chevron-up" />
       </button>
-      <button class="search-btn" title="次へ (Enter)" @click="search.findNext">
+      <button class="search-btn" :title="t('terminal.nextTitle')" @click="search.findNext">
         <span class="pi pi-chevron-down" />
       </button>
-      <button class="search-btn" title="閉じる (Esc)" @click="search.closeSearchBar">
+      <button class="search-btn" :title="t('terminal.closeTitle')" @click="search.closeSearchBar">
         <span class="pi pi-times" />
       </button>
     </div>

@@ -1,6 +1,7 @@
 import { ref, computed, nextTick } from "vue";
 import { SearchAddon } from "@xterm/addon-search";
 import type { Terminal } from "@xterm/xterm";
+import { i18n } from "../i18n";
 
 const SEARCH_DECORATIONS = {
   matchBackground: "#585b70",
@@ -21,10 +22,11 @@ export function useTerminalSearch(getTerminal: () => Terminal | null) {
   const searchInputRef = ref<HTMLInputElement | null>(null);
 
   const searchCountText = computed(() => {
+    const t = i18n.global.t;
     if (!searchQuery.value) return "";
-    if (searchResultCount.value === 0) return "0件";
-    if (searchResultIndex.value < 0) return `${searchResultCount.value}件`;
-    return `${searchResultIndex.value + 1} / ${searchResultCount.value}`;
+    if (searchResultCount.value === 0) return t("search.noResults");
+    if (searchResultIndex.value < 0) return t("search.results", { count: searchResultCount.value });
+    return t("search.position", { current: searchResultIndex.value + 1, total: searchResultCount.value });
   });
 
   function loadAddon(terminal: Terminal): void {

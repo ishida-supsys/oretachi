@@ -64,4 +64,5 @@ export interface AppSettings {
   focusMainOnEmptyTray?: boolean;
   aiAgent?: AiAgentSettings;
   worktreeDefaults?: WorktreeDefaults;
+  locale?: string;
 }

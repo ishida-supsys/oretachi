@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { platform } from "@tauri-apps/plugin-os";
 import type { AppSettings, HotkeyBinding, HotkeySettings } from "../types/settings";
+import { i18n } from "../i18n";
 
 const isMac = platform() === "macos";
 
@@ -79,6 +80,9 @@ async function loadSettings() {
     } catch (e) {
       console.error("マイグレーション保存に失敗:", e);
     }
+  }
+  if (loaded.locale) {
+    i18n.global.locale.value = loaded.locale as "en" | "ja";
   }
   settings.value = loaded;
 }

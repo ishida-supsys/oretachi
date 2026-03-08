@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
 import type { Repository, WorktreeEntry } from "../types/settings";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 
 const props = defineProps<{
   repositories: Repository[];
@@ -63,18 +66,18 @@ function confirm() {
 <template>
   <div class="dialog-overlay" @click.self="!submitting && emit('cancel')">
     <div class="dialog">
-      <h3 class="dialog-title">ワークツリーを追加</h3>
+      <h3 class="dialog-title">{{ t('worktree.addTitle') }}</h3>
 
       <!-- リポジトリ選択 -->
       <div class="field">
-        <label class="label">リポジトリ</label>
+        <label class="label">{{ t('worktree.repo') }}</label>
         <select
           v-model="selectedRepoId"
           class="select"
           :disabled="submitting"
           @change="prefill"
         >
-          <option value="">選択してください</option>
+          <option value="">{{ t('worktree.repoPlaceholder') }}</option>
           <option
             v-for="repo in repositories"
             :key="repo.id"
@@ -87,22 +90,22 @@ function confirm() {
 
       <!-- ワークツリー名 -->
       <div class="field">
-        <label class="label">ワークツリー名</label>
+        <label class="label">{{ t('worktree.name') }}</label>
         <input
           v-model="worktreeName"
           class="input"
-          placeholder="例: my-feature-a3f2"
+          :placeholder="t('worktree.namePlaceholder')"
           :disabled="submitting"
         />
       </div>
 
       <!-- ブランチ名 -->
       <div class="field">
-        <label class="label">ブランチ名</label>
+        <label class="label">{{ t('worktree.branch') }}</label>
         <input
           v-model="branchName"
           class="input"
-          placeholder="例: worktree/my-feature"
+          :placeholder="t('worktree.branchPlaceholder')"
           :disabled="submitting"
           @input="branchManuallyEdited = true"
         />
@@ -110,25 +113,25 @@ function confirm() {
 
       <!-- パス（自動） -->
       <div class="field">
-        <label class="label">作成先パス（自動）</label>
+        <label class="label">{{ t('worktree.path') }}</label>
         <input class="input readonly" :value="worktreePath" readonly />
       </div>
 
       <!-- ボタン -->
       <div class="dialog-actions">
-        <button class="btn-cancel" :disabled="submitting" @click="emit('cancel')">キャンセル</button>
+        <button class="btn-cancel" :disabled="submitting" @click="emit('cancel')">{{ t('common.cancel') }}</button>
         <button
           class="btn-confirm"
           :disabled="!selectedRepo || !worktreeName || !worktreeBaseDir || submitting"
           @click="confirm"
         >
           <span v-if="submitting" class="pi pi-spinner pi-spin" style="margin-right: 6px;" />
-          {{ submitting ? '作成中...' : '作成' }}
+          {{ submitting ? t('worktree.creating') : t('worktree.create') }}
         </button>
       </div>
 
       <p v-if="!worktreeBaseDir" class="warn">
-        設定でワークツリー追加先ディレクトリを設定してください。
+        {{ t('worktree.baseDirNotSet') }}
       </p>
     </div>
   </div>

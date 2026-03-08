@@ -5,6 +5,10 @@ import { open, message } from "@tauri-apps/plugin-dialog";
 import { useSettings } from "../composables/useSettings";
 import HotkeyInput from "./HotkeyInput.vue";
 import type { AiAgentKind } from "../types/settings";
+import { useI18n } from "vue-i18n";
+import { i18n } from "../i18n";
+
+const { t } = useI18n();
 
 const { settings, scheduleSave } = useSettings();
 
@@ -86,11 +90,11 @@ async function addRepository() {
   try {
     const valid = await invoke<boolean>("git_validate_repo", { path: selected });
     if (!valid) {
-      await message("選択したフォルダは git リポジトリではありません。", { kind: "error" });
+      await message(i18n.global.t("error.notARepo"), { kind: "error" });
       return;
     }
   } catch {
-    await message("選択したフォルダは git リポジトリではありません。", { kind: "error" });
+    await message(i18n.global.t("error.notARepo"), { kind: "error" });
     return;
   }
 
@@ -98,7 +102,7 @@ async function addRepository() {
 
   // 重複チェック
   if (settings.value.repositories.some((r) => r.path === selected)) {
-    await message("このリポジトリはすでに登録されています。", { kind: "warning" });
+    await message(i18n.global.t("error.alreadyRegistered"), { kind: "warning" });
     return;
   }
 
@@ -143,30 +147,50 @@ function clearExecScript(repoId: string) {
 
 <template>
   <div class="settings-view">
-    <h2 class="section-title">設定</h2>
+    <h2 class="section-title">{{ t('settings.title') }}</h2>
+
+    <!-- Language / 言語 -->
+    <div class="field-group">
+      <label class="field-label">Language / 言語</label>
+      <div class="row-input row-input--inline">
+        <select
+          class="text-input select-input"
+          :value="settings.locale ?? 'en'"
+          @change="(e) => {
+            const v = (e.target as HTMLSelectElement).value;
+            settings.locale = v;
+            i18n.global.locale.value = v as 'en' | 'ja';
+            scheduleSave();
+          }"
+        >
+          <option value="en">English</option>
+          <option value="ja">日本語</option>
+        </select>
+      </div>
+    </div>
 
     <!-- MCP サーバー -->
     <div class="field-group">
-      <label class="field-label">MCP サーバー</label>
+      <label class="field-label">{{ t('settings.mcp.label') }}</label>
       <div class="mcp-row">
         <span
           class="mcp-badge"
           :class="mcpStatus?.running ? 'badge--running' : 'badge--stopped'"
         >
-          {{ mcpStatus === null ? '取得中...' : mcpStatus.running ? '稼働中' : '停止' }}
+          {{ mcpStatus === null ? t('settings.mcp.loading') : mcpStatus.running ? t('settings.mcp.running') : t('settings.mcp.stopped') }}
         </span>
         <span v-if="mcpStatus?.running && mcpStatus?.port" class="mcp-port">
-          ポート: {{ mcpStatus.port }}
+          {{ t('settings.mcp.port', { port: mcpStatus.port }) }}
         </span>
         <button class="btn-secondary" :disabled="restarting" @click="restartMcp">
-          {{ restarting ? '再起動中...' : '再起動' }}
+          {{ restarting ? t('settings.mcp.restarting') : t('settings.mcp.restart') }}
         </button>
       </div>
     </div>
 
     <!-- ウィンドウ設定 -->
     <div class="field-group">
-      <label class="field-label">ウィンドウ</label>
+      <label class="field-label">{{ t('settings.window.label') }}</label>
       <div class="row-input row-input--inline">
         <input
           id="always-on-top"
@@ -175,7 +199,7 @@ function clearExecScript(repoId: string) {
           :checked="settings.alwaysOnTop"
           @change="(e) => { settings.alwaysOnTop = (e.target as HTMLInputElement).checked; scheduleSave(); }"
         />
-        <label for="always-on-top" class="inline-label toggle-label">常に手前に表示</label>
+        <label for="always-on-top" class="inline-label toggle-label">{{ t('settings.window.alwaysOnTop') }}</label>
       </div>
       <div class="row-input row-input--inline mt-8">
         <input
@@ -185,7 +209,7 @@ function clearExecScript(repoId: string) {
           :checked="settings.enableOsNotification"
           @change="(e) => { settings.enableOsNotification = (e.target as HTMLInputElement).checked; scheduleSave(); }"
         />
-        <label for="enable-os-notification" class="inline-label toggle-label">通知時にOSのデスクトップ通知を表示</label>
+        <label for="enable-os-notification" class="inline-label toggle-label">{{ t('settings.window.osNotification') }}</label>
       </div>
       <div class="row-input row-input--inline mt-8">
         <input
@@ -195,15 +219,15 @@ function clearExecScript(repoId: string) {
           :checked="settings.focusMainOnEmptyTray"
           @change="(e) => { settings.focusMainOnEmptyTray = (e.target as HTMLInputElement).checked; scheduleSave(); }"
         />
-        <label for="focus-main-on-empty-tray" class="inline-label toggle-label">通知がない時にトレイホットキーでメインウィンドウにフォーカス</label>
+        <label for="focus-main-on-empty-tray" class="inline-label toggle-label">{{ t('settings.window.focusMainOnEmptyTray') }}</label>
       </div>
     </div>
 
     <!-- 自動承認 -->
     <div class="field-group">
-      <label class="field-label">自動承認</label>
+      <label class="field-label">{{ t('settings.autoApproval.label') }}</label>
       <div class="row-input row-input--inline">
-        <span class="inline-label">AIエージェント</span>
+        <span class="inline-label">{{ t('settings.autoApproval.aiAgent') }}</span>
         <select
           class="text-input select-input"
           :value="settings.aiAgent?.approvalAgent ?? ''"
@@ -214,22 +238,22 @@ function clearExecScript(repoId: string) {
             scheduleSave();
           }"
         >
-          <option value="">(未設定)</option>
+          <option value="">{{ t('settings.autoApproval.notSet') }}</option>
           <option
             v-for="kind in ALL_AGENT_KINDS"
             :key="kind"
             :value="kind"
             :disabled="!isAgentDetected(kind)"
-          >{{ AI_AGENT_LABELS[kind] }}{{ !isAgentDetected(kind) ? ' (未検出)' : '' }}</option>
+          >{{ AI_AGENT_LABELS[kind] }}{{ !isAgentDetected(kind) ? t('settings.autoApproval.notDetected') : '' }}</option>
         </select>
       </div>
     </div>
 
     <!-- ターミナル設定 -->
     <div class="field-group">
-      <label class="field-label">ターミナル</label>
+      <label class="field-label">{{ t('settings.terminal.label') }}</label>
       <div class="row-input row-input--inline">
-        <span class="inline-label">文字サイズ</span>
+        <span class="inline-label">{{ t('settings.terminal.fontSize') }}</span>
         <input
           class="text-input number-input"
           type="number"
@@ -241,11 +265,11 @@ function clearExecScript(repoId: string) {
         <span class="unit-label">px</span>
       </div>
       <div class="row-input row-input--inline mt-8">
-        <span class="inline-label">デフォルトシェル</span>
+        <span class="inline-label">{{ t('settings.terminal.defaultShell') }}</span>
         <input
           class="text-input shell-input"
           :value="settings.terminal.shell ?? ''"
-          placeholder="空欄 = システムデフォルト"
+          :placeholder="t('settings.terminal.shellPlaceholder')"
           @change="(e) => { const v = (e.target as HTMLInputElement).value.trim(); settings.terminal.shell = v || undefined; scheduleSave(); }"
         />
       </div>
@@ -253,21 +277,21 @@ function clearExecScript(repoId: string) {
 
     <!-- ワークツリー追加先ディレクトリ -->
     <div class="field-group">
-      <label class="field-label">ワークツリーの追加先ディレクトリ</label>
+      <label class="field-label">{{ t('settings.worktreeBaseDir.label') }}</label>
       <div class="row-input">
         <input
           class="text-input"
           :value="settings.worktreeBaseDir"
           readonly
-          placeholder="未設定"
+          :placeholder="t('common.notConfigured')"
         />
-        <button class="btn-secondary" @click="selectWorktreeBaseDir">選択</button>
+        <button class="btn-secondary" @click="selectWorktreeBaseDir">{{ t('settings.worktreeBaseDir.select') }}</button>
       </div>
     </div>
 
     <!-- ワークツリー追加時のデフォルト動作 -->
     <div class="field-group">
-      <label class="field-label">ワークツリー追加時のデフォルト動作</label>
+      <label class="field-label">{{ t('settings.worktreeDefaults.label') }}</label>
       <div class="row-input row-input--inline">
         <input
           id="worktree-default-subwindow"
@@ -280,7 +304,7 @@ function clearExecScript(repoId: string) {
             scheduleSave();
           }"
         />
-        <label for="worktree-default-subwindow" class="inline-label toggle-label">サブウィンドウで開く</label>
+        <label for="worktree-default-subwindow" class="inline-label toggle-label">{{ t('settings.worktreeDefaults.openInSubWindow') }}</label>
       </div>
       <div class="row-input row-input--inline mt-8">
         <input
@@ -294,13 +318,13 @@ function clearExecScript(repoId: string) {
             scheduleSave();
           }"
         />
-        <label for="worktree-default-auto-approval" class="inline-label toggle-label">自動承認を有効にする</label>
+        <label for="worktree-default-auto-approval" class="inline-label toggle-label">{{ t('settings.worktreeDefaults.enableAutoApproval') }}</label>
       </div>
     </div>
 
     <!-- ホットキー設定 -->
     <div class="field-group">
-      <label class="field-label">ホットキー</label>
+      <label class="field-label">{{ t('settings.hotkeys.label') }}</label>
       <div class="row-input row-input--inline">
         <input
           id="auto-assign-hotkey"
@@ -309,18 +333,18 @@ function clearExecScript(repoId: string) {
           :checked="settings.autoAssignHotkey"
           @change="(e) => { settings.autoAssignHotkey = (e.target as HTMLInputElement).checked; scheduleSave(); }"
         />
-        <label for="auto-assign-hotkey" class="inline-label toggle-label">ホットキー自動割り当て</label>
+        <label for="auto-assign-hotkey" class="inline-label toggle-label">{{ t('settings.hotkeys.autoAssign') }}</label>
       </div>
       <table v-if="settings.hotkeys" class="hotkey-table">
         <thead>
           <tr>
-            <th class="hotkey-th">操作</th>
-            <th class="hotkey-th">キー</th>
+            <th class="hotkey-th">{{ t('settings.hotkeys.action') }}</th>
+            <th class="hotkey-th">{{ t('settings.hotkeys.key') }}</th>
           </tr>
         </thead>
         <tbody>
           <tr>
-            <td class="hotkey-td-label">Tray Popup 表示 (グローバル)</td>
+            <td class="hotkey-td-label">{{ t('settings.hotkeys.trayPopup') }}</td>
             <td class="hotkey-td-input">
               <HotkeyInput
                 :model-value="settings.hotkeys.globalTrayPopup"
@@ -329,7 +353,7 @@ function clearExecScript(repoId: string) {
             </td>
           </tr>
           <tr>
-            <td class="hotkey-td-label">ターミナル切り替え: 次</td>
+            <td class="hotkey-td-label">{{ t('settings.hotkeys.terminalNext') }}</td>
             <td class="hotkey-td-input">
               <HotkeyInput
                 :model-value="settings.hotkeys.terminalNext"
@@ -338,7 +362,7 @@ function clearExecScript(repoId: string) {
             </td>
           </tr>
           <tr>
-            <td class="hotkey-td-label">ターミナル切り替え: 前</td>
+            <td class="hotkey-td-label">{{ t('settings.hotkeys.terminalPrev') }}</td>
             <td class="hotkey-td-input">
               <HotkeyInput
                 :model-value="settings.hotkeys.terminalPrev"
@@ -347,7 +371,7 @@ function clearExecScript(repoId: string) {
             </td>
           </tr>
           <tr>
-            <td class="hotkey-td-label">ターミナル追加</td>
+            <td class="hotkey-td-label">{{ t('settings.hotkeys.terminalAdd') }}</td>
             <td class="hotkey-td-input">
               <HotkeyInput
                 :model-value="settings.hotkeys.terminalAdd"
@@ -356,7 +380,7 @@ function clearExecScript(repoId: string) {
             </td>
           </tr>
           <tr>
-            <td class="hotkey-td-label">ターミナルを閉じる</td>
+            <td class="hotkey-td-label">{{ t('settings.hotkeys.terminalClose') }}</td>
             <td class="hotkey-td-input">
               <HotkeyInput
                 :model-value="settings.hotkeys.terminalClose"
@@ -365,7 +389,7 @@ function clearExecScript(repoId: string) {
             </td>
           </tr>
           <tr>
-            <td class="hotkey-td-label">次の通知へ (トレイ)</td>
+            <td class="hotkey-td-label">{{ t('settings.hotkeys.trayNext') }}</td>
             <td class="hotkey-td-input">
               <HotkeyInput
                 :model-value="settings.hotkeys.trayNext"
@@ -374,7 +398,7 @@ function clearExecScript(repoId: string) {
             </td>
           </tr>
           <tr>
-            <td class="hotkey-td-label">メインウィンドウにフォーカス (サブウィンドウ用)</td>
+            <td class="hotkey-td-label">{{ t('settings.hotkeys.focusMainWindow') }}</td>
             <td class="hotkey-td-input">
               <HotkeyInput
                 :model-value="settings.hotkeys.focusMainWindow"
@@ -383,7 +407,7 @@ function clearExecScript(repoId: string) {
             </td>
           </tr>
           <tr>
-            <td class="hotkey-td-label">タスク追加</td>
+            <td class="hotkey-td-label">{{ t('settings.hotkeys.addTask') }}</td>
             <td class="hotkey-td-input">
               <HotkeyInput
                 :model-value="settings.hotkeys.addTask"
@@ -398,15 +422,15 @@ function clearExecScript(repoId: string) {
     <!-- リポジトリ一覧 -->
     <div class="field-group">
       <div class="field-header">
-        <label class="field-label">リポジトリ一覧</label>
-        <button class="btn-primary" @click="addRepository">+ 追加</button>
+        <label class="field-label">{{ t('settings.repositories.label') }}</label>
+        <button class="btn-primary" @click="addRepository">{{ t('settings.repositories.add') }}</button>
       </div>
       <div class="repo-list">
         <div
           v-if="settings.repositories.length === 0"
           class="empty-state"
         >
-          リポジトリが登録されていません
+          {{ t('settings.repositories.empty') }}
         </div>
         <div
           v-for="repo in settings.repositories"
@@ -416,22 +440,22 @@ function clearExecScript(repoId: string) {
           <div class="repo-row-main">
             <span class="repo-name">{{ repo.name }}</span>
             <span class="repo-path">{{ repo.path }}</span>
-            <button class="btn-remove" :disabled="hasWorktrees(repo.id)" :title="hasWorktrees(repo.id) ? 'ワークツリーが存在するため削除できません' : undefined" @click="removeRepository(repo.id)">×</button>
+            <button class="btn-remove" :disabled="hasWorktrees(repo.id)" :title="hasWorktrees(repo.id) ? t('settings.repositories.hasWorktrees') : undefined" @click="removeRepository(repo.id)">×</button>
           </div>
           <div class="repo-row-script">
-            <span class="script-label">実行スクリプト</span>
+            <span class="script-label">{{ t('settings.repositories.execScript') }}</span>
             <input
               class="text-input script-input"
               :value="repo.execScript ?? ''"
               readonly
-              placeholder="未設定"
+              :placeholder="t('common.notConfigured')"
             />
-            <button class="btn-secondary" @click="selectExecScript(repo.id)">選択</button>
+            <button class="btn-secondary" @click="selectExecScript(repo.id)">{{ t('settings.worktreeBaseDir.select') }}</button>
             <button
               v-if="repo.execScript"
               class="btn-secondary"
               @click="clearExecScript(repo.id)"
-            >クリア</button>
+            >{{ t('common.clear') }}</button>
           </div>
         </div>
       </div>

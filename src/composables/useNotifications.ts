@@ -6,6 +6,7 @@ import {
   sendNotification,
   onAction,
 } from "@tauri-apps/plugin-notification";
+import { i18n } from "../i18n";
 
 interface NotificationEntry {
   count: number;
@@ -28,7 +29,7 @@ export async function sendOsNotification(worktreeName: string) {
     permitted = permission === "granted";
   }
   if (permitted) {
-    sendNotification({ title: "Worktree通知", body: worktreeName, extra: { worktreeName } });
+    sendNotification({ title: i18n.global.t("notification.title"), body: worktreeName, extra: { worktreeName } });
   }
 }
 

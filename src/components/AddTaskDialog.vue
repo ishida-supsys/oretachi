@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import { ref } from "vue";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 
 const emit = defineEmits<{
   confirm: [prompt: string];
@@ -25,29 +28,29 @@ function onKeydown(e: KeyboardEvent) {
 <template>
   <div class="dialog-overlay" @click.self="emit('cancel')">
     <div class="dialog">
-      <h3 class="dialog-title">タスクを追加</h3>
+      <h3 class="dialog-title">{{ t('task.addTitle') }}</h3>
 
       <div class="field">
-        <label class="label">プロンプト</label>
+        <label class="label">{{ t('task.prompt') }}</label>
         <textarea
           v-model="promptText"
           class="textarea"
-          placeholder="例: https://github.com/owner/repo/issues/123 を実装してください"
+          :placeholder="t('task.promptPlaceholder')"
           rows="5"
           autofocus
           @keydown="onKeydown"
         />
-        <p class="hint">Ctrl+Enter で送信</p>
+        <p class="hint">{{ t('task.submitHint') }}</p>
       </div>
 
       <div class="dialog-actions">
-        <button class="btn-cancel" @click="emit('cancel')">キャンセル</button>
+        <button class="btn-cancel" @click="emit('cancel')">{{ t('common.cancel') }}</button>
         <button
           class="btn-confirm"
           :disabled="!promptText.trim()"
           @click="confirm"
         >
-          追加
+          {{ t('task.add') }}
         </button>
       </div>
     </div>

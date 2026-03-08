@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import type { Worktree } from "../types/worktree";
 import type { TaskItem } from "../types/task";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 import WorktreeCard from "./WorktreeCard.vue";
 import TaskCard from "./TaskCard.vue";
 import { useMasonryLayout } from "../composables/useMasonryLayout";
@@ -64,19 +67,19 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
 <template>
   <div class="home-view">
     <div class="home-header">
-      <span class="home-title">ワークツリー</span>
+      <span class="home-title">{{ t('worktree.title') }}</span>
       <div class="header-actions">
-        <button class="btn-icon-header" title="すべてのサブウィンドウを呼び出す" @click="emit('focusAllSubWindows')">
+        <button class="btn-icon-header" :title="t('worktree.focusAllSubWindows')" @click="emit('focusAllSubWindows')">
           <i class="pi pi-window-maximize"></i>
         </button>
-        <button class="btn-icon-header" title="ワークツリー追加" @click="emit('addWorktree')">
+        <button class="btn-icon-header" :title="t('worktree.addButton')" @click="emit('addWorktree')">
           <i class="pi pi-plus"></i>
         </button>
       </div>
     </div>
 
     <div v-if="worktrees.length === 0" class="empty-state">
-      ワークツリーがありません。右上の <i class="pi pi-plus"></i> ボタンで作成してください。
+      {{ t('worktree.empty') }}
     </div>
 
     <div ref="containerRef" class="worktree-list">
@@ -110,9 +113,9 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
     <!-- タスク -->
     <template v-if="tasks.length > 0">
       <div class="section-header">
-        <span class="home-title">タスク</span>
+        <span class="home-title">{{ t('task.title') }}</span>
         <div class="header-actions">
-          <button class="btn-icon-header" title="タスク追加" @click="emit('addTask')">
+          <button class="btn-icon-header" :title="t('task.addTaskButton')" @click="emit('addTask')">
             <i class="pi pi-plus"></i>
           </button>
         </div>
@@ -135,7 +138,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
       <div class="task-add-bar">
         <button class="btn-add-task" @click="emit('addTask')">
           <i class="pi pi-bolt"></i>
-          タスクを追加
+          {{ t('task.addTaskButton') }}
         </button>
       </div>
     </template>

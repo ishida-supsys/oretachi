@@ -1,5 +1,8 @@
 <script setup lang="ts">
 import type { TaskItem } from "../types/task";
+import { useI18n } from "vue-i18n";
+
+const { t } = useI18n();
 
 defineProps<{
   task: TaskItem;
@@ -11,18 +14,13 @@ const emit = defineEmits<{
 
 function stepLabel(code: TaskItem["steps"][number]["code"]): string {
   if (code.type === "add_worktree") {
-    return `WT追加: ${code.repository}/${code.branch}`;
+    return `${t("task.stepAddWorktree")}: ${code.repository}/${code.branch}`;
   }
-  return `エージェント: ${code.repository}/${code.branch}`;
+  return `${t("task.stepAgent")}: ${code.repository}/${code.branch}`;
 }
 
 function statusLabel(status: TaskItem["status"]): string {
-  switch (status) {
-    case "generating": return "生成中";
-    case "executing": return "実行中";
-    case "completed": return "完了";
-    case "error": return "エラー";
-  }
+  return t(`task.status.${status}`);
 }
 </script>
 
@@ -35,7 +33,7 @@ function statusLabel(status: TaskItem["status"]): string {
           class="task-badge"
           :class="`badge-${task.status}`"
         >{{ statusLabel(task.status) }}</span>
-        <button class="btn-remove" title="削除" @click="emit('remove', task.id)">
+        <button class="btn-remove" :title="t('task.removeTitle')" @click="emit('remove', task.id)">
           <i class="pi pi-times" />
         </button>
       </div>
@@ -45,13 +43,13 @@ function statusLabel(status: TaskItem["status"]): string {
       <!-- 生成中 -->
       <div v-if="task.status === 'generating'" class="generating">
         <i class="pi pi-spinner pi-spin" />
-        <span>タスク処理コード生成中...</span>
+        <span>{{ t('task.generating') }}</span>
       </div>
 
       <!-- エラー (ステップなし) -->
       <div v-else-if="task.status === 'error' && task.steps.length === 0" class="error-msg">
         <i class="pi pi-exclamation-circle" />
-        <span>{{ task.error ?? "エラーが発生しました" }}</span>
+        <span>{{ task.error ?? t('task.defaultError') }}</span>
       </div>
 
       <!-- ステップ一覧 -->
