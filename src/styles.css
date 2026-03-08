@@ -7,6 +7,17 @@
   width: 260px;
 }
 
+.toast-message-content {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.toast-spinner {
+  font-size: 1.2rem;
+  flex-shrink: 0;
+}
+
 @layer utilities {
   @keyframes gradient-x {
     0%, 100% {

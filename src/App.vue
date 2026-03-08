@@ -1530,7 +1530,17 @@ onMounted(async () => {
     />
 
     <!-- タスク進捗トースト -->
-    <Toast position="bottom-right" />
+    <Toast position="bottom-right">
+      <template #message="slotProps">
+        <div class="toast-message-content">
+          <i v-if="slotProps.message.severity === 'info'" class="pi pi-spinner pi-spin toast-spinner" />
+          <div>
+            <div class="font-semibold">{{ slotProps.message.summary }}</div>
+            <div class="text-sm">{{ slotProps.message.detail }}</div>
+          </div>
+        </div>
+      </template>
+    </Toast>
   </div>
 </template>
 
