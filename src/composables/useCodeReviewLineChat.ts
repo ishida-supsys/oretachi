@@ -24,12 +24,12 @@ export function useEditorLineSelection(
   const buttonPos = ref<{ top: number; left: number; height: number } | null>(null);
   let disposeListeners: (() => void) | null = null;
 
-  function updateButtonPosition(editor: Monaco.editor.IStandaloneCodeEditor, sel: Monaco.Selection) {
+  function updateButtonPosition(editor: Monaco.editor.ICodeEditor, sel: Monaco.Selection) {
     const pos = editor.getScrolledVisiblePosition({ lineNumber: sel.endLineNumber, column: sel.endColumn });
     buttonPos.value = pos ? { top: pos.top, left: pos.left, height: pos.height } : null;
   }
 
-  function handleMount(editor: Monaco.editor.IStandaloneCodeEditor) {
+  function handleMount(editor: Monaco.editor.ICodeEditor) {
     const selListener = editor.onDidChangeCursorSelection(() => {
       const sel = editor.getSelection();
       if (!sel || sel.isEmpty()) {

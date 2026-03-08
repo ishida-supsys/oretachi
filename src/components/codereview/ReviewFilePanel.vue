@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import Checkbox from "primevue/checkbox";
 import MonacoDiffViewer from "./MonacoDiffViewer.vue";
 import type { ReviewFileEntry } from "../../composables/useReviewSession";
+import type { ChatPayload } from "../../composables/useCodeReviewLineChat";
 
 const { t } = useI18n();
 
@@ -11,6 +12,7 @@ const props = defineProps<{ entry: ReviewFileEntry }>();
 const emit = defineEmits<{
   (e: "toggle-reviewed"): void;
   (e: "toggle-collapsed"): void;
+  (e: "chat", payload: ChatPayload): void;
 }>();
 
 const statusColorClass: Record<string, string> = {
@@ -71,7 +73,12 @@ const checked = computed({
 
     <!-- Diff エリア -->
     <div v-if="!entry.collapsed" :style="{ height: diffHeight }">
-      <MonacoDiffViewer :old-content="entry.oldContent" :new-content="entry.newContent" />
+      <MonacoDiffViewer
+        :old-content="entry.oldContent"
+        :new-content="entry.newContent"
+        :file-path="entry.filePath"
+        @chat="(payload) => emit('chat', payload)"
+      />
     </div>
   </div>
 </template>

@@ -4,11 +4,16 @@ import { useI18n } from "vue-i18n";
 import { useToast } from "primevue/usetoast";
 import ReviewFilePanel from "./ReviewFilePanel.vue";
 import { useReviewSession } from "../../composables/useReviewSession";
+import type { ChatPayload } from "../../composables/useCodeReviewLineChat";
 
 const { t } = useI18n();
 const toast = useToast();
 
 const props = defineProps<{ repoPath: string }>();
+
+const emit = defineEmits<{
+  chat: [payload: ChatPayload];
+}>();
 
 const { reviewFiles, summary, endReview, toggleReviewed, toggleCollapsed, commitAll } = useReviewSession();
 
@@ -109,6 +114,7 @@ async function handleCommit() {
         :entry="entry"
         @toggle-reviewed="toggleReviewed(entry.filePath)"
         @toggle-collapsed="toggleCollapsed(entry.filePath)"
+        @chat="(payload) => emit('chat', payload)"
       />
     </div>
   </div>

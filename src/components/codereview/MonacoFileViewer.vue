@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import { VueMonacoEditor } from "@guolao/vue-monaco-editor";
 import { useEditorLineSelection, type ChatPayload } from "../../composables/useCodeReviewLineChat";
+import EditorChatButton from "./EditorChatButton.vue";
 
 const props = defineProps<{
   content: string;
@@ -76,15 +77,6 @@ const { buttonPos, handleMount, handleChatClick } = useEditorLineSelection(
       class="h-full w-full"
       @mount="handleMount"
     />
-    <button
-      v-if="buttonPos && filePath"
-      class="absolute z-10 flex items-center gap-1 px-2 py-0.5 text-xs bg-primary-600 hover:bg-primary-500 text-white rounded shadow-lg transition-colors pointer-events-auto"
-      :style="{ top: (buttonPos.top + buttonPos.height) + 'px', left: buttonPos.left + 'px' }"
-      @click="handleChatClick"
-      @mousedown.prevent
-    >
-      <i class="pi pi-comments text-[10px]" />
-      Chat
-    </button>
+    <EditorChatButton :button-pos="buttonPos" :file-path="filePath" @click="handleChatClick" />
   </div>
 </template>

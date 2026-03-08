@@ -224,7 +224,7 @@ const { handleChatWithAgent } = useCodeReviewChat(worktreeId);
     <!-- メインエリア -->
     <div class="flex-1 flex flex-col overflow-hidden">
       <!-- レビューセッションビュー -->
-      <ReviewSessionView v-if="isReviewMode" :repo-path="worktreePath" />
+      <ReviewSessionView v-if="isReviewMode" :repo-path="worktreePath" @chat="handleChatWithAgent" />
 
       <!-- 通常タブビュー -->
       <template v-else>
@@ -247,6 +247,8 @@ const { handleChatWithAgent } = useCodeReviewChat(worktreeId);
               v-else
               :old-content="activeTab()!.oldContent ?? ''"
               :new-content="activeTab()!.newContent ?? ''"
+              :file-path="activeTab()!.filePath.replace(/:(?:staged|unstaged)$/, '')"
+              @chat="handleChatWithAgent"
             />
           </template>
           <div
