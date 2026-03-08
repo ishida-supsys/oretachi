@@ -52,7 +52,7 @@ To build manually:
 
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_USERNAME/oretachi.git
+git clone https://github.com/ishida-supsys/oretachi.git
 cd oretachi
 
 # Install frontend dependencies
