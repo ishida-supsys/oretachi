@@ -10,6 +10,7 @@ defineProps<{
 
 const emit = defineEmits<{
   remove: [taskId: string];
+  rerun: [taskId: string];
 }>();
 
 function stepLabel(code: TaskItem["steps"][number]["code"]): string {
@@ -33,6 +34,9 @@ function statusLabel(status: TaskItem["status"]): string {
           class="task-badge"
           :class="`badge-${task.status}`"
         >{{ statusLabel(task.status) }}</span>
+        <button class="btn-rerun" :title="t('rerunTitle')" @click="emit('rerun', task.id)">
+          <i class="pi pi-replay" />
+        </button>
         <button class="btn-remove" :title="t('removeTitle')" @click="emit('remove', task.id)">
           <i class="pi pi-times" />
         </button>
@@ -133,6 +137,7 @@ function statusLabel(status: TaskItem["status"]): string {
   color: #f38ba8;
 }
 
+.btn-rerun,
 .btn-remove {
   background: transparent;
   border: none;
@@ -142,6 +147,11 @@ function statusLabel(status: TaskItem["status"]): string {
   font-size: 11px;
   border-radius: 3px;
   line-height: 1;
+}
+
+.btn-rerun:hover {
+  color: #cba6f7;
+  background: #313244;
 }
 
 .btn-remove:hover {
@@ -215,6 +225,7 @@ function statusLabel(status: TaskItem["status"]): string {
 <i18n lang="json">
 {
   "en": {
+    "rerunTitle": "Rerun",
     "removeTitle": "Remove",
     "generating": "Generating task code...",
     "defaultError": "An error occurred",
@@ -228,6 +239,7 @@ function statusLabel(status: TaskItem["status"]): string {
     }
   },
   "ja": {
+    "rerunTitle": "再実行",
     "removeTitle": "削除",
     "generating": "タスク処理コード生成中...",
     "defaultError": "エラーが発生しました",

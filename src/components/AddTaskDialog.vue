@@ -4,12 +4,20 @@ import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
 
+const props = withDefaults(defineProps<{
+  initialPrompt?: string;
+  mode?: "add" | "rerun";
+}>(), {
+  initialPrompt: "",
+  mode: "add",
+});
+
 const emit = defineEmits<{
   confirm: [prompt: string];
   cancel: [];
 }>();
 
-const promptText = ref("");
+const promptText = ref(props.initialPrompt);
 
 function confirm() {
   const trimmed = promptText.value.trim();
@@ -28,7 +36,7 @@ function onKeydown(e: KeyboardEvent) {
 <template>
   <div class="dialog-overlay" @click.self="emit('cancel')">
     <div class="dialog">
-      <h3 class="dialog-title">{{ t('addTitle') }}</h3>
+      <h3 class="dialog-title">{{ mode === 'rerun' ? t('rerunTitle') : t('addTitle') }}</h3>
 
       <div class="field">
         <label class="label">{{ t('prompt') }}</label>
@@ -50,7 +58,7 @@ function onKeydown(e: KeyboardEvent) {
           :disabled="!promptText.trim()"
           @click="confirm"
         >
-          {{ t('add') }}
+          {{ mode === 'rerun' ? t('rerun') : t('add') }}
         </button>
       </div>
     </div>
@@ -166,17 +174,21 @@ function onKeydown(e: KeyboardEvent) {
 {
   "en": {
     "addTitle": "Add Task",
+    "rerunTitle": "Rerun Task",
     "prompt": "Prompt",
     "promptPlaceholder": "e.g. Implement https://github.com/owner/repo/issues/123",
     "submitHint": "Ctrl+Enter to submit",
-    "add": "Add"
+    "add": "Add",
+    "rerun": "Rerun"
   },
   "ja": {
     "addTitle": "タスクを追加",
+    "rerunTitle": "タスクを再実行",
     "prompt": "プロンプト",
     "promptPlaceholder": "例: https://github.com/owner/repo/issues/123 を実装してください",
     "submitHint": "Ctrl+Enter で送信",
-    "add": "追加"
+    "add": "追加",
+    "rerun": "再実行"
   }
 }
 </i18n>
