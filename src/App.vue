@@ -327,6 +327,9 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
       subWindowFocusMap.delete(worktreeId);
     }
 
+    // AI判定プロセスをキャンセル
+    await cancelApproval(worktreeId);
+
     // 内部ターミナルを全て kill
     for (const terminal of [...worktree.terminals]) {
       const term = terminalRefs.get(terminal.id);

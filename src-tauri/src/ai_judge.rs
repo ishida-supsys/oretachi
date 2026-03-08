@@ -111,6 +111,14 @@ pub async fn judge_approval(
     )
     .await;
 
+    // タイムアウト時はプロセスをkill
+    if wait_result.is_err() {
+        let map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;
+        if let Some(&pid) = map.get(&worktree_id) {
+            crate::process_utils::kill_process_tree(pid);
+        }
+    }
+
     // 完了後に HashMap から削除（finally 相当）
     {
         let mut map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;

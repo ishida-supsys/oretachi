@@ -177,11 +177,20 @@ pub async fn task_generate(
         }
     }
 
+    let pid = child.id();
+
     let wait_result = timeout(
         Duration::from_secs(TIMEOUT_SECS),
         child.wait_with_output(),
     )
     .await;
+
+    // タイムアウト時はプロセスをkill
+    if wait_result.is_err() {
+        if let Some(pid) = pid {
+            crate::process_utils::kill_process_tree(pid);
+        }
+    }
 
     let output = wait_result
         .map_err(|_| format!("AI agent timed out after {}s", TIMEOUT_SECS))?
