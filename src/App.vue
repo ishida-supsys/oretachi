@@ -440,22 +440,22 @@ function randomSuffix(): string {
   return Math.random().toString(36).slice(2, 6);
 }
 
-async function waitForScriptCompletion(worktreeId: string, timeoutMs = 300_000): Promise<void> {
-  // sessionId が確定するまでポーリング
-  let sid: number | null = null;
+async function waitForSessionReady(worktreeId: string): Promise<number | null> {
   for (let i = 0; i < 100; i++) {
     const wt = worktrees.value.find((w) => w.id === worktreeId);
     const t = wt?.terminals[0];
     if (t) {
       const ref = terminalRefs.get(t.id);
       const s = ref?.sessionId;
-      if (s !== null && s !== undefined) {
-        sid = s;
-        break;
-      }
+      if (s !== null && s !== undefined) return s;
     }
     await new Promise((r) => setTimeout(r, 100));
   }
+  return null;
+}
+
+async function waitForScriptCompletion(worktreeId: string, timeoutMs = 300_000): Promise<void> {
+  const sid = await waitForSessionReady(worktreeId);
   if (sid === null) return;
 
   const targetSid = sid;
@@ -517,6 +517,7 @@ async function executeAddWorktree(code: AddWorktreeTaskCode): Promise<string> {
     }
 
     await onAddTerminal(entry.id);
+    await waitForSessionReady(entry.id);
 
     if (repo.execScript) {
       await waitForScriptCompletion(entry.id);
