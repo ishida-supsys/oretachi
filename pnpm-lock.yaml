@@ -96,9 +96,9 @@ importers:
       vite:
         specifier: ^6.0.3
         version: 6.4.1(jiti@2.6.1)(lightningcss@1.31.1)(yaml@2.8.2)
-      vite-plugin-monaco-editor:
-        specifier: ^1.1.0
-        version: 1.1.0(monaco-editor@0.55.1)
+      vite-plugin-monaco-editor-esm:
+        specifier: ^2.0.2
+        version: 2.0.2(monaco-editor@0.55.1)
       vitest:
         specifier: ^4.0.18
         version: 4.0.18(jiti@2.6.1)(lightningcss@1.31.1)(yaml@2.8.2)
@@ -1470,8 +1470,8 @@ packages:
   uri-js@4.4.1:
     resolution: {integrity: sha512-7rKUyy33Q1yc98pQ1DAmLtwX109F7TIfWlW1Ydo8Wl1ii1SeHieeh0HHfPeL2fMXK6z0s8ecKs9frCuLJvndBg==}
 
-  vite-plugin-monaco-editor@1.1.0:
-    resolution: {integrity: sha512-IvtUqZotrRoVqwT0PBBDIZPNraya3BxN/bfcNfnxZ5rkJiGcNtO5eAOWWSgT7zullIAEqQwxMU83yL9J5k7gww==}
+  vite-plugin-monaco-editor-esm@2.0.2:
+    resolution: {integrity: sha512-XVkOpL/r0rw1NpbO30vUwG4S0THkC9KB1vjjV8olGd49h4/EQsKl3DrxB6KRDwyZNC9mKiiZgk2L6njUYj3oKQ==}
     peerDependencies:
       monaco-editor: '>=0.33.0'
 
@@ -2839,7 +2839,7 @@ snapshots:
     dependencies:
       punycode: 2.3.1
 
-  vite-plugin-monaco-editor@1.1.0(monaco-editor@0.55.1):
+  vite-plugin-monaco-editor-esm@2.0.2(monaco-editor@0.55.1):
     dependencies:
       monaco-editor: 0.55.1
 

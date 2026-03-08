@@ -2,7 +2,7 @@ import { defineConfig } from "vite";
 import vue from "@vitejs/plugin-vue";
 import tailwindcss from "@tailwindcss/vite";
 import VueI18nPlugin from "@intlify/unplugin-vue-i18n/vite";
-import monacoEditorPlugin from "vite-plugin-monaco-editor";
+import monacoEditorPlugin from "vite-plugin-monaco-editor-esm";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;

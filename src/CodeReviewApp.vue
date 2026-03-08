@@ -84,7 +84,7 @@ onMounted(() => {
   <Toast />
   <div class="flex h-screen w-screen overflow-hidden bg-surface-900 text-surface-100">
     <!-- アイコンメニューバー -->
-    <div class="flex flex-col items-center gap-3 w-10 bg-surface-950 py-3 shrink-0">
+    <div class="flex flex-col items-center gap-3 w-12 bg-surface-950 py-3 shrink-0">
       <button
         class="p-1 rounded hover:bg-surface-700 transition-colors"
         :class="activePanel === 'files' ? 'text-primary-400' : 'text-surface-400'"

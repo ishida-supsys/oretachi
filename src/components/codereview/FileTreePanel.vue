@@ -11,6 +11,7 @@ const props = defineProps<{ repoPath: string }>();
 const emit = defineEmits<{ (e: "open-file", filePath: string): void }>();
 
 const nodes = ref<TreeNode[]>([]);
+const selectedKey = ref<Record<string, boolean>>({});
 const loading = ref(false);
 const error = ref("");
 
@@ -103,11 +104,19 @@ onMounted(loadFiles);
     <Tree
       v-else
       :value="nodes"
+      v-model:selection-keys="selectedKey"
+      selection-mode="single"
       class="text-sm w-full border-none bg-transparent"
       @node-select="onNodeSelect"
     />
   </div>
 </template>
+
+<style scoped>
+:deep(.p-tree-node-children) {
+  padding-left: 1rem;
+}
+</style>
 
 <i18n lang="json">
 {
