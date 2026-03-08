@@ -13,6 +13,7 @@ import { useCodeReviewTabs } from "./composables/useCodeReviewTabs";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { useCodeReviewChat } from "./composables/useCodeReviewLineChat";
 
 const { t } = useI18n();
 const toast = useToast();
@@ -156,6 +157,8 @@ function cleanup() {
 }
 
 onUnmounted(cleanup);
+
+const { handleChatWithAgent } = useCodeReviewChat(worktreeId);
 </script>
 
 <template>
@@ -224,6 +227,8 @@ onUnmounted(cleanup);
             v-if="activeTab()!.type === 'file'"
             :content="activeTab()!.content ?? ''"
             :language="activeTab()!.language"
+            :file-path="activeTab()!.filePath"
+            @chat="handleChatWithAgent"
           />
           <MonacoDiffViewer
             v-else

@@ -29,6 +29,7 @@ import type { WorktreeEntry, Repository } from "./types/settings";
 import type { AddWorktreeTaskCode, AgentWorktreeTaskCode, TaskProcessCode } from "./types/task";
 import type { FrameNode } from "./types/frame";
 import { useHotkeyListener, bindingToAccelerator } from "./composables/useHotkeys";
+import { useCodeReviewChatListener } from "./composables/useCodeReviewLineChat";
 import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
 import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
 import { getRecentLines, analyzeForApproval, hasApprovalPrompt, cancelApproval } from "./utils/autoApproval";
@@ -100,6 +101,14 @@ const terminalExitCodes = reactive(new Map<number, number>());
 
 // terminalId → AIエージェント稼働中フラグ
 const terminalAgentStatus = reactive(new Map<number, boolean>());
+
+const { setup: setupCodeReviewChatListener } = useCodeReviewChatListener({
+  worktrees,
+  terminalAgentStatus,
+  isDetached,
+  getDetachedSessionId,
+  terminalRefs,
+});
 
 // terminalId → サムネイル data URL
 const thumbnailUrls = reactive(new Map<number, string>());
@@ -1328,6 +1337,9 @@ onMounted(async () => {
   await listen("tray-closing", () => {
     closeTrayPopup();
   });
+
+  // Code Review チャットボタン → AIエージェントターミナルへ書き込み
+  await setupCodeReviewChatListener();
 
   // 初期ターミナルの worktreeId マッピングを構築
   for (const wt of worktrees.value) {

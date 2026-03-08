@@ -1,10 +1,16 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import { VueMonacoEditor } from "@guolao/vue-monaco-editor";
+import { useEditorLineSelection, type ChatPayload } from "../../composables/useCodeReviewLineChat";
 
 const props = defineProps<{
   content: string;
   language?: string;
+  filePath?: string;
+}>();
+
+const emit = defineEmits<{
+  chat: [payload: ChatPayload];
 }>();
 
 const languageMap: Record<string, string> = {
@@ -53,14 +59,32 @@ const options = {
   wordWrap: "off" as const,
   theme: "vs-dark",
 };
+
+const { buttonPos, handleMount, handleChatClick } = useEditorLineSelection(
+  () => props.filePath,
+  (payload) => emit("chat", payload),
+);
 </script>
 
 <template>
-  <VueMonacoEditor
-    :value="content"
-    :language="monacoLanguage"
-    :options="options"
-    theme="vs-dark"
-    class="h-full w-full"
-  />
+  <div class="relative h-full w-full">
+    <VueMonacoEditor
+      :value="content"
+      :language="monacoLanguage"
+      :options="options"
+      theme="vs-dark"
+      class="h-full w-full"
+      @mount="handleMount"
+    />
+    <button
+      v-if="buttonPos && filePath"
+      class="absolute z-10 flex items-center gap-1 px-2 py-0.5 text-xs bg-primary-600 hover:bg-primary-500 text-white rounded shadow-lg transition-colors pointer-events-auto"
+      :style="{ top: (buttonPos.top + buttonPos.height) + 'px', left: buttonPos.left + 'px' }"
+      @click="handleChatClick"
+      @mousedown.prevent
+    >
+      <i class="pi pi-comments text-[10px]" />
+      Chat
+    </button>
+  </div>
 </template>
