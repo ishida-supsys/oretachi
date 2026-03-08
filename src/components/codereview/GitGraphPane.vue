@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
@@ -75,7 +76,16 @@ function onScroll(e: Event) {
   }
 }
 
-onMounted(init);
+let unlistenFsChanged: (() => void) | null = null;
+
+onMounted(async () => {
+  await init();
+  unlistenFsChanged = await listen("codereview-fs-changed", () => loadCommits(0));
+});
+
+onUnmounted(() => {
+  unlistenFsChanged?.();
+});
 </script>
 
 <template>

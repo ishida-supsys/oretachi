@@ -98,16 +98,30 @@ impl FsWatcherManager {
     }
 }
 
-/// `.git/` 配下は `.git/index` のみ通す（ステージング検知用）。
-/// それ以外の `.git/objects` 等は除外してノイズを減らす。
+/// `.git/` 配下は必要なファイルのみ通す（ノイズ削減）。
+/// - `.git/index`: ステージング検知
+/// - `.git/HEAD`: ブランチ切り替え検知
+/// - `.git/*_HEAD`: MERGE_HEAD, REBASE_HEAD 等
+/// - `.git/refs/**`: コミット・タグ・リモート追跡ブランチ検知
 fn is_relevant_path(path: &Path) -> bool {
     let components: Vec<_> = path.components().collect();
     let git_idx = components.iter().position(|c| c.as_os_str() == ".git");
     match git_idx {
         None => true,
         Some(i) => {
-            // .git/index のみ許可（.git 直下の index ファイル）
-            i + 2 == components.len() && components[i + 1].as_os_str() == "index"
+            let remaining = components.len() - i - 1;
+            if remaining == 0 {
+                return false;
+            }
+            let first_under_git = components[i + 1].as_os_str();
+            if remaining == 1 {
+                // .git/index, .git/HEAD, .git/MERGE_HEAD 等
+                return first_under_git == "index"
+                    || first_under_git == "HEAD"
+                    || first_under_git.to_string_lossy().ends_with("_HEAD");
+            }
+            // .git/refs/**
+            first_under_git == "refs"
         }
     }
 }
