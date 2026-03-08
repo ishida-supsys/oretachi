@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { VueMonacoEditor } from "@guolao/vue-monaco-editor";
+import { VueMonacoDiffEditor } from "@guolao/vue-monaco-editor";
 
 defineProps<{
   oldContent: string;
@@ -16,12 +16,11 @@ const options = {
 </script>
 
 <template>
-  <VueMonacoEditor
+  <VueMonacoDiffEditor
     :original="oldContent"
-    :value="newContent"
+    :modified="newContent"
     :options="options"
     theme="vs-dark"
-    diff-editor
     class="h-full w-full"
   />
 </template>
