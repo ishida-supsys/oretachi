@@ -26,7 +26,8 @@ import { useWindowFocus } from "./composables/useWindowFocus";
 import { useTasks } from "./composables/useTasks";
 import type { TrayWorktreeData, TrayTerminalData } from "./composables/useTrayPopup";
 import type { WorktreeEntry, Repository } from "./types/settings";
-import type { AddWorktreeTaskCode, AgentWorktreeTaskCode, TaskProcessCode } from "./types/task";
+import type { AddWorktreeTaskCode, AgentWorktreeTaskCode } from "./types/task";
+import { useAddTaskDialog } from "./composables/useAddTaskDialog";
 import type { FrameNode } from "./types/frame";
 import { useHotkeyListener, bindingToAccelerator } from "./composables/useHotkeys";
 import { useCodeReviewChatListener } from "./composables/useCodeReviewLineChat";
@@ -37,23 +38,6 @@ import { useAutoHotkey } from "./composables/useAutoHotkey";
 import { debug } from "@tauri-apps/plugin-log";
 import { platform } from "@tauri-apps/plugin-os";
 import Toast from "primevue/toast";
-import type { ToastMessageOptions } from "primevue/toast";
-import { useToast } from "primevue/usetoast";
-
-const toast = useToast();
-let activeTaskToast: ToastMessageOptions | null = null;
-
-function showTaskToast(options: ToastMessageOptions): void {
-  if (activeTaskToast) {
-    toast.remove(activeTaskToast);
-    activeTaskToast = null;
-  }
-  if (options.life === undefined) {
-    // 永続表示のメッセージは追跡する
-    activeTaskToast = options;
-  }
-  toast.add(options);
-}
 
 const { t } = useI18n();
 
@@ -78,8 +62,15 @@ const { notifications, initNotificationListener, addNotification, clearNotificat
 const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees } = useTrayPopup();
 const { closeAllCodeReviewWindows } = useCodeReviewWindow();
 const { tryAutoAssignHotkey } = useAutoHotkey();
-const { sortedTasks, addTask, setTaskSteps, updateStepStatus, updateTaskStatus, removeTask } = useTasks();
-const showAddTaskDialog = ref(false);
+const { sortedTasks, removeTask } = useTasks();
+const { showAddTaskDialog, rerunTaskId, rerunPrompt, onAddTaskConfirm, onAddTaskCancel } =
+  useAddTaskDialog(async (code) => {
+    if (code.type === "add_worktree") {
+      await executeAddWorktree(code);
+    } else if (code.type === "agent_worktree") {
+      await executeAgentWorktree(code);
+    }
+  });
 
 // HomeView / WorktreeCard 向け: Map<string, number> 形式を維持
 const notificationCounts = computed(() => {
@@ -607,81 +598,6 @@ async function executeAgentWorktree(code: AgentWorktreeTaskCode): Promise<void> 
     await termRef.write(command);
     const sid = termRef.sessionId;
     if (sid != null) await invoke("pty_set_ai_agent", { sessionId: sid, isAgent: true });
-  }
-}
-
-async function executeTaskSteps(taskId: string): Promise<void> {
-  const { tasks } = useTasks();
-  const task = tasks.value.find((t) => t.id === taskId);
-  if (!task) return;
-
-  for (let i = 0; i < task.steps.length; i++) {
-    const step = task.steps[i];
-    updateStepStatus(taskId, i, "running");
-
-    const stepLabel = step.code.type === "add_worktree" ? "ワークツリー追加中" : "エージェント起動中";
-    showTaskToast({
-      severity: "info",
-      summary: "タスク実行中",
-      detail: `ステップ ${i + 1}/${task.steps.length}: ${stepLabel}`,
-    });
-
-    try {
-      if (step.code.type === "add_worktree") {
-        await executeAddWorktree(step.code);
-      } else if (step.code.type === "agent_worktree") {
-        await executeAgentWorktree(step.code);
-      }
-      updateStepStatus(taskId, i, "done");
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      updateStepStatus(taskId, i, "error", msg);
-      throw e;
-    }
-  }
-}
-
-async function onAddTaskConfirm(prompt: string): Promise<void> {
-  showAddTaskDialog.value = false;
-  const task = addTask(prompt);
-
-  showTaskToast({
-    severity: "info",
-    summary: "タスク追加",
-    detail: "コード生成中...",
-  });
-
-  try {
-    const result = await invoke<string>("task_generate", { prompt });
-    const taskProcessCode = JSON.parse(result) as TaskProcessCode;
-    setTaskSteps(task.id, taskProcessCode.code);
-
-    const stepCount = taskProcessCode.code.length;
-    showTaskToast({
-      severity: "info",
-      summary: "タスク実行中",
-      detail: `ステップ実行開始 (${stepCount}件)`,
-    });
-
-    await executeTaskSteps(task.id);
-    updateTaskStatus(task.id, "completed");
-
-    showTaskToast({
-      severity: "success",
-      summary: "タスク完了",
-      detail: "すべてのステップが完了しました",
-      life: 3000,
-    });
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    updateTaskStatus(task.id, "error", msg);
-
-    showTaskToast({
-      severity: "error",
-      summary: "タスク失敗",
-      detail: msg,
-      life: 5000,
-    });
   }
 }
 
@@ -1523,6 +1439,7 @@ onMounted(async () => {
         @cancel-ai-judging="onCancelAiJudging"
         @add-task="showAddTaskDialog = true"
         @remove-task="removeTask"
+        @rerun-task="rerunTaskId = $event"
       />
 
       <!-- 設定ビュー -->
@@ -1556,11 +1473,13 @@ onMounted(async () => {
       </template>
     </div>
 
-    <!-- タスク追加ダイアログ -->
+    <!-- タスク追加/再実行ダイアログ -->
     <AddTaskDialog
-      v-if="showAddTaskDialog"
+      v-if="showAddTaskDialog || rerunTaskId"
+      :initial-prompt="rerunTaskId ? rerunPrompt : ''"
+      :mode="rerunTaskId ? 'rerun' : 'add'"
       @confirm="onAddTaskConfirm"
-      @cancel="showAddTaskDialog = false"
+      @cancel="onAddTaskCancel"
     />
 
     <!-- ワークツリー追加ダイアログ -->
@@ -1617,6 +1536,16 @@ onMounted(async () => {
 <i18n lang="json">
 {
   "en": {
+    "taskAddSummary": "Add Task",
+    "taskAddDetail": "Generating code...",
+    "taskExecutingSummary": "Executing Task",
+    "taskExecutingStartDetail": "Starting step execution ({count} steps)",
+    "taskStepDetail": "Step {current}/{total}: {label}",
+    "taskStepAddWorktree": "Adding worktree",
+    "taskStepAgent": "Launching agent",
+    "taskCompletedSummary": "Task Completed",
+    "taskCompletedDetail": "All steps completed",
+    "taskFailedSummary": "Task Failed",
     "deletingText": "Deleting...",
     "creatingText": "Creating...",
     "deleteFailed": "Delete failed: {error}",
@@ -1627,6 +1556,16 @@ onMounted(async () => {
     "worktreeCreateFailed": "Failed to create worktree: {error}"
   },
   "ja": {
+    "taskAddSummary": "タスク追加",
+    "taskAddDetail": "コード生成中...",
+    "taskExecutingSummary": "タスク実行中",
+    "taskExecutingStartDetail": "ステップ実行開始 ({count}件)",
+    "taskStepDetail": "ステップ {current}/{total}: {label}",
+    "taskStepAddWorktree": "ワークツリー追加中",
+    "taskStepAgent": "エージェント起動中",
+    "taskCompletedSummary": "タスク完了",
+    "taskCompletedDetail": "すべてのステップが完了しました",
+    "taskFailedSummary": "タスク失敗",
     "deletingText": "削除中...",
     "creatingText": "作成中...",
     "deleteFailed": "削除に失敗しました: {error}",

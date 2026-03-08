@@ -36,6 +36,7 @@ const emit = defineEmits<{
   cancelAiJudging: [worktreeId: string];
   addTask: [];
   removeTask: [taskId: string];
+  rerunTask: [taskId: string];
 }>();
 
 type PanelMode = "worktree" | "task";
@@ -139,6 +140,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
             :key="task.id"
             :task="task"
             @remove="emit('removeTask', $event)"
+            @rerun="emit('rerunTask', $event)"
           />
         </div>
       </div>
