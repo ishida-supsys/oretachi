@@ -17,7 +17,7 @@ const emit = defineEmits<{
 <template>
   <div class="dialog-overlay" @click.self="emit('cancel')">
     <div class="dialog">
-      <h3 class="dialog-title">{{ t('ide.select') }}</h3>
+      <h3 class="dialog-title">{{ t('select') }}</h3>
 
       <div class="ide-list">
         <button
@@ -120,3 +120,14 @@ const emit = defineEmits<{
   background: #45475a;
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "select": "Select IDE"
+  },
+  "ja": {
+    "select": "IDE を選択"
+  }
+}
+</i18n>

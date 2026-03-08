@@ -16,7 +16,6 @@ import { debug } from "@tauri-apps/plugin-log";
 import { message } from "@tauri-apps/plugin-dialog";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import type { IdeInfo } from "./types/ide";
-import { i18n } from "./i18n";
 import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
@@ -189,8 +188,8 @@ async function requestAddTerminal(leafId?: string) {
 async function requestOpenInIde() {
   const ides = await invoke<IdeInfo[]>("detect_ides");
   if (ides.length === 0) {
-    await message(i18n.global.t("ide.notInstalled"), {
-      title: i18n.global.t("ide.notInstalledTitle"),
+    await message(t("ideNotInstalled"), {
+      title: t("ideNotInstalledTitle"),
       kind: "warning",
     });
     return;
@@ -209,7 +208,7 @@ async function onIdeSelected(ide: IdeInfo) {
   try {
     await invoke("open_in_ide", { command: ide.command, path: ideTargetPath.value });
   } catch (e) {
-    await message(i18n.global.t("ide.launchFailed", { error: e }), { kind: "error" });
+    await message(t("ideLaunchFailed", { error: e }), { kind: "error" });
   }
 }
 
@@ -658,7 +657,7 @@ function getFirstLeafId(): string {
   <div class="h-screen flex flex-col bg-[#1e1e2e] text-[#cdd6f4] select-none">
     <!-- 初期化中 -->
     <div v-if="!initialized" class="flex items-center justify-center h-full text-[#6c7086] text-sm">
-      {{ t('subWindow.connecting') }}
+      {{ t('connecting') }}
     </div>
 
     <template v-else>
@@ -683,7 +682,7 @@ function getFirstLeafId(): string {
             v-if="autoApproval"
             class="text-[10px] px-1.5 py-0.5 rounded font-medium"
             style="background: rgba(166, 227, 161, 0.15); color: #a6e3a1; border: 1px solid rgba(166, 227, 161, 0.3)"
-          >{{ t('worktree.autoApprovalBadge') }}</span>
+          >{{ t('autoApprovalBadge') }}</span>
           <button
             v-if="aiJudging"
             class="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-semibold cursor-pointer border-none"
@@ -691,12 +690,12 @@ function getFirstLeafId(): string {
             @click="onCancelAiJudging"
           >
             <span class="pi pi-spin pi-spinner" style="font-size: 9px" />
-            {{ t('worktree.aiJudgingBadge') }}
+            {{ t('aiJudgingBadge') }}
           </button>
         </div>
         <button
           class="flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
-          :title="t('ide.openInIde')"
+          :title="t('openInIde')"
           @click="requestOpenInIde"
         >
           <span class="pi pi-code text-sm" />
@@ -747,3 +746,26 @@ function getFirstLeafId(): string {
     </div>
   </div>
 </template>
+
+<i18n lang="json">
+{
+  "en": {
+    "connecting": "Connecting...",
+    "autoApprovalBadge": "Auto approval",
+    "aiJudgingBadge": "AI judging",
+    "openInIde": "Open in IDE",
+    "ideNotInstalled": "None of Cursor, VS Code, Antigravity are installed.",
+    "ideNotInstalledTitle": "IDE not found",
+    "ideLaunchFailed": "Failed to launch IDE: {error}"
+  },
+  "ja": {
+    "connecting": "接続中...",
+    "autoApprovalBadge": "自動承認",
+    "aiJudgingBadge": "AI判定中",
+    "openInIde": "IDE で開く",
+    "ideNotInstalled": "Cursor、VS Code、Antigravity のいずれもインストールされていません。",
+    "ideNotInstalledTitle": "IDE が見つかりません",
+    "ideLaunchFailed": "IDE の起動に失敗しました: {error}"
+  }
+}
+</i18n>

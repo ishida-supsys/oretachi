@@ -9,4 +9,8 @@ export const i18n = createI18n({
   messages: { en, ja },
 })
 
+export function setLocale(locale: "en" | "ja") {
+  i18n.global.locale.value = locale;
+}
+
 export default i18n

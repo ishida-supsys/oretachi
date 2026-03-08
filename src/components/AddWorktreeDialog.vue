@@ -66,18 +66,18 @@ function confirm() {
 <template>
   <div class="dialog-overlay" @click.self="!submitting && emit('cancel')">
     <div class="dialog">
-      <h3 class="dialog-title">{{ t('worktree.addTitle') }}</h3>
+      <h3 class="dialog-title">{{ t('addTitle') }}</h3>
 
       <!-- リポジトリ選択 -->
       <div class="field">
-        <label class="label">{{ t('worktree.repo') }}</label>
+        <label class="label">{{ t('repo') }}</label>
         <select
           v-model="selectedRepoId"
           class="select"
           :disabled="submitting"
           @change="prefill"
         >
-          <option value="">{{ t('worktree.repoPlaceholder') }}</option>
+          <option value="">{{ t('repoPlaceholder') }}</option>
           <option
             v-for="repo in repositories"
             :key="repo.id"
@@ -90,22 +90,22 @@ function confirm() {
 
       <!-- ワークツリー名 -->
       <div class="field">
-        <label class="label">{{ t('worktree.name') }}</label>
+        <label class="label">{{ t('name') }}</label>
         <input
           v-model="worktreeName"
           class="input"
-          :placeholder="t('worktree.namePlaceholder')"
+          :placeholder="t('namePlaceholder')"
           :disabled="submitting"
         />
       </div>
 
       <!-- ブランチ名 -->
       <div class="field">
-        <label class="label">{{ t('worktree.branch') }}</label>
+        <label class="label">{{ t('branch') }}</label>
         <input
           v-model="branchName"
           class="input"
-          :placeholder="t('worktree.branchPlaceholder')"
+          :placeholder="t('branchPlaceholder')"
           :disabled="submitting"
           @input="branchManuallyEdited = true"
         />
@@ -113,7 +113,7 @@ function confirm() {
 
       <!-- パス（自動） -->
       <div class="field">
-        <label class="label">{{ t('worktree.path') }}</label>
+        <label class="label">{{ t('path') }}</label>
         <input class="input readonly" :value="worktreePath" readonly />
       </div>
 
@@ -126,12 +126,12 @@ function confirm() {
           @click="confirm"
         >
           <span v-if="submitting" class="pi pi-spinner pi-spin" style="margin-right: 6px;" />
-          {{ submitting ? t('worktree.creating') : t('worktree.create') }}
+          {{ submitting ? t('creating') : t('create') }}
         </button>
       </div>
 
       <p v-if="!worktreeBaseDir" class="warn">
-        {{ t('worktree.baseDirNotSet') }}
+        {{ t('baseDirNotSet') }}
       </p>
     </div>
   </div>
@@ -240,3 +240,34 @@ function confirm() {
   color: #f9e2af;
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "addTitle": "Add Worktree",
+    "repo": "Repository",
+    "repoPlaceholder": "Select",
+    "name": "Worktree name",
+    "namePlaceholder": "e.g. my-feature-a3f2",
+    "branch": "Branch name",
+    "branchPlaceholder": "e.g. worktree/my-feature",
+    "path": "Path (auto)",
+    "creating": "Creating...",
+    "create": "Create",
+    "baseDirNotSet": "Set the worktree base directory in settings."
+  },
+  "ja": {
+    "addTitle": "ワークツリーを追加",
+    "repo": "リポジトリ",
+    "repoPlaceholder": "選択してください",
+    "name": "ワークツリー名",
+    "namePlaceholder": "例: my-feature-a3f2",
+    "branch": "ブランチ名",
+    "branchPlaceholder": "例: worktree/my-feature",
+    "path": "作成先パス（自動）",
+    "creating": "作成中...",
+    "create": "作成",
+    "baseDirNotSet": "設定でワークツリー追加先ディレクトリを設定してください。"
+  }
+}
+</i18n>

@@ -67,19 +67,19 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
 <template>
   <div class="home-view">
     <div class="home-header">
-      <span class="home-title">{{ t('worktree.title') }}</span>
+      <span class="home-title">{{ t('worktreeTitle') }}</span>
       <div class="header-actions">
-        <button class="btn-icon-header" :title="t('worktree.focusAllSubWindows')" @click="emit('focusAllSubWindows')">
+        <button class="btn-icon-header" :title="t('focusAllSubWindows')" @click="emit('focusAllSubWindows')">
           <i class="pi pi-window-maximize"></i>
         </button>
-        <button class="btn-icon-header" :title="t('worktree.addButton')" @click="emit('addWorktree')">
+        <button class="btn-icon-header" :title="t('addWorktreeButton')" @click="emit('addWorktree')">
           <i class="pi pi-plus"></i>
         </button>
       </div>
     </div>
 
     <div v-if="worktrees.length === 0" class="empty-state">
-      {{ t('worktree.empty') }}
+      {{ t('worktreeEmpty') }}
     </div>
 
     <div ref="containerRef" class="worktree-list">
@@ -113,9 +113,9 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
     <!-- タスク -->
     <template v-if="tasks.length > 0">
       <div class="section-header">
-        <span class="home-title">{{ t('task.title') }}</span>
+        <span class="home-title">{{ t('taskTitle') }}</span>
         <div class="header-actions">
-          <button class="btn-icon-header" :title="t('task.addTaskButton')" @click="emit('addTask')">
+          <button class="btn-icon-header" :title="t('addTaskButton')" @click="emit('addTask')">
             <i class="pi pi-plus"></i>
           </button>
         </div>
@@ -138,7 +138,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
       <div class="task-add-bar">
         <button class="btn-add-task" @click="emit('addTask')">
           <i class="pi pi-bolt"></i>
-          {{ t('task.addTaskButton') }}
+          {{ t('addTaskButton') }}
         </button>
       </div>
     </template>
@@ -251,3 +251,24 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   border-color: #cba6f7;
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "worktreeTitle": "Worktrees",
+    "worktreeEmpty": "No worktrees. Click the + button to create one.",
+    "focusAllSubWindows": "Bring all sub windows",
+    "addWorktreeButton": "Add worktree",
+    "taskTitle": "Tasks",
+    "addTaskButton": "Add task"
+  },
+  "ja": {
+    "worktreeTitle": "ワークツリー",
+    "worktreeEmpty": "ワークツリーがありません。右上の + ボタンで作成してください。",
+    "focusAllSubWindows": "すべてのサブウィンドウを呼び出す",
+    "addWorktreeButton": "ワークツリー追加",
+    "taskTitle": "タスク",
+    "addTaskButton": "タスクを追加"
+  }
+}
+</i18n>

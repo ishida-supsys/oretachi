@@ -16,8 +16,8 @@ import { message } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import type { IdeInfo } from "./types/ide";
 import { useSettings } from "./composables/useSettings";
-import { i18n } from "./i18n";
 import { useWorktrees } from "./composables/useWorktrees";
+import { useI18n } from "vue-i18n";
 import { useSubWindows } from "./composables/useSubWindows";
 import { useNotifications, sendOsNotification } from "./composables/useNotifications";
 import { useTrayPopup } from "./composables/useTrayPopup";
@@ -34,6 +34,8 @@ import { getRecentLines, analyzeForApproval, hasApprovalPrompt, cancelApproval }
 import { useAutoHotkey } from "./composables/useAutoHotkey";
 import { debug } from "@tauri-apps/plugin-log";
 import { platform } from "@tauri-apps/plugin-os";
+
+const { t } = useI18n();
 
 // ウィンドウのフォーカス状態
 const { isWindowFocused } = useWindowFocus();
@@ -318,7 +320,7 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
   showRemoveDialog.value = false;
   removeTargetWorktree.value = null;
   removeBranches.value = [];
-  loadingWorktrees.set(worktreeId, i18n.global.t("worktree.deletingText"));
+  loadingWorktrees.set(worktreeId, t("deletingText"));
   try {
     // detached の場合はサブウィンドウを閉じる
     if (isDetached(worktreeId)) {
@@ -349,7 +351,7 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
         forceBranch: options.forceBranch,
       });
     } catch (e) {
-      await message(i18n.global.t("error.deleteFailed", { error: e }), { kind: "error" });
+      await message(t("deleteFailed", { error: e }), { kind: "error" });
     }
   } finally {
     loadingWorktrees.delete(worktreeId);
@@ -363,8 +365,8 @@ async function onOpenInIde(worktreeId: string) {
   const ides = await invoke<IdeInfo[]>("detect_ides");
 
   if (ides.length === 0) {
-    await message(i18n.global.t("ide.notInstalled"), {
-      title: i18n.global.t("ide.notInstalledTitle"),
+    await message(t("ideNotInstalled"), {
+      title: t("ideNotInstalledTitle"),
       kind: "warning",
     });
     return;
@@ -385,7 +387,7 @@ async function onIdeSelected(ide: IdeInfo) {
   try {
     await invoke("open_in_ide", { command: ide.command, path: ideTargetPath.value });
   } catch (e) {
-    await message(i18n.global.t("ide.launchFailed", { error: e }), { kind: "error" });
+    await message(t("ideLaunchFailed", { error: e }), { kind: "error" });
   }
 }
 
@@ -393,7 +395,7 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry) {
   // ダイアログを即閉じ、一覧に仮エントリを表示
   showAddDialog.value = false;
   addWorktreePlaceholder(entry);
-  loadingWorktrees.set(entry.id, i18n.global.t("worktree.creatingText"));
+  loadingWorktrees.set(entry.id, t("creatingText"));
 
   try {
     const lfsSkipped = await invokeWorktreeAdd(entry);
@@ -424,11 +426,11 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry) {
     }
 
     if (lfsSkipped) {
-      await message(i18n.global.t("error.lfsWarning"), { kind: "warning" });
+      await message(t("lfsWarning"), { kind: "warning" });
     }
   } catch (e) {
     rollbackWorktree(entry.id);
-    await message(i18n.global.t("error.worktreeCreateFailed", { error: e }), { kind: "error" });
+    await message(t("worktreeCreateFailed", { error: e }), { kind: "error" });
   } finally {
     loadingWorktrees.delete(entry.id);
   }
@@ -498,7 +500,7 @@ async function executeAddWorktree(code: AddWorktreeTaskCode): Promise<string> {
   };
 
   addWorktreePlaceholder(entry);
-  loadingWorktrees.set(entry.id, i18n.global.t("worktree.creatingText"));
+  loadingWorktrees.set(entry.id, t("creatingText"));
 
   try {
     await invokeWorktreeAdd(entry);
@@ -1086,7 +1088,8 @@ onMounted(async () => {
         }
         getCurrentWindow().setFocus();
       }
-    }
+    },
+    t("notification.title")
   );
 
   // notify-worktree → 自動承認チェック
@@ -1146,7 +1149,7 @@ onMounted(async () => {
     if (!approved && !isWorktreeFocused(wt.id)) {
       await debug(`[AutoApproval] local: not approved → addNotification(${wt.id})`);
       addNotification(wt.id);
-      await sendOsNotification(wt.name);
+      await sendOsNotification(wt.name, t("notification.title"));
     }
   });
 
@@ -1157,7 +1160,7 @@ onMounted(async () => {
     if (!approved && !isWorktreeFocused(wid)) {
       addNotification(wid);
       const wtName = worktrees.value.find((w) => w.id === wid)?.name;
-      if (wtName) await sendOsNotification(wtName);
+      if (wtName) await sendOsNotification(wtName, t("notification.title"));
     }
   });
 
@@ -1521,3 +1524,28 @@ onMounted(async () => {
     />
   </div>
 </template>
+
+<i18n lang="json">
+{
+  "en": {
+    "deletingText": "Deleting...",
+    "creatingText": "Creating...",
+    "deleteFailed": "Delete failed: {error}",
+    "ideNotInstalled": "None of Cursor, VS Code, Antigravity are installed.",
+    "ideNotInstalledTitle": "IDE not found",
+    "ideLaunchFailed": "Failed to launch IDE: {error}",
+    "lfsWarning": "Failed to fetch Git LFS files; worktree was created without LFS files.\nIf you need LFS files, run git lfs pull.",
+    "worktreeCreateFailed": "Failed to create worktree: {error}"
+  },
+  "ja": {
+    "deletingText": "削除中...",
+    "creatingText": "作成中...",
+    "deleteFailed": "削除に失敗しました: {error}",
+    "ideNotInstalled": "Cursor、VS Code、Antigravity のいずれもインストールされていません。",
+    "ideNotInstalledTitle": "IDE が見つかりません",
+    "ideLaunchFailed": "IDE の起動に失敗しました: {error}",
+    "lfsWarning": "Git LFS のファイル取得に失敗したため、LFS ファイルをスキップしてワークツリーを作成しました。\nLFS ファイルが必要な場合は git lfs pull を実行してください。",
+    "worktreeCreateFailed": "ワークツリーの作成に失敗しました: {error}"
+  }
+}
+</i18n>

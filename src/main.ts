@@ -4,7 +4,7 @@ import PrimeVue from "primevue/config";
 import Aura from "@primeuix/themes/aura";
 import { attachConsole } from "@tauri-apps/plugin-log";
 import { invoke } from "@tauri-apps/api/core";
-import { i18n } from "./i18n";
+import { i18n, setLocale } from "./i18n";
 import type { AppSettings } from "./types/settings";
 
 const params = new URLSearchParams(window.location.search);
@@ -17,7 +17,7 @@ async function mountApp() {
   try {
     const loaded = await invoke<AppSettings>("get_settings");
     if (loaded.locale) {
-      i18n.global.locale.value = loaded.locale as "en" | "ja";
+      setLocale(loaded.locale as "en" | "ja");
     }
   } catch {
     // settings 読み込み失敗時はデフォルト (en) のまま

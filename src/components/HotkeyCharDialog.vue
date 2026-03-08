@@ -32,7 +32,7 @@ function onKeydown(event: KeyboardEvent) {
   if (!/^[a-z0-9]$/.test(key)) return;
 
   if (props.usedChars.has(key)) {
-    error.value = t("hotkey.alreadyUsed", { key });
+    error.value = t("alreadyUsed", { key });
     return;
   }
 
@@ -51,15 +51,15 @@ onUnmounted(() => {
 <template>
   <div class="dialog-overlay" @click.self="emit('cancel')">
     <div class="dialog">
-      <h3 class="dialog-title">{{ t('hotkey.assignTitle') }}</h3>
+      <h3 class="dialog-title">{{ t('assignTitle') }}</h3>
       <p class="dialog-sub">{{ worktreeName }}</p>
 
       <div class="current-info" v-if="currentChar">
-        {{ t('hotkey.currentAssignment') }}: <span class="key-badge">Alt+{{ currentChar }}</span>
+        {{ t('currentAssignment') }}: <span class="key-badge">Alt+{{ currentChar }}</span>
       </div>
 
-      <p class="hint">{{ t('hotkey.pressKey') }}</p>
-      <p class="hint-sub">{{ t('hotkey.altKeyHint') }}</p>
+      <p class="hint">{{ t('pressKey') }}</p>
+      <p class="hint-sub">{{ t('altKeyHint') }}</p>
 
       <p v-if="error" class="error-msg">{{ error }}</p>
 
@@ -70,7 +70,7 @@ onUnmounted(() => {
           class="btn-clear"
           @click="emit('clear', worktreeId)"
         >
-          {{ t('hotkey.clearAssignment') }}
+          {{ t('clearAssignment') }}
         </button>
       </div>
     </div>
@@ -186,3 +186,24 @@ onUnmounted(() => {
   background: rgba(243, 139, 168, 0.1);
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "assignTitle": "Assign Hotkey",
+    "currentAssignment": "Current assignment",
+    "pressKey": "Press an alphanumeric key",
+    "altKeyHint": "With Alt+[key] you can focus this worktree",
+    "alreadyUsed": "\"{key}\" is already assigned to another worktree",
+    "clearAssignment": "Clear assignment"
+  },
+  "ja": {
+    "assignTitle": "ホットキー割り当て",
+    "currentAssignment": "現在の割り当て",
+    "pressKey": "英数字キーを押してください",
+    "altKeyHint": "割り当てると Alt+[文字] でこのワークツリーにフォーカスできます",
+    "alreadyUsed": "「{key}」は別のワークツリーに割り当て済みです",
+    "clearAssignment": "割り当て解除"
+  }
+}
+</i18n>

@@ -28,19 +28,19 @@ function onKeydown(e: KeyboardEvent) {
 <template>
   <div class="dialog-overlay" @click.self="emit('cancel')">
     <div class="dialog">
-      <h3 class="dialog-title">{{ t('task.addTitle') }}</h3>
+      <h3 class="dialog-title">{{ t('addTitle') }}</h3>
 
       <div class="field">
-        <label class="label">{{ t('task.prompt') }}</label>
+        <label class="label">{{ t('prompt') }}</label>
         <textarea
           v-model="promptText"
           class="textarea"
-          :placeholder="t('task.promptPlaceholder')"
+          :placeholder="t('promptPlaceholder')"
           rows="5"
           autofocus
           @keydown="onKeydown"
         />
-        <p class="hint">{{ t('task.submitHint') }}</p>
+        <p class="hint">{{ t('submitHint') }}</p>
       </div>
 
       <div class="dialog-actions">
@@ -50,7 +50,7 @@ function onKeydown(e: KeyboardEvent) {
           :disabled="!promptText.trim()"
           @click="confirm"
         >
-          {{ t('task.add') }}
+          {{ t('add') }}
         </button>
       </div>
     </div>
@@ -161,3 +161,22 @@ function onKeydown(e: KeyboardEvent) {
   cursor: not-allowed;
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "addTitle": "Add Task",
+    "prompt": "Prompt",
+    "promptPlaceholder": "e.g. Implement https://github.com/owner/repo/issues/123",
+    "submitHint": "Ctrl+Enter to submit",
+    "add": "Add"
+  },
+  "ja": {
+    "addTitle": "タスクを追加",
+    "prompt": "プロンプト",
+    "promptPlaceholder": "例: https://github.com/owner/repo/issues/123 を実装してください",
+    "submitHint": "Ctrl+Enter で送信",
+    "add": "追加"
+  }
+}
+</i18n>

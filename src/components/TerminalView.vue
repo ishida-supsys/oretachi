@@ -11,7 +11,6 @@ import { matchesHotkey } from "../composables/useHotkeys";
 import { useTerminalSearch } from "../composables/useTerminalSearch";
 import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import { useI18n } from "vue-i18n";
-import { i18n } from "../i18n";
 
 const { t } = useI18n();
 
@@ -216,7 +215,7 @@ async function startPty() {
       batcher.enqueue(data);
     },
     () => {
-      terminal?.write(`\r\n\x1b[33m[${i18n.global.t("terminal.processExited")}]\x1b[0m\r\n`);
+      terminal?.write(`\r\n\x1b[33m[${t("processExited")}]\x1b[0m\r\n`);
       emit("exit");
     },
     props.shell,
@@ -240,7 +239,7 @@ async function attachPty(id: number, snapshot?: string) {
       batcher.enqueue(data);
     },
     () => {
-      terminal?.write(`\r\n\x1b[33m[${i18n.global.t("terminal.processExited")}]\x1b[0m\r\n`);
+      terminal?.write(`\r\n\x1b[33m[${t("processExited")}]\x1b[0m\r\n`);
       emit("exit");
     }
   );
@@ -348,7 +347,7 @@ defineExpose({
           v-model="search.searchQuery.value"
           class="search-input"
           type="text"
-          :placeholder="t('terminal.searchPlaceholder')"
+          :placeholder="t('searchPlaceholder')"
           @input="search.onSearchInput"
           @keydown="search.onSearchKeydown"
         />
@@ -356,13 +355,13 @@ defineExpose({
           {{ search.searchCountText.value }}
         </span>
       </div>
-      <button class="search-btn" :title="t('terminal.prevTitle')" @click="search.findPrevious">
+      <button class="search-btn" :title="t('prevTitle')" @click="search.findPrevious">
         <span class="pi pi-chevron-up" />
       </button>
-      <button class="search-btn" :title="t('terminal.nextTitle')" @click="search.findNext">
+      <button class="search-btn" :title="t('nextTitle')" @click="search.findNext">
         <span class="pi pi-chevron-down" />
       </button>
-      <button class="search-btn" :title="t('terminal.closeTitle')" @click="search.closeSearchBar">
+      <button class="search-btn" :title="t('closeTitle')" @click="search.closeSearchBar">
         <span class="pi pi-times" />
       </button>
     </div>
@@ -461,3 +460,22 @@ defineExpose({
   background-color: #45475a;
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "searchPlaceholder": "Search...",
+    "prevTitle": "Previous (Shift+Enter)",
+    "nextTitle": "Next (Enter)",
+    "closeTitle": "Close (Esc)",
+    "processExited": "Process exited"
+  },
+  "ja": {
+    "searchPlaceholder": "検索...",
+    "prevTitle": "前へ (Shift+Enter)",
+    "nextTitle": "次へ (Enter)",
+    "closeTitle": "閉じる (Esc)",
+    "processExited": "プロセスが終了しました"
+  }
+}
+</i18n>

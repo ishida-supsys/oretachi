@@ -251,7 +251,7 @@ function overlayStyle(zone: DropZone): Record<string, string> {
 
       <button
         class="add-button"
-        :title="t('framePane.addTerminal')"
+        :title="t('addTerminal')"
         @click="emit('requestAddTerminal', leaf.id)"
       >+</button>
     </div>
@@ -268,7 +268,7 @@ function overlayStyle(zone: DropZone): Record<string, string> {
       </div>
 
       <div v-if="leaf.terminalIds.length === 0" class="empty-pane">
-        {{ t('framePane.noTerminals') }}
+        {{ t('noTerminals') }}
       </div>
 
       <!-- ドロップゾーンオーバーレイ -->
@@ -409,3 +409,16 @@ function overlayStyle(zone: DropZone): Record<string, string> {
   transition: left 0.05s ease;
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "addTerminal": "Add terminal",
+    "noTerminals": "No terminals"
+  },
+  "ja": {
+    "addTerminal": "ターミナルを追加",
+    "noTerminals": "ターミナルがありません"
+  }
+}
+</i18n>

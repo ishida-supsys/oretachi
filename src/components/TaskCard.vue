@@ -14,13 +14,13 @@ const emit = defineEmits<{
 
 function stepLabel(code: TaskItem["steps"][number]["code"]): string {
   if (code.type === "add_worktree") {
-    return `${t("task.stepAddWorktree")}: ${code.repository}/${code.branch}`;
+    return `${t("stepAddWorktree")}: ${code.repository}/${code.branch}`;
   }
-  return `${t("task.stepAgent")}: ${code.repository}/${code.branch}`;
+  return `${t("stepAgent")}: ${code.repository}/${code.branch}`;
 }
 
 function statusLabel(status: TaskItem["status"]): string {
-  return t(`task.status.${status}`);
+  return t(`status.${status}`);
 }
 </script>
 
@@ -33,7 +33,7 @@ function statusLabel(status: TaskItem["status"]): string {
           class="task-badge"
           :class="`badge-${task.status}`"
         >{{ statusLabel(task.status) }}</span>
-        <button class="btn-remove" :title="t('task.removeTitle')" @click="emit('remove', task.id)">
+        <button class="btn-remove" :title="t('removeTitle')" @click="emit('remove', task.id)">
           <i class="pi pi-times" />
         </button>
       </div>
@@ -43,13 +43,13 @@ function statusLabel(status: TaskItem["status"]): string {
       <!-- 生成中 -->
       <div v-if="task.status === 'generating'" class="generating">
         <i class="pi pi-spinner pi-spin" />
-        <span>{{ t('task.generating') }}</span>
+        <span>{{ t('generating') }}</span>
       </div>
 
       <!-- エラー (ステップなし) -->
       <div v-else-if="task.status === 'error' && task.steps.length === 0" class="error-msg">
         <i class="pi pi-exclamation-circle" />
-        <span>{{ task.error ?? t('task.defaultError') }}</span>
+        <span>{{ task.error ?? t('defaultError') }}</span>
       </div>
 
       <!-- ステップ一覧 -->
@@ -211,3 +211,34 @@ function statusLabel(status: TaskItem["status"]): string {
   margin-left: 4px;
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "removeTitle": "Remove",
+    "generating": "Generating task code...",
+    "defaultError": "An error occurred",
+    "stepAddWorktree": "Add WT",
+    "stepAgent": "Agent",
+    "status": {
+      "generating": "Generating",
+      "executing": "Executing",
+      "completed": "Completed",
+      "error": "Error"
+    }
+  },
+  "ja": {
+    "removeTitle": "削除",
+    "generating": "タスク処理コード生成中...",
+    "defaultError": "エラーが発生しました",
+    "stepAddWorktree": "WT追加",
+    "stepAgent": "エージェント",
+    "status": {
+      "generating": "生成中",
+      "executing": "実行中",
+      "completed": "完了",
+      "error": "エラー"
+    }
+  }
+}
+</i18n>

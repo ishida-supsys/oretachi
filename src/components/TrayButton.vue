@@ -17,7 +17,7 @@ defineEmits<{
     v-if="totalCount > 0"
     class="tray-btn"
     :class="{ 'tray-btn--pulse': totalCount > 0 }"
-    :title="t('trayButton.tooltip', { count: totalCount })"
+    :title="t('tooltip', { count: totalCount })"
     @click="$emit('click')"
   >
     <span class="pi pi-bell" style="font-size: 20px;" />
@@ -75,3 +75,14 @@ defineEmits<{
   animation: pulse 2s ease-in-out infinite;
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "tooltip": "Notifications: {count}"
+  },
+  "ja": {
+    "tooltip": "通知: {count} 件"
+  }
+}
+</i18n>

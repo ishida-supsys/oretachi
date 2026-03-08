@@ -52,7 +52,7 @@ function onBlur() {
     @keydown="onKeydown"
     @blur="onBlur"
   >
-    {{ capturing ? t('hotkeyInput.capturing') : formatHotkey(modelValue) }}
+    {{ capturing ? t('capturing') : formatHotkey(modelValue) }}
   </button>
 </template>
 
@@ -81,3 +81,14 @@ function onBlur() {
   color: #cba6f7;
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "capturing": "Press a key..."
+  },
+  "ja": {
+    "capturing": "キーを入力..."
+  }
+}
+</i18n>
