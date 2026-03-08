@@ -42,5 +42,12 @@ export function useCodeReviewWindow() {
     codeReviewWindowMap.set(worktreeId, win);
   }
 
-  return { openCodeReview };
+  async function closeAllCodeReviewWindows(): Promise<void> {
+    for (const [, win] of codeReviewWindowMap) {
+      try { await win.destroy(); } catch { /* 既に閉じ済み */ }
+    }
+    codeReviewWindowMap.clear();
+  }
+
+  return { openCodeReview, closeAllCodeReviewWindows };
 }

@@ -19,6 +19,7 @@ import { useSettings } from "./composables/useSettings";
 import { useWorktrees } from "./composables/useWorktrees";
 import { useI18n } from "vue-i18n";
 import { useSubWindows } from "./composables/useSubWindows";
+import { useCodeReviewWindow } from "./composables/useCodeReviewWindow";
 import { useNotifications, sendOsNotification } from "./composables/useNotifications";
 import { useTrayPopup } from "./composables/useTrayPopup";
 import { useWindowFocus } from "./composables/useWindowFocus";
@@ -74,6 +75,7 @@ const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWork
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, registerTerminalSession, closeAllSubWindows } = useSubWindows();
 const { notifications, initNotificationListener, addNotification, clearNotification, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
 const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees } = useTrayPopup();
+const { closeAllCodeReviewWindows } = useCodeReviewWindow();
 const { tryAutoAssignHotkey } = useAutoHotkey();
 const { sortedTasks, addTask, setTaskSteps, updateStepStatus, updateTaskStatus, removeTask } = useTasks();
 const showAddTaskDialog = ref(false);
@@ -1405,6 +1407,7 @@ onMounted(async () => {
     }
 
     // 5. 既存のシャットダウン処理
+    await closeAllCodeReviewWindows();
     await closeAllSubWindows();
     for (const [, term] of terminalRefs) {
       if (term?.isRunning) {
