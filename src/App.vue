@@ -35,9 +35,23 @@ import { useAutoHotkey } from "./composables/useAutoHotkey";
 import { debug } from "@tauri-apps/plugin-log";
 import { platform } from "@tauri-apps/plugin-os";
 import Toast from "primevue/toast";
+import type { ToastMessageOptions } from "primevue/toast";
 import { useToast } from "primevue/usetoast";
 
 const toast = useToast();
+let activeTaskToast: ToastMessageOptions | null = null;
+
+function showTaskToast(options: ToastMessageOptions): void {
+  if (activeTaskToast) {
+    toast.remove(activeTaskToast);
+    activeTaskToast = null;
+  }
+  if (options.life === undefined) {
+    // 永続表示のメッセージは追跡する
+    activeTaskToast = options;
+  }
+  toast.add(options);
+}
 
 const { t } = useI18n();
 
@@ -559,6 +573,8 @@ async function executeAgentWorktree(code: AgentWorktreeTaskCode): Promise<void> 
   }
 
   if (termRef) {
+    // PTY の起動完了 (sessionId がセットされるまで) を待ってからコマンドを送信
+    await termRef.waitForReady();
     await termRef.write(command);
   } else if (isDetached(wt.id)) {
     // サブウィンドウに移動済みの場合: pty_write で直接PTYに書き込む
@@ -567,6 +583,8 @@ async function executeAgentWorktree(code: AgentWorktreeTaskCode): Promise<void> 
     if (sid === null) {
       throw new Error(`セッションIDが見つかりません: ${wt.name}`);
     }
+    // シェルの初期化完了を待つ
+    await new Promise((resolve) => setTimeout(resolve, 500));
     const bytes = Array.from(new TextEncoder().encode(command));
     await invoke("pty_write", { sessionId: sid, data: bytes });
   } else {
@@ -584,9 +602,7 @@ async function executeTaskSteps(taskId: string): Promise<void> {
     updateStepStatus(taskId, i, "running");
 
     const stepLabel = step.code.type === "add_worktree" ? "ワークツリー追加中" : "エージェント起動中";
-    toast.removeGroup(taskId);
-    toast.add({
-      group: taskId,
+    showTaskToast({
       severity: "info",
       summary: "タスク実行中",
       detail: `ステップ ${i + 1}/${task.steps.length}: ${stepLabel}`,
@@ -611,8 +627,7 @@ async function onAddTaskConfirm(prompt: string): Promise<void> {
   showAddTaskDialog.value = false;
   const task = addTask(prompt);
 
-  toast.add({
-    group: task.id,
+  showTaskToast({
     severity: "info",
     summary: "タスク追加",
     detail: "コード生成中...",
@@ -624,9 +639,7 @@ async function onAddTaskConfirm(prompt: string): Promise<void> {
     setTaskSteps(task.id, taskProcessCode.code);
 
     const stepCount = taskProcessCode.code.length;
-    toast.removeGroup(task.id);
-    toast.add({
-      group: task.id,
+    showTaskToast({
       severity: "info",
       summary: "タスク実行中",
       detail: `ステップ実行開始 (${stepCount}件)`,
@@ -635,9 +648,7 @@ async function onAddTaskConfirm(prompt: string): Promise<void> {
     await executeTaskSteps(task.id);
     updateTaskStatus(task.id, "completed");
 
-    toast.removeGroup(task.id);
-    toast.add({
-      group: task.id,
+    showTaskToast({
       severity: "success",
       summary: "タスク完了",
       detail: "すべてのステップが完了しました",
@@ -647,9 +658,7 @@ async function onAddTaskConfirm(prompt: string): Promise<void> {
     const msg = e instanceof Error ? e.message : String(e);
     updateTaskStatus(task.id, "error", msg);
 
-    toast.removeGroup(task.id);
-    toast.add({
-      group: task.id,
+    showTaskToast({
       severity: "error",
       summary: "タスク失敗",
       detail: msg,

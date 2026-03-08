@@ -282,6 +282,18 @@ function getTerminal() {
   return terminal;
 }
 
+function waitForReady(): Promise<void> {
+  if (sessionId.value !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const stopWatch = watch(sessionId, (val) => {
+      if (val !== null) {
+        stopWatch();
+        resolve();
+      }
+    });
+  });
+}
+
 watch(
   () => settings.value.terminal.fontSize,
   (newSize) => {
@@ -331,6 +343,7 @@ defineExpose({
   sessionId,
   serializeBuffer,
   handleTabActivated,
+  waitForReady,
   containerRef,
   toggleSearchBar: search.toggleSearchBar,
   closeSearchBar: search.closeSearchBar,
