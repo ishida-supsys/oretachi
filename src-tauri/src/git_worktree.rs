@@ -1,4 +1,5 @@
 use crate::process_utils::make_command;
+use serde::Serialize;
 
 pub fn get_git_remotes(repo_path: &str) -> Vec<serde_json::Value> {
     let output = make_command("git")
@@ -227,6 +228,236 @@ pub fn delete_branch(repo_path: &str, branch_name: &str, force: bool) -> Result<
     }
 
     Ok(())
+}
+
+// ─── コードレビュー用 Git 関数 ───────────────────────────────────────────────
+
+pub fn list_tracked_files(repo_path: &str) -> Result<Vec<String>, String> {
+    let output = make_command("git")
+        .args(["ls-files"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git ls-files failed: {}", stderr));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let files = stdout
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect();
+    Ok(files)
+}
+
+pub fn read_file_content(
+    repo_path: &str,
+    file_path: &str,
+    revision: Option<&str>,
+) -> Result<String, String> {
+    if let Some(rev) = revision {
+        let spec = format!("{}:{}", rev, file_path);
+        let output = make_command("git")
+            .args(["show", &spec])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| format!("git command error: {}", e))?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            return Err(format!("git show failed: {}", stderr));
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        let full_path = std::path::Path::new(repo_path).join(file_path);
+        // バイナリファイルや巨大ファイルのガード (10MB)
+        let meta = std::fs::metadata(&full_path)
+            .map_err(|e| format!("file metadata error: {}", e))?;
+        if meta.len() > 10 * 1024 * 1024 {
+            return Err(format!("file too large: {} bytes", meta.len()));
+        }
+        std::fs::read_to_string(&full_path).map_err(|e| format!("file read error: {}", e))
+    }
+}
+
+#[derive(Serialize)]
+pub struct GitStatusEntry {
+    pub path: String,
+    pub status: String,
+    pub staged: bool,
+}
+
+pub fn get_status(repo_path: &str) -> Result<Vec<GitStatusEntry>, String> {
+    let output = make_command("git")
+        .args(["status", "--porcelain=v1"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git status failed: {}", stderr));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut entries = Vec::new();
+
+    for line in stdout.lines() {
+        if line.len() < 3 {
+            continue;
+        }
+        let xy = &line[..2];
+        let path = line[3..].to_string();
+        let x = &xy[..1]; // index (staged)
+        let y = &xy[1..]; // worktree (unstaged)
+
+        // staged change (index != ' ' && index != '?')
+        if x != " " && x != "?" {
+            entries.push(GitStatusEntry {
+                path: path.clone(),
+                status: x.to_string(),
+                staged: true,
+            });
+        }
+        // unstaged change (worktree != ' ' && worktree != '?')
+        if y != " " && y != "?" {
+            entries.push(GitStatusEntry {
+                path: path.clone(),
+                status: y.to_string(),
+                staged: false,
+            });
+        }
+        // untracked
+        if xy == "??" {
+            entries.push(GitStatusEntry {
+                path: path.clone(),
+                status: "??".to_string(),
+                staged: false,
+            });
+        }
+    }
+
+    Ok(entries)
+}
+
+#[derive(Serialize)]
+pub struct FileDiff {
+    pub old_content: String,
+    pub new_content: String,
+}
+
+pub fn get_file_diff(repo_path: &str, file_path: &str, staged: bool) -> Result<FileDiff, String> {
+    let old_content = {
+        let spec = format!("HEAD:{}", file_path);
+        let output = make_command("git")
+            .args(["show", &spec])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| format!("git command error: {}", e))?;
+        if output.status.success() {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        } else {
+            String::new() // 新規ファイルの場合は空
+        }
+    };
+
+    let new_content = if staged {
+        // staged: インデックスの内容
+        let spec = format!(":{}", file_path);
+        let output = make_command("git")
+            .args(["show", &spec])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| format!("git command error: {}", e))?;
+        if output.status.success() {
+            String::from_utf8_lossy(&output.stdout).into_owned()
+        } else {
+            String::new()
+        }
+    } else {
+        // unstaged: ワーキングツリーの内容
+        let full_path = std::path::Path::new(repo_path).join(file_path);
+        match std::fs::read_to_string(&full_path) {
+            Ok(content) => content,
+            Err(_) => String::new(),
+        }
+    };
+
+    Ok(FileDiff { old_content, new_content })
+}
+
+#[derive(Serialize)]
+pub struct CommitEntry {
+    pub hash: String,
+    pub short_hash: String,
+    pub author: String,
+    pub date: String,
+    pub message: String,
+    pub parents: Vec<String>,
+    pub refs: Vec<String>,
+}
+
+pub fn get_log(repo_path: &str, skip: usize, limit: usize) -> Result<Vec<CommitEntry>, String> {
+    // セパレータを使ってフィールドを区切る
+    let format = "%H%x00%h%x00%an%x00%ai%x00%s%x00%P%x00%D%x1e";
+    let skip_arg = format!("--skip={}", skip);
+    let limit_arg = format!("-n{}", limit);
+
+    let output = make_command("git")
+        .args([
+            "log",
+            "--all",
+            &format!("--format={}", format),
+            &skip_arg,
+            &limit_arg,
+        ])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git log failed: {}", stderr));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut entries = Vec::new();
+
+    for record in stdout.split('\x1e') {
+        let record = record.trim();
+        if record.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = record.split('\x00').collect();
+        if fields.len() < 7 {
+            continue;
+        }
+        let parents = fields[5]
+            .split_whitespace()
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string())
+            .collect();
+        let refs = fields[6]
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        entries.push(CommitEntry {
+            hash: fields[0].to_string(),
+            short_hash: fields[1].to_string(),
+            author: fields[2].to_string(),
+            date: fields[3].to_string(),
+            message: fields[4].to_string(),
+            parents,
+            refs,
+        });
+    }
+
+    Ok(entries)
 }
 
 pub fn worktree_remove(repo_path: &str, worktree_path: &str) -> Result<(), String> {

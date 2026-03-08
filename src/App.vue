@@ -380,7 +380,7 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
 async function onOpenInIde(worktreeId: string) {
   const worktree = worktrees.value.find((w) => w.id === worktreeId);
   if (!worktree) return;
-  await openInIde(worktree.path);
+  await openInIde(worktree.path, { worktreeId: worktree.id, worktreeName: worktree.name });
 }
 
 async function onAddWorktreeConfirm(entry: WorktreeEntry) {

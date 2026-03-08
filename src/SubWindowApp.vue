@@ -148,7 +148,7 @@ async function requestAddTerminal(leafId?: string) {
 }
 
 async function requestOpenInIde() {
-  await openInIde(worktreePath);
+  await openInIde(worktreePath, { worktreeId, worktreeName });
 }
 
 function onTerminalTitleChange(terminalId: number, title: string) {

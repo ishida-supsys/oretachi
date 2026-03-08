@@ -29,6 +29,8 @@ async function mountApp() {
     rootComponent = (await import("./SubWindowApp.vue")).default;
   } else if (mode === "tray") {
     rootComponent = (await import("./TrayPopupApp.vue")).default;
+  } else if (mode === "codereview") {
+    rootComponent = (await import("./CodeReviewApp.vue")).default;
   } else {
     rootComponent = (await import("./App.vue")).default;
   }
