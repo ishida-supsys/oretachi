@@ -1,4 +1,5 @@
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { invoke } from "@tauri-apps/api/core";
 
 const codeReviewWindowMap = new Map<string, WebviewWindow>();
 
@@ -37,6 +38,7 @@ export function useCodeReviewWindow() {
 
     win.once("tauri://destroyed", () => {
       codeReviewWindowMap.delete(worktreeId);
+      invoke("stop_fs_watch", { worktreeId }).catch(() => {});
     });
 
     codeReviewWindowMap.set(worktreeId, win);

@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, onMounted, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
@@ -53,7 +54,16 @@ const statusColor: Record<string, string> = {
   "??": "text-surface-400",
 };
 
-onMounted(loadStatus);
+let unlistenFsChanged: (() => void) | null = null;
+
+onMounted(async () => {
+  loadStatus();
+  unlistenFsChanged = await listen("codereview-fs-changed", loadStatus);
+});
+
+onUnmounted(() => {
+  unlistenFsChanged?.();
+});
 </script>
 
 <template>

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import "./monaco-workers";
-import { ref, onMounted } from "vue";
+import { ref, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { useToast } from "primevue/usetoast";
 import Toast from "primevue/toast";
@@ -11,12 +11,14 @@ import MonacoFileViewer from "./components/codereview/MonacoFileViewer.vue";
 import MonacoDiffViewer from "./components/codereview/MonacoDiffViewer.vue";
 import { useCodeReviewTabs } from "./composables/useCodeReviewTabs";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const { t } = useI18n();
 const toast = useToast();
 
 const params = new URLSearchParams(window.location.search);
+const worktreeId = params.get("worktreeId") ?? "";
 const worktreePath = params.get("worktreePath") ?? "";
 const worktreeName = params.get("worktreeName") ?? "";
 
@@ -26,7 +28,7 @@ const activePanel = ref<Panel>("files");
 const sidebarWidth = ref(250);
 const isResizing = ref(false);
 
-const { tabs, activeTabId, openFileTab, openDiffTab, closeTab, switchTab, activeTab } =
+const { tabs, activeTabId, openFileTab, openDiffTab, closeTab, switchTab, activeTab, updateFileTab, updateDiffTab, getOpenTabs } =
   useCodeReviewTabs();
 
 // ─── サイドバーリサイズ ───────────────────────────────────────────────────────
@@ -77,15 +79,83 @@ async function handleOpenDiff(payload: { filePath: string; staged: boolean }) {
   }
 }
 
-onMounted(() => {
+// ─── タブ自動リフレッシュ ─────────────────────────────────────────────────────
+async function refreshOpenTabs() {
+  const openTabs = getOpenTabs();
+  await Promise.allSettled(
+    openTabs.map(async (tab) => {
+      if (tab.type === "file") {
+        try {
+          const content = await invoke<string>("git_read_file", {
+            repoPath: worktreePath,
+            filePath: tab.filePath,
+            revision: null,
+          });
+          updateFileTab(tab.filePath, content);
+        } catch { /* 無視 */ }
+      } else {
+        try {
+          const diff = await invoke<{ old_content: string; new_content: string }>("git_get_file_diff", {
+            repoPath: worktreePath,
+            filePath: tab.filePath,
+            staged: tab.staged,
+          });
+          updateDiffTab(tab.filePath, tab.staged!, diff.old_content, diff.new_content);
+        } catch { /* 無視 */ }
+      }
+    }),
+  );
+}
+
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleRefresh() {
+  if (refreshTimer !== null) clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    refreshOpenTabs();
+  }, 300);
+}
+
+let unlistenFsChanged: (() => void) | null = null;
+
+onMounted(async () => {
   document.title = `Code Review - ${worktreeName}`;
+
+  // FS ウォッチャー起動
+  if (worktreeId && worktreePath) {
+    try {
+      await invoke("start_fs_watch", { worktreeId, worktreePath });
+      unlistenFsChanged = await listen("codereview-fs-changed", scheduleRefresh);
+    } catch (e) {
+      console.warn("start_fs_watch failed:", e);
+    }
+  }
+
+  // ウィンドウフォーカス時にも再取得（フォールバック）
+  window.addEventListener("focus", refreshOpenTabs);
 
   const appWindow = getCurrentWindow();
   appWindow.onCloseRequested(async (event) => {
     event.preventDefault();
+    cleanup();
     await appWindow.destroy();
   });
 });
+
+function cleanup() {
+  if (refreshTimer !== null) {
+    clearTimeout(refreshTimer);
+    refreshTimer = null;
+  }
+  window.removeEventListener("focus", refreshOpenTabs);
+  unlistenFsChanged?.();
+  unlistenFsChanged = null;
+  if (worktreeId) {
+    invoke("stop_fs_watch", { worktreeId }).catch(() => {});
+  }
+}
+
+onUnmounted(cleanup);
 </script>
 
 <template>
