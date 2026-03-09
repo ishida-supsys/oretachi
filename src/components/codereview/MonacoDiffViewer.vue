@@ -8,10 +8,12 @@ const props = defineProps<{
   oldContent: string;
   newContent: string;
   filePath?: string;
+  autoHeight?: boolean;
 }>();
 
 const emit = defineEmits<{
   chat: [payload: ChatPayload];
+  contentHeightChange: [height: number];
 }>();
 
 const options = {
@@ -20,6 +22,7 @@ const options = {
   scrollBeyondLastLine: false,
   fontSize: 13,
   renderSideBySide: true,
+  hideUnchangedRegions: { enabled: true },
 };
 
 const { buttonPos, handleMount, handleChatClick } = useEditorLineSelection(
@@ -29,6 +32,12 @@ const { buttonPos, handleMount, handleChatClick } = useEditorLineSelection(
 
 function onMount(editor: Monaco.editor.IStandaloneDiffEditor) {
   handleMount(editor.getModifiedEditor());
+
+  if (props.autoHeight) {
+    editor.getModifiedEditor().onDidContentSizeChange((e) => {
+      emit("contentHeightChange", e.contentHeight);
+    });
+  }
 }
 </script>
 

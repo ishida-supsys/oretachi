@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import Checkbox from "primevue/checkbox";
 import MonacoDiffViewer from "./MonacoDiffViewer.vue";
@@ -22,14 +22,21 @@ const statusColorClass: Record<string, string> = {
   "??": "text-surface-400",
 };
 
-const diffHeight = computed(() => {
-  const lines = Math.max(
-    props.entry.oldContent.split("\n").length,
-    props.entry.newContent.split("\n").length,
-  );
-  const px = Math.min(600, Math.max(200, lines * 19 + 40));
-  return `${px}px`;
-});
+const initialHeight = ref<number | null>(null);
+const displayHeight = ref(300);
+
+function handleContentHeightChange(height: number) {
+  if (initialHeight.value === null) {
+    initialHeight.value = height;
+    displayHeight.value = Math.min(600, Math.max(100, height));
+  } else if (height <= initialHeight.value) {
+    initialHeight.value = height;
+    displayHeight.value = Math.min(600, Math.max(100, height));
+  }
+  // height > initialHeight: 展開された → displayHeight を固定のまま
+}
+
+const diffHeight = computed(() => `${displayHeight.value}px`);
 
 const checked = computed({
   get: () => props.entry.reviewed,
@@ -84,7 +91,9 @@ const checked = computed({
           :old-content="entry.oldContent"
           :new-content="entry.newContent"
           :file-path="entry.filePath"
+          :auto-height="true"
           @chat="(payload) => emit('chat', payload)"
+          @content-height-change="handleContentHeightChange"
         />
       </div>
     </div>
