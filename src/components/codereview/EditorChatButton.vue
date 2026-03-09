@@ -2,7 +2,7 @@
 import type { HotkeyBinding } from "../../types/settings";
 import { formatHotkey } from "../../composables/useHotkeys";
 
-const props = defineProps<{
+defineProps<{
   buttonPos: { top: number; left: number; height: number } | null;
   filePath?: string;
   hotkey?: HotkeyBinding;
