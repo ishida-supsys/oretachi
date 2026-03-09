@@ -825,9 +825,15 @@ async function onTrayButtonClick() {
       }).filter((t) => t.sessionId !== 0);
 
       // フレーム領域のサイズを取得（ヘッダー除く）
-      const frameAreaEl = document.querySelector(`[data-frame-area="${worktreeId}"]`);
-      const rect = frameAreaEl?.getBoundingClientRect();
-      const mainWindowSize = rect
+      let frameAreaEl: Element | null = document.querySelector(`[data-frame-area="${worktreeId}"]`);
+      let rect = frameAreaEl?.getBoundingClientRect();
+      // 非アクティブワークツリーは v-show で非表示のため rect が 0x0 になる
+      // 全フレームは absolute inset-0 で同サイズなので、アクティブワークツリーの領域で代替
+      if (!rect || rect.width === 0 || rect.height === 0) {
+        frameAreaEl = document.querySelector(`[data-frame-area="${activeWorktreeId.value}"]`);
+        rect = frameAreaEl?.getBoundingClientRect();
+      }
+      const mainWindowSize = rect && rect.width > 0 && rect.height > 0
         ? { width: Math.round(rect.width), height: Math.round(rect.height) }
         : undefined;
 
