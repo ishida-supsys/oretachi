@@ -6,7 +6,7 @@ use tauri::State;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{timeout, Duration};
 
-const TIMEOUT_SECS: u64 = 30;
+const TIMEOUT_SECS: u64 = 120;
 
 const PROMPT_TEMPLATE: &str = r#"You are a safety gate preventing risky auto-approvals of CLI actions.
 Examine the terminal output below and decide if the agent must pause for user permission.

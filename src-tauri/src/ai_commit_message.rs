@@ -6,7 +6,7 @@ use tauri::State;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{timeout, Duration};
 
-const TIMEOUT_SECS: u64 = 30;
+const TIMEOUT_SECS: u64 = 120;
 
 const PROMPT_TEMPLATE: &str = r#"You are an expert at writing concise git commit messages.
 Analyze the following git diff and generate a commit message.
