@@ -28,6 +28,7 @@ fn pty_spawn(
     shell: Option<String>,
     cwd: Option<String>,
 ) -> Result<u32, String> {
+    log::debug!("[Terminal] cmd::pty_spawn rows={} cols={} shell={:?} cwd={:?}", rows, cols, shell, cwd);
     state.spawn(app_handle, rows, cols, shell, cwd)
 }
 
@@ -38,6 +39,7 @@ fn pty_write(state: State<PtyManager>, session_id: u32, data: Vec<u8>) -> Result
 
 #[tauri::command]
 fn pty_resize(state: State<PtyManager>, session_id: u32, rows: u16, cols: u16) -> Result<(), String> {
+    log::debug!("[Terminal] cmd::pty_resize session_id={} rows={} cols={}", session_id, rows, cols);
     state.resize(session_id, rows, cols)
 }
 

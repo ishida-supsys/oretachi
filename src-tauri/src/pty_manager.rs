@@ -230,6 +230,7 @@ impl PtyManager {
         shell: Option<String>,
         cwd: Option<String>,
     ) -> Result<u32, String> {
+        log::debug!("[Terminal] pty_manager::spawn rows={} cols={} shell={:?} cwd={:?}", rows, cols, shell, cwd);
         let pty_system = native_pty_system();
 
         let size = PtySize {
@@ -397,6 +398,7 @@ impl PtyManager {
 
         self.sessions.lock().unwrap().insert(session_id, session);
 
+        log::debug!("[Terminal] pty_manager::spawn done session_id={} rows={} cols={}", session_id, rows, cols);
         Ok(session_id)
     }
 
@@ -419,6 +421,7 @@ impl PtyManager {
     }
 
     pub fn resize(&self, session_id: u32, rows: u16, cols: u16) -> Result<(), String> {
+        log::debug!("[Terminal] pty_manager::resize session_id={} rows={} cols={}", session_id, rows, cols);
         let sessions = self.sessions.lock().unwrap();
         let session = sessions
             .get(&session_id)
@@ -439,6 +442,7 @@ impl PtyManager {
     }
 
     pub fn kill(&self, session_id: u32) -> Result<(), String> {
+        log::debug!("[Terminal] pty_manager::kill session_id={}", session_id);
         let watcher_handle = {
             let mut sessions = self.sessions.lock().unwrap();
             if let Some(mut session) = sessions.remove(&session_id) {

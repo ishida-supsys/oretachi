@@ -209,6 +209,8 @@ async function switchToTerminal(terminalId: number) {
   }
   if (!worktreeId) return;
 
+  debug(`[Terminal] switchToTerminal terminalId=${terminalId} worktreeId=${worktreeId}`);
+
   const bundle = worktreeFrameBundles.get(worktreeId);
   if (bundle) {
     const leaf = bundle.frame.getAllLeafs().find((l) => l.terminalIds.includes(terminalId));
@@ -221,17 +223,23 @@ async function switchToTerminal(terminalId: number) {
   viewMode.value = "terminal";
   activeWorktreeId.value = worktreeId;
   await nextTick();
+  debug(`[Terminal] switchToTerminal after nextTick terminalId=${terminalId}`);
 
   if (bundle) {
     bundle.frame.mountTerminalsToHosts();
+    debug(`[Terminal] switchToTerminal after mountTerminalsToHosts terminalId=${terminalId}`);
     const term = bundle.terminalRefs.get(terminalId);
     if (term) {
       await term.handleTabActivated();
+      debug(`[Terminal] switchToTerminal after handleTabActivated terminalId=${terminalId}`);
       term.focus();
       // 安全策: flexレイアウト確定が遅延する場合に備えた再fit
       setTimeout(() => {
+        debug(`[Terminal] switchToTerminal setTimeout re-fit terminalId=${terminalId}`);
         term.handleTabActivated();
       }, 150);
+    } else {
+      debug(`[Terminal] switchToTerminal term ref not found terminalId=${terminalId}`);
     }
   }
 }
@@ -280,6 +288,7 @@ async function onAddTerminal(worktreeId: string) {
 
   const terminal = addTerminal(worktreeId);
   terminalWorktreeMap.set(terminal.id, worktreeId);
+  debug(`[Terminal] onAddTerminal worktreeId=${worktreeId} terminalId=${terminal.id}`);
 
   // バンドルがなければ作成（ワークツリー追加直後など）
   if (!worktreeFrameBundles.has(worktreeId)) {
@@ -290,6 +299,7 @@ async function onAddTerminal(worktreeId: string) {
   bundle.terminalEntries.set(terminal.id, { id: terminal.id, title: terminal.title, sessionId: 0, snapshot: "" });
 
   const leafId = bundle.frame.lastFocusedLeafId.value || bundle.frame.getAllLeafs()[0]?.id;
+  debug(`[Terminal] onAddTerminal leafId=${leafId ?? "null"} terminalId=${terminal.id}`);
   if (leafId) {
     bundle.frame.returnAllToOffscreen();
     bundle.frame.addTerminalToLeaf(leafId, terminal.id);
@@ -303,16 +313,22 @@ async function onAddTerminal(worktreeId: string) {
   activeWorktreeId.value = worktreeId;
 
   await nextTick();
+  debug(`[Terminal] onAddTerminal after nextTick terminalId=${terminal.id}`);
 
   bundle.frame.mountTerminalsToHosts();
+  debug(`[Terminal] onAddTerminal after mountTerminalsToHosts terminalId=${terminal.id}`);
   const term = bundle.terminalRefs.get(terminal.id);
   if (term) {
     await term.handleTabActivated();
+    debug(`[Terminal] onAddTerminal after handleTabActivated terminalId=${terminal.id}`);
     term.focus();
     // 安全策: flexレイアウト確定が遅延する場合に備えた再fit
     setTimeout(() => {
+      debug(`[Terminal] onAddTerminal setTimeout re-fit terminalId=${terminal.id}`);
       term.handleTabActivated();
     }, 150);
+  } else {
+    debug(`[Terminal] onAddTerminal term ref not found terminalId=${terminal.id}`);
   }
 }
 
