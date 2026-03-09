@@ -5,18 +5,19 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import TerminalView from "./components/TerminalView.vue";
 import FrameContainer from "./components/FrameContainer.vue";
-import { useFrameLayout } from "./composables/useFrameLayout";
+import WorktreeHeader from "./components/WorktreeHeader.vue";
+import { useWorktreeFrame } from "./composables/useWorktreeFrame";
 import { useSettings } from "./composables/useSettings";
 import { useHotkeyListener } from "./composables/useHotkeys";
 import { renderToDataUrl } from "./composables/useTerminalThumbnail";
 import { useWindowFocus } from "./composables/useWindowFocus";
 import { getRecentLines, analyzeForApproval, hasApprovalPrompt } from "./utils/autoApproval";
-import { useTerminalReparenting } from "./composables/useTerminalReparenting";
 import { useIdeSelect } from "./composables/useIdeSelect";
 import { invoke } from "@tauri-apps/api/core";
 import { debug } from "@tauri-apps/plugin-log";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import type { SubTerminalEntry } from "./types/terminal";
+import type { FrameNode } from "./types/frame";
 import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
@@ -54,97 +55,39 @@ watch(isWindowFocused, (focused) => {
   emitTo("main", "sub-window-focus-changed", { worktreeId, focused });
 });
 
-// フレームレイアウト
-const { root, initLayout, addTerminalToLeaf, removeTerminalFromLeaf, moveTerminal, setActiveTerminal, splitLeaf, pruneTree, findLeafByTerminalId } = useFrameLayout();
-
-// 最後にフォーカスされたリーフ（新ターミナル追加先）
-const lastFocusedLeafId = ref<string>("");
-
 // TerminalView ref 管理
 const terminalRefs = reactive(new Map<number, InstanceType<typeof TerminalView>>());
 
-const { setTerminalRef, returnAllToOffscreen, mountTerminalsToHosts } =
-  useTerminalReparenting(terminalEntries, terminalRefs);
-
-// PTY 終了時にリーフを特定して closeTerminal を呼ぶ
-function handleTerminalExit(tid: number) {
-  const leaf = findLeafByTerminalId(tid);
-  if (leaf) {
-    closeTerminal(leaf.id, tid);
-  }
-}
+// フレームレイアウト（useWorktreeFrameで共通化）
+const {
+  root,
+  initLayout,
+  addTerminalToLeaf,
+  lastFocusedLeafId,
+  setTerminalRef,
+  mountTerminalsToHosts,
+  getAllLeafs,
+  getLeafsWithTerminals,
+  switchTerminal,
+  closeTerminal,
+  handleTerminalExit,
+  onSplitRequest,
+  onTabDrop,
+  onTabEdgeDrop,
+  onTabReorder,
+} = useWorktreeFrame({
+  terminalEntries,
+  terminalRefs,
+  onTerminalClosed: async (terminalId) => {
+    terminalExitCodes.delete(terminalId);
+    terminalAgentStatus.delete(terminalId);
+    await emitTo("main", "sub-remove-terminal", { worktreeId, terminalId });
+  },
+});
 
 // ────────────────────────────────────────────────
 // イベントハンドラ
 // ────────────────────────────────────────────────
-
-async function switchTerminal(leafId: string, terminalId: number) {
-  setActiveTerminal(leafId, terminalId);
-  lastFocusedLeafId.value = leafId;
-  await nextTick();
-  const term = terminalRefs.get(terminalId);
-  if (term) {
-    await term.handleTabActivated();
-    term.focus();
-  }
-}
-
-async function closeTerminal(leafId: string, terminalId: number) {
-  const entry = terminalEntries.get(terminalId);
-  if (!entry) return;
-
-  const term = terminalRefs.get(terminalId);
-  if (term?.isRunning) {
-    await term.kill();
-  }
-
-  // kill 中に pty-exit → 再入で既に削除済みの可能性
-  if (!terminalEntries.has(terminalId)) return;
-
-  returnAllToOffscreen();
-
-  terminalEntries.delete(terminalId);
-  terminalExitCodes.delete(terminalId);
-  terminalAgentStatus.delete(terminalId);
-  removeTerminalFromLeaf(leafId, terminalId);
-  pruneTree();
-
-  await emitTo("main", "sub-remove-terminal", { worktreeId, terminalId });
-
-  await nextTick();
-  mountTerminalsToHosts();
-
-  // 全ターミナルに handleTabActivated
-  for (const [tid] of terminalEntries) {
-    const t = terminalRefs.get(tid);
-    if (t) await t.handleTabActivated();
-  }
-
-  // 削除後にアクティブなターミナルにフォーカス
-  const leafs = getLeafsWithTerminals();
-  if (leafs.length > 0) {
-    const firstLeaf = leafs[0];
-    if (firstLeaf.activeTerminalId !== null) {
-      const activeTerm = terminalRefs.get(firstLeaf.activeTerminalId);
-      if (activeTerm) {
-        activeTerm.focus();
-      }
-    }
-  }
-}
-
-function getLeafsWithTerminals() {
-  const leafs: import("./types/frame").FrameLeaf[] = [];
-  function collect(node: import("./types/frame").FrameNode) {
-    if (node.type === "leaf") {
-      if (node.terminalIds.length > 0) leafs.push(node);
-    } else {
-      node.children.forEach(collect);
-    }
-  }
-  collect(root.value);
-  return leafs;
-}
 
 async function requestAddTerminal(leafId?: string) {
   if (leafId) lastFocusedLeafId.value = leafId;
@@ -163,79 +106,18 @@ function onTerminalTitleChange(terminalId: number, title: string) {
 
 function onTerminalFocus(terminalId: number) {
   emitTo("main", "sub-clear-notification", { worktreeId });
-  const leaf = findLeafByTerminalId(terminalId);
+  const leaf = getAllLeafs().find((l) => l.terminalIds.includes(terminalId));
   if (leaf) {
     lastFocusedLeafId.value = leaf.id;
   }
 }
 
-async function onSplitRequest(leafId: string, direction: "left" | "right" | "top" | "bottom") {
-  returnAllToOffscreen();
-
-  splitLeaf(leafId, direction);
-  lastFocusedLeafId.value = leafId;
-
-  await nextTick();
-  mountTerminalsToHosts();
-
-  // 全ターミナルに handleTabActivated
-  for (const [tid] of terminalEntries) {
-    const term = terminalRefs.get(tid);
-    if (term) await term.handleTabActivated();
+function getFirstLeafId(): string {
+  function find(node: import("./types/frame").FrameNode): string {
+    if (node.type === "leaf") return node.id;
+    return find(node.children[0]);
   }
-}
-
-function onTabReorder(leafId: string, terminalId: number, insertIndex: number) {
-  moveTerminal(terminalId, leafId, leafId, insertIndex);
-  // 同一リーフ内の並び替えのため pruneTree / DOM reparent 不要
-}
-
-async function onTabDrop(sourceLeafId: string, terminalId: number, targetLeafId: string, insertIndex?: number) {
-  if (sourceLeafId === targetLeafId) return;
-
-  returnAllToOffscreen();
-
-  moveTerminal(terminalId, sourceLeafId, targetLeafId, insertIndex);
-  pruneTree();
-  lastFocusedLeafId.value = targetLeafId;
-
-  await nextTick();
-  mountTerminalsToHosts();
-
-  // 全ターミナルに handleTabActivated
-  for (const [tid] of terminalEntries) {
-    const term = terminalRefs.get(tid);
-    if (term) await term.handleTabActivated();
-  }
-  const movedTerm = terminalRefs.get(terminalId);
-  if (movedTerm) movedTerm.focus();
-}
-
-async function onTabEdgeDrop(
-  sourceLeafId: string,
-  terminalId: number,
-  targetLeafId: string,
-  direction: "left" | "right" | "top" | "bottom"
-) {
-  returnAllToOffscreen();
-
-  const newLeaf = splitLeaf(targetLeafId, direction);
-  moveTerminal(terminalId, sourceLeafId, newLeaf.id);
-  pruneTree();
-  lastFocusedLeafId.value = newLeaf.id;
-
-  await nextTick();
-  mountTerminalsToHosts();
-
-  for (const [tid] of terminalEntries) {
-    const term = terminalRefs.get(tid);
-    if (term) {
-      await term.handleTabActivated();
-    }
-  }
-
-  const movedTerm = terminalRefs.get(terminalId);
-  if (movedTerm) movedTerm.focus();
+  return find(root.value);
 }
 
 // ────────────────────────────────────────────────
@@ -365,7 +247,12 @@ onMounted(async () => {
   const appWindow = getCurrentWindow();
 
   // 初期ターミナルデータを受信
-  unlistenInit = await appWindow.listen<{ worktreeId: string; terminals: SubTerminalEntry[]; autoApproval?: boolean }>(
+  unlistenInit = await appWindow.listen<{
+    worktreeId: string;
+    terminals: SubTerminalEntry[];
+    autoApproval?: boolean;
+    layout?: FrameNode;
+  }>(
     "sub-init",
     async (event) => {
       if (event.payload.worktreeId !== worktreeId) return;
@@ -380,11 +267,18 @@ onMounted(async () => {
       }
 
       const ids = event.payload.terminals.map((t) => t.id);
-      initLayout(ids);
+
+      // レイアウト復元: layout が渡された場合はそのまま設定
+      if (event.payload.layout) {
+        root.value = event.payload.layout;
+      } else {
+        initLayout(ids);
+      }
 
       // 最初のリーフを lastFocusedLeafId に設定
-      if (root.value.type === "leaf") {
-        lastFocusedLeafId.value = root.value.id;
+      const leafs = getAllLeafs();
+      if (leafs.length > 0) {
+        lastFocusedLeafId.value = leafs[0].id;
       }
 
       initialized.value = true;
@@ -393,8 +287,9 @@ onMounted(async () => {
       await nextTick();
       mountTerminalsToHosts();
 
-      if (root.value.type === "leaf" && root.value.activeTerminalId !== null) {
-        const term = terminalRefs.get(root.value.activeTerminalId);
+      const firstLeaf = leafs[0];
+      if (firstLeaf?.activeTerminalId !== null && firstLeaf?.activeTerminalId !== undefined) {
+        const term = terminalRefs.get(firstLeaf.activeTerminalId);
         if (term) {
           await term.handleTabActivated();
           term.focus();
@@ -432,9 +327,7 @@ onMounted(async () => {
     "sub-focus-terminal",
     async (event) => {
       const { terminalId } = event.payload;
-      // ターミナルが属するリーフを探す
-      const leafs = getLeafsWithTerminals();
-      const leaf = leafs.find((l) => l.terminalIds.includes(terminalId));
+      const leaf = getLeafsWithTerminals().find((l) => l.terminalIds.includes(terminalId));
       if (leaf) {
         await switchTerminal(leaf.id, terminalId);
       }
@@ -612,14 +505,6 @@ async function onCancelAiJudging() {
   await invoke("cancel_approval", { worktreeId });
   aiJudging.value = false;
 }
-
-function getFirstLeafId(): string {
-  function find(node: import("./types/frame").FrameNode): string {
-    if (node.type === "leaf") return node.id;
-    return find(node.children[0]);
-  }
-  return find(root.value);
-}
 </script>
 
 <template>
@@ -631,45 +516,15 @@ function getFirstLeafId(): string {
 
     <template v-else>
       <!-- ヘッダー -->
-      <div 
-        class="flex items-center justify-between border-b shrink-0 px-4 py-1 transition-colors duration-200"
-        :class="isWindowFocused ? 'bg-gradient-to-r from-[#181825] via-[#2a2a3f] to-[#181825] animate-gradient-x border-[#cba6f7]/50' : 'bg-[#11111b] opacity-80 border-[#313244]'"
-      >
-        <div class="flex items-center gap-2">
-          <span
-            class="text-sm font-semibold transition-colors duration-200"
-            :class="isWindowFocused ? 'text-[#cba6f7]' : 'text-[#6c7086]'"
-          >
-            {{ worktreeName }}
-          </span>
-          <span
-            v-if="hotkeyChar"
-            class="text-[10px] px-1.5 py-0.5 rounded font-mono font-medium"
-            style="background: rgba(203,166,247,0.15); color: #cba6f7; border: 1px solid rgba(203,166,247,0.3)"
-          >Alt+{{ hotkeyChar.toUpperCase() }}</span>
-          <span
-            v-if="autoApproval"
-            class="text-[10px] px-1.5 py-0.5 rounded font-medium"
-            style="background: rgba(166, 227, 161, 0.15); color: #a6e3a1; border: 1px solid rgba(166, 227, 161, 0.3)"
-          >{{ t('autoApprovalBadge') }}</span>
-          <button
-            v-if="aiJudging"
-            class="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-semibold cursor-pointer border-none"
-            style="background: #f9e2af; color: #1e1e2e"
-            @click="onCancelAiJudging"
-          >
-            <span class="pi pi-spin pi-spinner" style="font-size: 9px" />
-            {{ t('aiJudgingBadge') }}
-          </button>
-        </div>
-        <button
-          class="flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
-          :title="t('openInIde')"
-          @click="requestOpenInIde"
-        >
-          <span class="pi pi-code text-sm" />
-        </button>
-      </div>
+      <WorktreeHeader
+        :worktree-name="worktreeName"
+        :hotkey-char="hotkeyChar"
+        :auto-approval="autoApproval"
+        :ai-judging="aiJudging"
+        :is-window-focused="isWindowFocused"
+        @open-in-ide="requestOpenInIde"
+        @cancel-ai-judging="onCancelAiJudging"
+      />
 
       <!-- フレームレイアウト -->
       <div class="flex-1 min-h-0 overflow-hidden">
@@ -721,18 +576,12 @@ function getFirstLeafId(): string {
 {
   "en": {
     "connecting": "Connecting...",
-    "autoApprovalBadge": "Auto approval",
-    "aiJudgingBadge": "AI judging",
-    "openInIde": "Open in IDE",
     "ideNotInstalled": "None of Cursor, VS Code, Antigravity are installed.",
     "ideNotInstalledTitle": "IDE not found",
     "ideLaunchFailed": "Failed to launch IDE: {error}"
   },
   "ja": {
     "connecting": "接続中...",
-    "autoApprovalBadge": "自動承認",
-    "aiJudgingBadge": "AI判定中",
-    "openInIde": "IDE で開く",
     "ideNotInstalled": "Cursor、VS Code、Antigravity のいずれもインストールされていません。",
     "ideNotInstalledTitle": "IDE が見つかりません",
     "ideLaunchFailed": "IDE の起動に失敗しました: {error}"

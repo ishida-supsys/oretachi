@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { ref, reactive, nextTick, onMounted, markRaw, computed } from "vue";
+import { ref, reactive, nextTick, onMounted, computed } from "vue";
 import { renderToDataUrl } from "./composables/useTerminalThumbnail";
 import { listen, emitTo } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import TerminalView from "./components/TerminalView.vue";
+import FrameContainer from "./components/FrameContainer.vue";
+import WorktreeHeader from "./components/WorktreeHeader.vue";
 import HomeView from "./components/HomeView.vue";
 import SettingsView from "./components/SettingsView.vue";
 import AddWorktreeDialog from "./components/AddWorktreeDialog.vue";
@@ -29,6 +31,7 @@ import type { WorktreeEntry, Repository } from "./types/settings";
 import type { AddWorktreeTaskCode, AgentWorktreeTaskCode } from "./types/task";
 import { useAddTaskDialog } from "./composables/useAddTaskDialog";
 import type { FrameNode } from "./types/frame";
+import { useWorktreeFrameBundles } from "./composables/useWorktreeFrameBundles";
 import { useHotkeyListener, bindingToAccelerator } from "./composables/useHotkeys";
 import { useCodeReviewChatListener } from "./composables/useCodeReviewLineChat";
 import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
@@ -81,31 +84,49 @@ const notificationCounts = computed(() => {
 
 const viewMode = ref<ViewMode>("home");
 
-// アクティブなターミナルの識別情報
-const activeTerminalId = ref<number | null>(null);
-
-// terminalId → TerminalView インスタンス
-const terminalRefs = reactive(new Map<number, InstanceType<typeof TerminalView>>());
-
 // terminalId → 直近コマンドの終了コード (null = 未実行)
 const terminalExitCodes = reactive(new Map<number, number>());
 
 // terminalId → AIエージェント稼働中フラグ
 const terminalAgentStatus = reactive(new Map<number, boolean>());
 
+// terminalId → worktreeId のマッピング（ターミナルがどのワークツリーに属するか）
+const terminalWorktreeMap = new Map<number, string>();
+
+// ワークツリーごとのフレームバンドル管理
+const {
+  bundles: worktreeFrameBundles,
+  activeWorktreeId,
+  ensureWorktreeFrame,
+  getTerminalRef,
+  switchToWorktree,
+  onFrameSwitch,
+  onFrameClose,
+  onFrameSplit,
+  onFrameTabDrop,
+  onFrameTabEdgeDrop,
+  onFrameTabReorder,
+} = useWorktreeFrameBundles({
+  worktrees,
+  viewMode,
+  terminalWorktreeMap,
+  terminalExitCodes,
+  terminalAgentStatus,
+  removeTerminal,
+  clearNotification,
+});
+
 const { setup: setupCodeReviewChatListener } = useCodeReviewChatListener({
   worktrees,
   terminalAgentStatus,
   isDetached,
   getDetachedSessionId,
-  terminalRefs,
+  // getTerminalRef でバンドルから引く proxy
+  terminalRefs: { get: (id: number) => getTerminalRef(id) } as Map<number, { write(data: string): Promise<void> }>,
 });
 
 // terminalId → サムネイル data URL
 const thumbnailUrls = reactive(new Map<number, string>());
-
-// terminalId → worktreeId のマッピング（ターミナルがどのワークツリーに属するか）
-const terminalWorktreeMap = new Map<number, string>();
 
 // worktreeId → 実行待ちスクリプトコマンド文字列
 const pendingScripts = new Map<string, string>();
@@ -152,53 +173,23 @@ const usedHotkeyChars = computed(() => {
   return used;
 });
 
-function setTerminalRef(terminalId: number, el: unknown) {
-  if (el) {
-    terminalRefs.set(terminalId, markRaw(el as InstanceType<typeof TerminalView>));
-  } else {
-    terminalRefs.delete(terminalId);
-  }
-}
-
-async function onTerminalReady(terminalId: number) {
-  const ref = terminalRefs.get(terminalId);
-  if (ref) {
-    terminalRefs.delete(terminalId);
-    terminalRefs.set(terminalId, ref);
+async function onTerminalReady(worktreeId: string, terminalId: number) {
+  // Vue reactivity 強制更新
+  const bundle = worktreeFrameBundles.get(worktreeId);
+  if (bundle) {
+    const ref = bundle.terminalRefs.get(terminalId);
+    if (ref) {
+      bundle.terminalRefs.delete(terminalId);
+      bundle.terminalRefs.set(terminalId, ref);
+    }
   }
   pendingSnapshots.delete(terminalId);
-  const worktreeId = terminalWorktreeMap.get(terminalId);
-  if (worktreeId) {
-    const command = pendingScripts.get(worktreeId);
-    if (command) {
-      pendingScripts.delete(worktreeId);
-      await ref?.write(command);
-    }
+  const command = pendingScripts.get(worktreeId);
+  if (command) {
+    pendingScripts.delete(worktreeId);
+    const ref = getTerminalRef(terminalId);
+    await ref?.write(command);
   }
-}
-
-// タブバー用: 全ターミナル一覧 (worktree名/terminal名) — detached ワークツリーは除外
-interface TabEntry {
-  terminalId: number;
-  worktreeId: string;
-  label: string;
-  cwd: string;
-}
-
-function buildTabs(): TabEntry[] {
-  const result: TabEntry[] = [];
-  for (const wt of worktrees.value) {
-    if (isDetached(wt.id)) continue;
-    for (const t of wt.terminals) {
-      result.push({
-        terminalId: t.id,
-        worktreeId: wt.id,
-        label: `${wt.name}/${t.title}`,
-        cwd: wt.path,
-      });
-    }
-  }
-  return result;
 }
 
 async function switchToTerminal(terminalId: number) {
@@ -210,25 +201,39 @@ async function switchToTerminal(terminalId: number) {
     await emitTo(`sub-${worktreeId}`, "sub-focus-terminal", { terminalId });
     return;
   }
+  if (!worktreeId) return;
+
+  const bundle = worktreeFrameBundles.get(worktreeId);
+  if (bundle) {
+    const leaf = bundle.frame.getAllLeafs().find((l) => l.terminalIds.includes(terminalId));
+    if (leaf) {
+      bundle.frame.setActiveTerminal(leaf.id, terminalId);
+      bundle.frame.lastFocusedLeafId.value = leaf.id;
+    }
+  }
 
   viewMode.value = "terminal";
-  activeTerminalId.value = terminalId;
+  activeWorktreeId.value = worktreeId;
   await nextTick();
-  const term = terminalRefs.get(terminalId);
-  if (term) {
-    await term.handleTabActivated();
-    term.focus();
+
+  if (bundle) {
+    bundle.frame.mountTerminalsToHosts();
+    const term = bundle.terminalRefs.get(terminalId);
+    if (term) {
+      await term.handleTabActivated();
+      term.focus();
+    }
   }
 }
 
 function goHome() {
   viewMode.value = "home";
-  activeTerminalId.value = null;
+  activeWorktreeId.value = null;
 }
 
 function goSettings() {
   viewMode.value = "settings";
-  activeTerminalId.value = null;
+  activeWorktreeId.value = null;
 }
 
 function resolveShell(_worktreeId: string): string | undefined {
@@ -266,48 +271,50 @@ async function onAddTerminal(worktreeId: string) {
   const terminal = addTerminal(worktreeId);
   terminalWorktreeMap.set(terminal.id, worktreeId);
 
-  // TerminalView マウント時に v-show=true になるよう、nextTick の前に viewMode と activeTerminalId をセット
+  // バンドルがなければ作成（ワークツリー追加直後など）
+  if (!worktreeFrameBundles.has(worktreeId)) {
+    ensureWorktreeFrame(worktreeId);
+  }
+
+  const bundle = worktreeFrameBundles.get(worktreeId)!;
+  bundle.terminalEntries.set(terminal.id, { id: terminal.id, title: terminal.title, sessionId: 0, snapshot: "" });
+
+  const leafId = bundle.frame.lastFocusedLeafId.value || bundle.frame.getAllLeafs()[0]?.id;
+  if (leafId) {
+    bundle.frame.returnAllToOffscreen();
+    bundle.frame.addTerminalToLeaf(leafId, terminal.id);
+    bundle.frame.lastFocusedLeafId.value = leafId;
+  } else {
+    bundle.frame.initLayout([terminal.id]);
+    bundle.frame.lastFocusedLeafId.value = bundle.frame.getAllLeafs()[0]?.id ?? "";
+  }
+
   viewMode.value = "terminal";
-  activeTerminalId.value = terminal.id;
+  activeWorktreeId.value = worktreeId;
 
   await nextTick();
 
-  const term = terminalRefs.get(terminal.id);
+  bundle.frame.mountTerminalsToHosts();
+  const term = bundle.terminalRefs.get(terminal.id);
   if (term) {
     await term.handleTabActivated();
     term.focus();
   }
 }
 
-function onTerminalExitCodeChange(terminalId: number, exitCode: number) {
-  terminalExitCodes.set(terminalId, exitCode);
+
+function onTerminalTitleChange(worktreeId: string, terminalId: number, title: string) {
+  updateTerminalTitle(worktreeId, terminalId, title);
+  const bundle = worktreeFrameBundles.get(worktreeId);
+  const entry = bundle?.terminalEntries.get(terminalId);
+  if (entry) entry.title = title;
 }
 
-async function onRemoveTerminal(worktreeId: string, terminalId: number) {
-  const term = terminalRefs.get(terminalId);
-  if (term?.isRunning) {
-    await term.kill();
+async function onSessionExit(worktreeId: string, terminalId: number) {
+  const bundle = worktreeFrameBundles.get(worktreeId);
+  if (bundle) {
+    bundle.frame.handleTerminalExit(terminalId);
   }
-  terminalWorktreeMap.delete(terminalId);
-  terminalExitCodes.delete(terminalId);
-  terminalAgentStatus.delete(terminalId);
-  removeTerminal(worktreeId, terminalId);
-
-  // アクティブターミナルが削除された場合、ホームへ
-  if (activeTerminalId.value === terminalId) {
-    goHome();
-  }
-}
-
-async function onTabClose(terminalId: number) {
-  const worktreeId = terminalWorktreeMap.get(terminalId);
-  if (worktreeId) {
-    await onRemoveTerminal(worktreeId, terminalId);
-  }
-}
-
-async function onSessionExit(terminalId: number) {
-  await onTabClose(terminalId);
 }
 
 async function onRemoveWorktree(worktreeId: string) {
@@ -354,19 +361,18 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
     await cancelApproval(worktreeId);
 
     // 内部ターミナルを全て kill
+    const bundle = worktreeFrameBundles.get(worktreeId);
     for (const terminal of [...worktree.terminals]) {
-      const term = terminalRefs.get(terminal.id);
+      const term = bundle?.terminalRefs.get(terminal.id) ?? getTerminalRef(terminal.id);
       if (term?.isRunning) {
         await term.kill();
       }
       terminalWorktreeMap.delete(terminal.id);
     }
+    worktreeFrameBundles.delete(worktreeId);
 
-    if (activeTerminalId.value !== null) {
-      const activeWorktreeId = terminalWorktreeMap.get(activeTerminalId.value);
-      if (activeWorktreeId === worktreeId) {
-        goHome();
-      }
+    if (activeWorktreeId.value === worktreeId) {
+      goHome();
     }
 
     try {
@@ -445,7 +451,7 @@ async function waitForSessionReady(worktreeId: string): Promise<number | null> {
     const wt = worktrees.value.find((w) => w.id === worktreeId);
     const t = wt?.terminals[0];
     if (t) {
-      const ref = terminalRefs.get(t.id);
+      const ref = getTerminalRef(t.id);
       const s = ref?.sessionId;
       if (s !== null && s !== undefined) return s;
     }
@@ -591,7 +597,7 @@ async function executeAgentWorktree(code: AgentWorktreeTaskCode): Promise<void> 
     await invoke("pty_set_ai_agent", { sessionId: sid, isAgent: true });
   } else {
     // メインウィンドウ: terminalRef 経由で書き込む
-    const termRef = terminalRefs.get(terminal.id);
+    const termRef = getTerminalRef(terminal.id);
     if (!termRef) {
       throw new Error(`ターミナルが見つかりません: ${wt.name}`);
     }
@@ -628,9 +634,13 @@ async function onMoveToSubWindow(worktreeId: string) {
   const worktree = worktrees.value.find((w) => w.id === worktreeId);
   if (!worktree) return;
 
+  // フレームレイアウトをシリアライズ
+  const bundle = worktreeFrameBundles.get(worktreeId);
+  const layout = bundle ? (JSON.parse(JSON.stringify(bundle.frame.root.value)) as FrameNode) : undefined;
+
   // 各ターミナルの sessionId とスナップショットを収集
   const terminals = worktree.terminals.map((t) => {
-    const termRef = terminalRefs.get(t.id);
+    const termRef = getTerminalRef(t.id);
     const sessionId = termRef?.sessionId ?? null;
     const snapshot = sessionId !== null ? (termRef?.serializeBuffer() ?? "") : "";
     return {
@@ -642,32 +652,28 @@ async function onMoveToSubWindow(worktreeId: string) {
     };
   }).filter((t) => t.sessionId !== 0);
 
-
   // 各ターミナルの PTY を detach (アンマウント時に kill させない)
-
   for (const t of worktree.terminals) {
-    const termRef = terminalRefs.get(t.id);
+    const termRef = getTerminalRef(t.id);
     termRef?.detach();
   }
 
-  // アクティブターミナルがこのワークツリーに属する場合はホームへ
-  if (activeTerminalId.value !== null) {
-    const activeWtId = terminalWorktreeMap.get(activeTerminalId.value);
-    if (activeWtId === worktreeId) {
-      goHome();
-    }
+  // アクティブワークツリーがこのワークツリーの場合はホームへ
+  if (activeWorktreeId.value === worktreeId) {
+    goHome();
   }
 
-  await moveToSubWindow(worktreeId, worktree.name, terminals, autoApprovalMap.get(worktreeId) ?? false, false, worktree.path);
+  await moveToSubWindow(worktreeId, worktree.name, terminals, autoApprovalMap.get(worktreeId) ?? false, false, worktree.path, layout);
+
+  // バンドルをクリーンアップ
+  worktreeFrameBundles.delete(worktreeId);
 }
 
 function isWorktreeFocused(worktreeId: string): boolean {
   if (isDetached(worktreeId)) {
     return subWindowFocusMap.get(worktreeId) === true;
   }
-  if (!isWindowFocused.value || viewMode.value !== "terminal") return false;
-  const wt = worktrees.value.find((w) => w.id === worktreeId);
-  return wt?.terminals.some((t) => t.id === activeTerminalId.value) ?? false;
+  return isWindowFocused.value && viewMode.value === "terminal" && activeWorktreeId.value === worktreeId;
 }
 
 async function onToggleAutoApproval(worktreeId: string) {
@@ -701,14 +707,40 @@ async function onCancelAiJudging(worktreeId: string) {
   }
 }
 
-function onTerminalTitleChange(terminalId: number, title: string) {
-  const worktreeId = terminalWorktreeMap.get(terminalId);
-  if (worktreeId) updateTerminalTitle(worktreeId, terminalId, title);
+async function getSubWindowLayout(worktreeId: string): Promise<FrameNode | null> {
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      unlisten();
+      resolve(null);
+    }, 3000);
+
+    let unlisten = () => {};
+    listen<{ worktreeId: string; layout: FrameNode | null; terminals: unknown[]; windowSize?: unknown }>(
+      "sub-layout-response",
+      (event) => {
+        if (event.payload.worktreeId === worktreeId) {
+          clearTimeout(timeout);
+          unlisten();
+          resolve(event.payload.layout);
+        }
+      }
+    ).then((fn) => { unlisten = fn; });
+
+    emitTo(`sub-${worktreeId}`, "sub-get-layout", {}).catch(() => {
+      clearTimeout(timeout);
+      unlisten();
+      resolve(null);
+    });
+  });
 }
 
 async function onMoveToMainWindow(worktreeId: string) {
+  // サブウィンドウからレイアウトを取得（destroy前に）
+  const savedLayout = isDetached(worktreeId) ? await getSubWindowLayout(worktreeId) : null;
   await moveToMainWindow(worktreeId);
   subWindowFocusMap.delete(worktreeId);
+  // バンドルをレイアウト付きで作成
+  ensureWorktreeFrame(worktreeId, savedLayout ?? undefined);
 }
 
 async function onTrayButtonClick() {
@@ -766,8 +798,13 @@ async function onTrayButtonClick() {
       });
     } else {
       // メインウィンドウのターミナル情報を収集
+      const mainBundle = worktreeFrameBundles.get(worktreeId);
+      const mainLayout = mainBundle
+        ? (JSON.parse(JSON.stringify(mainBundle.frame.root.value)) as FrameNode)
+        : null;
+
       const terminals: TrayTerminalData[] = worktree.terminals.map((t) => {
-        const termRef = terminalRefs.get(t.id);
+        const termRef = getTerminalRef(t.id);
         const sessionId = termRef?.sessionId ?? null;
         const snapshot = sessionId !== null ? (termRef?.serializeBuffer(300) ?? "") : "";
         const termObj = termRef?.getTerminal();
@@ -781,12 +818,20 @@ async function onTrayButtonClick() {
         };
       }).filter((t) => t.sessionId !== 0);
 
+      // フレーム領域のサイズを取得（ヘッダー除く）
+      const frameAreaEl = document.querySelector(`[data-frame-area="${worktreeId}"]`);
+      const rect = frameAreaEl?.getBoundingClientRect();
+      const mainWindowSize = rect
+        ? { width: Math.round(rect.width), height: Math.round(rect.height) }
+        : undefined;
+
       worktreeDataList.push({
         worktreeId,
         worktreeName: worktree.name,
         isDetached: false,
-        layout: null,
+        layout: mainLayout,
         terminals,
+        windowSize: mainWindowSize,
       });
     }
   }
@@ -794,6 +839,12 @@ async function onTrayButtonClick() {
   if (worktreeDataList.length === 0) return;
 
   await openTrayPopup(worktreeDataList);
+}
+
+function onFrameAddTerminal(wid: string, leafId: string) {
+  const bundle = worktreeFrameBundles.get(wid);
+  if (bundle) bundle.frame.lastFocusedLeafId.value = leafId;
+  onAddTerminal(wid);
 }
 
 async function onFocusSubWindow(worktreeId: string) {
@@ -837,27 +888,37 @@ useHotkeyListener(() => {
 
   const actions = [];
 
-  // terminalNext: 次のタブへ循環
+  // terminalNext: アクティブワークツリーのフォーカスリーフで次のタブへ
   actions.push({
     binding: hk.terminalNext,
     handler: () => {
-      const tabs = buildTabs();
-      if (tabs.length === 0) return;
-      const idx = tabs.findIndex((t) => t.terminalId === activeTerminalId.value);
-      const nextIdx = idx === -1 ? 0 : (idx + 1) % tabs.length;
-      switchToTerminal(tabs[nextIdx].terminalId);
+      if (!activeWorktreeId.value) return;
+      const bundle = worktreeFrameBundles.get(activeWorktreeId.value);
+      if (!bundle) return;
+      const leafId = bundle.frame.lastFocusedLeafId.value;
+      if (!leafId) return;
+      const leaf = bundle.frame.getLeafsWithTerminals().find((l) => l.id === leafId);
+      if (!leaf || leaf.terminalIds.length === 0) return;
+      const idx = leaf.terminalIds.indexOf(leaf.activeTerminalId ?? -1);
+      const nextIdx = idx === -1 ? 0 : (idx + 1) % leaf.terminalIds.length;
+      bundle.frame.switchTerminal(leafId, leaf.terminalIds[nextIdx]);
     },
   });
 
-  // terminalPrev: 前のタブへ循環
+  // terminalPrev: アクティブワークツリーのフォーカスリーフで前のタブへ
   actions.push({
     binding: hk.terminalPrev,
     handler: () => {
-      const tabs = buildTabs();
-      if (tabs.length === 0) return;
-      const idx = tabs.findIndex((t) => t.terminalId === activeTerminalId.value);
-      const prevIdx = idx <= 0 ? tabs.length - 1 : idx - 1;
-      switchToTerminal(tabs[prevIdx].terminalId);
+      if (!activeWorktreeId.value) return;
+      const bundle = worktreeFrameBundles.get(activeWorktreeId.value);
+      if (!bundle) return;
+      const leafId = bundle.frame.lastFocusedLeafId.value;
+      if (!leafId) return;
+      const leaf = bundle.frame.getLeafsWithTerminals().find((l) => l.id === leafId);
+      if (!leaf || leaf.terminalIds.length === 0) return;
+      const idx = leaf.terminalIds.indexOf(leaf.activeTerminalId ?? -1);
+      const prevIdx = idx <= 0 ? leaf.terminalIds.length - 1 : idx - 1;
+      bundle.frame.switchTerminal(leafId, leaf.terminalIds[prevIdx]);
     },
   });
 
@@ -865,26 +926,25 @@ useHotkeyListener(() => {
   actions.push({
     binding: hk.terminalAdd,
     handler: () => {
-      if (viewMode.value === "home") return;
-      let worktreeId: string | undefined;
-      if (activeTerminalId.value !== null) {
-        worktreeId = terminalWorktreeMap.get(activeTerminalId.value);
-      }
-      if (!worktreeId) {
-        // 最初の非detachedワークツリーに追加
-        const wt = worktrees.value.find((w) => !isDetached(w.id));
-        worktreeId = wt?.id;
-      }
+      const worktreeId = activeWorktreeId.value
+        ?? worktrees.value.find((w) => !isDetached(w.id))?.id;
       if (worktreeId) onAddTerminal(worktreeId);
     },
   });
 
-  // terminalClose: アクティブターミナルを閉じる
+  // terminalClose: アクティブワークツリーのフォーカスリーフのアクティブターミナルを閉じる
   actions.push({
     binding: hk.terminalClose,
     handler: () => {
-      if (viewMode.value !== "terminal" || activeTerminalId.value === null) return;
-      onTabClose(activeTerminalId.value);
+      if (viewMode.value !== "terminal" || !activeWorktreeId.value) return;
+      const bundle = worktreeFrameBundles.get(activeWorktreeId.value);
+      if (!bundle) return;
+      const leafId = bundle.frame.lastFocusedLeafId.value;
+      if (!leafId) return;
+      const leaf = bundle.frame.getLeafsWithTerminals().find((l) => l.id === leafId);
+      if (leaf?.activeTerminalId != null) {
+        bundle.frame.closeTerminal(leafId, leaf.activeTerminalId);
+      }
     },
   });
 
@@ -916,7 +976,7 @@ function focusWorktreeByChar(char: string) {
   if (isDetached(wt.id)) {
     focusSubWindow(wt.id);
   } else if (wt.terminals.length > 0) {
-    switchToTerminal(wt.terminals[0].id);
+    switchToWorktree(wt.id);
   } else {
     onAddTerminal(wt.id);
   }
@@ -997,6 +1057,8 @@ onMounted(async () => {
     } catch {
       // セッション読み込み失敗は無視
     }
+    // ターミナル追加後にバンドルを作成
+    ensureWorktreeFrame(wt.id);
   }
 
   // サブウィンドウ準備完了 → init データをイベントで送信（サブウィンドウ復元より前に登録必須）
@@ -1010,6 +1072,7 @@ onMounted(async () => {
         worktreeId,
         terminals: initData.terminals,
         autoApproval: initData.autoApproval,
+        layout: initData.layout,
       });
       clearPendingInitData(worktreeId);
     }
@@ -1056,7 +1119,7 @@ onMounted(async () => {
       } else {
         const wt = worktrees.value.find((w) => w.id === worktreeId);
         if (wt && wt.terminals.length > 0) {
-          switchToTerminal(wt.terminals[0].id);
+          switchToWorktree(worktreeId);
         }
         getCurrentWindow().setFocus();
       }
@@ -1094,7 +1157,7 @@ onMounted(async () => {
     let approved = false;
     try {
       for (const t of wt.terminals) {
-        const termRef = terminalRefs.get(t.id);
+        const termRef = getTerminalRef(t.id);
         if (!termRef) { await debug(`[AutoApproval] tid=${t.id} termRef=null, skip`); continue; }
         const terminal = termRef.getTerminal();
         if (!terminal) { await debug(`[AutoApproval] tid=${t.id} terminal=null, skip`); continue; }
@@ -1186,8 +1249,8 @@ onMounted(async () => {
   await listen<{ worktreeId: string; terminalId: number; title: string }>(
     "sub-title-update",
     (event) => {
-      const { worktreeId, terminalId, title } = event.payload;
-      updateTerminalTitle(worktreeId, terminalId, title);
+      const { worktreeId: wid, terminalId, title } = event.payload;
+      updateTerminalTitle(wid, terminalId, title);
     }
   );
 
@@ -1195,9 +1258,11 @@ onMounted(async () => {
   await listen<{ sessions: Record<number, boolean> }>("pty-ai-agent-changed", (event) => {
     // sessionId → terminalId の逆引きマップを構築
     const sessionToTerminal = new Map<number, number>();
-    for (const [tid, termRef] of terminalRefs) {
-      const sid = termRef?.sessionId;
-      if (sid != null) sessionToTerminal.set(sid, tid);
+    for (const [, bundle] of worktreeFrameBundles) {
+      for (const [tid, termRef] of bundle.terminalRefs) {
+        const sid = termRef?.sessionId;
+        if (sid != null) sessionToTerminal.set(sid, tid);
+      }
     }
     for (const [sessionIdStr, isAgent] of Object.entries(event.payload.sessions)) {
       const sid = Number(sessionIdStr);
@@ -1267,13 +1332,14 @@ onMounted(async () => {
 
   // ローカルターミナル用サムネイル生成ループ（変化があった場合のみ更新）
   setInterval(() => {
-    for (const [id, ref] of terminalRefs) {
-      const wtId = terminalWorktreeMap.get(id);
-      if (wtId && isDetached(wtId)) continue;
-      const terminal = ref.getTerminal();
-      if (terminal) {
-        const url = renderToDataUrl(terminal);
-        if (url && url !== thumbnailUrls.get(id)) thumbnailUrls.set(id, url);
+    for (const [wid, bundle] of worktreeFrameBundles) {
+      if (isDetached(wid)) continue;
+      for (const [id, ref] of bundle.terminalRefs) {
+        const terminal = ref.getTerminal();
+        if (terminal) {
+          const url = renderToDataUrl(terminal);
+          if (url && url !== thumbnailUrls.get(id)) thumbnailUrls.set(id, url);
+        }
       }
     }
   }, 1000);
@@ -1324,8 +1390,9 @@ onMounted(async () => {
     for (const wt of worktrees.value) {
       if (isDetached(wt.id)) continue;
       try {
+        const bundle = worktreeFrameBundles.get(wt.id);
         const terminals = wt.terminals.map((t) => {
-          const termRef = terminalRefs.get(t.id);
+          const termRef = bundle?.terminalRefs.get(t.id) ?? getTerminalRef(t.id);
           return { title: t.title, buffer: termRef?.serializeBuffer() ?? "" };
         }).filter((t) => t.buffer !== "");
         if (terminals.length > 0) {
@@ -1339,9 +1406,11 @@ onMounted(async () => {
     // 5. 既存のシャットダウン処理
     await closeAllCodeReviewWindows();
     await closeAllSubWindows();
-    for (const [, term] of terminalRefs) {
-      if (term?.isRunning) {
-        await term.kill();
+    for (const [, bundle] of worktreeFrameBundles) {
+      for (const [, term] of bundle.terminalRefs) {
+        if (term?.isRunning) {
+          await term.kill();
+        }
       }
     }
     await getCurrentWindow().destroy();
@@ -1378,35 +1447,25 @@ onMounted(async () => {
       <!-- 区切り線 -->
       <div class="w-px h-5 bg-[#313244] shrink-0 mx-1" />
 
-      <!-- ターミナルタブ一覧 -->
+      <!-- ワークツリー単位のタブ -->
       <div class="flex overflow-x-auto min-w-0 flex-1">
         <button
-          v-for="tab in buildTabs()"
-          :key="tab.terminalId"
-          class="group flex items-center gap-1 px-3 py-2 text-xs shrink-0 border-r border-[#313244] transition-colors"
+          v-for="wt in worktrees.filter(w => !isDetached(w.id))"
+          :key="wt.id"
+          class="flex items-center gap-1.5 px-3 py-2 text-xs shrink-0 border-r border-[#313244] transition-colors"
           :class="
-            viewMode === 'terminal' && tab.terminalId === activeTerminalId
+            viewMode === 'terminal' && wt.id === activeWorktreeId
               ? 'bg-[#1e1e2e] text-[#cba6f7]'
               : 'bg-[#181825] text-[#6c7086] hover:text-[#cdd6f4]'
           "
-          @click="switchToTerminal(tab.terminalId)"
+          @click="switchToWorktree(wt.id)"
         >
-          <span>{{ tab.label }}</span>
+          <span>{{ wt.name }}</span>
           <span
-            v-if="terminalAgentStatus.get(tab.terminalId)"
-            class="pi pi-microchip text-[10px] text-[#a6e3a1] shrink-0"
-            title="AI Agent"
-          />
-          <span
-            v-else-if="terminalExitCodes.has(tab.terminalId)"
-            class="w-2 h-2 rounded-full inline-block shrink-0"
-            :class="terminalExitCodes.get(tab.terminalId) === 0 ? 'bg-[#89b4fa]' : 'bg-[#f38ba8]'"
-            :title="'Exit: ' + terminalExitCodes.get(tab.terminalId)"
-          />
-          <span
-            class="pi pi-times text-[10px] opacity-0 group-hover:opacity-100 hover:text-[#f38ba8] transition-opacity ml-1"
-            @click.stop="onTabClose(tab.terminalId)"
-          />
+            v-if="notificationCounts.get(wt.id)"
+            class="text-[9px] px-1 py-0.5 rounded-full font-bold shrink-0 leading-none"
+            style="background: #f38ba8; color: #1e1e2e; min-width: 14px; text-align: center;"
+          >{{ notificationCounts.get(wt.id) }}</span>
         </button>
       </div>
     </div>
@@ -1449,29 +1508,67 @@ onMounted(async () => {
         class="absolute inset-0"
       />
 
-      <!-- ターミナル群 (detached ワークツリーは DOM から除外) -->
+      <!-- ワークツリーごとのフレームレイアウト (detached は除外) -->
       <template v-for="wt in worktrees" :key="wt.id">
-        <template v-if="!isDetached(wt.id)">
-          <div
-            v-for="terminal in wt.terminals"
-            :key="terminal.id"
-            v-show="viewMode === 'terminal' && terminal.id === activeTerminalId"
-            class="absolute inset-0"
-          >
+        <div
+          v-if="!isDetached(wt.id)"
+          v-show="viewMode === 'terminal' && wt.id === activeWorktreeId"
+          class="absolute inset-0 flex flex-col"
+        >
+          <!-- ワークツリーヘッダー -->
+          <WorktreeHeader
+            :worktree-name="wt.name"
+            :hotkey-char="hotkeyChars.get(wt.id)"
+            :auto-approval="autoApprovalMap.get(wt.id) ?? false"
+            :ai-judging="aiJudgingWorktrees.has(wt.id)"
+            :is-window-focused="isWindowFocused"
+            @open-in-ide="onOpenInIde(wt.id)"
+            @cancel-ai-judging="onCancelAiJudging(wt.id)"
+          />
+          <!-- フレームコンテンツ -->
+          <div :data-frame-area="wt.id" class="flex-1 min-h-0 overflow-hidden">
+            <FrameContainer
+              v-if="worktreeFrameBundles.has(wt.id)"
+              :node="worktreeFrameBundles.get(wt.id)!.frame.root.value"
+              :terminal-entries="worktreeFrameBundles.get(wt.id)!.terminalEntries"
+              :terminal-exit-codes="terminalExitCodes"
+              :terminal-agent-status="terminalAgentStatus"
+              @switch-terminal="(leafId, tid) => onFrameSwitch(wt.id, leafId, tid)"
+              @close-terminal="(leafId, tid) => onFrameClose(wt.id, leafId, tid)"
+              @split-request="(leafId, dir) => onFrameSplit(wt.id, leafId, dir)"
+              @tab-drop="(sl, tid, tl, idx) => onFrameTabDrop(wt.id, sl, tid, tl, idx)"
+              @tab-edge-drop="(sl, tid, tl, dir) => onFrameTabEdgeDrop(wt.id, sl, tid, tl, dir)"
+              @tab-reorder="(lid, tid, idx) => onFrameTabReorder(wt.id, lid, tid, idx)"
+              @request-add-terminal="(leafId) => onFrameAddTerminal(wt.id, leafId)"
+              @resize-end="() => {}"
+            />
+          </div>
+        </div>
+      </template>
+
+      <!-- オフスクリーン TerminalView 群（DOM reparenting用） -->
+      <div
+        data-offscreen
+        style="position:fixed; left:-10000px; top:-10000px; width:1000px; height:1000px; overflow:hidden; pointer-events:none"
+      >
+        <template v-for="wt in worktrees" :key="'off-' + wt.id">
+          <template v-if="!isDetached(wt.id)">
             <TerminalView
-              :ref="(el) => setTerminalRef(terminal.id, el)"
+              v-for="terminal in wt.terminals"
+              :key="terminal.id"
+              :ref="(el) => { const b = worktreeFrameBundles.get(wt.id); if (b) b.frame.setTerminalRef(terminal.id, el); }"
               :auto-start="true"
               :cwd="wt.path"
               :shell="resolveShell(wt.id)"
               :restore-snapshot="pendingSnapshots.get(terminal.id)"
-              @exit="onSessionExit(terminal.id)"
-              @ready="onTerminalReady(terminal.id)"
-              @title-change="onTerminalTitleChange(terminal.id, $event)"
-              @exit-code-change="onTerminalExitCodeChange(terminal.id, $event)"
+              @exit="onSessionExit(wt.id, terminal.id)"
+              @ready="onTerminalReady(wt.id, terminal.id)"
+              @title-change="onTerminalTitleChange(wt.id, terminal.id, $event)"
+              @exit-code-change="terminalExitCodes.set(terminal.id, $event)"
             />
-          </div>
+          </template>
         </template>
-      </template>
+      </div>
     </div>
 
     <!-- タスク追加/再実行ダイアログ -->

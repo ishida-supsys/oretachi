@@ -15,6 +15,8 @@ import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
 
+// ヘッダー ref（ウィンドウサイズ補正用）
+const headerRef = ref<HTMLDivElement | null>(null);
 // フッター ref（ウィンドウサイズ補正用）
 const footerRef = ref<HTMLDivElement | null>(null);
 
@@ -44,11 +46,14 @@ async function showWorktree(data: TrayWorktreeData) {
   terminalEntries.clear();
   terminalRefs.clear();
 
-  // ウィンドウサイズをサブウィンドウに合わせる（フッター高さ分を加算）
+  // ウィンドウサイズをサブウィンドウに合わせる
+  // isDetached=true: windowSize はサブウィンドウ全体のサイズ → フッターのみ加算
+  // isDetached=false: windowSize はメインウィンドウのフレーム領域 → ヘッダー + フッター加算
   const win = getCurrentWindow();
   const footerH = footerRef.value?.offsetHeight ?? 0;
+  const headerH = data.isDetached ? 0 : (headerRef.value?.offsetHeight ?? 0);
   const width = data.windowSize?.width ?? 900;
-  const height = (data.windowSize?.height ?? 600) + footerH;
+  const height = (data.windowSize?.height ?? 600) + footerH + headerH;
   await win.setSize(new LogicalSize(width, height));
 
   for (const t of data.terminals) {
@@ -57,8 +62,8 @@ async function showWorktree(data: TrayWorktreeData) {
 
   const ids = data.terminals.map((t) => t.id);
 
-  // レイアウト復元: detached でレイアウトがある場合はそのまま設定
-  if (data.isDetached && data.layout) {
+  // レイアウト復元: layout があればそのまま設定（detached/non-detached 両対応）
+  if (data.layout) {
     root.value = data.layout as FrameNode;
   } else {
     initLayout(ids);
@@ -311,6 +316,7 @@ onUnmounted(() => {
   <div class="h-screen flex flex-col bg-[#1e1e2e] text-[#cdd6f4] select-none">
     <!-- ヘッダー (drag-region) -->
     <div
+      ref="headerRef"
       class="flex items-center justify-between bg-[#181825] border-b border-[#313244] shrink-0 px-4 py-2"
       @mousedown.left="onHeaderDrag"
     >

@@ -1,6 +1,7 @@
 import { reactive } from "vue";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emitTo, listen } from "@tauri-apps/api/event";
+import type { FrameNode } from "../types/frame";
 
 export interface SubWindowTerminal {
   id: number;
@@ -12,6 +13,7 @@ export interface SubWindowTerminal {
 interface PendingInitData {
   terminals: SubWindowTerminal[];
   autoApproval: boolean;
+  layout?: FrameNode;
 }
 
 const detachedWorktrees = reactive(new Set<string>());
@@ -32,6 +34,7 @@ export function useSubWindows() {
     autoApproval: boolean = false,
     restoring: boolean = false,
     worktreePath: string = "",
+    layout?: FrameNode,
   ): Promise<void> {
     if (detachedWorktrees.has(worktreeId)) {
       const win = subWindowMap.get(worktreeId);
@@ -65,7 +68,7 @@ export function useSubWindows() {
     });
 
     // ターミナルデータはサブウィンドウ準備完了後にイベントで送る
-    pendingInitData.set(worktreeId, { terminals, autoApproval });
+    pendingInitData.set(worktreeId, { terminals, autoApproval, layout });
 
     // サブウィンドウ移動時のsessionIdマッピングを保持
     const terminalIds: number[] = [];
