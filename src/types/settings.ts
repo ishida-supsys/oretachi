@@ -36,7 +36,7 @@ export interface HotkeySettings {
   terminalAdd: HotkeyBinding;   // デフォルト: { ctrl: true, key: "t" }
   terminalClose: HotkeyBinding; // デフォルト: { ctrl: true, key: "q" }
   trayNext: HotkeyBinding;      // デフォルト: { ctrl: true, key: "n" }
-  focusMainWindow: HotkeyBinding; // デフォルト: { alt: true, key: "m" }
+  homeTab: HotkeyBinding;         // デフォルト: { alt: true, key: "0" }
   addTask: HotkeyBinding;       // デフォルト: { ctrl: true, shift: true, key: "n" }
 }
 

@@ -75,8 +75,8 @@ fn default_tray_next() -> HotkeyBinding {
     }
 }
 
-fn default_focus_main_window() -> HotkeyBinding {
-    HotkeyBinding { ctrl: false, meta: false, shift: false, alt: true, key: "m".to_string() }
+fn default_home_tab() -> HotkeyBinding {
+    HotkeyBinding { ctrl: false, meta: false, shift: false, alt: true, key: "0".to_string() }
 }
 
 fn default_add_task() -> HotkeyBinding {
@@ -129,8 +129,8 @@ pub struct HotkeySettings {
     pub terminal_close: HotkeyBinding,
     #[serde(default = "default_tray_next", rename = "trayNext")]
     pub tray_next: HotkeyBinding,
-    #[serde(default = "default_focus_main_window", rename = "focusMainWindow")]
-    pub focus_main_window: HotkeyBinding,
+    #[serde(default = "default_home_tab", rename = "homeTab", alias = "focusMainWindow")]
+    pub home_tab: HotkeyBinding,
     #[serde(default = "default_add_task", rename = "addTask")]
     pub add_task: HotkeyBinding,
 }
@@ -144,7 +144,7 @@ impl Default for HotkeySettings {
             terminal_add: default_terminal_add(),
             terminal_close: default_terminal_close(),
             tray_next: default_tray_next(),
-            focus_main_window: default_focus_main_window(),
+            home_tab: default_home_tab(),
             add_task: default_add_task(),
         }
     }

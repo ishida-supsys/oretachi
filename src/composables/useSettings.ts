@@ -14,7 +14,7 @@ const defaultHotkeys = () => ({
   terminalAdd: isMac ? { meta: true, key: "t" } : { ctrl: true, key: "t" },
   terminalClose: isMac ? { meta: true, key: "w" } : { ctrl: true, key: "w" },
   trayNext: isMac ? { meta: true, key: "n" } : { ctrl: true, key: "n" },
-  focusMainWindow: { alt: true, key: "m" },
+  homeTab: { alt: true, key: "0" },
   addTask: isMac ? { meta: true, shift: true, key: "n" } : { ctrl: true, shift: true, key: "n" },
 });
 
@@ -22,6 +22,14 @@ function migrateHotkeys(hotkeys: HotkeySettings): boolean {
   let changed = false;
   const isOldDefault = (b: HotkeyBinding, key: string, shift = false) =>
     !!b.ctrl && !b.alt && !b.meta && !!b.shift === shift && b.key === key;
+
+  // focusMainWindow (Alt+M) → homeTab (Alt+0)
+  const isOldFocusMainWindow = (b: HotkeyBinding) =>
+    !b.ctrl && !b.meta && !b.shift && !!b.alt && b.key === "m";
+  if (isOldFocusMainWindow(hotkeys.homeTab)) {
+    hotkeys.homeTab = { alt: true, key: "0" };
+    changed = true;
+  }
 
   // 全プラットフォーム: Ctrl+Q → Ctrl+W / ⌘+W
   if (isOldDefault(hotkeys.terminalClose, "q")) {

@@ -398,11 +398,11 @@ function clearExecScript(repoId: string) {
             </td>
           </tr>
           <tr>
-            <td class="hotkey-td-label">{{ t('hotkeys.focusMainWindow') }}</td>
+            <td class="hotkey-td-label">{{ t('hotkeys.homeTab') }}</td>
             <td class="hotkey-td-input">
               <HotkeyInput
-                :model-value="settings.hotkeys.focusMainWindow"
-                @update:model-value="(v) => { settings.hotkeys.focusMainWindow = v; scheduleSave(); }"
+                :model-value="settings.hotkeys.homeTab"
+                @update:model-value="(v) => { settings.hotkeys.homeTab = v; scheduleSave(); }"
               />
             </td>
           </tr>
@@ -788,7 +788,7 @@ function clearExecScript(repoId: string) {
       "terminalAdd": "Add terminal",
       "terminalClose": "Close terminal",
       "trayNext": "Next notification (tray)",
-      "focusMainWindow": "Focus main window (for sub window)",
+      "homeTab": "Home tab",
       "addTask": "Add task"
     },
     "repositories": {
@@ -852,7 +852,7 @@ function clearExecScript(repoId: string) {
       "terminalAdd": "ターミナル追加",
       "terminalClose": "ターミナルを閉じる",
       "trayNext": "次の通知へ (トレイ)",
-      "focusMainWindow": "メインウィンドウにフォーカス (サブウィンドウ用)",
+      "homeTab": "ホームタブへ戻る",
       "addTask": "タスク追加"
     },
     "repositories": {

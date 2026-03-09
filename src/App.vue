@@ -32,7 +32,7 @@ import type { AddWorktreeTaskCode, AgentWorktreeTaskCode } from "./types/task";
 import { useAddTaskDialog } from "./composables/useAddTaskDialog";
 import type { FrameNode } from "./types/frame";
 import { useWorktreeFrameBundles } from "./composables/useWorktreeFrameBundles";
-import { useHotkeyListener, bindingToAccelerator } from "./composables/useHotkeys";
+import { useHotkeyListener, bindingToAccelerator, matchesHotkey } from "./composables/useHotkeys";
 import { useCodeReviewChatListener } from "./composables/useCodeReviewLineChat";
 import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
 import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
@@ -1018,6 +1018,16 @@ useHotkeyListener(() => {
     });
   }
 
+  // homeTab: ホームタブへ戻る
+  if (hk.homeTab) {
+    actions.push({
+      binding: hk.homeTab,
+      handler: () => {
+        goHome();
+      },
+    });
+  }
+
   // Alt+[char]: 対応するワークツリーにフォーカス
   // (matchesHotkey は使わず個別に処理するため空の binding で追加しない)
   // → 別途 keydown リスナーで対応
@@ -1050,6 +1060,10 @@ function handleAltCharKey(event: KeyboardEvent) {
   if (event.key.length !== 1) return;
 
   const char = event.key.toLowerCase();
+  // homeTab ホットキーと重複する場合は Alt+[char] の処理をスキップ
+  const homeTabBinding = settings.value.hotkeys?.homeTab;
+  if (homeTabBinding && matchesHotkey(event, homeTabBinding)) return;
+
   const wt = worktrees.value.find((w) => {
     const entry = settings.value.worktrees.find((e) => e.id === w.id);
     return entry?.hotkeyChar === char;
@@ -1120,6 +1134,11 @@ onMounted(async () => {
     // ターミナル追加後にバンドルを作成
     ensureWorktreeFrame(wt.id);
   }
+
+  // サブウィンドウからのホームタブ要求
+  await listen("go-home", () => {
+    goHome();
+  });
 
   // サブウィンドウ準備完了 → init データをイベントで送信（サブウィンドウ復元より前に登録必須）
   await listen<{ worktreeId: string }>("sub-ready", async (event) => {

@@ -138,9 +138,14 @@ useHotkeyListener(() => {
 
   return [
     {
-      binding: hk.focusMainWindow,
+      binding: hk.homeTab,
       handler: () => {
-        WebviewWindow.getByLabel("main").then((w) => w?.setFocus());
+        WebviewWindow.getByLabel("main").then(async (w) => {
+          if (w) {
+            await w.setFocus();
+            await emitTo("main", "go-home");
+          }
+        });
       },
     },
     {
