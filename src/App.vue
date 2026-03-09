@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, nextTick, onMounted, computed } from "vue";
+import { ref, reactive, nextTick, onMounted, onUnmounted, computed, watch } from "vue";
 import { renderToDataUrl } from "./composables/useTerminalThumbnail";
 import { listen, emitTo } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -84,6 +84,7 @@ const notificationCounts = computed(() => {
 });
 
 const viewMode = ref<ViewMode>("home");
+const mainContentAreaRef = ref<HTMLDivElement | null>(null);
 
 // terminalId → 直近コマンドの終了コード (null = 未実行)
 const terminalExitCodes = reactive(new Map<number, number>());
@@ -845,14 +846,25 @@ async function onTrayButtonClick() {
         frameAreaEl = document.querySelector(`[data-frame-area="${activeWorktreeId.value}"]`);
         rect = frameAreaEl?.getBoundingClientRect();
       }
-      const mainWindowSize = rect && rect.width > 0 && rect.height > 0
-        ? { width: Math.round(rect.width), height: Math.round(rect.height) }
-        : undefined;
+      let mainWindowSize: { width: number; height: number } | undefined;
+      // sizeFromContainer: 親コンテナからのフォールバックサイズを使ったかどうか
+      let sizeFromContainer = false;
+      if (rect && rect.width > 0 && rect.height > 0) {
+        mainWindowSize = { width: Math.round(rect.width), height: Math.round(rect.height) };
+      } else {
+        // activeWorktreeId が null（ホーム/設定画面）の場合:
+        // メインコンテンツ領域を計測（= WorktreeHeader + フレーム領域と同サイズ）
+        const containerRect = mainContentAreaRef.value?.getBoundingClientRect();
+        if (containerRect && containerRect.width > 0 && containerRect.height > 0) {
+          mainWindowSize = { width: Math.round(containerRect.width), height: Math.round(containerRect.height) };
+          sizeFromContainer = true;
+        }
+      }
 
       worktreeDataList.push({
         worktreeId,
         worktreeName: worktree.name,
-        isDetached: false,
+        isDetached: sizeFromContainer,  // コンテナサイズの場合はヘッダー加算をスキップ
         layout: mainLayout,
         terminals,
         windowSize: mainWindowSize,
@@ -1502,7 +1514,7 @@ onMounted(async () => {
     </div>
 
     <!-- メインコンテンツ領域 -->
-    <div class="flex-1 min-h-0 relative">
+    <div ref="mainContentAreaRef" class="flex-1 min-h-0 relative">
       <!-- ホームビュー -->
       <HomeView
         v-show="viewMode === 'home'"
