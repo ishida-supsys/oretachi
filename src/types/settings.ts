@@ -51,6 +51,15 @@ export interface WorktreeDefaults {
   autoApproval?: boolean;
 }
 
+export interface CodeReviewSettings {
+  monacoFontSize?: number;          // デフォルト: 13
+  monacoMinimap?: boolean;          // デフォルト: true
+  monacoWordWrap?: 'on' | 'off';    // デフォルト: 'off'
+  monacoLineNumbers?: 'on' | 'off'; // デフォルト: 'on'
+  chatHotkey?: HotkeyBinding;       // デフォルト: { ctrl: true, key: 'l' }
+  autoOpenReviewOnDiff?: boolean;   // デフォルト: true
+}
+
 export interface AppSettings {
   repositories: Repository[];
   worktreeBaseDir: string;
@@ -65,4 +74,5 @@ export interface AppSettings {
   aiAgent?: AiAgentSettings;
   worktreeDefaults?: WorktreeDefaults;
   locale?: string;
+  codeReview?: CodeReviewSettings;
 }

@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onMounted, onUnmounted } from "vue";
 import { VueMonacoEditor } from "@guolao/vue-monaco-editor";
 import { useEditorLineSelection, type ChatPayload } from "../../composables/useCodeReviewLineChat";
+import { useCodeReviewSettings } from "../../composables/useCodeReviewSettings";
+import { matchesHotkey } from "../../composables/useHotkeys";
 import EditorChatButton from "./EditorChatButton.vue";
 
 const props = defineProps<{
@@ -13,6 +15,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   chat: [payload: ChatPayload];
 }>();
+
+const { resolved: cr } = useCodeReviewSettings();
 
 const languageMap: Record<string, string> = {
   ts: "typescript",
@@ -51,20 +55,33 @@ const monacoLanguage = computed(() => {
   return languageMap[props.language.toLowerCase()] ?? "plaintext";
 });
 
-const options = {
-  readOnly: true,
-  minimap: { enabled: true },
-  scrollBeyondLastLine: false,
-  fontSize: 13,
-  lineNumbers: "on" as const,
-  wordWrap: "off" as const,
-  theme: "vs-dark",
-};
+const chatHotkey = computed(() => cr.value.chatHotkey);
 
-const { buttonPos, handleMount, handleChatClick } = useEditorLineSelection(
+const options = computed(() => ({
+  readOnly: true,
+  minimap: { enabled: cr.value.monacoMinimap },
+  scrollBeyondLastLine: false,
+  fontSize: cr.value.monacoFontSize,
+  lineNumbers: cr.value.monacoLineNumbers as "on" | "off",
+  wordWrap: cr.value.monacoWordWrap as "on" | "off",
+  theme: "vs-dark",
+}));
+
+const { buttonPos, handleMount, handleChatClick, selectionInfo } = useEditorLineSelection(
   () => props.filePath,
   (payload) => emit("chat", payload),
 );
+
+function onKeydown(e: KeyboardEvent) {
+  if (!selectionInfo.value) return;
+  if (matchesHotkey(e, chatHotkey.value)) {
+    e.preventDefault();
+    handleChatClick();
+  }
+}
+
+onMounted(() => window.addEventListener("keydown", onKeydown, true));
+onUnmounted(() => window.removeEventListener("keydown", onKeydown, true));
 </script>
 
 <template>
@@ -77,6 +94,6 @@ const { buttonPos, handleMount, handleChatClick } = useEditorLineSelection(
       class="h-full w-full"
       @mount="handleMount"
     />
-    <EditorChatButton :button-pos="buttonPos" :file-path="filePath" @click="handleChatClick" />
+    <EditorChatButton :button-pos="buttonPos" :file-path="filePath" :hotkey="chatHotkey" @click="handleChatClick" />
   </div>
 </template>

@@ -1,7 +1,10 @@
 <script setup lang="ts">
 import type * as Monaco from "monaco-editor";
+import { computed, onMounted, onUnmounted } from "vue";
 import { VueMonacoDiffEditor } from "@guolao/vue-monaco-editor";
 import { useEditorLineSelection, type ChatPayload } from "../../composables/useCodeReviewLineChat";
+import { useCodeReviewSettings } from "../../composables/useCodeReviewSettings";
+import { matchesHotkey } from "../../composables/useHotkeys";
 import EditorChatButton from "./EditorChatButton.vue";
 
 const props = defineProps<{
@@ -16,19 +19,34 @@ const emit = defineEmits<{
   contentHeightChange: [height: number];
 }>();
 
-const options = {
+const { resolved: cr } = useCodeReviewSettings();
+
+const chatHotkey = computed(() => cr.value.chatHotkey);
+
+const options = computed(() => ({
   readOnly: true,
-  minimap: { enabled: false },
+  minimap: { enabled: cr.value.monacoMinimap },
   scrollBeyondLastLine: false,
-  fontSize: 13,
+  fontSize: cr.value.monacoFontSize,
   renderSideBySide: true,
   hideUnchangedRegions: { enabled: true },
-};
+}));
 
-const { buttonPos, handleMount, handleChatClick } = useEditorLineSelection(
+const { buttonPos, handleMount, handleChatClick, selectionInfo } = useEditorLineSelection(
   () => props.filePath,
   (payload) => emit("chat", payload),
 );
+
+function onKeydown(e: KeyboardEvent) {
+  if (!selectionInfo.value) return;
+  if (matchesHotkey(e, chatHotkey.value)) {
+    e.preventDefault();
+    handleChatClick();
+  }
+}
+
+onMounted(() => window.addEventListener("keydown", onKeydown, true));
+onUnmounted(() => window.removeEventListener("keydown", onKeydown, true));
 
 function onMount(editor: Monaco.editor.IStandaloneDiffEditor) {
   handleMount(editor.getModifiedEditor());
@@ -51,6 +69,6 @@ function onMount(editor: Monaco.editor.IStandaloneDiffEditor) {
       class="h-full w-full"
       @mount="onMount"
     />
-    <EditorChatButton :button-pos="buttonPos" :file-path="filePath" @click="handleChatClick" />
+    <EditorChatButton :button-pos="buttonPos" :file-path="filePath" :hotkey="chatHotkey" @click="handleChatClick" />
   </div>
 </template>

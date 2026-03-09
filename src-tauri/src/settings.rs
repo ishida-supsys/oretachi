@@ -187,6 +187,45 @@ pub struct WorktreeDefaults {
     pub auto_approval: bool,
 }
 
+fn default_monaco_font_size() -> u32 { 13 }
+fn default_monaco_minimap() -> bool { true }
+fn default_monaco_word_wrap() -> String { "off".to_string() }
+fn default_monaco_line_numbers() -> String { "on".to_string() }
+fn default_chat_hotkey() -> HotkeyBinding {
+    HotkeyBinding { ctrl: true, meta: false, shift: false, alt: false, key: "l".to_string() }
+}
+fn default_auto_open_review_on_diff() -> bool { true }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CodeReviewSettings {
+    #[serde(default = "default_monaco_font_size", rename = "monacoFontSize")]
+    pub monaco_font_size: u32,
+    #[serde(default = "default_monaco_minimap", rename = "monacoMinimap")]
+    pub monaco_minimap: bool,
+    #[serde(default = "default_monaco_word_wrap", rename = "monacoWordWrap")]
+    pub monaco_word_wrap: String,
+    #[serde(default = "default_monaco_line_numbers", rename = "monacoLineNumbers")]
+    pub monaco_line_numbers: String,
+    #[serde(default = "default_chat_hotkey", rename = "chatHotkey")]
+    pub chat_hotkey: HotkeyBinding,
+    #[serde(default = "default_auto_open_review_on_diff", rename = "autoOpenReviewOnDiff")]
+    pub auto_open_review_on_diff: bool,
+}
+
+impl Default for CodeReviewSettings {
+    fn default() -> Self {
+        CodeReviewSettings {
+            monaco_font_size: default_monaco_font_size(),
+            monaco_minimap: default_monaco_minimap(),
+            monaco_word_wrap: default_monaco_word_wrap(),
+            monaco_line_numbers: default_monaco_line_numbers(),
+            chat_hotkey: default_chat_hotkey(),
+            auto_open_review_on_diff: default_auto_open_review_on_diff(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppSettings {
     pub repositories: Vec<Repository>,
@@ -213,6 +252,8 @@ pub struct AppSettings {
     pub worktree_defaults: Option<WorktreeDefaults>,
     #[serde(default)]
     pub locale: Option<String>,
+    #[serde(default, rename = "codeReview")]
+    pub code_review: Option<CodeReviewSettings>,
 }
 
 impl Default for AppSettings {

@@ -10,8 +10,11 @@ import CodeReviewTabs from "./components/codereview/CodeReviewTabs.vue";
 import MonacoFileViewer from "./components/codereview/MonacoFileViewer.vue";
 import MonacoDiffViewer from "./components/codereview/MonacoDiffViewer.vue";
 import ReviewSessionView from "./components/codereview/ReviewSessionView.vue";
+import CodeReviewSettingsView from "./components/codereview/CodeReviewSettingsView.vue";
 import { useCodeReviewTabs } from "./composables/useCodeReviewTabs";
 import { useReviewSession } from "./composables/useReviewSession";
+import { useSettings } from "./composables/useSettings";
+import { useCodeReviewSettings } from "./composables/useCodeReviewSettings";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -31,10 +34,12 @@ const activePanel = ref<Panel>("files");
 const sidebarWidth = ref(250);
 const isResizing = ref(false);
 
-const { tabs, activeTabId, openFileTab, openDiffTab, openReviewTab, closeReviewTab, closeTab, switchTab, activeTab, updateFileTab, updateDiffTab, getOpenTabs } =
+const { tabs, activeTabId, openFileTab, openDiffTab, openReviewTab, closeReviewTab, openSettingsTab, closeTab, switchTab, activeTab, updateFileTab, updateDiffTab, getOpenTabs } =
   useCodeReviewTabs();
 
 const { isReviewMode, startReview, endReview, refreshReviewFiles } = useReviewSession();
+const { loadSettings } = useSettings();
+const { resolved: crSettings } = useCodeReviewSettings();
 
 function handleStartReview() {
   startReview(worktreePath);
@@ -148,6 +153,8 @@ let unlistenFsChanged: (() => void) | null = null;
 onMounted(async () => {
   document.title = `Code Review - ${worktreeName}`;
 
+  await loadSettings();
+
   // FS ウォッチャー起動
   if (worktreeId && worktreePath) {
     try {
@@ -155,6 +162,18 @@ onMounted(async () => {
       unlistenFsChanged = await listen("codereview-fs-changed", scheduleRefresh);
     } catch (e) {
       console.warn("start_fs_watch failed:", e);
+    }
+  }
+
+  // 自動レビュータブオープン
+  if (worktreePath && crSettings.value.autoOpenReviewOnDiff) {
+    try {
+      const statusEntries = await invoke<{ path: string }[]>("git_get_status", { repoPath: worktreePath });
+      if (statusEntries.length > 0) {
+        handleStartReview();
+      }
+    } catch {
+      // 無視
     }
   }
 
@@ -208,6 +227,15 @@ const { handleChatWithAgent } = useCodeReviewChat(worktreeId);
       >
         <i class="pi pi-share-alt text-lg" />
       </button>
+      <div class="flex-1" />
+      <button
+        class="p-1 rounded hover:bg-surface-700 transition-colors"
+        :class="activeTab()?.type === 'settings' ? 'text-primary-400' : 'text-surface-400'"
+        :title="t('panel.settings')"
+        @click="openSettingsTab()"
+      >
+        <i class="pi pi-cog text-lg" />
+      </button>
     </div>
 
     <!-- サイドバー -->
@@ -250,8 +278,11 @@ const { handleChatWithAgent } = useCodeReviewChat(worktreeId);
       />
       <div class="flex-1 overflow-hidden">
         <template v-if="activeTab()">
+          <CodeReviewSettingsView
+            v-if="activeTab()!.type === 'settings'"
+          />
           <ReviewSessionView
-            v-if="activeTab()!.type === 'review'"
+            v-else-if="activeTab()!.type === 'review'"
             :repo-path="worktreePath"
             @close="handleReviewClose"
             @chat="handleChatWithAgent"
@@ -291,12 +322,12 @@ const { handleChatWithAgent } = useCodeReviewChat(worktreeId);
 <i18n lang="json">
 {
   "en": {
-    "panel": { "files": "Files", "git": "Git" },
+    "panel": { "files": "Files", "git": "Git", "settings": "Settings" },
     "editor": { "noFileOpen": "Select a file to view", "binaryFile": "Binary file (diff not shown)" },
     "error": { "fileOpen": "Failed to open file", "diffOpen": "Failed to open diff" }
   },
   "ja": {
-    "panel": { "files": "ファイル", "git": "Git" },
+    "panel": { "files": "ファイル", "git": "Git", "settings": "設定" },
     "editor": { "noFileOpen": "ファイルを選択してください", "binaryFile": "バイナリファイル（差分を表示できません）" },
     "error": { "fileOpen": "ファイルを開けませんでした", "diffOpen": "Diffを開けませんでした" }
   }

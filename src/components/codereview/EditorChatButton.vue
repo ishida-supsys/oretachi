@@ -1,7 +1,11 @@
 <script setup lang="ts">
-defineProps<{
+import type { HotkeyBinding } from "../../types/settings";
+import { formatHotkey } from "../../composables/useHotkeys";
+
+const props = defineProps<{
   buttonPos: { top: number; left: number; height: number } | null;
   filePath?: string;
+  hotkey?: HotkeyBinding;
 }>();
 
 defineEmits<{ click: [] }>();
@@ -16,6 +20,6 @@ defineEmits<{ click: [] }>();
     @mousedown.prevent
   >
     <i class="pi pi-comments text-[10px]" />
-    Chat
+    Chat<template v-if="hotkey"> {{ formatHotkey(hotkey) }}</template>
   </button>
 </template>

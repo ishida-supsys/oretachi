@@ -2,7 +2,7 @@ import { ref, reactive } from "vue";
 
 export interface CodeReviewTab {
   id: string;
-  type: "file" | "diff" | "review";
+  type: "file" | "diff" | "review" | "settings";
   label: string;
   filePath: string;
   content?: string;
@@ -59,6 +59,17 @@ export function useCodeReviewTabs() {
     if (tab) closeTab(tab.id);
   }
 
+  function openSettingsTab(): void {
+    const existing = tabs.find((t) => t.type === "settings");
+    if (existing) {
+      activeTabId.value = existing.id;
+      return;
+    }
+    const id = `tab-${++tabCounter}`;
+    tabs.push({ id, type: "settings", label: "Settings", filePath: "" });
+    activeTabId.value = id;
+  }
+
   function closeTab(id: string): void {
     const idx = tabs.findIndex((t) => t.id === id);
     if (idx === -1) return;
@@ -91,17 +102,19 @@ export function useCodeReviewTabs() {
   }
 
   function getOpenTabs(): Array<{ filePath: string; type: "file" | "diff"; staged?: boolean }> {
-    return tabs.map((t) => {
-      if (t.type === "file") {
-        return { filePath: t.filePath, type: "file" as const };
-      } else {
-        const colonIdx = t.filePath.lastIndexOf(":");
-        const actualPath = t.filePath.slice(0, colonIdx);
-        const staged = t.filePath.slice(colonIdx + 1) === "staged";
-        return { filePath: actualPath, type: "diff" as const, staged };
-      }
-    });
+    return tabs
+      .filter((t) => t.type === "file" || t.type === "diff")
+      .map((t) => {
+        if (t.type === "file") {
+          return { filePath: t.filePath, type: "file" as const };
+        } else {
+          const colonIdx = t.filePath.lastIndexOf(":");
+          const actualPath = t.filePath.slice(0, colonIdx);
+          const staged = t.filePath.slice(colonIdx + 1) === "staged";
+          return { filePath: actualPath, type: "diff" as const, staged };
+        }
+      });
   }
 
-  return { tabs, activeTabId, openFileTab, openDiffTab, openReviewTab, closeReviewTab, closeTab, switchTab, activeTab, updateFileTab, updateDiffTab, getOpenTabs };
+  return { tabs, activeTabId, openFileTab, openDiffTab, openReviewTab, closeReviewTab, openSettingsTab, closeTab, switchTab, activeTab, updateFileTab, updateDiffTab, getOpenTabs };
 }
