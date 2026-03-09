@@ -13,6 +13,7 @@ export interface TrayTerminalData {
 export interface TrayWorktreeData {
   worktreeId: string;
   worktreeName: string;
+  worktreePath: string;
   isDetached: boolean;
   layout: FrameNode | null;
   terminals: TrayTerminalData[];

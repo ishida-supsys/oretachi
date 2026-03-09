@@ -4,10 +4,12 @@ import { emitTo, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import TerminalView from "./components/TerminalView.vue";
 import FrameContainer from "./components/FrameContainer.vue";
+import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import { useFrameLayout } from "./composables/useFrameLayout";
 import { useSettings } from "./composables/useSettings";
 import { useHotkeyListener } from "./composables/useHotkeys";
 import { useTerminalReparenting } from "./composables/useTerminalReparenting";
+import { useIdeSelect } from "./composables/useIdeSelect";
 import type { TrayWorktreeData } from "./composables/useTrayPopup";
 import type { FrameNode } from "./types/frame";
 import type { TrayTerminalEntry } from "./types/terminal";
@@ -214,6 +216,15 @@ async function onTabEdgeDrop(
 const currentWorktree = computed(() => allWorktrees.value[currentIndex.value] ?? null);
 const isLast = computed(() => currentIndex.value >= allWorktrees.value.length - 1);
 
+// IDE で開く
+const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect();
+
+async function onOpenInIde() {
+  const wt = currentWorktree.value;
+  if (!wt) return;
+  await openInIde(wt.worktreePath, { worktreeId: wt.worktreeId, worktreeName: wt.worktreeName });
+}
+
 /** 現在のターミナルを detach してから次に進む */
 async function detachCurrentTerminals() {
   returnAllToOffscreen();
@@ -332,13 +343,23 @@ onUnmounted(() => {
           {{ currentIndex + 1 }} / {{ allWorktrees.length }}
         </span>
       </div>
-      <button
-        class="pointer-events-auto w-6 h-6 flex items-center justify-center rounded hover:bg-[#313244] text-[#6c7086] hover:text-[#f38ba8] transition-colors"
-        :title="t('close')"
-        @click="onClose"
-      >
-        <span class="pi pi-times text-xs" />
-      </button>
+      <div class="flex items-center gap-1">
+        <button
+          v-if="currentWorktree"
+          class="pointer-events-auto w-6 h-6 flex items-center justify-center rounded hover:bg-[#313244] text-[#6c7086] hover:text-[#cdd6f4] transition-colors"
+          :title="t('openInIde')"
+          @click="onOpenInIde"
+        >
+          <span class="pi pi-code text-xs" />
+        </button>
+        <button
+          class="pointer-events-auto w-6 h-6 flex items-center justify-center rounded hover:bg-[#313244] text-[#6c7086] hover:text-[#f38ba8] transition-colors"
+          :title="t('close')"
+          @click="onClose"
+        >
+          <span class="pi pi-times text-xs" />
+        </button>
+      </div>
     </div>
 
     <!-- コンテンツ -->
@@ -384,6 +405,14 @@ onUnmounted(() => {
       </button>
     </div>
 
+    <!-- IDE 選択ダイアログ -->
+    <IdeSelectDialog
+      v-if="showIdeDialog"
+      :ides="detectedIdes"
+      @select="onIdeSelected"
+      @cancel="showIdeDialog = false"
+    />
+
     <!-- TerminalView のマウント先 -->
     <div
       data-offscreen
@@ -409,6 +438,7 @@ onUnmounted(() => {
   "en": {
     "notification": "Notification",
     "close": "Close",
+    "openInIde": "Open in IDE",
     "loading": "Loading...",
     "noTerminals": "No terminals",
     "next": "Next →",
@@ -417,6 +447,7 @@ onUnmounted(() => {
   "ja": {
     "notification": "通知",
     "close": "閉じる",
+    "openInIde": "IDE で開く",
     "loading": "読み込み中...",
     "noTerminals": "ターミナルがありません",
     "next": "次へ →",

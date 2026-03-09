@@ -815,6 +815,7 @@ async function onTrayButtonClick() {
       worktreeDataList.push({
         worktreeId,
         worktreeName: worktree.name,
+        worktreePath: worktree.path,
         isDetached: true,
         layout: (layoutData?.layout ?? null) as import("./types/frame").FrameNode | null,
         terminals: layoutData?.terminals ?? [],
@@ -869,6 +870,7 @@ async function onTrayButtonClick() {
       worktreeDataList.push({
         worktreeId,
         worktreeName: worktree.name,
+        worktreePath: worktree.path,
         isDetached: sizeFromContainer,  // コンテナサイズの場合はヘッダー加算をスキップ
         layout: mainLayout,
         terminals,
