@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, nextTick, onMounted, onUnmounted, computed, watch } from "vue";
+import { ref, reactive, nextTick, onMounted, computed, watch } from "vue";
 import { renderToDataUrl } from "./composables/useTerminalThumbnail";
 import { listen, emitTo } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
