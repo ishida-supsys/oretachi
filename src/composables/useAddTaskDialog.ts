@@ -8,6 +8,8 @@ import type { TaskCode, TaskProcessCode } from "../types/task";
 
 type StepExecutor = (code: TaskCode) => Promise<void>;
 
+let executionQueue: Promise<void> = Promise.resolve();
+
 export function useAddTaskDialog(executeStep: StepExecutor) {
   const toast = useToast();
   const { t } = useI18n();
@@ -80,13 +82,27 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
       setTaskSteps(task.id, taskProcessCode.code);
 
       const stepCount = taskProcessCode.code.length;
-      showTaskToast({
-        severity: "info",
-        summary: t("taskExecutingSummary"),
-        detail: t("taskExecutingStartDetail", { count: stepCount }),
+      updateTaskStatus(task.id, "queued");
+
+      await new Promise<void>((resolve, reject) => {
+        executionQueue = executionQueue
+          .catch(() => {})
+          .then(async () => {
+            updateTaskStatus(task.id, "executing");
+            showTaskToast({
+              severity: "info",
+              summary: t("taskExecutingSummary"),
+              detail: t("taskExecutingStartDetail", { count: stepCount }),
+            });
+            try {
+              await executeTaskSteps(task.id);
+              resolve();
+            } catch (e) {
+              reject(e);
+            }
+          });
       });
 
-      await executeTaskSteps(task.id);
       updateTaskStatus(task.id, "completed");
 
       showTaskToast({

@@ -22,7 +22,7 @@ export interface TaskStep {
   error?: string;
 }
 
-export type TaskStatus = "generating" | "executing" | "completed" | "error";
+export type TaskStatus = "generating" | "queued" | "executing" | "completed" | "error";
 
 export interface TaskItem {
   id: string;

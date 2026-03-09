@@ -50,6 +50,12 @@ function statusLabel(status: TaskItem["status"]): string {
         <span>{{ t('generating') }}</span>
       </div>
 
+      <!-- 実行待ち -->
+      <div v-else-if="task.status === 'queued'" class="generating">
+        <i class="pi pi-clock" />
+        <span>{{ t('queued') }}</span>
+      </div>
+
       <!-- エラー (ステップなし) -->
       <div v-else-if="task.status === 'error' && task.steps.length === 0" class="error-msg">
         <i class="pi pi-exclamation-circle" />
@@ -120,6 +126,11 @@ function statusLabel(status: TaskItem["status"]): string {
 .badge-generating {
   background: #45475a;
   color: #a6adc8;
+}
+
+.badge-queued {
+  background: #3a3347;
+  color: #cba6f7;
 }
 
 .badge-executing {
@@ -228,11 +239,13 @@ function statusLabel(status: TaskItem["status"]): string {
     "rerunTitle": "Rerun",
     "removeTitle": "Remove",
     "generating": "Generating task code...",
+    "queued": "Waiting to execute...",
     "defaultError": "An error occurred",
     "stepAddWorktree": "Add WT",
     "stepAgent": "Agent",
     "status": {
       "generating": "Generating",
+      "queued": "Queued",
       "executing": "Executing",
       "completed": "Completed",
       "error": "Error"
@@ -242,11 +255,13 @@ function statusLabel(status: TaskItem["status"]): string {
     "rerunTitle": "再実行",
     "removeTitle": "削除",
     "generating": "タスク処理コード生成中...",
+    "queued": "実行待機中...",
     "defaultError": "エラーが発生しました",
     "stepAddWorktree": "WT追加",
     "stepAgent": "エージェント",
     "status": {
       "generating": "生成中",
+      "queued": "待機中",
       "executing": "実行中",
       "completed": "完了",
       "error": "エラー"
