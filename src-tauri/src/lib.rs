@@ -144,6 +144,11 @@ async fn git_read_file(
 }
 
 #[tauri::command]
+async fn git_get_merge_message(repo_path: String) -> Result<Option<String>, String> {
+    run_git(move || git_worktree::get_merge_message(&repo_path)).await
+}
+
+#[tauri::command]
 async fn git_get_status(repo_path: String) -> Result<Vec<git_worktree::GitStatusEntry>, String> {
     run_git(move || git_worktree::get_status(&repo_path)).await
 }
@@ -290,6 +295,7 @@ pub fn run() {
             git_delete_branch,
             git_list_files,
             git_read_file,
+            git_get_merge_message,
             git_get_status,
             git_get_file_diff,
             git_get_log,

@@ -24,12 +24,21 @@ const commitMessage = ref("");
 const committing = ref(false);
 const generatingMessage = ref(false);
 
-// レビュー開始時、変更ファイルがあればコミットメッセージを自動生成
+// レビュー開始時、マージ中なら MERGE_MSG をプリセット、そうでなければ AI 生成
 const stopAutoGenerate = watch(
   () => reviewFiles.value.length,
-  (len) => {
+  async (len) => {
     if (len > 0 && !commitMessage.value && !generatingMessage.value) {
-      generateCommitMessage();
+      try {
+        const mergeMsg = await invoke<string | null>("git_get_merge_message", { repoPath: props.repoPath });
+        if (mergeMsg) {
+          commitMessage.value = mergeMsg;
+        } else {
+          generateCommitMessage();
+        }
+      } catch {
+        generateCommitMessage();
+      }
       stopAutoGenerate();
     }
   },

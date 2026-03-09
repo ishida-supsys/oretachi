@@ -290,6 +290,31 @@ pub struct GitStatusEntry {
     pub staged: bool,
 }
 
+pub fn get_merge_message(repo_path: &str) -> Result<Option<String>, String> {
+    let output = make_command("git")
+        .args(["rev-parse", "--git-dir"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+
+    if !output.status.success() {
+        return Err("Not a git repository".to_string());
+    }
+
+    let git_dir = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let git_dir_path = std::path::Path::new(repo_path).join(&git_dir);
+
+    if !git_dir_path.join("MERGE_HEAD").exists() {
+        return Ok(None);
+    }
+
+    let merge_msg_path = git_dir_path.join("MERGE_MSG");
+    match std::fs::read_to_string(&merge_msg_path) {
+        Ok(content) => Ok(Some(content)),
+        Err(_) => Ok(Some(String::new())),
+    }
+}
+
 pub fn get_status(repo_path: &str) -> Result<Vec<GitStatusEntry>, String> {
     let output = make_command("git")
         .args(["status", "--porcelain=v1"])
