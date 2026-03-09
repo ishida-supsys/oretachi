@@ -343,7 +343,7 @@ onUnmounted(() => {
           {{ currentIndex + 1 }} / {{ allWorktrees.length }}
         </span>
       </div>
-      <div class="flex items-center gap-1">
+      <div class="flex items-center gap-4">
         <button
           v-if="currentWorktree"
           class="pointer-events-auto w-6 h-6 flex items-center justify-center rounded hover:bg-[#313244] text-[#6c7086] hover:text-[#cdd6f4] transition-colors"
