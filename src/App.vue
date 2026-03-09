@@ -137,6 +137,8 @@ const pendingScripts = new Map<string, string>();
 
 // terminalId → 復元スナップショット（起動時セッション復元用）
 const pendingSnapshots = new Map<number, string>();
+// 新規追加ターミナル: autoStart を抑制して reparenting 後に手動 startPty するための ID セット
+const pendingManualStart = new Set<number>();
 
 // ワークツリー追加ダイアログ
 const showAddDialog = ref(false);
@@ -287,6 +289,7 @@ async function onAddTerminal(worktreeId: string) {
   }
 
   const terminal = addTerminal(worktreeId);
+  pendingManualStart.add(terminal.id);
   terminalWorktreeMap.set(terminal.id, worktreeId);
   debug(`[Terminal] onAddTerminal worktreeId=${worktreeId} terminalId=${terminal.id}`);
 
@@ -321,6 +324,9 @@ async function onAddTerminal(worktreeId: string) {
   if (term) {
     await term.handleTabActivated();
     debug(`[Terminal] onAddTerminal after handleTabActivated terminalId=${terminal.id}`);
+    pendingManualStart.delete(terminal.id);
+    await term.startPty();
+    debug(`[Terminal] onAddTerminal after startPty terminalId=${terminal.id}`);
     term.focus();
     // 安全策: flexレイアウト確定が遅延する場合に備えた再fit
     setTimeout(() => {
@@ -328,6 +334,7 @@ async function onAddTerminal(worktreeId: string) {
       term.handleTabActivated();
     }, 150);
   } else {
+    pendingManualStart.delete(terminal.id);
     debug(`[Terminal] onAddTerminal term ref not found terminalId=${terminal.id}`);
   }
 }
@@ -1642,7 +1649,7 @@ onMounted(async () => {
               v-for="terminal in wt.terminals"
               :key="terminal.id"
               :ref="(el) => { const b = worktreeFrameBundles.get(wt.id); if (b) b.frame.setTerminalRef(terminal.id, el); }"
-              :auto-start="true"
+              :auto-start="!pendingManualStart.has(terminal.id)"
               :cwd="wt.path"
               :shell="resolveShell(wt.id)"
               :restore-snapshot="pendingSnapshots.get(terminal.id)"
