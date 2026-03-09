@@ -682,6 +682,16 @@ function isWorktreeFocused(worktreeId: string): boolean {
   return isWindowFocused.value && viewMode.value === "terminal" && activeWorktreeId.value === worktreeId;
 }
 
+// メインウィンドウでワークツリーがフォーカス状態になったら通知をクリア
+watch(
+  () => isWindowFocused.value && viewMode.value === "terminal" && activeWorktreeId.value,
+  (worktreeId) => {
+    if (worktreeId) {
+      clearNotification(worktreeId);
+    }
+  },
+);
+
 async function onToggleAutoApproval(worktreeId: string) {
   const current = autoApprovalMap.get(worktreeId) ?? false;
   autoApprovalMap.set(worktreeId, !current);
