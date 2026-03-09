@@ -8,6 +8,7 @@ export interface ReviewFileEntry {
   collapsed: boolean;
   oldContent: string;
   newContent: string;
+  isBinary: boolean;
 }
 
 interface StatusEntry {
@@ -19,6 +20,7 @@ interface StatusEntry {
 interface FileDiff {
   old_content: string;
   new_content: string;
+  is_binary: boolean;
 }
 
 // モジュールレベルのシングルトン状態 (各 CodeReview ウィンドウは独立した JS ランタイム)
@@ -35,7 +37,7 @@ async function fetchDiff(repoPath: string, filePath: string, staged: boolean): P
   try {
     return await invoke<FileDiff>("git_get_file_diff", { repoPath, filePath, staged });
   } catch {
-    return { old_content: "", new_content: "" };
+    return { old_content: "", new_content: "", is_binary: false };
   }
 }
 
@@ -62,6 +64,7 @@ export function useReviewSession() {
             collapsed: false,
             oldContent: diff.old_content,
             newContent: diff.new_content,
+            isBinary: diff.is_binary,
           };
         }),
       );
@@ -119,7 +122,7 @@ export function useReviewSession() {
           if (existing) {
             if (existing.oldContent !== diff.old_content || existing.newContent !== diff.new_content) {
               // diff が変わっていたらレビュー済みをリセット
-              return { ...existing, oldContent: diff.old_content, newContent: diff.new_content, reviewed: false, collapsed: false };
+              return { ...existing, oldContent: diff.old_content, newContent: diff.new_content, isBinary: diff.is_binary, reviewed: false, collapsed: false };
             }
             return existing;
           } else {
@@ -130,6 +133,7 @@ export function useReviewSession() {
               collapsed: false,
               oldContent: diff.old_content,
               newContent: diff.new_content,
+              isBinary: diff.is_binary,
             };
           }
         }),

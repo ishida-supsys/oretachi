@@ -72,20 +72,28 @@ const checked = computed({
     </div>
 
     <!-- Diff エリア -->
-    <div v-if="!entry.collapsed" :style="{ height: diffHeight }">
-      <MonacoDiffViewer
-        :old-content="entry.oldContent"
-        :new-content="entry.newContent"
-        :file-path="entry.filePath"
-        @chat="(payload) => emit('chat', payload)"
-      />
+    <div v-if="!entry.collapsed">
+      <div
+        v-if="entry.isBinary"
+        class="flex items-center justify-center py-6 text-surface-500 text-sm"
+      >
+        <i class="pi pi-ban mr-2" />{{ t("binaryFile") }}
+      </div>
+      <div v-else :style="{ height: diffHeight }">
+        <MonacoDiffViewer
+          :old-content="entry.oldContent"
+          :new-content="entry.newContent"
+          :file-path="entry.filePath"
+          @chat="(payload) => emit('chat', payload)"
+        />
+      </div>
     </div>
   </div>
 </template>
 
 <i18n lang="json">
 {
-  "en": { "reviewed": "Reviewed" },
-  "ja": { "reviewed": "レビュー済み" }
+  "en": { "reviewed": "Reviewed", "binaryFile": "Binary file (diff not shown)" },
+  "ja": { "reviewed": "レビュー済み", "binaryFile": "バイナリファイル（差分を表示できません）" }
 }
 </i18n>

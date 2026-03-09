@@ -9,6 +9,7 @@ export interface CodeReviewTab {
   oldContent?: string;
   newContent?: string;
   language?: string;
+  isBinary?: boolean;
 }
 
 let tabCounter = 0;
@@ -29,7 +30,7 @@ export function useCodeReviewTabs() {
     activeTabId.value = id;
   }
 
-  function openDiffTab(filePath: string, oldContent: string, newContent: string, staged: boolean): void {
+  function openDiffTab(filePath: string, oldContent: string, newContent: string, staged: boolean, isBinary = false): void {
     const key = `${filePath}:${staged ? "staged" : "unstaged"}`;
     const existing = tabs.find((t) => t.type === "diff" && t.filePath === key);
     if (existing) {
@@ -38,7 +39,7 @@ export function useCodeReviewTabs() {
     }
     const id = `tab-${++tabCounter}`;
     const label = `${filePath.split("/").pop() ?? filePath} (${staged ? "staged" : "changes"})`;
-    tabs.push({ id, type: "diff", label, filePath: key, oldContent, newContent });
+    tabs.push({ id, type: "diff", label, filePath: key, oldContent, newContent, isBinary });
     activeTabId.value = id;
   }
 

@@ -347,24 +347,21 @@ pub fn get_status(repo_path: &str) -> Result<Vec<GitStatusEntry>, String> {
 pub struct FileDiff {
     pub old_content: String,
     pub new_content: String,
+    pub is_binary: bool,
 }
 
 pub fn get_file_diff(repo_path: &str, file_path: &str, staged: bool) -> Result<FileDiff, String> {
-    let old_content = {
+    let old_bytes = {
         let spec = format!("HEAD:{}", file_path);
         let output = make_command("git")
             .args(["show", &spec])
             .current_dir(repo_path)
             .output()
             .map_err(|e| format!("git command error: {}", e))?;
-        if output.status.success() {
-            String::from_utf8_lossy(&output.stdout).into_owned()
-        } else {
-            String::new() // 新規ファイルの場合は空
-        }
+        if output.status.success() { output.stdout } else { vec![] }
     };
 
-    let new_content = if staged {
+    let new_bytes = if staged {
         // staged: インデックスの内容
         let spec = format!(":{}", file_path);
         let output = make_command("git")
@@ -372,21 +369,24 @@ pub fn get_file_diff(repo_path: &str, file_path: &str, staged: bool) -> Result<F
             .current_dir(repo_path)
             .output()
             .map_err(|e| format!("git command error: {}", e))?;
-        if output.status.success() {
-            String::from_utf8_lossy(&output.stdout).into_owned()
-        } else {
-            String::new()
-        }
+        if output.status.success() { output.stdout } else { vec![] }
     } else {
         // unstaged: ワーキングツリーの内容
         let full_path = std::path::Path::new(repo_path).join(file_path);
-        match std::fs::read_to_string(&full_path) {
-            Ok(content) => content,
-            Err(_) => String::new(),
-        }
+        std::fs::read(&full_path).unwrap_or_default()
     };
 
-    Ok(FileDiff { old_content, new_content })
+    if content_inspector::inspect(&old_bytes).is_binary()
+        || content_inspector::inspect(&new_bytes).is_binary()
+    {
+        return Ok(FileDiff { old_content: String::new(), new_content: String::new(), is_binary: true });
+    }
+
+    Ok(FileDiff {
+        old_content: String::from_utf8_lossy(&old_bytes).into_owned(),
+        new_content: String::from_utf8_lossy(&new_bytes).into_owned(),
+        is_binary: false,
+    })
 }
 
 #[derive(Serialize)]

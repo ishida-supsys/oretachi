@@ -37,6 +37,7 @@ axum = "0.8"
 tokio = { version = "1", features = ["net", "sync", "time", "process", "io-util"] }
 notify = "7"
 notify-debouncer-mini = "0.5"
+content_inspector = "0.2"
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 libc = "0.2"

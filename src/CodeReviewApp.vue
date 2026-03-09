@@ -91,12 +91,12 @@ async function handleOpenFile(filePath: string) {
 // ─── Diff を開く ────────────────────────────────────────────────────────────
 async function handleOpenDiff(payload: { filePath: string; staged: boolean }) {
   try {
-    const diff = await invoke<{ old_content: string; new_content: string }>("git_get_file_diff", {
+    const diff = await invoke<{ old_content: string; new_content: string; is_binary: boolean }>("git_get_file_diff", {
       repoPath: worktreePath,
       filePath: payload.filePath,
       staged: payload.staged,
     });
-    openDiffTab(payload.filePath, diff.old_content, diff.new_content, payload.staged);
+    openDiffTab(payload.filePath, diff.old_content, diff.new_content, payload.staged, diff.is_binary);
   } catch (e) {
     toast.add({ severity: "error", summary: t("error.diffOpen"), detail: String(e), life: 4000 });
   }
@@ -262,6 +262,12 @@ const { handleChatWithAgent } = useCodeReviewChat(worktreeId);
             :file-path="activeTab()!.filePath"
             @chat="handleChatWithAgent"
           />
+          <div
+            v-else-if="activeTab()!.isBinary"
+            class="flex items-center justify-center h-full text-surface-500 text-sm"
+          >
+            <i class="pi pi-ban mr-2" />{{ t("editor.binaryFile") }}
+          </div>
           <MonacoDiffViewer
             v-else
             :old-content="activeTab()!.oldContent ?? ''"
@@ -285,12 +291,12 @@ const { handleChatWithAgent } = useCodeReviewChat(worktreeId);
 {
   "en": {
     "panel": { "files": "Files", "git": "Git" },
-    "editor": { "noFileOpen": "Select a file to view" },
+    "editor": { "noFileOpen": "Select a file to view", "binaryFile": "Binary file (diff not shown)" },
     "error": { "fileOpen": "Failed to open file", "diffOpen": "Failed to open diff" }
   },
   "ja": {
     "panel": { "files": "ファイル", "git": "Git" },
-    "editor": { "noFileOpen": "ファイルを選択してください" },
+    "editor": { "noFileOpen": "ファイルを選択してください", "binaryFile": "バイナリファイル（差分を表示できません）" },
     "error": { "fileOpen": "ファイルを開けませんでした", "diffOpen": "Diffを開けませんでした" }
   }
 }
