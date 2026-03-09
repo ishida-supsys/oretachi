@@ -317,7 +317,7 @@ pub fn get_merge_message(repo_path: &str) -> Result<Option<String>, String> {
 
 pub fn get_status(repo_path: &str) -> Result<Vec<GitStatusEntry>, String> {
     let output = make_command("git")
-        .args(["status", "--porcelain=v1"])
+        .args(["status", "--porcelain=v1", "-uall"])
         .current_dir(repo_path)
         .output()
         .map_err(|e| format!("git command error: {}", e))?;
