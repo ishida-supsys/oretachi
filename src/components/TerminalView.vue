@@ -258,22 +258,25 @@ function focus() {
 
 async function handleTabActivated() {
   await nextTick();
-  requestAnimationFrame(() => {
+  await new Promise<void>((resolve) => {
     requestAnimationFrame(() => {
-      if (fitAddon && terminal) {
-        if (!props.noResize) {
-          fitAddon.fit();
-          const dimsAfter = fitAddon.proposeDimensions();
-          if (dimsAfter) {
-            resize(dimsAfter.rows, dimsAfter.cols);
+      requestAnimationFrame(() => {
+        if (fitAddon && terminal) {
+          if (!props.noResize) {
+            fitAddon.fit();
+            const dimsAfter = fitAddon.proposeDimensions();
+            if (dimsAfter) {
+              resize(dimsAfter.rows, dimsAfter.cols);
+            }
           }
+          terminal.refresh(0, terminal.rows - 1);
+          terminal.scrollToBottom();
+          // DOM reparenting後のIME textarea位置を再同期（blur→focusで強制再計算）
+          terminal.blur();
+          terminal.focus();
         }
-        terminal.refresh(0, terminal.rows - 1);
-        terminal.scrollToBottom();
-        // DOM reparenting後のIME textarea位置を再同期（blur→focusで強制再計算）
-        terminal.blur();
-        terminal.focus();
-      }
+        resolve();
+      });
     });
   });
 }

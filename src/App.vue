@@ -229,6 +229,10 @@ async function switchToTerminal(terminalId: number) {
     if (term) {
       await term.handleTabActivated();
       term.focus();
+      // 安全策: flexレイアウト確定が遅延する場合に備えた再fit
+      setTimeout(() => {
+        term.handleTabActivated();
+      }, 150);
     }
   }
 }
@@ -302,12 +306,14 @@ async function onAddTerminal(worktreeId: string) {
   await nextTick();
 
   bundle.frame.mountTerminalsToHosts();
-  // DOM reparenting 後、CSS レイアウト確定を待ってから fit
-  await new Promise<void>(r => requestAnimationFrame(() => r()));
   const term = bundle.terminalRefs.get(terminal.id);
   if (term) {
     await term.handleTabActivated();
     term.focus();
+    // 安全策: flexレイアウト確定が遅延する場合に備えた再fit
+    setTimeout(() => {
+      term.handleTabActivated();
+    }, 150);
   }
 }
 
