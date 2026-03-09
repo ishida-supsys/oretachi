@@ -1668,8 +1668,9 @@ onMounted(async () => {
       @cancel="showHotkeyCharDialog = false"
     />
 
-    <!-- 通知トレイボタン -->
+    <!-- 通知トレイボタン (ワークツリー表示中は非表示) -->
     <TrayButton
+      v-if="viewMode !== 'terminal'"
       :total-count="getTotalNotificationCount()"
       @click="onTrayButtonClick"
     />
