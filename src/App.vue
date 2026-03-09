@@ -124,6 +124,9 @@ const { setup: setupCodeReviewChatListener } = useCodeReviewChatListener({
   getDetachedSessionId,
   // getTerminalRef でバンドルから引く proxy
   terminalRefs: { get: (id: number) => getTerminalRef(id) } as Map<number, { write(data: string): Promise<void> }>,
+  worktreeFrameBundles,
+  activeWorktreeId,
+  switchToWorktree,
 });
 
 // terminalId → サムネイル data URL

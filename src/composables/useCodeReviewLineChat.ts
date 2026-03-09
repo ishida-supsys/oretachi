@@ -4,6 +4,7 @@ import { listen, emit } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import type * as Monaco from "monaco-editor";
 import type { Worktree } from "../types/worktree";
+import type { WorktreeFrameBundle } from "./useWorktreeFrameBundles";
 
 // ─── 共通ペイロード型 ──────────────────────────────────────────────────────
 
@@ -88,6 +89,9 @@ export function useCodeReviewChatListener(deps: {
   isDetached: (worktreeId: string) => boolean;
   getDetachedSessionId: (terminalId: number) => number | null;
   terminalRefs: Map<number, TerminalRef>;
+  worktreeFrameBundles: Map<string, WorktreeFrameBundle>;
+  activeWorktreeId: Ref<string | null>;
+  switchToWorktree: (worktreeId: string) => Promise<void>;
 }) {
   async function setup() {
     await listen<{ worktreeId: string } & ChatPayload>(
@@ -102,8 +106,8 @@ export function useCodeReviewChatListener(deps: {
 
         const text =
           startLine === endLine
-            ? `${filePath}#L${startLine}\n`
-            : `${filePath}#L${startLine}-L${endLine}\n`;
+            ? `${filePath}#L${startLine}`
+            : `${filePath}#L${startLine}-L${endLine}`;
 
         if (deps.isDetached(wid)) {
           const sid = deps.getDetachedSessionId(terminal.id);
@@ -113,6 +117,18 @@ export function useCodeReviewChatListener(deps: {
           const termRef = deps.terminalRefs.get(terminal.id);
           if (!termRef) return;
           await termRef.write(text);
+        }
+
+        // ターミナルビューへ切替＋フォーカス
+        if (deps.activeWorktreeId.value !== wid) {
+          await deps.switchToWorktree(wid);
+        }
+        const bundle = deps.worktreeFrameBundles.get(wid);
+        if (bundle) {
+          const leaf = bundle.frame.getAllLeafs().find((l) => l.terminalIds.includes(terminal.id));
+          if (leaf) {
+            await bundle.frame.switchTerminal(leaf.id, terminal.id);
+          }
         }
       },
     );
