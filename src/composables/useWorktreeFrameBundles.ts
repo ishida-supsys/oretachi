@@ -110,10 +110,6 @@ export function useWorktreeFrameBundles(options: {
     bundles.get(wid)?.frame.closeTerminal(leafId, tid);
   }
 
-  function onFrameSplit(wid: string, leafId: string, dir: "left" | "right" | "top" | "bottom") {
-    bundles.get(wid)?.frame.onSplitRequest(leafId, dir);
-  }
-
   function onFrameTabDrop(
     wid: string,
     srcLeafId: string,
@@ -146,7 +142,6 @@ export function useWorktreeFrameBundles(options: {
     switchToWorktree,
     onFrameSwitch,
     onFrameClose,
-    onFrameSplit,
     onFrameTabDrop,
     onFrameTabEdgeDrop,
     onFrameTabReorder,

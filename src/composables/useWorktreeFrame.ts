@@ -97,14 +97,15 @@ export function useWorktreeFrame(options: {
 
   async function onSplitRequest(leafId: string, direction: "left" | "right" | "top" | "bottom") {
     returnAllToOffscreen();
-    splitLeaf(leafId, direction);
-    lastFocusedLeafId.value = leafId;
+    const newLeaf = splitLeaf(leafId, direction);
+    lastFocusedLeafId.value = newLeaf.id;
     await nextTick();
     mountTerminalsToHosts();
     for (const [tid] of terminalEntries) {
       const term = terminalRefs.get(tid);
       if (term) await term.handleTabActivated();
     }
+    return newLeaf;
   }
 
   function onTabReorder(leafId: string, terminalId: number, insertIndex: number) {
@@ -141,6 +142,10 @@ export function useWorktreeFrame(options: {
     targetLeafId: string,
     direction: "left" | "right" | "top" | "bottom"
   ) {
+    if (sourceLeafId === targetLeafId) {
+      const srcLeaf = findLeafByTerminalId(terminalId);
+      if (srcLeaf && srcLeaf.terminalIds.length <= 1) return;
+    }
     returnAllToOffscreen();
     const newLeaf = splitLeaf(targetLeafId, direction);
     moveTerminal(terminalId, sourceLeafId, newLeaf.id);

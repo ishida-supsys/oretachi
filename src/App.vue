@@ -104,7 +104,6 @@ const {
   switchToWorktree,
   onFrameSwitch,
   onFrameClose,
-  onFrameSplit,
   onFrameTabDrop,
   onFrameTabEdgeDrop,
   onFrameTabReorder,
@@ -883,6 +882,7 @@ function onFrameAddTerminal(wid: string, leafId: string) {
   onAddTerminal(wid);
 }
 
+
 async function onFocusSubWindow(worktreeId: string) {
   clearNotification(worktreeId);
   await focusSubWindow(worktreeId);
@@ -1578,7 +1578,6 @@ onMounted(async () => {
               :terminal-agent-status="terminalAgentStatus"
               @switch-terminal="(leafId, tid) => onFrameSwitch(wt.id, leafId, tid)"
               @close-terminal="(leafId, tid) => onFrameClose(wt.id, leafId, tid)"
-              @split-request="(leafId, dir) => onFrameSplit(wt.id, leafId, dir)"
               @tab-drop="(sl, tid, tl, idx) => onFrameTabDrop(wt.id, sl, tid, tl, idx)"
               @tab-edge-drop="(sl, tid, tl, dir) => onFrameTabEdgeDrop(wt.id, sl, tid, tl, dir)"
               @tab-reorder="(lid, tid, idx) => onFrameTabReorder(wt.id, lid, tid, idx)"
