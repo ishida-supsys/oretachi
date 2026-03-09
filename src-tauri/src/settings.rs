@@ -272,6 +272,7 @@ impl Default for AppSettings {
             ai_agent: None,
             worktree_defaults: None,
             locale: None,
+            code_review: None,
         }
     }
 }
