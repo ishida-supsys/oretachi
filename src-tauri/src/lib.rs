@@ -1,3 +1,4 @@
+mod ai_commit_message;
 mod ai_judge;
 mod ai_provider;
 mod fs_watcher;
@@ -269,6 +270,7 @@ pub fn run() {
         .manage(SettingsManager::new())
         .manage(mcp_server::McpServerManager::new())
         .manage(ai_judge::ApprovalManager::new())
+        .manage(ai_commit_message::CommitMessageManager::new())
         .manage(FsWatcherManager::new())
         .invoke_handler(tauri::generate_handler![
             pty_spawn,
@@ -298,6 +300,8 @@ pub fn run() {
             restart_mcp_server,
             ai_judge::judge_approval,
             ai_judge::cancel_approval,
+            ai_commit_message::generate_commit_message,
+            ai_commit_message::cancel_commit_message_generation,
             terminal_session::save_terminal_session,
             terminal_session::load_terminal_session,
             terminal_session::delete_terminal_session,

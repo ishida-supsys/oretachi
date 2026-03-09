@@ -460,6 +460,30 @@ pub fn get_log(repo_path: &str, skip: usize, limit: usize) -> Result<Vec<CommitE
     Ok(entries)
 }
 
+pub fn get_diff_text(repo_path: &str) -> Result<String, String> {
+    // ステージ済み + 未ステージの全差分を取得
+    let staged = make_command("git")
+        .args(["diff", "--cached"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+
+    let unstaged = make_command("git")
+        .args(["diff"])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+
+    let mut result = String::new();
+    if staged.status.success() {
+        result.push_str(&String::from_utf8_lossy(&staged.stdout));
+    }
+    if unstaged.status.success() {
+        result.push_str(&String::from_utf8_lossy(&unstaged.stdout));
+    }
+    Ok(result)
+}
+
 pub fn stage_all(repo_path: &str) -> Result<(), String> {
     let output = make_command("git")
         .args(["add", "-A"])

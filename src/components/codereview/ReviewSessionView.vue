@@ -2,6 +2,7 @@
 import { ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { useToast } from "primevue/usetoast";
+import { invoke } from "@tauri-apps/api/core";
 import ReviewFilePanel from "./ReviewFilePanel.vue";
 import { useReviewSession } from "../../composables/useReviewSession";
 import type { ChatPayload } from "../../composables/useCodeReviewLineChat";
@@ -21,6 +22,26 @@ const { reviewFiles, summary, toggleReviewed, toggleCollapsed, commitAll } = use
 const showCommitPanel = ref(false);
 const commitMessage = ref("");
 const committing = ref(false);
+const generatingMessage = ref(false);
+
+async function generateCommitMessage() {
+  if (generatingMessage.value) {
+    await invoke("cancel_commit_message_generation", { repoPath: props.repoPath });
+    generatingMessage.value = false;
+    return;
+  }
+  generatingMessage.value = true;
+  try {
+    const message = await invoke<string>("generate_commit_message", { repoPath: props.repoPath });
+    commitMessage.value = message;
+  } catch (e) {
+    if (String(e) !== "already in progress") {
+      toast.add({ severity: "error", summary: t("generateFailed"), detail: String(e), life: 5000 });
+    }
+  } finally {
+    generatingMessage.value = false;
+  }
+}
 
 async function handleCommit() {
   if (!commitMessage.value.trim()) return;
@@ -76,7 +97,18 @@ async function handleCommit() {
           v-if="showCommitPanel"
           class="absolute top-full right-0 mt-1 w-80 bg-surface-800 border border-surface-600 rounded shadow-xl z-50 p-3"
         >
-          <div class="text-xs font-semibold text-surface-300 mb-2">{{ t("commitMessage") }}</div>
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-semibold text-surface-300">{{ t("commitMessage") }}</span>
+            <button
+              class="flex items-center gap-1 px-2 py-0.5 text-xs rounded bg-surface-700 hover:bg-surface-600 text-surface-300 hover:text-surface-100 transition-colors"
+              :title="generatingMessage ? t('cancel') : t('generateCommitMessage')"
+              @click="generateCommitMessage"
+            >
+              <i v-if="generatingMessage" class="pi pi-spin pi-spinner text-xs" />
+              <i v-else class="pi pi-sparkles text-xs" />
+              <span>{{ generatingMessage ? t("generating") : t("generateCommitMessage") }}</span>
+            </button>
+          </div>
           <textarea
             v-model="commitMessage"
             class="w-full bg-surface-900 border border-surface-600 rounded px-2 py-1.5 text-sm text-surface-100 resize-none focus:outline-none focus:border-primary-500"
@@ -134,7 +166,10 @@ async function handleCommit() {
     "commitRun": "Commit",
     "noChanges": "No changed files",
     "commitSuccess": "Committed successfully",
-    "commitFailed": "Commit failed"
+    "commitFailed": "Commit failed",
+    "generateCommitMessage": "Generate",
+    "generating": "Generating...",
+    "generateFailed": "Failed to generate commit message"
   },
   "ja": {
     "filesChanged": "{count} ファイル変更",
@@ -147,7 +182,10 @@ async function handleCommit() {
     "commitRun": "コミット",
     "noChanges": "変更ファイルなし",
     "commitSuccess": "コミットしました",
-    "commitFailed": "コミットに失敗しました"
+    "commitFailed": "コミットに失敗しました",
+    "generateCommitMessage": "生成",
+    "generating": "生成中...",
+    "generateFailed": "コミットメッセージの生成に失敗しました"
   }
 }
 </i18n>
