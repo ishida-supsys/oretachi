@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useToast } from "primevue/usetoast";
 import { invoke } from "@tauri-apps/api/core";
@@ -23,6 +23,18 @@ const showCommitPanel = ref(false);
 const commitMessage = ref("");
 const committing = ref(false);
 const generatingMessage = ref(false);
+
+// レビュー開始時、変更ファイルがあればコミットメッセージを自動生成
+const stopAutoGenerate = watch(
+  () => reviewFiles.value.length,
+  (len) => {
+    if (len > 0 && !commitMessage.value && !generatingMessage.value) {
+      generateCommitMessage();
+      stopAutoGenerate();
+    }
+  },
+  { immediate: true },
+);
 
 async function generateCommitMessage() {
   if (generatingMessage.value) {
