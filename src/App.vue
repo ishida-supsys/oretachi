@@ -38,6 +38,7 @@ import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
 import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
 import { getRecentLines, analyzeForApproval, hasApprovalPrompt, cancelApproval } from "./utils/autoApproval";
 import { useAutoHotkey } from "./composables/useAutoHotkey";
+import { useShutdownGuard } from "./composables/useShutdownGuard";
 import { debug } from "@tauri-apps/plugin-log";
 import { platform } from "@tauri-apps/plugin-os";
 import Toast from "primevue/toast";
@@ -140,6 +141,8 @@ const showAddDialog = ref(false);
 
 // 削除中のワークツリー ID セット
 const loadingWorktrees = reactive(new Map<string, string>());
+
+const { isWaitingForShutdown, isBusyForShutdown, waitForBusyOperations } = useShutdownGuard(loadingWorktrees);
 
 // ワークツリー削除ダイアログ
 const showRemoveDialog = ref(false);
@@ -1347,6 +1350,13 @@ onMounted(async () => {
   // メインウィンドウ閉じ時: 全サブウィンドウを閉じてからアプリ終了
   await getCurrentWindow().onCloseRequested(async (event) => {
     event.preventDefault();
+    if (isWaitingForShutdown.value) return; // 二重クリック防止
+
+    // ワークツリー操作/タスク実行中の場合は完了まで待機
+    if (isBusyForShutdown.value) {
+      isWaitingForShutdown.value = true;
+      await waitForBusyOperations();
+    }
 
     // 1. 全ウィンドウの位置・サイズをプラグインで保存
     await saveWindowState(StateFlags.ALL);
@@ -1638,6 +1648,12 @@ onMounted(async () => {
         </div>
       </template>
     </Toast>
+
+    <!-- シャットダウン待機オーバーレイ -->
+    <div v-if="isWaitingForShutdown" class="shutdown-overlay">
+      <i class="pi pi-spinner pi-spin" style="font-size: 2.5rem; color: #cba6f7;" />
+      <p style="color: #cdd6f4; margin-top: 16px;">{{ t('shuttingDown') }}</p>
+    </div>
   </div>
 </template>
 
@@ -1661,7 +1677,8 @@ onMounted(async () => {
     "ideNotInstalledTitle": "IDE not found",
     "ideLaunchFailed": "Failed to launch IDE: {error}",
     "lfsWarning": "Failed to fetch Git LFS files; worktree was created without LFS files.\nIf you need LFS files, run git lfs pull.",
-    "worktreeCreateFailed": "Failed to create worktree: {error}"
+    "worktreeCreateFailed": "Failed to create worktree: {error}",
+    "shuttingDown": "Waiting for operations to finish..."
   },
   "ja": {
     "taskAddSummary": "タスク追加",
@@ -1681,7 +1698,8 @@ onMounted(async () => {
     "ideNotInstalledTitle": "IDE が見つかりません",
     "ideLaunchFailed": "IDE の起動に失敗しました: {error}",
     "lfsWarning": "Git LFS のファイル取得に失敗したため、LFS ファイルをスキップしてワークツリーを作成しました。\nLFS ファイルが必要な場合は git lfs pull を実行してください。",
-    "worktreeCreateFailed": "ワークツリーの作成に失敗しました: {error}"
+    "worktreeCreateFailed": "ワークツリーの作成に失敗しました: {error}",
+    "shuttingDown": "処理の完了を待っています..."
   }
 }
 </i18n>
