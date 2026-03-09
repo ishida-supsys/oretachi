@@ -13,7 +13,7 @@ import ReviewSessionView from "./components/codereview/ReviewSessionView.vue";
 import { useCodeReviewTabs } from "./composables/useCodeReviewTabs";
 import { useReviewSession } from "./composables/useReviewSession";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useCodeReviewChat } from "./composables/useCodeReviewLineChat";
 
@@ -52,6 +52,7 @@ function handleCloseTab(id: string) {
 function handleReviewClose() {
   endReview();
   closeReviewTab();
+  emit("codereview-fs-changed");
 }
 
 // ─── サイドバーリサイズ ───────────────────────────────────────────────────────
