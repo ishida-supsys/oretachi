@@ -14,6 +14,7 @@ struct PtySession {
     alive: Arc<Mutex<bool>>,
     watcher_handle: Option<std::thread::JoinHandle<()>>,
     is_ai_agent: bool,
+    cwd: Option<String>,
 }
 
 pub struct PtyManager {
@@ -307,7 +308,7 @@ impl PtyManager {
             );
         }
 
-        if let Some(dir) = cwd {
+        if let Some(ref dir) = cwd {
             cmd.cwd(dir);
         }
 
@@ -394,6 +395,7 @@ impl PtyManager {
             alive,
             watcher_handle: Some(watcher_handle),
             is_ai_agent: false,
+            cwd,
         };
 
         self.sessions.lock().unwrap().insert(session_id, session);
@@ -473,6 +475,32 @@ impl PtyManager {
         let ids: Vec<u32> = self.sessions.lock().unwrap().keys().cloned().collect();
         for id in ids {
             let _ = self.kill(id);
+        }
+    }
+
+    /// 指定ディレクトリ以下をcwdとして持つ全PTYセッションをkillする。
+    /// ワークツリー削除前にそのディレクトリを掴んでいる子プロセスを解放するために使用。
+    pub fn kill_sessions_in_dir(&self, dir: &str) {
+        let target = std::path::Path::new(dir);
+        let ids: Vec<u32> = {
+            let sessions = self.sessions.lock().unwrap();
+            sessions
+                .iter()
+                .filter(|(_, s)| {
+                    s.cwd.as_deref().map_or(false, |cwd| {
+                        std::path::Path::new(cwd).starts_with(target)
+                    })
+                })
+                .map(|(id, _)| *id)
+                .collect()
+        };
+        for id in &ids {
+            log::info!("[Terminal] kill_sessions_in_dir: killing session {} (worktree={})", id, dir);
+            let _ = self.kill(*id);
+        }
+        if !ids.is_empty() {
+            // プロセスが完全に終了するまで少し待機
+            std::thread::sleep(std::time::Duration::from_millis(200));
         }
     }
 }

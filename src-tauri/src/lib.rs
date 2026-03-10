@@ -101,7 +101,13 @@ async fn git_worktree_add(
 }
 
 #[tauri::command]
-async fn git_worktree_remove(repo_path: String, worktree_path: String) -> Result<(), String> {
+async fn git_worktree_remove(
+    pty_manager: State<'_, PtyManager>,
+    repo_path: String,
+    worktree_path: String,
+) -> Result<(), String> {
+    // 削除対象ディレクトリをcwdとして掴んでいる子プロセスを先にkill
+    pty_manager.kill_sessions_in_dir(&worktree_path);
     run_git(move || git_worktree::worktree_remove(&repo_path, &worktree_path)).await
 }
 
