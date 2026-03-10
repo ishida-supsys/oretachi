@@ -3106,7 +3106,7 @@ dependencies = [
 
 [[package]]
 name = "oretachi"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "axum",
  "content_inspector",
