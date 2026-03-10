@@ -52,7 +52,7 @@ pub async fn judge_approval(
     settings_state: State<'_, SettingsManager>,
     worktree_id: String,
     content: String,
-    cwd: String,
+    _cwd: String,
 ) -> Result<bool, String> {
     // 重複防止: 既に同一ワークツリーの判定が進行中ならエラーを返す
     {
@@ -79,8 +79,9 @@ pub async fn judge_approval(
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
 
-    if !cwd.is_empty() {
-        cmd.current_dir(&cwd);
+    let worktree_base_dir = settings_state.get().worktree_base_dir.clone();
+    if !worktree_base_dir.is_empty() {
+        cmd.current_dir(&worktree_base_dir);
     }
 
     let mut child = cmd

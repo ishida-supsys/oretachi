@@ -105,7 +105,10 @@ pub async fn generate_commit_message(
     cmd.stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    cmd.current_dir(&repo_path);
+    let worktree_base_dir = settings_state.get().worktree_base_dir.clone();
+    if !worktree_base_dir.is_empty() {
+        cmd.current_dir(&worktree_base_dir);
+    }
 
     let mut child = cmd
         .spawn()
