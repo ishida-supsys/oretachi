@@ -143,12 +143,18 @@ pub async fn task_generate(
             }
         });
         let config_str = serde_json::to_string(&mcp_config)
-            .map_err(|e| format!("Failed to serialize MCP config: {}", e))?;
+            .map_err(|e| {
+                log::error!("[TaskGenerate] Failed to serialize MCP config: {}", e);
+                format!("Failed to serialize MCP config: {}", e)
+            })?;
 
         let config_path = std::env::temp_dir()
             .join(format!("oretachi-task-mcp-{}.json", std::process::id()));
         std::fs::write(&config_path, &config_str)
-            .map_err(|e| format!("Failed to write MCP config: {}", e))?;
+            .map_err(|e| {
+                log::error!("[TaskGenerate] Failed to write MCP config: {}", e);
+                format!("Failed to write MCP config: {}", e)
+            })?;
 
         #[cfg(target_os = "windows")]
         let (prog, mut a) = (
@@ -189,14 +195,20 @@ pub async fn task_generate(
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("Failed to spawn AI agent: {}", e))?;
+        .map_err(|e| {
+            log::error!("[TaskGenerate] Failed to spawn AI agent: {}", e);
+            format!("Failed to spawn AI agent: {}", e)
+        })?;
 
     if !stdin_content.is_empty() {
         if let Some(mut stdin) = child.stdin.take() {
             stdin
                 .write_all(stdin_content.as_bytes())
                 .await
-                .map_err(|e| format!("Failed to write stdin: {}", e))?;
+                .map_err(|e| {
+                    log::error!("[TaskGenerate] Failed to write stdin: {}", e);
+                    format!("Failed to write stdin: {}", e)
+                })?;
         }
     }
 
@@ -216,11 +228,18 @@ pub async fn task_generate(
     }
 
     let output = wait_result
-        .map_err(|_| format!("AI agent timed out after {}s", TIMEOUT_SECS))?
-        .map_err(|e| format!("Failed to wait for AI agent: {}", e))?;
+        .map_err(|_| {
+            log::error!("[TaskGenerate] AI agent timed out after {}s", TIMEOUT_SECS);
+            format!("AI agent timed out after {}s", TIMEOUT_SECS)
+        })?
+        .map_err(|e| {
+            log::error!("[TaskGenerate] Failed to wait for AI agent: {}", e);
+            format!("Failed to wait for AI agent: {}", e)
+        })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        log::error!("[TaskGenerate] AI agent exited with {}: {}", output.status, stderr);
         return Err(format!(
             "AI agent exited with {}: {}",
             output.status, stderr
@@ -233,7 +252,10 @@ pub async fn task_generate(
     let structured = ai_provider::parse_response(&agent_kind, &stdout)?;
 
     serde_json::to_string(&structured)
-        .map_err(|e| format!("Failed to serialize response: {}", e))
+        .map_err(|e| {
+            log::error!("[TaskGenerate] Failed to serialize response: {}", e);
+            format!("Failed to serialize response: {}", e)
+        })
 }
 
 #[tauri::command]
