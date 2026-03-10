@@ -328,10 +328,13 @@ watch(
 );
 
 onMounted(async () => {
+  debug(`[TerminalView] onMounted initialSessionId=${props.initialSessionId} autoStart=${props.autoStart} cwd=${props.cwd}`);
   initTerminal();
   if (props.initialSessionId !== undefined) {
+    debug(`[TerminalView] attaching to session ${props.initialSessionId}`);
     await attachPty(props.initialSessionId, props.initialSnapshot);
   } else if (props.autoStart) {
+    debug(`[TerminalView] starting new PTY (no initialSessionId)`);
     if (props.restoreSnapshot) {
       terminal?.write(props.restoreSnapshot);
     }

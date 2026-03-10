@@ -794,9 +794,11 @@ async function onMoveToMainWindow(worktreeId: string) {
   const { layout: savedLayout, terminals: savedTerminals } = isDetached(worktreeId)
     ? await getSubWindowLayout(worktreeId)
     : { layout: null, terminals: [] };
-  await moveToMainWindow(worktreeId);
-  subWindowFocusMap.delete(worktreeId);
-  // セッション引き継ぎ情報を設定（TerminalView の initialSessionId/initialSnapshot に渡す）
+
+  debug(`[MoveToMain] start worktreeId=${worktreeId} savedTerminals=${JSON.stringify(savedTerminals.map(t => ({ id: t.id, sessionId: t.sessionId })))}`);
+
+  // ★ moveToMainWindow の前にデータを準備（Vue再描画より先にセット）
+  // pendingSessionAttach はプレーンMap → Vue再描画をトリガーしない
   for (const t of savedTerminals) {
     if (t.sessionId) {
       pendingSessionAttach.set(t.id, { sessionId: t.sessionId, snapshot: t.snapshot });
@@ -805,8 +807,17 @@ async function onMoveToMainWindow(worktreeId: string) {
       terminalAgentStatus.set(t.id, true);
     }
   }
-  // バンドルをレイアウト付きで作成
+  debug(`[MoveToMain] pendingSessionAttach set for terminalIds=[${[...pendingSessionAttach.keys()]}]`);
+
+  // ensureWorktreeFrame は bundles.set() で再描画をトリガーするが、
+  // isDetached がまだ true なので TerminalView は作成されない
   ensureWorktreeFrame(worktreeId, savedLayout ?? undefined);
+  debug(`[MoveToMain] ensureWorktreeFrame done, calling moveToMainWindow`);
+
+  await moveToMainWindow(worktreeId);
+  debug(`[MoveToMain] moveToMainWindow done, isDetached=${isDetached(worktreeId)}`);
+
+  subWindowFocusMap.delete(worktreeId);
 }
 
 async function onTrayButtonClick() {
