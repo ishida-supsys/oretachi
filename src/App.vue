@@ -31,6 +31,7 @@ import type { WorktreeEntry, Repository } from "./types/settings";
 import type { AddWorktreeTaskCode, AgentWorktreeTaskCode } from "./types/task";
 import { useAddTaskDialog } from "./composables/useAddTaskDialog";
 import type { FrameNode } from "./types/frame";
+import type { SubTerminalEntry } from "./types/terminal";
 import { useWorktreeFrameBundles } from "./composables/useWorktreeFrameBundles";
 import { useHotkeyListener, bindingToAccelerator, matchesHotkey } from "./composables/useHotkeys";
 import { useCodeReviewChatListener } from "./composables/useCodeReviewLineChat";
@@ -143,6 +144,8 @@ const pendingScripts = new Map<string, string>();
 const pendingSnapshots = new Map<number, string>();
 // 新規追加ターミナル: autoStart を抑制して reparenting 後に手動 startPty するための ID セット
 const pendingManualStart = new Set<number>();
+// terminalId → { sessionId, snapshot } （サブ→メイン移動時のセッション引き継ぎ用）
+const pendingSessionAttach = new Map<number, { sessionId: number; snapshot: string }>();
 
 // ワークツリー追加ダイアログ
 const showAddDialog = ref(false);
@@ -196,6 +199,7 @@ async function onTerminalReady(worktreeId: string, terminalId: number) {
     }
   }
   pendingSnapshots.delete(terminalId);
+  pendingSessionAttach.delete(terminalId);
   const command = pendingScripts.get(worktreeId);
   if (command) {
     pendingScripts.delete(worktreeId);
@@ -758,21 +762,21 @@ async function onCancelAiJudging(worktreeId: string) {
   }
 }
 
-async function getSubWindowLayout(worktreeId: string): Promise<FrameNode | null> {
+async function getSubWindowLayout(worktreeId: string): Promise<{ layout: FrameNode | null; terminals: SubTerminalEntry[] }> {
   return new Promise((resolve) => {
     const timeout = setTimeout(() => {
       unlisten();
-      resolve(null);
+      resolve({ layout: null, terminals: [] });
     }, 3000);
 
     let unlisten = () => {};
-    listen<{ worktreeId: string; layout: FrameNode | null; terminals: unknown[]; windowSize?: unknown }>(
+    listen<{ worktreeId: string; layout: FrameNode | null; terminals: SubTerminalEntry[]; windowSize?: unknown }>(
       "sub-layout-response",
       (event) => {
         if (event.payload.worktreeId === worktreeId) {
           clearTimeout(timeout);
           unlisten();
-          resolve(event.payload.layout);
+          resolve({ layout: event.payload.layout, terminals: event.payload.terminals ?? [] });
         }
       }
     ).then((fn) => { unlisten = fn; });
@@ -780,16 +784,27 @@ async function getSubWindowLayout(worktreeId: string): Promise<FrameNode | null>
     emitTo(`sub-${worktreeId}`, "sub-get-layout", {}).catch(() => {
       clearTimeout(timeout);
       unlisten();
-      resolve(null);
+      resolve({ layout: null, terminals: [] });
     });
   });
 }
 
 async function onMoveToMainWindow(worktreeId: string) {
-  // サブウィンドウからレイアウトを取得（destroy前に）
-  const savedLayout = isDetached(worktreeId) ? await getSubWindowLayout(worktreeId) : null;
+  // サブウィンドウからレイアウトとターミナル情報を取得（destroy前に）
+  const { layout: savedLayout, terminals: savedTerminals } = isDetached(worktreeId)
+    ? await getSubWindowLayout(worktreeId)
+    : { layout: null, terminals: [] };
   await moveToMainWindow(worktreeId);
   subWindowFocusMap.delete(worktreeId);
+  // セッション引き継ぎ情報を設定（TerminalView の initialSessionId/initialSnapshot に渡す）
+  for (const t of savedTerminals) {
+    if (t.sessionId) {
+      pendingSessionAttach.set(t.id, { sessionId: t.sessionId, snapshot: t.snapshot });
+    }
+    if (t.isAiAgent) {
+      terminalAgentStatus.set(t.id, true);
+    }
+  }
   // バンドルをレイアウト付きで作成
   ensureWorktreeFrame(worktreeId, savedLayout ?? undefined);
 }
@@ -1661,10 +1676,12 @@ onMounted(async () => {
               v-for="terminal in wt.terminals"
               :key="terminal.id"
               :ref="(el) => { const b = worktreeFrameBundles.get(wt.id); if (b) b.frame.setTerminalRef(terminal.id, el); }"
-              :auto-start="!pendingManualStart.has(terminal.id)"
+              :auto-start="!pendingManualStart.has(terminal.id) && !pendingSessionAttach.has(terminal.id)"
               :cwd="wt.path"
               :shell="resolveShell(wt.id)"
               :restore-snapshot="pendingSnapshots.get(terminal.id)"
+              :initial-session-id="pendingSessionAttach.get(terminal.id)?.sessionId"
+              :initial-snapshot="pendingSessionAttach.get(terminal.id)?.snapshot"
               @exit="onSessionExit(wt.id, terminal.id)"
               @ready="onTerminalReady(wt.id, terminal.id)"
               @title-change="onTerminalTitleChange(wt.id, terminal.id, $event)"

@@ -345,11 +345,11 @@ onMounted(async () => {
     async (event) => {
       if (event.payload.worktreeId === worktreeId) {
         closingByMain = true;
-        // 全ターミナルの PTY を kill
+        // 全ターミナルの PTY を detach (メイン側で引き継ぐため kill しない)
         for (const [, entry] of terminalEntries) {
           const termRef = terminalRefs.get(entry.id);
           if (termRef?.isRunning) {
-            await termRef.kill();
+            termRef.detach();
           }
         }
         // kill 完了をメインに通知（destroy 前に送信）
@@ -402,6 +402,7 @@ onMounted(async () => {
         title: entry.title,
         sessionId: entry.sessionId,
         snapshot,
+        isAiAgent: entry.isAiAgent ?? false,
         rows: termObj?.rows ?? 24,
         cols: termObj?.cols ?? 80,
       };
