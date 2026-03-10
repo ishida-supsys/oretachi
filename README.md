@@ -72,6 +72,10 @@ pnpm tauri dev
 
 Logs are written to the platform-specific app log directory.
 
+## Documentation
+
+- [Setup Script & Notification Guide](docs/setup-guide.md)
+
 ## License
 
 MIT — see [LICENSE](LICENSE) for details.
