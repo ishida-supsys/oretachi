@@ -222,7 +222,7 @@ const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect()
 async function onOpenInIde() {
   const wt = currentWorktree.value;
   if (!wt) return;
-  await openInIde(wt.worktreePath, { worktreeId: wt.worktreeId, worktreeName: wt.worktreeName });
+  await openInIde(wt.worktreePath, { worktreeId: wt.worktreeId, worktreeName: wt.worktreeName, origin: "tray" });
 }
 
 /** 現在のターミナルを detach してから次に進む */
@@ -245,7 +245,9 @@ async function onNext() {
 
   currentIndex.value += 1;
   if (currentIndex.value < allWorktrees.value.length) {
-    await showWorktree(allWorktrees.value[currentIndex.value]);
+    const next = allWorktrees.value[currentIndex.value];
+    await emitTo("main", "tray-current-worktree-changed", { worktreeId: next.worktreeId });
+    await showWorktree(next);
   }
 }
 

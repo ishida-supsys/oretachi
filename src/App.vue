@@ -63,7 +63,7 @@ const { settings, loadSettings, scheduleSave } = useSettings();
 const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, removeWorktree, listBranches, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, registerTerminalSession, closeAllSubWindows } = useSubWindows();
 const { notifications, initNotificationListener, addNotification, clearNotification, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
-const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees } = useTrayPopup();
+const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees, setCurrentTrayWorktreeId, isTrayShowingWorktree, focusTrayWindow } = useTrayPopup();
 const { closeAllCodeReviewWindows } = useCodeReviewWindow();
 const { tryAutoAssignHotkey } = useAutoHotkey();
 const { sortedTasks, removeTask } = useTasks();
@@ -127,6 +127,10 @@ const { setup: setupCodeReviewChatListener } = useCodeReviewChatListener({
   worktreeFrameBundles,
   activeWorktreeId,
   switchToWorktree,
+  focusSubWindow,
+  focusMainWindow: () => getCurrentWindow().setFocus(),
+  isTrayShowingWorktree,
+  focusTrayPopup: focusTrayWindow,
 });
 
 // terminalId → サムネイル data URL
@@ -1379,11 +1383,19 @@ onMounted(async () => {
     if (worktrees) {
       try {
         await emitTo("tray-popup", "tray-init", { worktrees });
+        if (worktrees.length > 0) {
+          setCurrentTrayWorktreeId(worktrees[0].worktreeId);
+        }
       } catch (e) {
         console.error("tray-init 送信失敗:", e);
       }
       clearPendingWorktrees();
     }
+  });
+
+  // トレイポップアップが別ワークツリーに切り替えた通知
+  await listen<{ worktreeId: string }>("tray-current-worktree-changed", (event) => {
+    setCurrentTrayWorktreeId(event.payload.worktreeId);
   });
 
   // トレイポップアップからの通知クリア

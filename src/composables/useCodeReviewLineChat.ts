@@ -1,10 +1,12 @@
 import { ref, onUnmounted } from "vue";
 import type { Ref } from "vue";
-import { listen, emit } from "@tauri-apps/api/event";
+import { listen, emit, emitTo } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
 import type * as Monaco from "monaco-editor";
 import type { Worktree } from "../types/worktree";
 import type { WorktreeFrameBundle } from "./useWorktreeFrameBundles";
+
+export type CodeReviewOrigin = "main" | "sub" | "tray";
 
 // ─── 共通ペイロード型 ──────────────────────────────────────────────────────
 
@@ -69,9 +71,9 @@ export function useEditorLineSelection(
 // ─── useCodeReviewChat ─────────────────────────────────────────────────────
 // CodeReviewApp.vue: チャットイベントをメインウィンドウに中継
 
-export function useCodeReviewChat(worktreeId: string) {
+export function useCodeReviewChat(worktreeId: string, origin: CodeReviewOrigin) {
   async function handleChatWithAgent(payload: ChatPayload) {
-    await emit("codereview-chat-with-agent", { worktreeId, ...payload });
+    await emit("codereview-chat-with-agent", { worktreeId, origin, ...payload });
   }
   return { handleChatWithAgent };
 }
@@ -92,12 +94,16 @@ export function useCodeReviewChatListener(deps: {
   worktreeFrameBundles: Map<string, WorktreeFrameBundle>;
   activeWorktreeId: Ref<string | null>;
   switchToWorktree: (worktreeId: string) => Promise<void>;
+  focusSubWindow: (worktreeId: string) => Promise<void>;
+  focusMainWindow: () => Promise<void>;
+  isTrayShowingWorktree: (worktreeId: string) => boolean;
+  focusTrayPopup: () => Promise<void>;
 }) {
   async function setup() {
-    await listen<{ worktreeId: string } & ChatPayload>(
+    await listen<{ worktreeId: string; origin: CodeReviewOrigin } & ChatPayload>(
       "codereview-chat-with-agent",
       async (event) => {
-        const { worktreeId: wid, filePath, startLine, endLine } = event.payload;
+        const { worktreeId: wid, origin, filePath, startLine, endLine } = event.payload;
         const wt = deps.worktrees.value.find((w) => w.id === wid);
         if (!wt || wt.terminals.length === 0) return;
 
@@ -109,6 +115,7 @@ export function useCodeReviewChatListener(deps: {
             ? `${filePath}#L${startLine}`
             : `${filePath}#L${startLine}-L${endLine}`;
 
+        // テキスト書き込み
         if (deps.isDetached(wid)) {
           const sid = deps.getDetachedSessionId(terminal.id);
           if (sid === null) return;
@@ -119,16 +126,27 @@ export function useCodeReviewChatListener(deps: {
           await termRef.write(text);
         }
 
-        // ターミナルビューへ切替＋フォーカス
-        if (deps.activeWorktreeId.value !== wid) {
-          await deps.switchToWorktree(wid);
-        }
-        const bundle = deps.worktreeFrameBundles.get(wid);
-        if (bundle) {
-          const leaf = bundle.frame.getAllLeafs().find((l) => l.terminalIds.includes(terminal.id));
-          if (leaf) {
-            await bundle.frame.switchTerminal(leaf.id, terminal.id);
+        // 起動元に応じたフォーカス処理
+        if (origin === "tray" && deps.isTrayShowingWorktree(wid)) {
+          // トレイポップアップが同じワークツリーを表示中 → トレイにフォーカス
+          await deps.focusTrayPopup();
+        } else if (deps.isDetached(wid)) {
+          // サブウィンドウ → サブウィンドウにフォーカス + ターミナルタブ切替
+          await deps.focusSubWindow(wid);
+          await emitTo(`sub-${wid}`, "sub-focus-terminal", { terminalId: terminal.id });
+        } else {
+          // メインウィンドウ → ワークツリー切替 + ターミナルタブ切替 + メインウィンドウにフォーカス
+          if (deps.activeWorktreeId.value !== wid) {
+            await deps.switchToWorktree(wid);
           }
+          const bundle = deps.worktreeFrameBundles.get(wid);
+          if (bundle) {
+            const leaf = bundle.frame.getAllLeafs().find((l) => l.terminalIds.includes(terminal.id));
+            if (leaf) {
+              await bundle.frame.switchTerminal(leaf.id, terminal.id);
+            }
+          }
+          await deps.focusMainWindow();
         }
       },
     );

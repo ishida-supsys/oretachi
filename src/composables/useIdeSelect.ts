@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { message } from "@tauri-apps/plugin-dialog";
 import type { IdeInfo } from "../types/ide";
 import { useCodeReviewWindow } from "./useCodeReviewWindow";
+import type { CodeReviewOrigin } from "./useCodeReviewLineChat";
 
 export const CODE_REVIEWER_IDE: IdeInfo = {
   id: "code-reviewer",
@@ -14,6 +15,8 @@ export interface IdeSelectOptions {
   /** worktreeId を渡す（Code Reviewer ウィンドウ識別に使用） */
   worktreeId?: string;
   worktreeName?: string;
+  /** Code Reviewerを開いたウィンドウの種別 */
+  origin?: CodeReviewOrigin;
 }
 
 /**
@@ -38,6 +41,7 @@ export function useIdeSelect() {
         options.worktreeId ?? path,
         options.worktreeName ?? path,
         path,
+        options.origin,
       );
       return;
     }
@@ -56,6 +60,7 @@ export function useIdeSelect() {
         ideTargetOptions.value.worktreeId ?? ideTargetPath.value,
         ideTargetOptions.value.worktreeName ?? ideTargetPath.value,
         ideTargetPath.value,
+        ideTargetOptions.value.origin,
       );
       return;
     }

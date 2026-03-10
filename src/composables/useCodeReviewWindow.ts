@@ -1,5 +1,6 @@
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { invoke } from "@tauri-apps/api/core";
+import type { CodeReviewOrigin } from "./useCodeReviewLineChat";
 
 const codeReviewWindowMap = new Map<string, WebviewWindow>();
 
@@ -8,6 +9,7 @@ export function useCodeReviewWindow() {
     worktreeId: string,
     worktreeName: string,
     worktreePath: string,
+    origin: CodeReviewOrigin = "main",
   ): Promise<void> {
     const existing = codeReviewWindowMap.get(worktreeId);
     if (existing) {
@@ -16,7 +18,7 @@ export function useCodeReviewWindow() {
     }
 
     const baseUrl = window.location.origin + window.location.pathname;
-    const url = `${baseUrl}?mode=codereview&worktreeId=${encodeURIComponent(worktreeId)}&worktreeName=${encodeURIComponent(worktreeName)}&worktreePath=${encodeURIComponent(worktreePath)}`;
+    const url = `${baseUrl}?mode=codereview&worktreeId=${encodeURIComponent(worktreeId)}&worktreeName=${encodeURIComponent(worktreeName)}&worktreePath=${encodeURIComponent(worktreePath)}&origin=${encodeURIComponent(origin)}`;
 
     const win = new WebviewWindow(`codereview-${worktreeId}`, {
       url,

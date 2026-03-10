@@ -64,6 +64,7 @@ export function useTrayPopup() {
       trayWindow = null;
     }
     pendingWorktrees = null;
+    currentTrayWorktreeId = null;
   }
 
   function getPendingWorktrees(): TrayWorktreeData[] | null {
@@ -74,13 +75,32 @@ export function useTrayPopup() {
     pendingWorktrees = null;
   }
 
+  function setCurrentTrayWorktreeId(worktreeId: string | null): void {
+    currentTrayWorktreeId = worktreeId;
+  }
+
+  function isTrayShowingWorktree(worktreeId: string): boolean {
+    return trayWindow !== null && currentTrayWorktreeId === worktreeId;
+  }
+
+  async function focusTrayWindow(): Promise<void> {
+    if (trayWindow) {
+      await trayWindow.setFocus();
+    }
+  }
+
   return {
     openTrayPopup,
     closeTrayPopup,
     getPendingWorktrees,
     clearPendingWorktrees,
+    setCurrentTrayWorktreeId,
+    isTrayShowingWorktree,
+    focusTrayWindow,
   };
 }
 
 // モジュールスコープで pendingWorktrees を保持
 let pendingWorktrees: TrayWorktreeData[] | null = null;
+// トレイポップアップが現在表示しているワークツリーID
+let currentTrayWorktreeId: string | null = null;

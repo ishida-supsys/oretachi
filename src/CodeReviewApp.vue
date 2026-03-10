@@ -18,7 +18,7 @@ import { useCodeReviewSettings } from "./composables/useCodeReviewSettings";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { useCodeReviewChat } from "./composables/useCodeReviewLineChat";
+import { useCodeReviewChat, type CodeReviewOrigin } from "./composables/useCodeReviewLineChat";
 
 const { t } = useI18n();
 const toast = useToast();
@@ -27,6 +27,7 @@ const params = new URLSearchParams(window.location.search);
 const worktreeId = params.get("worktreeId") ?? "";
 const worktreePath = params.get("worktreePath") ?? "";
 const worktreeName = params.get("worktreeName") ?? "";
+const origin = (params.get("origin") as CodeReviewOrigin | null) ?? "main";
 
 type Panel = "files" | "git";
 const activePanel = ref<Panel>("files");
@@ -203,7 +204,7 @@ function cleanup() {
 
 onUnmounted(cleanup);
 
-const { handleChatWithAgent } = useCodeReviewChat(worktreeId);
+const { handleChatWithAgent } = useCodeReviewChat(worktreeId, origin);
 </script>
 
 <template>
