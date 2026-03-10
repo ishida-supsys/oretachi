@@ -58,13 +58,24 @@ const statusColor: Record<string, string> = {
 };
 
 let unlistenFsChanged: (() => void) | null = null;
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 onMounted(async () => {
   loadStatus();
-  unlistenFsChanged = await listen("codereview-fs-changed", loadStatus);
+  unlistenFsChanged = await listen("codereview-fs-changed", () => {
+    if (debounceTimer !== null) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      loadStatus();
+    }, 500);
+  });
 });
 
 onUnmounted(() => {
+  if (debounceTimer !== null) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
   unlistenFsChanged?.();
 });
 </script>

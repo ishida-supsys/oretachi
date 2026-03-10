@@ -77,13 +77,24 @@ function onScroll(e: Event) {
 }
 
 let unlistenFsChanged: (() => void) | null = null;
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 onMounted(async () => {
   await init();
-  unlistenFsChanged = await listen("codereview-fs-changed", () => loadCommits(0));
+  unlistenFsChanged = await listen("codereview-fs-changed", () => {
+    if (debounceTimer !== null) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      loadCommits(0);
+    }, 500);
+  });
 });
 
 onUnmounted(() => {
+  if (debounceTimer !== null) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
   unlistenFsChanged?.();
 });
 </script>

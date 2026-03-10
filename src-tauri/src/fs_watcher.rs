@@ -8,10 +8,17 @@ use notify_debouncer_mini::notify::RecommendedWatcher;
 use std::{
     collections::HashMap,
     path::Path,
-    sync::Mutex,
-    time::Duration,
+    sync::{Arc, Mutex},
+    time::{Duration, Instant},
 };
 use tauri::{AppHandle, Manager};
+
+const MIN_EMIT_INTERVAL: Duration = Duration::from_millis(2000);
+
+struct ThrottleState {
+    last_emit: Option<Instant>,
+    pending: bool,
+}
 
 struct WatcherHandle {
     _debouncer: Debouncer<RecommendedWatcher>,
@@ -43,20 +50,64 @@ impl FsWatcherManager {
         watchers.remove(&worktree_id);
 
         let worktree_id_clone = worktree_id.clone();
+        let throttle_state = Arc::new(Mutex::new(ThrottleState {
+            last_emit: None,
+            pending: false,
+        }));
 
         let mut debouncer = new_debouncer(
             Duration::from_millis(500),
             move |res: DebounceEventResult| match res {
                 Ok(events) => {
                     let relevant = events.iter().any(|e| is_relevant_path(&e.path));
-                    if relevant {
+                    if !relevant {
+                        return;
+                    }
+
+                    let now = Instant::now();
+                    let mut state = match throttle_state.lock() {
+                        Ok(s) => s,
+                        Err(_) => return,
+                    };
+
+                    let elapsed = state.last_emit
+                        .map(|t| now.duration_since(t))
+                        .unwrap_or(Duration::MAX);
+
+                    if elapsed >= MIN_EMIT_INTERVAL {
+                        // 前回emitから十分時間が経過 → 即emit
+                        state.last_emit = Some(now);
+                        drop(state);
                         if let Some(window) = app_handle
                             .get_webview_window(&format!("codereview-{}", worktree_id_clone))
                         {
                             use tauri::Emitter;
                             let _ = window.emit("codereview-fs-changed", ());
                         }
+                    } else if !state.pending {
+                        // スロットル中かつ pending なし → trailing emit をスケジュール
+                        state.pending = true;
+                        let remaining = MIN_EMIT_INTERVAL - elapsed;
+                        drop(state);
+
+                        let app_handle2 = app_handle.clone();
+                        let worktree_id2 = worktree_id_clone.clone();
+                        let throttle_state2 = throttle_state.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(remaining).await;
+                            if let Ok(mut s) = throttle_state2.lock() {
+                                s.pending = false;
+                                s.last_emit = Some(Instant::now());
+                            }
+                            if let Some(window) = app_handle2
+                                .get_webview_window(&format!("codereview-{}", worktree_id2))
+                            {
+                                use tauri::Emitter;
+                                let _ = window.emit("codereview-fs-changed", ());
+                            }
+                        });
                     }
+                    // pending が既にある場合は何もしない（重複防止）
                 }
                 Err(e) => {
                     log::warn!("fs_watcher error for {}: {:?}", worktree_id_clone, e);

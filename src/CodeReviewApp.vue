@@ -178,7 +178,7 @@ onMounted(async () => {
   }
 
   // ウィンドウフォーカス時にも再取得（フォールバック）
-  window.addEventListener("focus", refreshOpenTabs);
+  window.addEventListener("focus", scheduleRefresh);
 
   const appWindow = getCurrentWindow();
   appWindow.onCloseRequested(async (event) => {
@@ -193,7 +193,7 @@ function cleanup() {
     clearTimeout(refreshTimer);
     refreshTimer = null;
   }
-  window.removeEventListener("focus", refreshOpenTabs);
+  window.removeEventListener("focus", scheduleRefresh);
   unlistenFsChanged?.();
   unlistenFsChanged = null;
   if (worktreeId) {

@@ -94,13 +94,24 @@ function onNodeSelect(node: TreeNode) {
 }
 
 let unlistenFsChanged: (() => void) | null = null;
+let debounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 onMounted(async () => {
   loadFiles();
-  unlistenFsChanged = await listen("codereview-fs-changed", loadFiles);
+  unlistenFsChanged = await listen("codereview-fs-changed", () => {
+    if (debounceTimer !== null) clearTimeout(debounceTimer);
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null;
+      loadFiles();
+    }, 500);
+  });
 });
 
 onUnmounted(() => {
+  if (debounceTimer !== null) {
+    clearTimeout(debounceTimer);
+    debounceTimer = null;
+  }
   unlistenFsChanged?.();
 });
 </script>
