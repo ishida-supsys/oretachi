@@ -12,9 +12,9 @@ pub enum AiAgentKind {
 
 pub fn default_model(kind: &AiAgentKind) -> &'static str {
     match kind {
-        AiAgentKind::ClaudeCode => "claude-sonnet-4-6",
-        AiAgentKind::GeminiCli => "gemini-2.5-pro",
-        AiAgentKind::CodexCli => "o3",
+        AiAgentKind::ClaudeCode => "claude-haiku-4-5",
+        AiAgentKind::GeminiCli => "gemini-2.5-flash",
+        AiAgentKind::CodexCli => "o4-mini",
         AiAgentKind::ClineCli => "",
     }
 }

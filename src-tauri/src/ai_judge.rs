@@ -71,7 +71,7 @@ pub async fn judge_approval(
         .and_then(|s| s.approval_agent)
         .unwrap_or(AiAgentKind::ClaudeCode);
 
-    let plan = ai_provider::build_execution_plan(&agent_kind, &prompt, JSON_SCHEMA, "haiku");
+    let plan = ai_provider::build_execution_plan(&agent_kind, &prompt, JSON_SCHEMA, ai_provider::default_model(&agent_kind));
 
     let mut cmd = crate::process_utils::make_async_command(&plan.program);
     cmd.args(&plan.args);
