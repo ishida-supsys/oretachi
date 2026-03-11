@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { ref, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
@@ -18,6 +18,11 @@ const emit = defineEmits<{
 }>();
 
 const promptText = ref(props.initialPrompt);
+const textareaRef = ref<HTMLTextAreaElement | null>(null);
+
+onMounted(() => {
+  textareaRef.value?.focus();
+});
 
 function confirm() {
   const trimmed = promptText.value.trim();
@@ -41,11 +46,11 @@ function onKeydown(e: KeyboardEvent) {
       <div class="field">
         <label class="label">{{ t('prompt') }}</label>
         <textarea
+          ref="textareaRef"
           v-model="promptText"
           class="textarea"
           :placeholder="t('promptPlaceholder')"
           rows="5"
-          autofocus
           @keydown="onKeydown"
         />
         <p class="hint">{{ t('submitHint') }}</p>
