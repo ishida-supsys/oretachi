@@ -10,6 +10,15 @@ pub enum AiAgentKind {
     ClineCli,
 }
 
+pub fn default_model(kind: &AiAgentKind) -> &'static str {
+    match kind {
+        AiAgentKind::ClaudeCode => "claude-sonnet-4-6",
+        AiAgentKind::GeminiCli => "gemini-2.5-pro",
+        AiAgentKind::CodexCli => "o3",
+        AiAgentKind::ClineCli => "",
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AiAgentInfo {

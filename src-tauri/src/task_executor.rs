@@ -177,7 +177,7 @@ pub async fn task_generate(
         (prog, a, final_prompt)
     } else {
         let plan =
-            ai_provider::build_execution_plan(&agent_kind, &final_prompt, JSON_SCHEMA, "claude-opus-4-5");
+            ai_provider::build_execution_plan(&agent_kind, &final_prompt, JSON_SCHEMA, ai_provider::default_model(&agent_kind));
         (plan.program, plan.args, plan.stdin_content)
     };
 
