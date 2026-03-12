@@ -24,12 +24,16 @@ interface NotificationEntry {
 const notifications = reactive(new Map<string, NotificationEntry>());
 let initialized = false;
 let osNotificationEnabled: (() => boolean) | undefined;
-let storedNotificationTitle = "Notification";
+let storedNotificationTitles: Record<NotificationKind, string> = {
+  general: "Notification",
+  approval: "Notification",
+  completed: "Notification",
+};
 
 /**
  * OS通知を送信する。App.vue の自動承認不承認ハンドラからも呼ばれる。
  */
-export async function sendOsNotification(worktreeName: string, title?: string) {
+export async function sendOsNotification(worktreeName: string, title?: string, kind?: NotificationKind) {
   if (!osNotificationEnabled?.()) return;
   let permitted = await isPermissionGranted();
   if (!permitted) {
@@ -37,7 +41,8 @@ export async function sendOsNotification(worktreeName: string, title?: string) {
     permitted = permission === "granted";
   }
   if (permitted) {
-    sendNotification({ title: title ?? storedNotificationTitle, body: worktreeName, extra: { worktreeName } });
+    const resolvedTitle = title ?? (kind ? storedNotificationTitles[kind] : storedNotificationTitles.general);
+    sendNotification({ title: resolvedTitle, body: worktreeName, extra: { worktreeName } });
   }
 }
 
@@ -51,12 +56,12 @@ export function useNotifications() {
     shouldHold?: (worktreeId: string) => boolean,
     isOsNotificationEnabledFn?: () => boolean,
     focusWorktree?: (worktreeId: string) => void,
-    notificationTitle?: string
+    notificationTitles?: Record<NotificationKind, string>
   ) {
     if (initialized) return;
     initialized = true;
     osNotificationEnabled = isOsNotificationEnabledFn;
-    if (notificationTitle) storedNotificationTitle = notificationTitle;
+    if (notificationTitles) storedNotificationTitles = notificationTitles;
 
     await listen<NotifyWorktreeEvent>("notify-worktree", async (event) => {
       const { worktree_name: worktreeName, kind } = event.payload;
@@ -64,7 +69,7 @@ export function useNotifications() {
       if (id) {
         if (shouldHold?.(id)) return;
         addNotification(id, kind);
-        await sendOsNotification(worktreeName);
+        await sendOsNotification(worktreeName, undefined, kind);
       }
     });
 

@@ -1240,7 +1240,11 @@ onMounted(async () => {
         getCurrentWindow().setFocus();
       }
     },
-    t("notification.title")
+    {
+      general: t("notification.title"),
+      approval: t("notification.titleApproval"),
+      completed: t("notification.titleCompleted"),
+    }
   );
 
   // notify-worktree → 自動承認チェック
@@ -1258,7 +1262,7 @@ onMounted(async () => {
     if (kind === "completed") {
       if (!isWorktreeFocused(wt.id)) {
         addNotification(wt.id, "completed");
-        await sendOsNotification(wt.name, t("notification.title"));
+        await sendOsNotification(wt.name, t("notification.titleCompleted"));
       }
       return;
     }
@@ -1310,7 +1314,7 @@ onMounted(async () => {
     if (!approved && !isWorktreeFocused(wt.id)) {
       await debug(`[AutoApproval] local: not approved → addNotification(${wt.id})`);
       addNotification(wt.id, "approval");
-      await sendOsNotification(wt.name, t("notification.title"));
+      await sendOsNotification(wt.name, t("notification.titleApproval"));
     }
   });
 
@@ -1321,7 +1325,7 @@ onMounted(async () => {
     if (!approved && !isWorktreeFocused(wid)) {
       addNotification(wid, "approval");
       const wtName = worktrees.value.find((w) => w.id === wid)?.name;
-      if (wtName) await sendOsNotification(wtName, t("notification.title"));
+      if (wtName) await sendOsNotification(wtName, t("notification.titleApproval"));
     }
   });
 

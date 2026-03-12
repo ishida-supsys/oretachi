@@ -13,5 +13,7 @@ export default {
   },
   notification: {
     title: 'Worktree Notification',
+    titleApproval: 'Approval Required',
+    titleCompleted: 'Task Completed',
   },
 }
