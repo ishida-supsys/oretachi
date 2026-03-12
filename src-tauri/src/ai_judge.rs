@@ -11,6 +11,8 @@ const TIMEOUT_SECS: u64 = 120;
 const PROMPT_TEMPLATE: &str = r#"You are a safety gate preventing risky auto-approvals of CLI actions.
 Examine the terminal output below and decide if the agent must pause for user permission.
 
+Current Working Directory: {{CWD}}
+
 Terminal Output:
 {{TERMINAL_OUTPUT}}
 
@@ -24,7 +26,7 @@ Return true (permission needed) if ANY of these apply:
 
 Return false (auto-approve) when:
 - The output clearly shows explicit user intent/confirmation to run the exact action (e.g., user typed the command AND confirmed, or explicitly said "I want to delete <path>; please do it now"). Explicit intent should normally override the risk list unless there are signs of coercion/compromise, the target path is unclear, or the action differs from what was confirmed.
-- The output shows strictly read-only, low-risk operations (e.g., git log/diff/status/show/branch, lint/test passing, help text, formatting dry runs, simple logs, cat/head/tail/ls on local files) with no pending commands that could change the system or touch sensitive data.
+- The output shows strictly read-only, low-risk operations (e.g., git log/diff/status/show/branch, lint/test passing, help text, formatting dry runs, simple logs, cat/head/tail/ls on local files, cd into subdirectories of the current working directory) with no pending commands that could change the system or touch sensitive data.
 
 When unsure, return true.
 
@@ -52,7 +54,7 @@ pub async fn judge_approval(
     settings_state: State<'_, SettingsManager>,
     worktree_id: String,
     content: String,
-    _cwd: String,
+    cwd: String,
 ) -> Result<bool, String> {
     // 重複防止: 既に同一ワークツリーの判定が進行中ならエラーを返す
     {
@@ -62,7 +64,9 @@ pub async fn judge_approval(
         }
     }
 
-    let prompt = PROMPT_TEMPLATE.replace("{{TERMINAL_OUTPUT}}", &content);
+    let prompt = PROMPT_TEMPLATE
+        .replace("{{CWD}}", &cwd)
+        .replace("{{TERMINAL_OUTPUT}}", &content);
 
     // 設定からAIエージェント種別を取得（デフォルト: ClaudeCode）
     let agent_kind = settings_state
