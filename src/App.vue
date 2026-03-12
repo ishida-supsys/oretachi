@@ -160,6 +160,7 @@ const { isWaitingForShutdown, isBusyForShutdown, waitForBusyOperations } = useSh
 const showRemoveDialog = ref(false);
 const removeTargetWorktree = ref<{ id: string; name: string; branchName: string } | null>(null);
 const removeBranches = ref<string[]>([]);
+const removeDirtyFiles = ref<{ path: string; status: string; staged: boolean }[]>([]);
 
 // IDE 選択
 const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect();
@@ -367,17 +368,15 @@ async function onRemoveWorktree(worktreeId: string) {
   const worktree = worktrees.value.find((w) => w.id === worktreeId);
   if (!worktree) return;
 
-  // ブランチ一覧を取得してダイアログ表示
-  let branches: string[] = [];
-  try {
-    const all = await listBranches(worktree.repositoryId);
-    branches = all.filter((b) => b !== worktree.branchName);
-  } catch {
-    branches = [];
-  }
+  // ブランチ一覧 & ステータスを並行取得してダイアログ表示
+  const [branches, dirtyFiles] = await Promise.all([
+    listBranches(worktree.repositoryId).then((all) => all.filter((b) => b !== worktree.branchName)).catch(() => [] as string[]),
+    invoke<{ path: string; status: string; staged: boolean }[]>("git_get_status", { repoPath: worktree.path }).catch(() => [] as { path: string; status: string; staged: boolean }[]),
+  ]);
 
   removeTargetWorktree.value = { id: worktree.id, name: worktree.name, branchName: worktree.branchName };
   removeBranches.value = branches;
+  removeDirtyFiles.value = dirtyFiles;
   showRemoveDialog.value = true;
 }
 
@@ -388,12 +387,14 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
   const worktree = worktrees.value.find((w) => w.id === worktreeId);
   if (!worktree) {
     showRemoveDialog.value = false;
+    removeDirtyFiles.value = [];
     return;
   }
 
   showRemoveDialog.value = false;
   removeTargetWorktree.value = null;
   removeBranches.value = [];
+  removeDirtyFiles.value = [];
   loadingWorktrees.set(worktreeId, t("deletingText"));
   try {
     // detached の場合はサブウィンドウを閉じる
@@ -1742,8 +1743,9 @@ onMounted(async () => {
       :worktree-name="removeTargetWorktree.name"
       :branch-name="removeTargetWorktree.branchName"
       :branches="removeBranches"
+      :dirty-files="removeDirtyFiles"
       @confirm="onRemoveWorktreeConfirm"
-      @cancel="showRemoveDialog = false"
+      @cancel="showRemoveDialog = false; removeDirtyFiles = []"
     />
 
     <!-- IDE 選択ダイアログ -->

@@ -4,11 +4,21 @@ import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
 
-defineProps<{
+const props = defineProps<{
   worktreeName: string;
   branchName: string;
   branches: string[];
+  dirtyFiles: { path: string; status: string; staged: boolean }[];
 }>();
+
+const dirtyFilesText = computed(() =>
+  props.dirtyFiles
+    .map((f) => {
+      const prefix = f.staged ? "S" : f.status === "??" ? "?" : "M";
+      return `${prefix} ${f.path}`;
+    })
+    .join("\n")
+);
 
 const emit = defineEmits<{
   confirm: [options: { mergeTo: string; deleteBranch: boolean; forceBranch: boolean }];
@@ -55,6 +65,11 @@ function confirm() {
           />
           {{ t('deleteBranch') }}
         </label>
+      </div>
+
+      <div v-if="props.dirtyFiles.length > 0" class="dirty-files">
+        <p class="dirty-files-label">{{ t('dirtyFilesWarning', { count: props.dirtyFiles.length }) }}</p>
+        <textarea class="dirty-files-area" readonly :value="dirtyFilesText" />
       </div>
 
       <p class="warn">{{ t('removeWarning') }}</p>
@@ -157,6 +172,31 @@ function confirm() {
   accent-color: #f38ba8;
 }
 
+.dirty-files {
+  margin-bottom: 14px;
+}
+
+.dirty-files-label {
+  font-size: 12px;
+  color: #fab387;
+  margin: 0 0 6px;
+}
+
+.dirty-files-area {
+  width: 100%;
+  max-height: 140px;
+  background: #181825;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 12px;
+  font-family: monospace;
+  color: #cdd6f4;
+  resize: vertical;
+  box-sizing: border-box;
+  overflow-y: auto;
+}
+
 .warn-force {
   color: #f38ba8;
 }
@@ -222,7 +262,8 @@ function confirm() {
     "noMerge": "Do not merge",
     "deleteBranch": "Delete branch",
     "removeWarning": "⚠ git worktree remove will be executed",
-    "forceDeleteWarning": "⚠ No merge target: git branch -D will force-delete"
+    "forceDeleteWarning": "⚠ No merge target: git branch -D will force-delete",
+    "dirtyFilesWarning": "⚠ {count} uncommitted file(s) will be lost"
   },
   "ja": {
     "removeTitle": "ワークツリー「{name}」を削除",
@@ -231,7 +272,8 @@ function confirm() {
     "noMerge": "マージしない",
     "deleteBranch": "ブランチを削除する",
     "removeWarning": "⚠ git worktree remove が実行されます",
-    "forceDeleteWarning": "⚠ マージ先未指定のため git branch -D で強制削除されます"
+    "forceDeleteWarning": "⚠ マージ先未指定のため git branch -D で強制削除されます",
+    "dirtyFilesWarning": "⚠ {count} 件の未コミットファイルが失われます"
   }
 }
 </i18n>
