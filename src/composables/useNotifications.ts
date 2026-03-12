@@ -7,9 +7,17 @@ import {
   onAction,
 } from "@tauri-apps/plugin-notification";
 
+export type NotificationKind = "approval" | "completed" | "general";
+
+export interface NotifyWorktreeEvent {
+  worktree_name: string;
+  kind: NotificationKind;
+}
+
 interface NotificationEntry {
   count: number;
   firstNotifiedAt: number; // Date.now()
+  kind: NotificationKind;
 }
 
 // worktreeId → 未確認の通知エントリ
@@ -50,12 +58,12 @@ export function useNotifications() {
     osNotificationEnabled = isOsNotificationEnabledFn;
     if (notificationTitle) storedNotificationTitle = notificationTitle;
 
-    await listen<string>("notify-worktree", async (event) => {
-      const worktreeName = event.payload;
+    await listen<NotifyWorktreeEvent>("notify-worktree", async (event) => {
+      const { worktree_name: worktreeName, kind } = event.payload;
       const id = resolveWorktreeId(worktreeName);
       if (id) {
         if (shouldHold?.(id)) return;
-        addNotification(id);
+        addNotification(id, kind);
         await sendOsNotification(worktreeName);
       }
     });
@@ -73,12 +81,13 @@ export function useNotifications() {
     }
   }
 
-  function addNotification(worktreeId: string) {
+  function addNotification(worktreeId: string, kind: NotificationKind = "general") {
     const existing = notifications.get(worktreeId);
     if (existing) {
       existing.count += 1;
+      existing.kind = kind;
     } else {
-      notifications.set(worktreeId, { count: 1, firstNotifiedAt: Date.now() });
+      notifications.set(worktreeId, { count: 1, firstNotifiedAt: Date.now(), kind });
     }
   }
 

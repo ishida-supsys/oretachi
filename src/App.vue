@@ -1244,8 +1244,8 @@ onMounted(async () => {
   );
 
   // notify-worktree → 自動承認チェック
-  await listen<string>("notify-worktree", async (event) => {
-    const worktreeName = event.payload;
+  await listen<{ worktree_name: string; kind: string }>("notify-worktree", async (event) => {
+    const { worktree_name: worktreeName, kind } = event.payload;
     const wt = worktrees.value.find((w) => w.name === worktreeName);
 
     await debug(
@@ -1253,6 +1253,16 @@ onMounted(async () => {
     );
 
     if (!wt) return;
+
+    // 作業完了通知は承認チェック不要 → そのまま通知
+    if (kind === "completed") {
+      if (!isWorktreeFocused(wt.id)) {
+        addNotification(wt.id, "completed");
+        await sendOsNotification(wt.name, t("notification.title"));
+      }
+      return;
+    }
+
     if (!autoApprovalMap.get(wt.id)) return;
 
     // 重複防止: 既に同一ワークツリーのAI判定が進行中ならスキップ
@@ -1299,7 +1309,7 @@ onMounted(async () => {
     }
     if (!approved && !isWorktreeFocused(wt.id)) {
       await debug(`[AutoApproval] local: not approved → addNotification(${wt.id})`);
-      addNotification(wt.id);
+      addNotification(wt.id, "approval");
       await sendOsNotification(wt.name, t("notification.title"));
     }
   });
@@ -1309,7 +1319,7 @@ onMounted(async () => {
     const { worktreeId: wid, approved } = event.payload;
     await debug(`[AutoApproval] sub-auto-approve-result worktreeId=${wid} approved=${approved}`);
     if (!approved && !isWorktreeFocused(wid)) {
-      addNotification(wid);
+      addNotification(wid, "approval");
       const wtName = worktrees.value.find((w) => w.id === wid)?.name;
       if (wtName) await sendOsNotification(wtName, t("notification.title"));
     }

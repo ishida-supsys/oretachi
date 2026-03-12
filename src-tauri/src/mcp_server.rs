@@ -58,12 +58,21 @@ impl McpServerManager {
 #[derive(Debug, Deserialize)]
 pub struct NotifyPayload {
     pub worktree: String,
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NotifyWorktreeParams {
     #[schemars(description = "通知するワークツリー名")]
     pub worktree_name: String,
+    #[schemars(description = "通知種別: \"approval\"(承認待ち) / \"completed\"(作業完了) / \"general\"(汎用)。省略時は \"general\"")]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct NotifyWorktreeEvent {
+    pub worktree_name: String,
+    pub kind: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -92,12 +101,16 @@ impl NotifyService {
     #[tool(description = "ワークツリーに通知を送信する")]
     fn notify_worktree(
         &self,
-        Parameters(NotifyWorktreeParams { worktree_name }): Parameters<NotifyWorktreeParams>,
+        Parameters(NotifyWorktreeParams { worktree_name, kind }): Parameters<NotifyWorktreeParams>,
     ) -> Result<CallToolResult, McpError> {
+        let event = NotifyWorktreeEvent {
+            worktree_name: worktree_name.clone(),
+            kind: kind.unwrap_or_else(|| "general".to_string()),
+        };
         self.app_handle
-            .emit("notify-worktree", &worktree_name)
+            .emit("notify-worktree", &event)
             .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
-        log::info!("[mcp] notify_worktree: {}", worktree_name);
+        log::info!("[mcp] notify_worktree: {} kind={}", worktree_name, event.kind);
         Ok(CallToolResult::success(vec![Content::text("ok")]))
     }
 
@@ -176,9 +189,13 @@ async fn notify_handler(
     State(app_handle): State<AppHandle>,
     Json(payload): Json<NotifyPayload>,
 ) -> StatusCode {
-    match app_handle.emit("notify-worktree", &payload.worktree) {
+    let event = NotifyWorktreeEvent {
+        worktree_name: payload.worktree.clone(),
+        kind: payload.kind.unwrap_or_else(|| "general".to_string()),
+    };
+    match app_handle.emit("notify-worktree", &event) {
         Ok(_) => {
-            log::info!("[notify] worktree={}", payload.worktree);
+            log::info!("[notify] worktree={} kind={}", payload.worktree, event.kind);
             StatusCode::OK
         }
         Err(e) => {
@@ -307,9 +324,12 @@ pub fn start_mcp_server(app_handle: AppHandle) {
 
 // ─── CLI notification sender (standalone, no AppHandle needed) ───────────────
 
-pub fn send_notification_standalone(worktree_name: &str) -> Result<(), String> {
+pub fn send_notification_standalone(worktree_name: &str, kind: Option<&str>) -> Result<(), String> {
     let port = read_port_standalone()?;
-    let body = serde_json::json!({ "worktree": worktree_name }).to_string();
+    let body = serde_json::json!({
+        "worktree": worktree_name,
+        "kind": kind.unwrap_or("general"),
+    }).to_string();
     let request = format!(
         "POST /notify HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
