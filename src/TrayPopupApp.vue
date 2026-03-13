@@ -278,7 +278,7 @@ function onHeaderDrag(e: MouseEvent) {
 
 const { settings, loadSettings } = useSettings();
 
-// TrayPopup のホットキーリスナー (trayNext)
+// TrayPopup のホットキーリスナー
 useHotkeyListener(() => {
   const hk = settings.value.hotkeys;
   if (!hk || !initialized.value) return [];
@@ -290,6 +290,41 @@ useHotkeyListener(() => {
           onDone();
         } else {
           onNext();
+        }
+      },
+    },
+    {
+      binding: hk.terminalNext,
+      handler: () => {
+        const leafId = lastFocusedLeafId.value;
+        if (!leafId) return;
+        const leaf = getAllLeafs().filter(l => l.terminalIds.length > 0).find(l => l.id === leafId);
+        if (!leaf || leaf.terminalIds.length === 0) return;
+        const idx = leaf.terminalIds.indexOf(leaf.activeTerminalId ?? -1);
+        const nextIdx = idx === -1 ? 0 : (idx + 1) % leaf.terminalIds.length;
+        switchTerminal(leafId, leaf.terminalIds[nextIdx]);
+      },
+    },
+    {
+      binding: hk.terminalPrev,
+      handler: () => {
+        const leafId = lastFocusedLeafId.value;
+        if (!leafId) return;
+        const leaf = getAllLeafs().filter(l => l.terminalIds.length > 0).find(l => l.id === leafId);
+        if (!leaf || leaf.terminalIds.length === 0) return;
+        const idx = leaf.terminalIds.indexOf(leaf.activeTerminalId ?? -1);
+        const prevIdx = idx <= 0 ? leaf.terminalIds.length - 1 : idx - 1;
+        switchTerminal(leafId, leaf.terminalIds[prevIdx]);
+      },
+    },
+    {
+      binding: hk.terminalClose,
+      handler: () => {
+        const leafId = lastFocusedLeafId.value;
+        if (!leafId) return;
+        const leaf = getAllLeafs().filter(l => l.terminalIds.length > 0).find(l => l.id === leafId);
+        if (leaf?.activeTerminalId != null) {
+          closeTerminal(leafId, leaf.activeTerminalId);
         }
       },
     },
