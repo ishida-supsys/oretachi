@@ -103,7 +103,6 @@ pub fn build_execution_plan(
     json_schema: &str,
     model: &str,
     disable_mcp: bool,
-    max_tokens: Option<u32>,
 ) -> AiExecutionPlan {
     match kind {
         AiAgentKind::ClaudeCode => {
@@ -127,10 +126,6 @@ pub fn build_execution_plan(
             if disable_mcp {
                 args.push("--strict-mcp-config".to_string());
             }
-            if let Some(mt) = max_tokens {
-                args.extend(["--max-tokens".to_string(), mt.to_string()]);
-            }
-
             AiExecutionPlan {
                 program,
                 args,
@@ -333,7 +328,7 @@ mod tests {
 
     #[test]
     fn test_build_execution_plan_claude_code() {
-        let plan = build_execution_plan(&AiAgentKind::ClaudeCode, "my prompt", "{}", "model-x", false, None);
+        let plan = build_execution_plan(&AiAgentKind::ClaudeCode, "my prompt", "{}", "model-x", false);
         assert!(plan.args.contains(&"--model".to_string()));
         assert!(plan.args.contains(&"model-x".to_string()));
         assert!(plan.args.contains(&"--output-format".to_string()));
@@ -344,15 +339,8 @@ mod tests {
     }
 
     #[test]
-    fn test_build_execution_plan_claude_code_with_max_tokens() {
-        let plan = build_execution_plan(&AiAgentKind::ClaudeCode, "my prompt", "{}", "model-x", false, Some(256));
-        assert!(plan.args.contains(&"--max-tokens".to_string()));
-        assert!(plan.args.contains(&"256".to_string()));
-    }
-
-    #[test]
     fn test_build_execution_plan_gemini() {
-        let plan = build_execution_plan(&AiAgentKind::GeminiCli, "my prompt", "{}", "model-x", false, None);
+        let plan = build_execution_plan(&AiAgentKind::GeminiCli, "my prompt", "{}", "model-x", false);
         assert!(plan.args.contains(&"--model".to_string()));
         assert!(plan.stdin_content.contains("my prompt"));
         assert!(plan.stdin_content.contains("{}"));
@@ -360,14 +348,14 @@ mod tests {
 
     #[test]
     fn test_build_execution_plan_codex() {
-        let plan = build_execution_plan(&AiAgentKind::CodexCli, "my prompt", "{}", "model-x", false, None);
+        let plan = build_execution_plan(&AiAgentKind::CodexCli, "my prompt", "{}", "model-x", false);
         assert!(plan.args.contains(&"-q".to_string()));
         assert!(plan.stdin_content.contains("my prompt"));
     }
 
     #[test]
     fn test_build_execution_plan_cline() {
-        let plan = build_execution_plan(&AiAgentKind::ClineCli, "my prompt", "{}", "model-x", false, None);
+        let plan = build_execution_plan(&AiAgentKind::ClineCli, "my prompt", "{}", "model-x", false);
         assert!(plan.stdin_content.is_empty());
         assert!(plan.args.contains(&"--prompt".to_string()));
     }
@@ -375,7 +363,7 @@ mod tests {
     #[cfg(target_os = "windows")]
     #[test]
     fn test_build_execution_plan_windows_uses_cmd() {
-        let plan = build_execution_plan(&AiAgentKind::ClaudeCode, "p", "{}", "m", false, None);
+        let plan = build_execution_plan(&AiAgentKind::ClaudeCode, "p", "{}", "m", false);
         assert_eq!(plan.program, "cmd");
         assert!(plan.args.contains(&"/c".to_string()));
         assert!(plan.args.contains(&"claude".to_string()));
@@ -384,7 +372,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn test_build_execution_plan_non_windows_program() {
-        let plan = build_execution_plan(&AiAgentKind::ClaudeCode, "p", "{}", "m", false, None);
+        let plan = build_execution_plan(&AiAgentKind::ClaudeCode, "p", "{}", "m", false);
         assert_eq!(plan.program, "claude");
     }
 }
