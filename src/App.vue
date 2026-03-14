@@ -1608,6 +1608,11 @@ onMounted(async () => {
         >
           <span>{{ wt.name }}</span>
           <span
+            v-if="hotkeyChars.get(wt.id)"
+            class="text-[9px] px-1 py-0.5 rounded font-mono font-medium shrink-0"
+            style="background: rgba(203,166,247,0.15); color: #cba6f7; border: 1px solid rgba(203,166,247,0.3)"
+          >{{ hotkeyChars.get(wt.id)!.toUpperCase() }}</span>
+          <span
             v-if="notificationCounts.get(wt.id)"
             class="text-[9px] px-1 py-0.5 rounded-full font-bold shrink-0 leading-none"
             style="background: #f38ba8; color: #1e1e2e; min-width: 14px; text-align: center;"
