@@ -608,7 +608,7 @@ async function executeAgentWorktree(code: AgentWorktreeTaskCode): Promise<void> 
   // 一時ファイルにプロンプトを書き出し
   const tempPath = await invoke<string>("write_temp_prompt", { content: code.prompt });
 
-  const agentKind = settings.value.aiAgent?.approvalAgent ?? "claudeCode";
+  const agentKind = settings.value.aiAgent?.taskAddAgent ?? settings.value.aiAgent?.approvalAgent ?? "claudeCode";
   const isWindows = platform() === "windows";
   const shell = resolveShell(wt.id);
   const shellLower = (shell ?? "").toLowerCase();

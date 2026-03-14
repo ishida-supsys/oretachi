@@ -176,6 +176,8 @@ impl Default for TerminalSettings {
 pub struct AiAgentSettings {
     #[serde(default)]
     pub approval_agent: Option<AiAgentKind>,
+    #[serde(default)]
+    pub task_add_agent: Option<AiAgentKind>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

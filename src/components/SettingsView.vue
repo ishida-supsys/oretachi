@@ -227,7 +227,7 @@ function clearExecScript(repoId: string) {
     <div class="field-group">
       <label class="field-label">{{ t('autoApproval.label') }}</label>
       <div class="row-input row-input--inline">
-        <span class="inline-label">{{ t('autoApproval.aiAgent') }}</span>
+        <span class="inline-label">{{ t('autoApproval.approvalAgent') }}</span>
         <select
           class="text-input select-input"
           :value="settings.aiAgent?.approvalAgent ?? ''"
@@ -235,6 +235,27 @@ function clearExecScript(repoId: string) {
             const v = (e.target as HTMLSelectElement).value;
             if (!settings.aiAgent) settings.aiAgent = {};
             settings.aiAgent.approvalAgent = v ? (v as AiAgentKind) : undefined;
+            scheduleSave();
+          }"
+        >
+          <option value="">{{ t('autoApproval.notSet') }}</option>
+          <option
+            v-for="kind in ALL_AGENT_KINDS"
+            :key="kind"
+            :value="kind"
+            :disabled="!isAgentDetected(kind)"
+          >{{ AI_AGENT_LABELS[kind] }}{{ !isAgentDetected(kind) ? t('autoApproval.notDetected') : '' }}</option>
+        </select>
+      </div>
+      <div class="row-input row-input--inline mt-8">
+        <span class="inline-label">{{ t('autoApproval.taskAddAgent') }}</span>
+        <select
+          class="text-input select-input"
+          :value="settings.aiAgent?.taskAddAgent ?? ''"
+          @change="(e) => {
+            const v = (e.target as HTMLSelectElement).value;
+            if (!settings.aiAgent) settings.aiAgent = {};
+            settings.aiAgent.taskAddAgent = v ? (v as AiAgentKind) : undefined;
             scheduleSave();
           }"
         >
@@ -758,7 +779,8 @@ function clearExecScript(repoId: string) {
     },
     "autoApproval": {
       "label": "Auto Approval",
-      "aiAgent": "AI Agent",
+      "approvalAgent": "AI Agent (Auto Approval, Commit Msg, Task Gen)",
+      "taskAddAgent": "AI Agent (Task Execution)",
       "notSet": "(Not set)",
       "notDetected": " (Not detected)"
     },
@@ -821,8 +843,9 @@ function clearExecScript(repoId: string) {
       "focusMainOnEmptyTray": "通知がない時にトレイホットキーでメインウィンドウにフォーカス"
     },
     "autoApproval": {
-      "label": "自動承認",
-      "aiAgent": "AIエージェント",
+      "label": "自動承認 / AI エージェント",
+      "approvalAgent": "自動承認・コミットメッセージ・タスク生成",
+      "taskAddAgent": "タスク追加コード実行",
       "notSet": "(未設定)",
       "notDetected": " (未検出)"
     },
