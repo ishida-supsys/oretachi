@@ -53,7 +53,7 @@ export function useNotifications() {
    */
   async function initNotificationListener(
     resolveWorktreeId: (name: string) => string | undefined,
-    shouldHold?: (worktreeId: string) => boolean,
+    shouldHold?: (worktreeId: string, kind: NotificationKind) => boolean,
     isOsNotificationEnabledFn?: () => boolean,
     focusWorktree?: (worktreeId: string) => void,
     notificationTitles?: Record<NotificationKind, string>
@@ -67,7 +67,7 @@ export function useNotifications() {
       const { worktree_name: worktreeName, kind } = event.payload;
       const id = resolveWorktreeId(worktreeName);
       if (id) {
-        if (shouldHold?.(id)) return;
+        if (shouldHold?.(id, kind)) return;
         addNotification(id, kind);
         await sendOsNotification(worktreeName, undefined, kind);
       }
