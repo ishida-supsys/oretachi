@@ -63,7 +63,7 @@ type ViewMode = "home" | "settings" | "terminal";
 const { settings, loadSettings, scheduleSave } = useSettings();
 const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, removeWorktree, listBranches, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, registerTerminalSession, closeAllSubWindows } = useSubWindows();
-const { notifications, initNotificationListener, addNotification, clearNotification, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
+const { notifications, initNotificationListener, addNotification, clearNotification, purgeStaleNotifications, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
 const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees, setCurrentTrayWorktreeId, isTrayShowingWorktree, focusTrayWindow } = useTrayPopup();
 const { closeAllCodeReviewWindows } = useCodeReviewWindow();
 const { tryAutoAssignHotkey } = useAutoHotkey();
@@ -395,6 +395,7 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
   removeTargetWorktree.value = null;
   removeBranches.value = [];
   removeDirtyFiles.value = [];
+  clearNotification(worktreeId);
   loadingWorktrees.set(worktreeId, t("deletingText"));
   try {
     // detached の場合はサブウィンドウを閉じる
@@ -822,6 +823,7 @@ async function onMoveToMainWindow(worktreeId: string) {
 }
 
 async function onTrayButtonClick() {
+  purgeStaleNotifications(new Set(worktrees.value.map((w) => w.id)));
   const worktreeIds = getNotifiedWorktreeIds();
   if (worktreeIds.length === 0) {
     if (settings.value.focusMainOnEmptyTray) {
@@ -1262,7 +1264,7 @@ onMounted(async () => {
 
     if (!wt) return;
 
-    // 作業完了通知は useNotifications が処理
+    // 作業完了通知は承認チェック不要 (通知追加は initNotificationListener 側で行う)
     if (kind === "completed") return;
 
     if (!autoApprovalMap.get(wt.id)) return;
