@@ -66,7 +66,7 @@ function onKeydown(e: KeyboardEvent) {
 </script>
 
 <template>
-  <div class="dialog-overlay" @click.self="showConfirm ? confirmCancel() : tryCancel()">
+  <div class="dialog-overlay">
     <div class="dialog">
       <h3 class="dialog-title">{{ mode === 'rerun' ? t('rerunTitle') : t('addTitle') }}</h3>
 
@@ -86,8 +86,8 @@ function onKeydown(e: KeyboardEvent) {
       <div v-if="showConfirm" class="confirm-bar">
         <span class="confirm-message">{{ t('confirmClose') }}</span>
         <div class="confirm-actions">
-          <button class="btn-confirm-close" @click="confirmCancel">{{ t('closeAnyway') }}</button>
           <button class="btn-back" @click="dismissConfirm">{{ t('back') }}</button>
+          <button class="btn-confirm-close" @click="confirmCancel">{{ t('closeAnyway') }}</button>
         </div>
       </div>
 
