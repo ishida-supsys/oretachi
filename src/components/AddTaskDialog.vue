@@ -19,6 +19,7 @@ const emit = defineEmits<{
 
 const promptText = ref(props.initialPrompt);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
+const showConfirm = ref(false);
 
 const isDirty = computed(() => promptText.value.trim() !== props.initialPrompt.trim());
 
@@ -33,8 +34,19 @@ function confirm() {
 }
 
 function tryCancel() {
-  if (isDirty.value && !window.confirm(t('confirmClose'))) return;
+  if (isDirty.value) {
+    showConfirm.value = true;
+    return;
+  }
   emit('cancel');
+}
+
+function confirmCancel() {
+  emit('cancel');
+}
+
+function dismissConfirm() {
+  showConfirm.value = false;
 }
 
 function onKeydown(e: KeyboardEvent) {
@@ -44,13 +56,17 @@ function onKeydown(e: KeyboardEvent) {
   }
   if (e.key === "Escape") {
     e.preventDefault();
-    tryCancel();
+    if (showConfirm.value) {
+      dismissConfirm();
+    } else {
+      tryCancel();
+    }
   }
 }
 </script>
 
 <template>
-  <div class="dialog-overlay" @click.self="tryCancel">
+  <div class="dialog-overlay" @click.self="showConfirm ? confirmCancel() : tryCancel()">
     <div class="dialog">
       <h3 class="dialog-title">{{ mode === 'rerun' ? t('rerunTitle') : t('addTitle') }}</h3>
 
@@ -67,7 +83,15 @@ function onKeydown(e: KeyboardEvent) {
         <p class="hint">{{ t('submitHint') }}</p>
       </div>
 
-      <div class="dialog-actions">
+      <div v-if="showConfirm" class="confirm-bar">
+        <span class="confirm-message">{{ t('confirmClose') }}</span>
+        <div class="confirm-actions">
+          <button class="btn-confirm-close" @click="confirmCancel">{{ t('closeAnyway') }}</button>
+          <button class="btn-back" @click="dismissConfirm">{{ t('back') }}</button>
+        </div>
+      </div>
+
+      <div v-else class="dialog-actions">
         <button class="btn-cancel" @click="tryCancel">{{ t('common.cancel') }}</button>
         <button
           class="btn-confirm"
@@ -184,6 +208,59 @@ function onKeydown(e: KeyboardEvent) {
   opacity: 0.4;
   cursor: not-allowed;
 }
+
+.confirm-bar {
+  margin-top: 20px;
+  padding: 12px 14px;
+  background: #2a1f3d;
+  border: 1px solid #cba6f7;
+  border-radius: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.confirm-message {
+  font-size: 12px;
+  color: #cba6f7;
+  flex: 1;
+}
+
+.confirm-actions {
+  display: flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.btn-confirm-close {
+  background: #f38ba8;
+  color: #1e1e2e;
+  border: none;
+  border-radius: 4px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-confirm-close:hover {
+  background: #eba0ac;
+}
+
+.btn-back {
+  background: #313244;
+  color: #cdd6f4;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  padding: 5px 12px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.btn-back:hover {
+  background: #45475a;
+}
 </style>
 
 <i18n lang="json">
@@ -196,7 +273,9 @@ function onKeydown(e: KeyboardEvent) {
     "submitHint": "Ctrl+Enter to submit",
     "add": "Add",
     "rerun": "Rerun",
-    "confirmClose": "You have unsaved input. Are you sure you want to close?"
+    "confirmClose": "You have unsaved input. Are you sure you want to close?",
+    "closeAnyway": "Close",
+    "back": "Back"
   },
   "ja": {
     "addTitle": "タスクを追加",
@@ -206,7 +285,9 @@ function onKeydown(e: KeyboardEvent) {
     "submitHint": "Ctrl+Enter で送信",
     "add": "追加",
     "rerun": "再実行",
-    "confirmClose": "入力内容が失われますが、閉じてもよろしいですか？"
+    "confirmClose": "入力内容が失われますが、閉じてもよろしいですか？",
+    "closeAnyway": "閉じる",
+    "back": "戻る"
   }
 }
 </i18n>
