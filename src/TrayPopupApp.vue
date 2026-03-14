@@ -262,6 +262,10 @@ async function onDone() {
 }
 
 async function onClose() {
+  const wt = currentWorktree.value;
+  if (wt) {
+    await emitTo("main", "tray-clear-notification", { worktreeId: wt.worktreeId });
+  }
   await detachCurrentTerminals();
   await emitTo("main", "tray-closing", {});
   await getCurrentWindow().destroy();

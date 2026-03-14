@@ -101,6 +101,15 @@ export function useNotifications() {
     notifications.delete(worktreeId);
   }
 
+  /** 存在しないワークツリーの stale な通知エントリを削除する */
+  function purgeStaleNotifications(activeWorktreeIds: Set<string>) {
+    for (const id of notifications.keys()) {
+      if (!activeWorktreeIds.has(id)) {
+        notifications.delete(id);
+      }
+    }
+  }
+
   /** firstNotifiedAt の昇順（古い順）でソートした worktreeId 配列を返す */
   function getNotifiedWorktreeIds(): string[] {
     return Array.from(notifications.entries())
@@ -122,6 +131,7 @@ export function useNotifications() {
     initNotificationListener,
     addNotification,
     clearNotification,
+    purgeStaleNotifications,
     getNotifiedWorktreeIds,
     getTotalNotificationCount,
   };
