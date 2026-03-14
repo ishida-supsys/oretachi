@@ -22,7 +22,7 @@ import { useWorktrees } from "./composables/useWorktrees";
 import { useI18n } from "vue-i18n";
 import { useSubWindows } from "./composables/useSubWindows";
 import { useCodeReviewWindow } from "./composables/useCodeReviewWindow";
-import { useNotifications, sendOsNotification } from "./composables/useNotifications";
+import { useNotifications, sendOsNotification, type NotificationKind } from "./composables/useNotifications";
 import { useTrayPopup } from "./composables/useTrayPopup";
 import { useWindowFocus } from "./composables/useWindowFocus";
 import { useTasks } from "./composables/useTasks";
@@ -1228,7 +1228,10 @@ onMounted(async () => {
   // 通知リスナー初期化 (ワークツリー名 → ID 解決関数と自動承認中は保留するコールバックを渡す)
   await initNotificationListener(
     (name: string) => worktrees.value.find((w) => w.name === name)?.id,
-    (id: string) => autoApprovalMap.get(id) === true || isWorktreeFocused(id),
+    (id: string, kind: NotificationKind) => {
+      if (kind === "completed") return isWorktreeFocused(id);
+      return autoApprovalMap.get(id) === true || isWorktreeFocused(id);
+    },
     () => settings.value.enableOsNotification === true,
     (worktreeId: string) => {
       if (isDetached(worktreeId)) {
@@ -1259,14 +1262,8 @@ onMounted(async () => {
 
     if (!wt) return;
 
-    // 作業完了通知は承認チェック不要 → そのまま通知
-    if (kind === "completed") {
-      if (!isWorktreeFocused(wt.id)) {
-        addNotification(wt.id, "completed");
-        await sendOsNotification(wt.name, t("notification.titleCompleted"));
-      }
-      return;
-    }
+    // 作業完了通知は useNotifications が処理
+    if (kind === "completed") return;
 
     if (!autoApprovalMap.get(wt.id)) return;
 
