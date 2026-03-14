@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, computed, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
@@ -20,6 +20,8 @@ const emit = defineEmits<{
 const promptText = ref(props.initialPrompt);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 
+const isDirty = computed(() => promptText.value.trim() !== props.initialPrompt.trim());
+
 onMounted(() => {
   textareaRef.value?.focus();
 });
@@ -30,16 +32,25 @@ function confirm() {
   emit("confirm", trimmed);
 }
 
+function tryCancel() {
+  if (isDirty.value && !window.confirm(t('confirmClose'))) return;
+  emit('cancel');
+}
+
 function onKeydown(e: KeyboardEvent) {
   if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
     e.preventDefault();
     confirm();
   }
+  if (e.key === "Escape") {
+    e.preventDefault();
+    tryCancel();
+  }
 }
 </script>
 
 <template>
-  <div class="dialog-overlay" @click.self="emit('cancel')">
+  <div class="dialog-overlay" @click.self="tryCancel">
     <div class="dialog">
       <h3 class="dialog-title">{{ mode === 'rerun' ? t('rerunTitle') : t('addTitle') }}</h3>
 
@@ -57,7 +68,7 @@ function onKeydown(e: KeyboardEvent) {
       </div>
 
       <div class="dialog-actions">
-        <button class="btn-cancel" @click="emit('cancel')">{{ t('common.cancel') }}</button>
+        <button class="btn-cancel" @click="tryCancel">{{ t('common.cancel') }}</button>
         <button
           class="btn-confirm"
           :disabled="!promptText.trim()"
@@ -184,7 +195,8 @@ function onKeydown(e: KeyboardEvent) {
     "promptPlaceholder": "e.g. Implement https://github.com/owner/repo/issues/123",
     "submitHint": "Ctrl+Enter to submit",
     "add": "Add",
-    "rerun": "Rerun"
+    "rerun": "Rerun",
+    "confirmClose": "You have unsaved input. Are you sure you want to close?"
   },
   "ja": {
     "addTitle": "タスクを追加",
@@ -193,7 +205,8 @@ function onKeydown(e: KeyboardEvent) {
     "promptPlaceholder": "例: https://github.com/owner/repo/issues/123 を実装してください",
     "submitHint": "Ctrl+Enter で送信",
     "add": "追加",
-    "rerun": "再実行"
+    "rerun": "再実行",
+    "confirmClose": "入力内容が失われますが、閉じてもよろしいですか？"
   }
 }
 </i18n>
