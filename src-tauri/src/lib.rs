@@ -62,6 +62,11 @@ fn pty_set_ai_agent(
     Ok(())
 }
 
+#[tauri::command]
+fn pty_is_ai_agent(state: State<PtyManager>, session_id: u32) -> Result<bool, String> {
+    state.is_ai_agent(session_id)
+}
+
 // ─── 設定コマンド ────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -291,6 +296,7 @@ pub fn run() {
             pty_resize,
             pty_kill,
             pty_set_ai_agent,
+            pty_is_ai_agent,
             get_settings,
             save_settings,
             git_validate_repo,
