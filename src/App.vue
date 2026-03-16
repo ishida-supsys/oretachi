@@ -1549,15 +1549,16 @@ onMounted(async () => {
     }
 
     // 5. 既存のシャットダウン処理
-    await closeAllCodeReviewWindows();
-    await closeAllSubWindows();
-    for (const [, bundle] of worktreeFrameBundles) {
-      for (const [, term] of bundle.terminalRefs) {
-        if (term?.isRunning) {
-          await term.kill();
-        }
-      }
-    }
+    await Promise.all([
+      closeTrayPopup(),
+      closeAllCodeReviewWindows(),
+      closeAllSubWindows(),
+    ]);
+    await Promise.all(
+      [...worktreeFrameBundles.values()].flatMap((bundle) =>
+        [...bundle.terminalRefs.values()].filter((term) => term?.isRunning).map((term) => term!.kill()),
+      ),
+    );
     await getCurrentWindow().destroy();
   });
 });

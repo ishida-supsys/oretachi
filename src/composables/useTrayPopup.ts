@@ -58,9 +58,9 @@ export function useTrayPopup() {
     });
   }
 
-  function closeTrayPopup(): void {
+  async function closeTrayPopup(): Promise<void> {
     if (trayWindow) {
-      trayWindow.destroy().catch(() => {});
+      await trayWindow.destroy().catch(() => {});
       trayWindow = null;
     }
     pendingWorktrees = null;
