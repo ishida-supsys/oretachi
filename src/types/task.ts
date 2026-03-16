@@ -9,6 +9,7 @@ export type AgentWorktreeTaskCode = {
   repository: string;
   branch: string;
   prompt: string;
+  remoteExec?: boolean;
 };
 
 export type TaskCode = AddWorktreeTaskCode | AgentWorktreeTaskCode;

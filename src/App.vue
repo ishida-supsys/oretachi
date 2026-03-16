@@ -619,7 +619,7 @@ async function executeAgentWorktree(code: AgentWorktreeTaskCode): Promise<void> 
 
   let agentCmd: string;
   switch (agentKind) {
-    case "claudeCode": agentCmd = "claude --permission-mode plan"; break;
+    case "claudeCode": agentCmd = code.remoteExec ? "claude --remote --permission-mode plan" : "claude --permission-mode plan"; break;
     case "geminiCli":  agentCmd = "gemini"; break;
     case "codexCli":   agentCmd = "codex"; break;
     case "clineCli":   agentCmd = "cline"; break;
@@ -1729,7 +1729,8 @@ onMounted(async () => {
       v-if="showAddTaskDialog || rerunTaskId"
       :initial-prompt="rerunTaskId ? rerunPrompt : ''"
       :mode="rerunTaskId ? 'rerun' : 'add'"
-      @confirm="onAddTaskConfirm"
+      :show-remote-exec="(settings.aiAgent?.taskAddAgent ?? settings.aiAgent?.approvalAgent) === 'claudeCode'"
+      @confirm="(prompt, remoteExec) => onAddTaskConfirm(prompt, remoteExec)"
       @cancel="onAddTaskCancel"
     />
 

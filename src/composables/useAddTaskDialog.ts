@@ -65,7 +65,7 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
     }
   }
 
-  async function onAddTaskConfirm(prompt: string): Promise<void> {
+  async function onAddTaskConfirm(prompt: string, remoteExec: boolean = false): Promise<void> {
     showAddTaskDialog.value = false;
     rerunTaskId.value = null;
     const task = addTask(prompt);
@@ -79,6 +79,13 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
     try {
       const result = await invoke<string>("task_generate", { prompt });
       const taskProcessCode = JSON.parse(result) as TaskProcessCode;
+      if (remoteExec) {
+        for (const code of taskProcessCode.code) {
+          if (code.type === "agent_worktree") {
+            code.remoteExec = true;
+          }
+        }
+      }
       setTaskSteps(task.id, taskProcessCode.code);
 
       const stepCount = taskProcessCode.code.length;

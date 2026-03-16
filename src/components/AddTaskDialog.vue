@@ -7,19 +7,22 @@ const { t } = useI18n();
 const props = withDefaults(defineProps<{
   initialPrompt?: string;
   mode?: "add" | "rerun";
+  showRemoteExec?: boolean;
 }>(), {
   initialPrompt: "",
   mode: "add",
+  showRemoteExec: false,
 });
 
 const emit = defineEmits<{
-  confirm: [prompt: string];
+  confirm: [prompt: string, remoteExec: boolean];
   cancel: [];
 }>();
 
 const promptText = ref(props.initialPrompt);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 const showConfirm = ref(false);
+const remoteExec = ref(false);
 
 const isDirty = computed(() => promptText.value.trim() !== props.initialPrompt.trim());
 
@@ -30,7 +33,7 @@ onMounted(() => {
 function confirm() {
   const trimmed = promptText.value.trim();
   if (!trimmed) return;
-  emit("confirm", trimmed);
+  emit("confirm", trimmed, remoteExec.value);
 }
 
 function tryCancel() {
@@ -81,6 +84,13 @@ function onKeydown(e: KeyboardEvent) {
           @keydown="onKeydown"
         />
         <p class="hint">{{ t('submitHint') }}</p>
+      </div>
+
+      <div v-if="showRemoteExec" class="field checkbox-field">
+        <label class="checkbox-label">
+          <input type="checkbox" v-model="remoteExec" />
+          <span>{{ t('remoteExec') }}</span>
+        </label>
       </div>
 
       <div v-if="showConfirm" class="confirm-bar">
@@ -261,6 +271,27 @@ function onKeydown(e: KeyboardEvent) {
 .btn-back:hover {
   background: #45475a;
 }
+
+.checkbox-field {
+  margin-bottom: 0;
+}
+
+.checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #cdd6f4;
+  cursor: pointer;
+  user-select: none;
+}
+
+.checkbox-label input[type="checkbox"] {
+  accent-color: #cba6f7;
+  width: 14px;
+  height: 14px;
+  cursor: pointer;
+}
 </style>
 
 <i18n lang="json">
@@ -271,6 +302,7 @@ function onKeydown(e: KeyboardEvent) {
     "prompt": "Prompt",
     "promptPlaceholder": "e.g. Implement https://github.com/owner/repo/issues/123",
     "submitHint": "Ctrl+Enter to submit",
+    "remoteExec": "Start in web session",
     "add": "Add",
     "rerun": "Rerun",
     "confirmClose": "You have unsaved input. Are you sure you want to close?",
@@ -283,6 +315,7 @@ function onKeydown(e: KeyboardEvent) {
     "prompt": "プロンプト",
     "promptPlaceholder": "例: https://github.com/owner/repo/issues/123 を実装してください",
     "submitHint": "Ctrl+Enter で送信",
+    "remoteExec": "Webセッションで開始",
     "add": "追加",
     "rerun": "再実行",
     "confirmClose": "入力内容が失われますが、閉じてもよろしいですか？",
