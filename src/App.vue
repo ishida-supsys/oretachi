@@ -710,7 +710,7 @@ async function onMoveToSubWindow(worktreeId: string) {
     goHome();
   }
 
-  await moveToSubWindow(worktreeId, worktree.name, terminals, autoApprovalMap.get(worktreeId) ?? false, false, worktree.path, layout);
+  await moveToSubWindow(worktreeId, worktree.name, terminals, autoApprovalMap.get(worktreeId) ?? false, false, worktree.path, layout, worktree.branchName);
 
   // バンドルをクリーンアップ
   worktreeFrameBundles.delete(worktreeId);
@@ -1221,7 +1221,7 @@ onMounted(async () => {
       // セッション読み込み失敗は無視
     }
 
-    await moveToSubWindow(wt.id, wt.name, subTerminals, autoApprovalMap.get(wt.id) ?? false, true, wt.path);
+    await moveToSubWindow(wt.id, wt.name, subTerminals, autoApprovalMap.get(wt.id) ?? false, true, wt.path, undefined, wt.branchName);
   }
 
   // Alt+char ホットキーリスナー登録
@@ -1668,6 +1668,7 @@ onMounted(async () => {
           <!-- ワークツリーヘッダー -->
           <WorktreeHeader
             :worktree-name="wt.name"
+            :branch-name="wt.branchName"
             :hotkey-char="hotkeyChars.get(wt.id)"
             :auto-approval="autoApprovalMap.get(wt.id) ?? false"
             :ai-judging="aiJudgingWorktrees.has(wt.id)"
