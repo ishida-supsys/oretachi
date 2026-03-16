@@ -5,6 +5,7 @@ const { t } = useI18n();
 
 const props = defineProps<{
   worktreeName: string;
+  branchName: string;
   hotkeyChar?: string;
   autoApproval: boolean;
   aiJudging: boolean;
@@ -32,6 +33,10 @@ defineEmits<{
         :class="props.isWindowFocused ? 'text-[#cba6f7]' : 'text-[#6c7086]'"
       >
         {{ props.worktreeName }}
+      </span>
+      <span class="flex items-center gap-1 text-xs font-mono text-[#9399b2]">
+        <span class="pi pi-code-branch" style="font-size: 10px" />
+        {{ props.branchName }}
       </span>
       <span
         v-if="props.hotkeyChar"

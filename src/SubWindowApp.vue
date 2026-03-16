@@ -27,6 +27,7 @@ const params = new URLSearchParams(window.location.search);
 const worktreeId = params.get("worktreeId") ?? "";
 const worktreeName = params.get("worktreeName") ?? "";
 const worktreePath = params.get("worktreePath") ?? "";
+const branchName = params.get("branchName") ?? "";
 
 // ターミナルエントリ（Map）
 const terminalEntries = reactive(new Map<number, SubTerminalEntry>());
@@ -524,6 +525,7 @@ async function onCancelAiJudging() {
       <!-- ヘッダー -->
       <WorktreeHeader
         :worktree-name="worktreeName"
+        :branch-name="branchName"
         :hotkey-char="hotkeyChar"
         :auto-approval="autoApproval"
         :ai-judging="aiJudging"

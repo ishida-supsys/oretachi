@@ -35,6 +35,7 @@ export function useSubWindows() {
     restoring: boolean = false,
     worktreePath: string = "",
     layout?: FrameNode,
+    branchName: string = "",
   ): Promise<void> {
     if (detachedWorktrees.has(worktreeId)) {
       const win = subWindowMap.get(worktreeId);
@@ -44,7 +45,7 @@ export function useSubWindows() {
 
     // window.location.origin + pathname を使い dev/prod 両方で正しい URL を構築
     const baseUrl = window.location.origin + window.location.pathname;
-    const url = `${baseUrl}?mode=subwindow&worktreeId=${encodeURIComponent(worktreeId)}&worktreeName=${encodeURIComponent(worktreeName)}&worktreePath=${encodeURIComponent(worktreePath)}`;
+    const url = `${baseUrl}?mode=subwindow&worktreeId=${encodeURIComponent(worktreeId)}&worktreeName=${encodeURIComponent(worktreeName)}&worktreePath=${encodeURIComponent(worktreePath)}&branchName=${encodeURIComponent(branchName)}`;
 
     const win = new WebviewWindow(`sub-${worktreeId}`, {
       url,
