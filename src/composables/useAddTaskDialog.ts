@@ -4,6 +4,7 @@ import { useToast } from "primevue/usetoast";
 import { useI18n } from "vue-i18n";
 import type { ToastMessageOptions } from "primevue/toast";
 import { useTasks } from "./useTasks";
+import { useSettings } from "./useSettings";
 import type { TaskCode, TaskProcessCode } from "../types/task";
 
 type StepExecutor = (code: TaskCode) => Promise<void>;
@@ -13,6 +14,7 @@ let executionQueue: Promise<void> = Promise.resolve();
 export function useAddTaskDialog(executeStep: StepExecutor) {
   const toast = useToast();
   const { t } = useI18n();
+  const { settings, scheduleSave } = useSettings();
   const { sortedTasks, addTask, setTaskSteps, updateStepStatus, updateTaskStatus } = useTasks();
 
   const showAddTaskDialog = ref(false);
@@ -68,6 +70,12 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
   async function onAddTaskConfirm(prompt: string, remoteExec: boolean = false): Promise<void> {
     showAddTaskDialog.value = false;
     rerunTaskId.value = null;
+    if (settings.value.aiAgent) {
+      settings.value.aiAgent.remoteExec = remoteExec;
+    } else {
+      settings.value.aiAgent = { remoteExec };
+    }
+    scheduleSave();
     const task = addTask(prompt);
 
     showTaskToast({

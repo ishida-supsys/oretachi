@@ -1730,6 +1730,7 @@ onMounted(async () => {
       :initial-prompt="rerunTaskId ? rerunPrompt : ''"
       :mode="rerunTaskId ? 'rerun' : 'add'"
       :show-remote-exec="(settings.aiAgent?.taskAddAgent ?? settings.aiAgent?.approvalAgent) === 'claudeCode'"
+      :initial-remote-exec="settings.aiAgent?.remoteExec ?? false"
       @confirm="(prompt, remoteExec) => onAddTaskConfirm(prompt, remoteExec)"
       @cancel="onAddTaskCancel"
     />

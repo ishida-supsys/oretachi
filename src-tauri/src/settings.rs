@@ -178,6 +178,8 @@ pub struct AiAgentSettings {
     pub approval_agent: Option<AiAgentKind>,
     #[serde(default)]
     pub task_add_agent: Option<AiAgentKind>,
+    #[serde(default)]
+    pub remote_exec: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

@@ -8,10 +8,12 @@ const props = withDefaults(defineProps<{
   initialPrompt?: string;
   mode?: "add" | "rerun";
   showRemoteExec?: boolean;
+  initialRemoteExec?: boolean;
 }>(), {
   initialPrompt: "",
   mode: "add",
   showRemoteExec: false,
+  initialRemoteExec: false,
 });
 
 const emit = defineEmits<{
@@ -22,7 +24,7 @@ const emit = defineEmits<{
 const promptText = ref(props.initialPrompt);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 const showConfirm = ref(false);
-const remoteExec = ref(false);
+const remoteExec = ref(props.initialRemoteExec);
 
 const isDirty = computed(() => promptText.value.trim() !== props.initialPrompt.trim());
 

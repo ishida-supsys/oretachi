@@ -45,6 +45,7 @@ export type AiAgentKind = 'claudeCode' | 'geminiCli' | 'codexCli' | 'clineCli';
 export interface AiAgentSettings {
   approvalAgent?: AiAgentKind;
   taskAddAgent?: AiAgentKind;
+  remoteExec?: boolean;
 }
 
 export interface WorktreeDefaults {
