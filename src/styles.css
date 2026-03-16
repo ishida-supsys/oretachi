@@ -18,6 +18,33 @@
   flex-shrink: 0;
 }
 
+/* Catppuccin Mocha スクロールバー */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #45475a;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #585b70;
+}
+
+::-webkit-scrollbar-thumb:active {
+  background: #6c7086;
+}
+
+::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
 @layer utilities {
   @keyframes gradient-x {
     0%, 100% {
