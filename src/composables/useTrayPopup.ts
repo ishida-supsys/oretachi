@@ -21,9 +21,12 @@ export interface TrayWorktreeData {
 }
 
 let trayWindow: WebviewWindow | null = null;
+let isOpening = false;
 
 export function useTrayPopup() {
   async function openTrayPopup(worktrees: TrayWorktreeData[]): Promise<void> {
+    if (isOpening) return;
+
     if (trayWindow) {
       try {
         await trayWindow.setFocus();
@@ -33,29 +36,34 @@ export function useTrayPopup() {
       if (trayWindow) return;
     }
 
-    const baseUrl = window.location.origin + window.location.pathname;
-    const url = `${baseUrl}?mode=tray`;
+    isOpening = true;
+    try {
+      const baseUrl = window.location.origin + window.location.pathname;
+      const url = `${baseUrl}?mode=tray`;
 
-    trayWindow = new WebviewWindow("tray-popup", {
-      url,
-      title: "oretachi - 通知",
-      width: 900,
-      height: 600,
-      resizable: true,
-      decorations: false,
-      dragDropEnabled: false,
-    });
+      trayWindow = new WebviewWindow("tray-popup", {
+        url,
+        title: "oretachi - 通知",
+        width: 900,
+        height: 600,
+        resizable: true,
+        decorations: false,
+        dragDropEnabled: false,
+      });
 
-    // ペンディングデータを保持（tray-ready 受信後に main が送信する）
-    // worktrees データは App.vue 側が tray-ready → tray-init で送信する
-    // ここでは参照のために pendingWorktrees に保持しておく
-    pendingWorktrees = worktrees;
+      // ペンディングデータを保持（tray-ready 受信後に main が送信する）
+      // worktrees データは App.vue 側が tray-ready → tray-init で送信する
+      // ここでは参照のために pendingWorktrees に保持しておく
+      pendingWorktrees = worktrees;
 
-    trayWindow.once("tauri://error", (e) => {
-      console.error("トレイポップアップ作成失敗:", e);
-      trayWindow = null;
-      pendingWorktrees = null;
-    });
+      trayWindow.once("tauri://error", (e) => {
+        console.error("トレイポップアップ作成失敗:", e);
+        trayWindow = null;
+        pendingWorktrees = null;
+      });
+    } finally {
+      isOpening = false;
+    }
   }
 
   async function closeTrayPopup(): Promise<void> {
