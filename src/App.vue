@@ -590,6 +590,28 @@ async function executeAddWorktree(code: AddWorktreeTaskCode): Promise<string> {
   return entry.id;
 }
 
+async function sendPromptToRunningAgent(
+  sessionId: number,
+  worktreeId: string,
+  terminalId: number,
+  prompt: string,
+): Promise<void> {
+  // ブラケット付きペーストモードで囲み、改行を含むテキストを一括入力として送信
+  const data = `\x1b[200~${prompt}\x1b[201~\r`;
+  if (isDetached(worktreeId)) {
+    const bytes = Array.from(new TextEncoder().encode(data));
+    await invoke("pty_write", { sessionId, data: bytes });
+  } else {
+    const termRef = getTerminalRef(terminalId);
+    if (termRef) {
+      await termRef.write(data);
+    } else {
+      const bytes = Array.from(new TextEncoder().encode(data));
+      await invoke("pty_write", { sessionId, data: bytes });
+    }
+  }
+}
+
 async function executeAgentWorktree(code: AgentWorktreeTaskCode): Promise<void> {
   // 既存のワークツリーを repository名 + branch名 で検索
   const wt = worktrees.value.find(
@@ -603,6 +625,26 @@ async function executeAgentWorktree(code: AgentWorktreeTaskCode): Promise<void> 
   const terminal = wt.terminals[0];
   if (!terminal) {
     throw new Error(`ターミナルが見つかりません: ${wt.name}`);
+  }
+
+  // sessionId を取得してエージェント実行中か判定
+  let sessionId: number | null;
+  let agentRunning: boolean;
+  if (isDetached(wt.id)) {
+    sessionId = getDetachedSessionId(terminal.id);
+    agentRunning = sessionId != null
+      ? await invoke<boolean>("pty_is_ai_agent", { sessionId })
+      : false;
+  } else {
+    const termRef = getTerminalRef(terminal.id);
+    sessionId = termRef?.sessionId ?? null;
+    agentRunning = terminalAgentStatus.get(terminal.id) === true;
+  }
+
+  // 既存エージェントが実行中の場合はプロンプトを直接送信して続行
+  if (agentRunning && sessionId != null) {
+    await sendPromptToRunningAgent(sessionId, wt.id, terminal.id, code.prompt);
+    return;
   }
 
   // 一時ファイルにプロンプトを書き出し

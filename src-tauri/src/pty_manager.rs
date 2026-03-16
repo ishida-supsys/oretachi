@@ -150,6 +150,16 @@ impl PtyManager {
         }
     }
 
+    /// AIエージェントフラグを参照する
+    pub fn is_ai_agent(&self, session_id: u32) -> Result<bool, String> {
+        let sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+        if let Some(session) = sessions.get(&session_id) {
+            Ok(session.is_ai_agent)
+        } else {
+            Err(format!("Session {} not found", session_id))
+        }
+    }
+
     /// バックグラウンドでポーリングスレッドを起動し、AIエージェント状態の変化をイベントで通知する
     pub fn start_polling(&self, app_handle: AppHandle) {
         let sessions_arc = self.sessions.clone();
