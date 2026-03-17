@@ -259,7 +259,7 @@ pub fn run() {
         }
     }
 
-    let app = tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_cli::init())
         .plugin(
@@ -283,7 +283,16 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_os::init())
-        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_notification::init());
+
+    #[cfg(debug_assertions)]
+    {
+        builder = builder.plugin(tauri_plugin_mcp::init_with_config(
+            tauri_plugin_mcp::PluginConfig::new("oretachi".to_string()).tcp_localhost(4000),
+        ));
+    }
+
+    let app = builder
         .manage(PtyManager::new())
         .manage(SettingsManager::new())
         .manage(mcp_server::McpServerManager::new())

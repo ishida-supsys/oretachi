@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "tauri-mcp": {
+      "command": "npx",
+      "args": ["tauri-plugin-mcp-server"],
+      "env": {
+        "TAURI_MCP_CONNECTION_TYPE": "tcp",
+        "TAURI_MCP_TCP_HOST": "127.0.0.1",
+        "TAURI_MCP_TCP_PORT": "4000"
+      }
+    }
+  }
+}

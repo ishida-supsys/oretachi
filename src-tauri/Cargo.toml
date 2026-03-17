@@ -39,6 +39,7 @@ notify = "7"
 notify-debouncer-mini = "0.5"
 content_inspector = "0.2"
 dotenvy = "0.15"
+tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp" }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 libc = "0.2"
