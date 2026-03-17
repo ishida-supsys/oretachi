@@ -242,7 +242,7 @@ export function useTaskExecution(deps: {
 
     let agentCmd: string;
     switch (agentKind) {
-      case "claudeCode": agentCmd = code.remoteExec ? "claude --remote --permission-mode plan" : "claude --permission-mode plan"; break;
+      case "claudeCode": agentCmd = code.remoteExec ? "claude --remote" : "claude --permission-mode plan"; break;
       case "geminiCli":  agentCmd = "gemini"; break;
       case "codexCli":   agentCmd = "codex"; break;
       case "clineCli":   agentCmd = "cline"; break;
