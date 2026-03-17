@@ -217,6 +217,14 @@ fn port_file_path(app_handle: &AppHandle) -> Option<PathBuf> {
 
 fn write_port_file(app_handle: &AppHandle, port: u16) {
     if let Some(path) = port_file_path(app_handle) {
+        // MCP_PORT_OVERWRITE=false なら既存ファイルを上書きしない
+        let overwrite = std::env::var("MCP_PORT_OVERWRITE")
+            .map(|v| v != "false")
+            .unwrap_or(true);
+        if !overwrite && path.exists() {
+            log::info!("MCP port file already exists, skipping overwrite (MCP_PORT_OVERWRITE=false)");
+            return;
+        }
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }

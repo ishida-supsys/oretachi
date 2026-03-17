@@ -331,6 +331,12 @@ pub fn run() {
             stop_fs_watch,
         ])
         .setup(|app| {
+            // .env 読み込み（Vite の .env 規約に準拠）
+            let _ = dotenvy::from_filename(".env");
+            if cfg!(debug_assertions) {
+                let _ = dotenvy::from_filename(".env.development");
+            }
+
             if let Ok(log_dir) = app.path().app_log_dir() {
                 log::info!("Application log directory: {:?}", log_dir);
             }
