@@ -1398,7 +1398,7 @@ onMounted(async () => {
     <!-- タブバー -->
     <div 
       class="flex items-center border-b shrink-0 min-h-0 transition-colors duration-200"
-      :class="isWindowFocused ? 'bg-gradient-to-r from-[#181825] via-[#2a2a3f] to-[#181825] animate-gradient-x border-[#cba6f7]/50' : 'bg-[#11111b] opacity-90 border-[#313244]'"
+      :class="isWindowFocused ? 'border-[#cba6f7]/50' : 'opacity-90 border-[#313244]'"
     >
       <!-- ホームボタン -->
       <button
@@ -1430,8 +1430,8 @@ onMounted(async () => {
           class="flex items-center gap-1.5 px-3 py-2 text-xs shrink-0 border-r border-[#313244] transition-colors"
           :class="
             viewMode === 'terminal' && wt.id === activeWorktreeId
-              ? 'bg-[#1e1e2e] text-[#cba6f7]'
-              : 'bg-[#181825] text-[#6c7086] hover:text-[#cdd6f4]'
+              ? 'text-[#cba6f7]'
+              : 'text-[#6c7086] hover:text-[#cdd6f4]'
           "
           @click="switchToWorktree(wt.id)"
         >

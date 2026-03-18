@@ -290,7 +290,7 @@ function overlayStyle(zone: DropZone): Record<string, string> {
 .tab-bar {
   display: flex;
   align-items: center;
-  background-color: #181825;
+  background-color: transparent;
   border-bottom: 1px solid #313244;
   flex-shrink: 0;
 }
@@ -321,12 +321,12 @@ function overlayStyle(zone: DropZone): Record<string, string> {
 }
 
 .tab-active {
-  background-color: #1e1e2e;
+  background-color: transparent;
   color: #cba6f7;
 }
 
 .tab-inactive {
-  background-color: #181825;
+  background-color: transparent;
   color: #6c7086;
 }
 

@@ -23,8 +23,8 @@ defineEmits<{
     class="flex items-center justify-between border-b shrink-0 px-4 py-1 transition-colors duration-200"
     :class="
       props.isWindowFocused
-        ? 'bg-gradient-to-r from-[#181825] via-[#2a2a3f] to-[#181825] animate-gradient-x border-[#cba6f7]/50'
-        : 'bg-[#11111b] opacity-80 border-[#313244]'
+        ? 'border-[#cba6f7]/50'
+        : 'opacity-80 border-[#313244]'
     "
   >
     <div class="flex items-center gap-2">

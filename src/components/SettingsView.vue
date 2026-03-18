@@ -490,7 +490,7 @@ function clearExecScript(repoId: string) {
   height: 100%;
   overflow-y: auto;
   padding: 24px;
-  background: #1e1e2e;
+  background: transparent;
   box-sizing: border-box;
   color: #cdd6f4;
 }
