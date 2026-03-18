@@ -65,6 +65,9 @@ importers:
       primevue:
         specifier: ^4.5.4
         version: 4.5.4(vue@3.5.29(typescript@5.6.3))
+      tauri-plugin-liquid-glass-api:
+        specifier: ^0.1.6
+        version: 0.1.6(@tauri-apps/api@2.10.1)
       vue:
         specifier: ^3.5.13
         version: 3.5.29(typescript@5.6.3)
@@ -1425,6 +1428,11 @@ packages:
   tapable@2.3.0:
     resolution: {integrity: sha512-g9ljZiwki/LfxmQADO3dEY1CbpmXT5Hm2fJ+QaGKwSXUylMybePR7/67YW7jOrrvjEgL1Fmz5kzyAjWVWLlucg==}
     engines: {node: '>=6'}
+
+  tauri-plugin-liquid-glass-api@0.1.6:
+    resolution: {integrity: sha512-93sppeXhn6WbzUheAFUWhqVICxZS6pNQzPBq2UcNFLdSP2icH94lDXmmHE9DhesxhiJiGITJ4bj8wNjWcQ/zCw==}
+    peerDependencies:
+      '@tauri-apps/api': ^2.0.0
 
   tinybench@2.9.0:
     resolution: {integrity: sha512-0+DUvqWMValLmha6lr4kD8iAMK1HzV0/aKnCtWb9v9641TnP/MFb7Pc2bxoxQjTXAErryXVgUOfv2YqNllqGeg==}
@@ -2794,6 +2802,10 @@ snapshots:
   tailwindcss@4.2.1: {}
 
   tapable@2.3.0: {}
+
+  tauri-plugin-liquid-glass-api@0.1.6(@tauri-apps/api@2.10.1):
+    dependencies:
+      '@tauri-apps/api': 2.10.1
 
   tinybench@2.9.0: {}
 

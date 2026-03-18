@@ -49,6 +49,7 @@ export function useTrayPopup() {
         resizable: true,
         decorations: false,
         dragDropEnabled: false,
+        transparent: true,
       });
 
       // ペンディングデータを保持（tray-ready 受信後に main が送信する）

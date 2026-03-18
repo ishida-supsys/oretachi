@@ -18,7 +18,8 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["macos-private-api"] }
+tauri-plugin-liquid-glass = "0.1.6"
 tauri-plugin-window-state = "2"
 tauri-plugin-opener = "2"
 tauri-plugin-clipboard-manager = "2"
@@ -46,4 +47,6 @@ libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.58", features = ["Win32_UI_Shell"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_Graphics_Dwm"] }
+windows-version = "0.1"
 

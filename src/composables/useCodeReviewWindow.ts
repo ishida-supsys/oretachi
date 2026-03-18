@@ -27,6 +27,7 @@ export function useCodeReviewWindow() {
       height: 800,
       resizable: true,
       dragDropEnabled: false,
+      transparent: true,
     });
 
     win.once("tauri://created", () => {

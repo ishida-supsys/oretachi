@@ -74,10 +74,11 @@ function initTerminal() {
 
   terminal = new Terminal({
     allowProposedApi: true,
+    allowTransparency: true,
     fontFamily: '"Cascadia Code", Consolas, Menlo, "SF Mono", Monaco, monospace',
     fontSize: settings.value.terminal.fontSize,
     theme: {
-      background: "#1e1e2e",
+      background: "#1e1e2e00",
       foreground: "#cdd6f4",
       cursor: "#f5e0dc",
       cursorAccent: "#1e1e2e",
@@ -408,7 +409,7 @@ defineExpose({
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background-color: #1e1e2e;
+  background-color: transparent;
 }
 
 .terminal-container {

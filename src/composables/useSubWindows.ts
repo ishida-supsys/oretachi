@@ -55,6 +55,7 @@ export function useSubWindows() {
       visible: restoring ? false : undefined,
       resizable: true,
       dragDropEnabled: false,  // HTML5 D&D を有効にするために必要 (Windows)
+      transparent: true,
     });
 
     win.once("tauri://created", () => {

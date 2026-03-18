@@ -154,7 +154,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   height: 100%;
   overflow-y: auto;
   padding: 16px;
-  background: #1e1e2e;
+  background: transparent;
   box-sizing: border-box;
 }
 

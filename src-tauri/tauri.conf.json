@@ -22,13 +22,16 @@
     }
   },
   "app": {
+    "macOSPrivateApi": true,
     "windows": [
       {
         "title": "oretachi",
         "width": 800,
         "height": 600,
         "visible": false,
-        "dragDropEnabled": false
+        "dragDropEnabled": false,
+        "transparent": true,
+        "shadow": true
       }
     ],
     "security": {

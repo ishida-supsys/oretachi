@@ -11,6 +11,9 @@ mod settings;
 mod task_executor;
 mod terminal_session;
 
+#[cfg(target_os = "windows")]
+mod acrylic;
+
 use fs_watcher::FsWatcherManager;
 use pty_manager::{AiAgentChangedPayload, PtyManager};
 use settings::{AppSettings, SettingsManager};
@@ -260,6 +263,20 @@ pub fn run() {
     }
 
     let mut builder = tauri::Builder::default()
+        .plugin(tauri_plugin_liquid_glass::init())
+        .plugin(
+            tauri::plugin::Builder::<tauri::Wry>::new("acrylic-effect")
+                .on_window_ready(|window| {
+                    #[cfg(target_os = "windows")]
+                    {
+                        if let Ok(hwnd) = window.hwnd() {
+                            acrylic::setup(hwnd.0, 18, 18, 18, 125);
+                        }
+                    }
+                    let _ = window;
+                })
+                .build(),
+        )
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_cli::init())
         .plugin(

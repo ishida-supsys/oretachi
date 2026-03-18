@@ -24,6 +24,7 @@
     "window-state:default",
     "os:default",
     "notification:default",
-    "notification:allow-register-listener"
+    "notification:allow-register-listener",
+    "liquid-glass:default"
   ]
 }
