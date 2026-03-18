@@ -44,6 +44,24 @@ fn get_swca() -> Option<SetWindowCompositionAttributeFn> {
     }
 }
 
+type DwmExtendFrameIntoClientAreaFn = unsafe extern "system" fn(HWND, *const i32) -> i32;
+
+fn get_dwm_extend_frame() -> Option<DwmExtendFrameIntoClientAreaFn> {
+    unsafe {
+        let module = windows_sys::Win32::System::LibraryLoader::LoadLibraryA(
+            b"dwmapi.dll\0".as_ptr(),
+        );
+        if module.is_null() {
+            return None;
+        }
+        let proc = windows_sys::Win32::System::LibraryLoader::GetProcAddress(
+            module,
+            b"DwmExtendFrameIntoClientArea\0".as_ptr(),
+        );
+        proc.map(|f| std::mem::transmute(f))
+    }
+}
+
 /// Win11 (build >= 22523): SWCA acrylic with dark mode enabled.
 /// Using ACCENT_ENABLE_ACRYLICBLURBEHIND (4) via SWCA instead of DWM's
 /// DWMSBT_TRANSIENTWINDOW, because the latter is disabled on focus loss.
@@ -58,6 +76,13 @@ fn apply_backdrop(hwnd: HWND, r: u8, g: u8, b: u8, a: u8) {
             &dark as *const _ as *const _,
             4,
         );
+        // Extend DWM frame into the entire client area so that the title bar
+        // drawn by DWM on Win11 (visible when decorations:false) is hidden.
+        // MARGINS { left:-1, right:-1, top:-1, bottom:-1 } extends into entire client.
+        if let Some(extend_frame) = get_dwm_extend_frame() {
+            let margins: [i32; 4] = [-1, -1, -1, -1];
+            extend_frame(hwnd, margins.as_ptr());
+        }
     }
 
     let Some(swca) = get_swca() else {

@@ -365,11 +365,11 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="h-screen flex flex-col bg-[#1e1e2e] text-[#cdd6f4] select-none">
+  <div class="h-screen flex flex-col bg-transparent text-[#cdd6f4] select-none">
     <!-- ヘッダー (drag-region) -->
     <div
       ref="headerRef"
-      class="flex items-center justify-between bg-[#181825] border-b border-[#313244] shrink-0 px-4 py-2"
+      class="flex items-center justify-between bg-[#181825]/80 border-b border-[#313244] shrink-0 px-4 py-2"
       @mousedown.left="onHeaderDrag"
     >
       <div class="flex items-center gap-3 pointer-events-none">
@@ -430,7 +430,7 @@ onUnmounted(() => {
     </div>
 
     <!-- フッター -->
-    <div ref="footerRef" class="flex items-center justify-end gap-2 bg-[#181825] border-t border-[#313244] shrink-0 px-4 py-2">
+    <div ref="footerRef" class="flex items-center justify-end gap-2 bg-[#181825]/80 border-t border-[#313244] shrink-0 px-4 py-2">
       <button
         v-if="!isLast"
         class="px-4 py-1.5 text-sm rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
