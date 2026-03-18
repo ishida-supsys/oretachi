@@ -530,6 +530,7 @@ async function onCancelAiJudging() {
         :auto-approval="autoApproval"
         :ai-judging="aiJudging"
         :is-window-focused="isWindowFocused"
+        :show-window-controls="true"
         @open-in-ide="requestOpenInIde"
         @cancel-ai-judging="onCancelAiJudging"
       />

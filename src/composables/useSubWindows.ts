@@ -56,6 +56,7 @@ export function useSubWindows() {
       resizable: true,
       dragDropEnabled: false,  // HTML5 D&D を有効にするために必要 (Windows)
       transparent: true,
+      decorations: false,
     });
 
     win.once("tauri://created", () => {
@@ -95,7 +96,7 @@ export function useSubWindows() {
             resolve();
           }, 5000);
 
-          let unlisten = () => {};
+          let unlisten = () => { };
           listen<{ worktreeId: string }>("sub-window-closed-ack", (event) => {
             if (event.payload.worktreeId === worktreeId) {
               clearTimeout(timeout);
@@ -167,7 +168,7 @@ export function useSubWindows() {
           resolve();
         }, 5000);
 
-        let unlisten = () => {};
+        let unlisten = () => { };
         listen<{ worktreeId: string }>("sub-window-closed-ack", (event) => {
           if (event.payload.worktreeId === worktreeId) {
             clearTimeout(timeout);

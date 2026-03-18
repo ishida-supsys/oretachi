@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 
 const { t } = useI18n();
 
@@ -10,22 +11,41 @@ const props = defineProps<{
   autoApproval: boolean;
   aiJudging: boolean;
   isWindowFocused: boolean;
+  showWindowControls?: boolean;
 }>();
 
 defineEmits<{
   "open-in-ide": [];
   "cancel-ai-judging": [];
 }>();
+
+function onHeaderDrag(e: MouseEvent) {
+  if ((e.target as HTMLElement).closest('button')) return;
+  getCurrentWindow().startDragging();
+}
+
+async function minimize() {
+  await getCurrentWindow().minimize();
+}
+
+async function toggleMaximize() {
+  await getCurrentWindow().toggleMaximize();
+}
+
+async function closeWindow() {
+  await getCurrentWindow().close();
+}
 </script>
 
 <template>
   <div
-    class="flex items-center justify-between border-b shrink-0 px-4 py-1 transition-colors duration-200"
+    class="flex items-center justify-between border-b shrink-0 pl-4 pr-[2px] py-1 transition-colors duration-200"
     :class="
       props.isWindowFocused
         ? 'border-[#cba6f7]/50'
         : 'opacity-80 border-[#313244]'
     "
+    @mousedown.left="props.showWindowControls ? onHeaderDrag($event) : undefined"
   >
     <div class="flex items-center gap-2">
       <span
@@ -58,13 +78,42 @@ defineEmits<{
         {{ t('aiJudgingBadge') }}
       </button>
     </div>
-    <button
-      class="flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
-      :title="t('openInIde')"
-      @click="$emit('open-in-ide')"
-    >
-      <span class="pi pi-code text-sm" />
-    </button>
+    <div class="flex items-center">
+      <button
+        class="flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
+        :class="props.showWindowControls ? 'mr-4' : ''"
+        :title="t('openInIde')"
+        @click="$emit('open-in-ide')"
+      >
+        <span class="pi pi-code text-sm" />
+      </button>
+      <template v-if="props.showWindowControls">
+        <button
+          class="flex items-center justify-center h-8 hover:bg-[#313244] text-[#6c7086] hover:text-[#cdd6f4] transition-colors"
+          style="width: 42px; margin: 0 1px;"
+          :title="t('minimize')"
+          @click="minimize"
+        >
+          <span class="pi pi-minus text-xs" />
+        </button>
+        <button
+          class="flex items-center justify-center h-8 hover:bg-[#313244] text-[#6c7086] hover:text-[#cdd6f4] transition-colors"
+          style="width: 42px; margin: 0 1px;"
+          :title="t('maximize')"
+          @click="toggleMaximize"
+        >
+          <span class="pi pi-stop text-xs" />
+        </button>
+        <button
+          class="flex items-center justify-center h-8 hover:bg-[#c0392b] hover:text-white text-[#6c7086] transition-colors"
+          style="width: 42px; margin: 0 1px;"
+          :title="t('close')"
+          @click="closeWindow"
+        >
+          <span class="pi pi-times text-xs" />
+        </button>
+      </template>
+    </div>
   </div>
 </template>
 
@@ -73,12 +122,18 @@ defineEmits<{
   "en": {
     "autoApprovalBadge": "Auto approval",
     "aiJudgingBadge": "AI judging",
-    "openInIde": "Open in IDE"
+    "openInIde": "Open in IDE",
+    "minimize": "Minimize",
+    "maximize": "Maximize",
+    "close": "Close"
   },
   "ja": {
     "autoApprovalBadge": "自動承認",
     "aiJudgingBadge": "AI判定中",
-    "openInIde": "IDE で開く"
+    "openInIde": "IDE で開く",
+    "minimize": "最小化",
+    "maximize": "最大化",
+    "close": "閉じる"
   }
 }
 </i18n>
