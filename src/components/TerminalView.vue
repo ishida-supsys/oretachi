@@ -421,10 +421,12 @@ defineExpose({
 .terminal-container :deep(.xterm) {
   height: 100%;
   padding: 4px;
+  background-color: transparent !important;
 }
 
 .terminal-container :deep(.xterm-viewport) {
   overflow-y: auto;
+  background-color: transparent !important;
 }
 
 .search-bar {
