@@ -388,7 +388,7 @@ pub fn run() {
             // .env 読み込み（Vite の .env 規約に準拠）
             let _ = dotenvy::from_filename(".env");
             if cfg!(debug_assertions) {
-                let _ = dotenvy::from_filename(".env.development");
+                let _ = dotenvy::from_filename_override(".env.development");
             }
 
             if let Ok(log_dir) = app.path().app_log_dir() {
