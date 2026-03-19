@@ -78,26 +78,36 @@ async function showWorktree(data: TrayWorktreeData) {
   }
 
   await nextTick();
+  // OSレベルのウィンドウリサイズがレイアウトに反映されるのを待つ
+  await new Promise<void>((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => resolve());
+    });
+  });
   mountTerminalsToHosts();
 
-  // 最初のアクティブターミナルにフォーカス
-  const firstLeaf = leafs[0];
-  if (firstLeaf?.activeTerminalId !== null && firstLeaf?.activeTerminalId !== undefined) {
-    const term = terminalRefs.get(firstLeaf.activeTerminalId);
-    if (term) {
-      await term.handleTabActivated();
-      // PTYサイズに合わせてxterm.jsをリサイズ（noResize=trueのためfit()は呼ばれない）
-      const entry = terminalEntries.get(firstLeaf.activeTerminalId);
-      if (entry) {
-        const termObj = term.getTerminal();
-        if (termObj) {
-          termObj.resize(entry.cols, entry.rows);
-          termObj.refresh(0, termObj.rows - 1);
-          termObj.scrollToBottom();
-        }
+  // 全リーフのアクティブターミナルをリサイズ+リフレッシュ
+  for (const leaf of leafs) {
+    if (leaf.activeTerminalId == null) continue;
+    const term = terminalRefs.get(leaf.activeTerminalId);
+    if (!term) continue;
+    await term.handleTabActivated();
+    // PTYサイズに合わせてxterm.jsをリサイズ（noResize=trueのためfit()は呼ばれない）
+    const entry = terminalEntries.get(leaf.activeTerminalId);
+    if (entry) {
+      const termObj = term.getTerminal();
+      if (termObj) {
+        termObj.resize(entry.cols, entry.rows);
+        termObj.refresh(0, termObj.rows - 1);
+        termObj.scrollToBottom();
       }
-      term.focus();
     }
+  }
+
+  // 最初のリーフにフォーカス
+  const firstActiveId = leafs[0]?.activeTerminalId;
+  if (firstActiveId != null) {
+    terminalRefs.get(firstActiveId)?.focus();
   }
 }
 
@@ -466,6 +476,8 @@ onUnmounted(() => {
           :auto-start="false"
           :initial-session-id="entry.sessionId"
           :initial-snapshot="entry.snapshot"
+          :initial-cols="entry.cols"
+          :initial-rows="entry.rows"
           @exit="handleTerminalExit(tid)"
           @title-change="() => {}"
         />

@@ -24,6 +24,8 @@ const props = withDefaults(
     initialSnapshot?: string;
     restoreSnapshot?: string;
     noResize?: boolean;
+    initialCols?: number;
+    initialRows?: number;
   }>(),
   {
     autoStart: true,
@@ -75,6 +77,8 @@ function initTerminal() {
   terminal = new Terminal({
     allowProposedApi: true,
     allowTransparency: true,
+    cols: props.initialCols,
+    rows: props.initialRows,
     fontFamily: '"Cascadia Code", Consolas, Menlo, "SF Mono", Monaco, monospace',
     fontSize: settings.value.terminal.fontSize,
     theme: {
