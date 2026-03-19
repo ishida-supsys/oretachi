@@ -199,6 +199,19 @@ fn default_chat_hotkey() -> HotkeyBinding {
     HotkeyBinding { ctrl: true, meta: false, shift: false, alt: false, key: "l".to_string() }
 }
 fn default_auto_open_review_on_diff() -> bool { true }
+fn default_true() -> bool { true }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppearanceSettings {
+    #[serde(default = "default_true", rename = "enableAcrylic")]
+    pub enable_acrylic: bool,
+}
+
+impl Default for AppearanceSettings {
+    fn default() -> Self {
+        AppearanceSettings { enable_acrylic: true }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -258,6 +271,8 @@ pub struct AppSettings {
     pub locale: Option<String>,
     #[serde(default, rename = "codeReview")]
     pub code_review: Option<CodeReviewSettings>,
+    #[serde(default)]
+    pub appearance: Option<AppearanceSettings>,
 }
 
 impl Default for AppSettings {
@@ -277,6 +292,7 @@ impl Default for AppSettings {
             worktree_defaults: None,
             locale: None,
             code_review: None,
+            appearance: None,
         }
     }
 }

@@ -149,3 +149,25 @@ pub fn setup(hwnd: HWND, r: u8, g: u8, b: u8, a: u8) {
         apply_blur(hwnd, r, g, b, a);
     }
 }
+
+/// settings.json から appearance.enableAcrylic を先読みする。
+/// SettingsManager の初期化前に呼ぶ必要があるため、ファイルを直接読む。
+pub fn load_enabled() -> bool {
+    let settings_path = std::env::var("APPDATA")
+        .ok()
+        .map(|p| std::path::PathBuf::from(p).join("com.ia.oretachi").join("settings.json"));
+    if let Some(path) = settings_path {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(enabled) = json
+                    .get("appearance")
+                    .and_then(|a| a.get("enableAcrylic"))
+                    .and_then(|v| v.as_bool())
+                {
+                    return enabled;
+                }
+            }
+        }
+    }
+    true // デフォルト: 有効
+}

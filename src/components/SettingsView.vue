@@ -481,6 +481,26 @@ function clearExecScript(repoId: string) {
         </div>
       </div>
     </div>
+
+    <!-- 外観設定 -->
+    <div class="field-group">
+      <label class="field-label">{{ t('appearance.label') }}</label>
+      <div class="row-input row-input--inline">
+        <input
+          id="appearance-enable-acrylic"
+          type="checkbox"
+          class="toggle-checkbox"
+          :checked="settings.appearance?.enableAcrylic ?? true"
+          @change="(e) => {
+            if (!settings.appearance) settings.appearance = {};
+            settings.appearance.enableAcrylic = (e.target as HTMLInputElement).checked;
+            scheduleSave();
+          }"
+        />
+        <label for="appearance-enable-acrylic" class="inline-label toggle-label">{{ t('appearance.enableAcrylic') }}</label>
+      </div>
+      <p class="appearance-note">{{ t('appearance.restartNote') }}</p>
+    </div>
   </div>
 </template>
 
@@ -756,6 +776,12 @@ function clearExecScript(repoId: string) {
   min-width: 180px;
   cursor: pointer;
 }
+
+.appearance-note {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #6c7086;
+}
 </style>
 
 <i18n lang="json">
@@ -819,6 +845,11 @@ function clearExecScript(repoId: string) {
       "empty": "No repositories registered",
       "hasWorktrees": "Cannot delete: worktrees exist",
       "execScript": "Exec script"
+    },
+    "appearance": {
+      "label": "Appearance",
+      "enableAcrylic": "Enable Acrylic / LiquidGlass effect",
+      "restartNote": "Changes take effect after restarting the app."
     },
     "error": {
       "notARepo": "The selected folder is not a git repository.",
@@ -884,6 +915,11 @@ function clearExecScript(repoId: string) {
       "empty": "リポジトリが登録されていません",
       "hasWorktrees": "ワークツリーが存在するため削除できません",
       "execScript": "実行スクリプト"
+    },
+    "appearance": {
+      "label": "外観",
+      "enableAcrylic": "Acrylic / LiquidGlass エフェクトを有効にする",
+      "restartNote": "変更はアプリ再起動後に反映されます。"
     },
     "error": {
       "notARepo": "選択したフォルダは git リポジトリではありません。",

@@ -62,6 +62,10 @@ export interface CodeReviewSettings {
   autoOpenReviewOnDiff?: boolean;   // デフォルト: true
 }
 
+export interface AppearanceSettings {
+  enableAcrylic?: boolean; // デフォルト: true
+}
+
 export interface AppSettings {
   repositories: Repository[];
   worktreeBaseDir: string;
@@ -77,4 +81,5 @@ export interface AppSettings {
   worktreeDefaults?: WorktreeDefaults;
   locale?: string;
   codeReview?: CodeReviewSettings;
+  appearance?: AppearanceSettings;
 }

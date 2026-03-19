@@ -262,21 +262,30 @@ pub fn run() {
         }
     }
 
-    let mut builder = tauri::Builder::default()
-        .plugin(tauri_plugin_liquid_glass::init())
-        .plugin(
-            tauri::plugin::Builder::<tauri::Wry>::new("acrylic-effect")
-                .on_window_ready(|window| {
-                    #[cfg(target_os = "windows")]
-                    {
-                        if let Ok(hwnd) = window.hwnd() {
-                            acrylic::setup(hwnd.0, 18, 18, 18, 125);
+    #[cfg(target_os = "windows")]
+    let acrylic_enabled = acrylic::load_enabled();
+    #[cfg(not(target_os = "windows"))]
+    let acrylic_enabled = true;
+
+    let mut builder = tauri::Builder::default();
+    if acrylic_enabled {
+        builder = builder
+            .plugin(tauri_plugin_liquid_glass::init())
+            .plugin(
+                tauri::plugin::Builder::<tauri::Wry>::new("acrylic-effect")
+                    .on_window_ready(|window| {
+                        #[cfg(target_os = "windows")]
+                        {
+                            if let Ok(hwnd) = window.hwnd() {
+                                acrylic::setup(hwnd.0, 18, 18, 18, 125);
+                            }
                         }
-                    }
-                    let _ = window;
-                })
-                .build(),
-        )
+                        let _ = window;
+                    })
+                    .build(),
+            );
+    }
+    let mut builder = builder
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
         .plugin(tauri_plugin_cli::init())
         .plugin(
