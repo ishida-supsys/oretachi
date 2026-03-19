@@ -1,6 +1,22 @@
+:root {
+  --bg-base: #1e1e2e;
+  --bg-mantle: #181825;
+  --bg-crust: #11111b;
+  --bg-terminal: #1e1e2e;
+  --bg-mantle-translucent: #181825;
+}
+
+html.transparent-mode {
+  --bg-base: transparent;
+  --bg-mantle: transparent;
+  --bg-crust: transparent;
+  --bg-terminal: #1e1e2e00;
+  --bg-mantle-translucent: rgba(24, 24, 37, 0.8);
+}
+
 html,
 body {
-  background: transparent !important;
+  background: var(--bg-base) !important;
 }
 
 @import "primeicons/primeicons.css";

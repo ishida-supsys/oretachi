@@ -516,7 +516,8 @@ async function onCancelAiJudging() {
 
 <template>
   <div
-    class="h-screen flex flex-col bg-transparent text-[#cdd6f4] select-none"
+    class="h-screen flex flex-col text-[#cdd6f4] select-none"
+    style="background-color: var(--bg-base)"
     :class="{ 'gaming-border': settings.appearance?.enableGamingBorder }"
   >
     <!-- 初期化中 -->

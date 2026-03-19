@@ -1398,12 +1398,14 @@ onMounted(async () => {
 
 <template>
   <div
-    class="h-screen flex flex-col bg-transparent text-[#cdd6f4] select-none"
+    class="h-screen flex flex-col text-[#cdd6f4] select-none"
+    style="background-color: var(--bg-base)"
     :class="{ 'gaming-border': settings.appearance?.enableGamingBorder }"
   >
     <!-- タブバー -->
-    <div 
+    <div
       class="flex items-center border-b shrink-0 min-h-0 transition-colors duration-200"
+      style="background-color: var(--bg-mantle)"
       :class="isWindowFocused ? 'border-[#cba6f7]/50' : 'opacity-90 border-[#313244]'"
     >
       <!-- ホームボタン -->

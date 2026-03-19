@@ -74,15 +74,16 @@ async function handlePaste() {
 function initTerminal() {
   if (!xtermRef.value) return;
 
+  const isTransparent = settings.value.appearance?.enableAcrylic !== false;
   terminal = new Terminal({
     allowProposedApi: true,
-    allowTransparency: true,
+    allowTransparency: isTransparent,
     cols: props.initialCols,
     rows: props.initialRows,
     fontFamily: '"Cascadia Code", Consolas, Menlo, "SF Mono", Monaco, monospace',
     fontSize: settings.value.terminal.fontSize,
     theme: {
-      background: "#1e1e2e00",
+      background: isTransparent ? "#1e1e2e00" : "#1e1e2e",
       foreground: "#cdd6f4",
       cursor: "#f5e0dc",
       cursorAccent: "#1e1e2e",
@@ -413,7 +414,7 @@ defineExpose({
   width: 100%;
   height: 100%;
   overflow: hidden;
-  background-color: transparent;
+  background-color: var(--bg-terminal);
 }
 
 .terminal-container {
@@ -425,12 +426,12 @@ defineExpose({
 .terminal-container :deep(.xterm) {
   height: 100%;
   padding: 4px;
-  background-color: transparent !important;
+  background-color: var(--bg-terminal) !important;
 }
 
 .terminal-container :deep(.xterm-viewport) {
   overflow-y: auto;
-  background-color: transparent !important;
+  background-color: var(--bg-terminal) !important;
 }
 
 .search-bar {
