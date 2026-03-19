@@ -628,20 +628,6 @@ function getSoundLabel(sound: string | null | undefined): string {
         />
         <label for="appearance-enable-acrylic" class="inline-label toggle-label">{{ t('appearance.enableAcrylic') }}</label>
       </div>
-      <div class="row-input row-input--inline mt-8">
-        <input
-          id="appearance-enable-gaming-border"
-          type="checkbox"
-          class="toggle-checkbox"
-          :checked="settings.appearance?.enableGamingBorder ?? false"
-          @change="(e) => {
-            if (!settings.appearance) settings.appearance = {};
-            settings.appearance.enableGamingBorder = (e.target as HTMLInputElement).checked;
-            scheduleSave();
-          }"
-        />
-        <label for="appearance-enable-gaming-border" class="inline-label toggle-label">{{ t('appearance.enableGamingBorder') }}</label>
-      </div>
       <p class="appearance-note">{{ t('appearance.restartNote') }}</p>
       <div v-if="settings.appearance?.enableAcrylic ?? true" class="appearance-acrylic-controls">
         <div class="row-input row-input--inline">
@@ -674,6 +660,20 @@ function getSoundLabel(sound: string | null | undefined): string {
             }"
           />
         </div>
+      </div>
+      <div class="row-input row-input--inline mt-8">
+        <input
+          id="appearance-enable-gaming-border"
+          type="checkbox"
+          class="toggle-checkbox"
+          :checked="settings.appearance?.enableGamingBorder ?? false"
+          @change="(e) => {
+            if (!settings.appearance) settings.appearance = {};
+            settings.appearance.enableGamingBorder = (e.target as HTMLInputElement).checked;
+            scheduleSave();
+          }"
+        />
+        <label for="appearance-enable-gaming-border" class="inline-label toggle-label">{{ t('appearance.enableGamingBorder') }}</label>
       </div>
     </div>
   </div>

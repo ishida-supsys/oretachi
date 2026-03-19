@@ -85,7 +85,7 @@ body {
   content: "";
   position: absolute;
   inset: 0;
-  padding: 2px;
+  padding: 1px;
   background: conic-gradient(
     from var(--gaming-angle),
     #ff0000, #ff8000, #ffff00, #00ff00, #00ffff, #0080ff, #8000ff, #ff00ff, #ff0000
