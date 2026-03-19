@@ -213,6 +213,32 @@ impl Default for AppearanceSettings {
     }
 }
 
+fn default_notification_volume() -> u32 { 80 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationSoundSettings {
+    #[serde(default = "default_notification_volume")]
+    pub volume: u32, // 0-100
+    #[serde(default)]
+    pub approval: Option<String>, // None=音なし, "system:<filename>", "custom:<filename>"
+    #[serde(default)]
+    pub completed: Option<String>,
+    #[serde(default)]
+    pub general: Option<String>,
+}
+
+impl Default for NotificationSoundSettings {
+    fn default() -> Self {
+        NotificationSoundSettings {
+            volume: default_notification_volume(),
+            approval: None,
+            completed: None,
+            general: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CodeReviewSettings {
@@ -273,6 +299,8 @@ pub struct AppSettings {
     pub code_review: Option<CodeReviewSettings>,
     #[serde(default)]
     pub appearance: Option<AppearanceSettings>,
+    #[serde(default, rename = "notificationSound")]
+    pub notification_sound: Option<NotificationSoundSettings>,
 }
 
 impl Default for AppSettings {
@@ -293,6 +321,7 @@ impl Default for AppSettings {
             locale: None,
             code_review: None,
             appearance: None,
+            notification_sound: None,
         }
     }
 }
@@ -350,6 +379,56 @@ impl SettingsManager {
         *self.settings.lock().unwrap() = settings;
         Ok(())
     }
+}
+
+/// Windowsのシステムサウンドファイル一覧を返す (C:\Windows\Media\*.wav)
+#[tauri::command]
+pub fn list_system_sounds() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    {
+        let media_dir = std::path::Path::new(r"C:\Windows\Media");
+        if let Ok(entries) = std::fs::read_dir(media_dir) {
+            let mut names: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let path = e.path();
+                    if path.extension().and_then(|x| x.to_str()) == Some("wav") {
+                        path.file_name().and_then(|n| n.to_str()).map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            names.sort();
+            return names;
+        }
+    }
+    Vec::new()
+}
+
+/// カスタム通知音ファイルをアプリデータディレクトリにコピーし、コピー後のファイル名を返す
+#[tauri::command]
+pub async fn copy_custom_sound(app_handle: tauri::AppHandle, source_path: String) -> Result<String, String> {
+    let dest_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("notification-sounds");
+    std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+
+    let ext = std::path::Path::new(&source_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("wav")
+        .to_string();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let filename = format!("{}.{}", ts, ext);
+    let dest = dest_dir.join(&filename);
+    std::fs::copy(&source_path, &dest).map_err(|e| e.to_string())?;
+    Ok(filename)
 }
 
 #[cfg(test)]

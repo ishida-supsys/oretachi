@@ -7,6 +7,8 @@ import HotkeyInput from "./HotkeyInput.vue";
 import type { AiAgentKind } from "../types/settings";
 import { useI18n } from "vue-i18n";
 import { setLocale } from "../i18n";
+import { playNotificationSound } from "../utils/notificationSound";
+import type { NotificationKind } from "../composables/useNotifications";
 
 const { t } = useI18n();
 
@@ -143,6 +145,75 @@ function clearExecScript(repoId: string) {
   repo.execScript = undefined;
   scheduleSave();
 }
+
+// ─── 通知音 ───────────────────────────────────────────────────────────────────
+
+const systemSounds = ref<string[]>([]);
+
+onMounted(async () => {
+  try {
+    systemSounds.value = await invoke<string[]>("list_system_sounds");
+  } catch (e) {
+    console.error("list_system_sounds failed:", e);
+  }
+});
+
+function ensureNotificationSound() {
+  if (!settings.value.notificationSound) {
+    settings.value.notificationSound = { volume: 80 };
+  }
+}
+
+function getSoundForKind(kind: NotificationKind): string {
+  return settings.value.notificationSound?.[kind] ?? "";
+}
+
+async function setSoundForKind(kind: NotificationKind, value: string) {
+  ensureNotificationSound();
+  if (value === "__pick_custom__") {
+    const selected = await open({
+      multiple: false,
+      filters: [{ name: "Audio", extensions: ["wav", "ogg", "mp3"] }],
+    });
+    if (typeof selected !== "string") {
+      // キャンセルされた場合は元の値のままにする（リセットしない）
+      return;
+    }
+    try {
+      const filename = await invoke<string>("copy_custom_sound", { sourcePath: selected });
+      settings.value.notificationSound![kind] = `custom:${filename}`;
+    } catch (e) {
+      console.error("copy_custom_sound failed:", e);
+      return;
+    }
+  } else {
+    settings.value.notificationSound![kind] = value || null;
+  }
+  scheduleSave();
+}
+
+function getVolumeForSound(): number {
+  return settings.value.notificationSound?.volume ?? 80;
+}
+
+function setVolume(value: number) {
+  ensureNotificationSound();
+  settings.value.notificationSound!.volume = value;
+  scheduleSave();
+}
+
+async function previewSound(kind: NotificationKind) {
+  const sound = getSoundForKind(kind);
+  if (!sound) return;
+  const volume = getVolumeForSound();
+  await playNotificationSound(sound, volume).catch(() => {});
+}
+
+function getSoundLabel(sound: string | null | undefined): string {
+  if (!sound) return "";
+  if (sound.startsWith("custom:")) return sound.slice("custom:".length);
+  return sound;
+}
 </script>
 
 <template>
@@ -220,6 +291,51 @@ function clearExecScript(repoId: string) {
           @change="(e) => { settings.focusMainOnEmptyTray = (e.target as HTMLInputElement).checked; scheduleSave(); }"
         />
         <label for="focus-main-on-empty-tray" class="inline-label toggle-label">{{ t('window.focusMainOnEmptyTray') }}</label>
+      </div>
+    </div>
+
+    <!-- 通知音 -->
+    <div class="field-group">
+      <label class="field-label">{{ t('notificationSound.label') }}</label>
+      <div class="row-input mt-8">
+        <span class="inline-label">{{ t('notificationSound.volume') }}</span>
+        <input
+          type="range"
+          min="0"
+          max="100"
+          class="sound-volume-slider"
+          :value="getVolumeForSound()"
+          @change="(e) => setVolume(Number((e.target as HTMLInputElement).value))"
+        />
+        <span class="volume-label">{{ getVolumeForSound() }}</span>
+      </div>
+      <div v-for="kind in (['approval', 'completed', 'general'] as const)" :key="kind" class="row-input mt-8 sound-row">
+        <span class="inline-label sound-kind-label">{{ t(`notificationSound.kind.${kind}`) }}</span>
+        <select
+          class="text-input select-input sound-select"
+          :value="getSoundForKind(kind)"
+          @change="(e) => setSoundForKind(kind, (e.target as HTMLSelectElement).value)"
+        >
+          <option value="">{{ t('notificationSound.none') }}</option>
+          <optgroup :label="t('notificationSound.systemSounds')" v-if="systemSounds.length > 0">
+            <option
+              v-for="s in systemSounds"
+              :key="s"
+              :value="`system:${s}`"
+            >{{ s }}</option>
+          </optgroup>
+          <option value="__pick_custom__">{{ t('notificationSound.pickCustom') }}</option>
+          <option
+            v-if="getSoundForKind(kind).startsWith('custom:')"
+            :value="getSoundForKind(kind)"
+          >{{ getSoundLabel(getSoundForKind(kind)) }}</option>
+        </select>
+        <button
+          class="preview-btn"
+          :disabled="!getSoundForKind(kind)"
+          @click="previewSound(kind)"
+          :title="t('notificationSound.preview')"
+        >▶</button>
       </div>
     </div>
 
@@ -782,6 +898,56 @@ function clearExecScript(repoId: string) {
   font-size: 11px;
   color: #6c7086;
 }
+
+.sound-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.sound-kind-label {
+  min-width: 90px;
+  flex-shrink: 0;
+}
+
+.sound-select {
+  flex: 1;
+  min-width: 0;
+}
+
+.sound-volume-slider {
+  flex: 1;
+  min-width: 80px;
+  accent-color: #89b4fa;
+}
+
+.volume-label {
+  min-width: 28px;
+  text-align: right;
+  font-size: 12px;
+  color: #a6adc8;
+}
+
+.preview-btn {
+  background: transparent;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  color: #a6adc8;
+  cursor: pointer;
+  padding: 2px 6px;
+  font-size: 11px;
+  flex-shrink: 0;
+}
+
+.preview-btn:hover:not(:disabled) {
+  background: #313244;
+  color: #cdd6f4;
+}
+
+.preview-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 </style>
 
 <i18n lang="json">
@@ -850,6 +1016,19 @@ function clearExecScript(repoId: string) {
       "label": "Appearance",
       "enableAcrylic": "Enable Acrylic / LiquidGlass effect",
       "restartNote": "Changes take effect after restarting the app."
+    },
+    "notificationSound": {
+      "label": "Notification Sound",
+      "volume": "Volume",
+      "none": "None",
+      "systemSounds": "System Sounds",
+      "pickCustom": "Choose custom file...",
+      "preview": "Preview",
+      "kind": {
+        "approval": "Approval",
+        "completed": "Completed",
+        "general": "General"
+      }
     },
     "error": {
       "notARepo": "The selected folder is not a git repository.",
@@ -920,6 +1099,19 @@ function clearExecScript(repoId: string) {
       "label": "外観",
       "enableAcrylic": "Acrylic / LiquidGlass エフェクトを有効にする",
       "restartNote": "変更はアプリ再起動後に反映されます。"
+    },
+    "notificationSound": {
+      "label": "通知音",
+      "volume": "音量",
+      "none": "なし",
+      "systemSounds": "システムサウンド",
+      "pickCustom": "カスタムファイルを選択...",
+      "preview": "プレビュー",
+      "kind": {
+        "approval": "承認待ち",
+        "completed": "作業完了",
+        "general": "汎用"
+      }
     },
     "error": {
       "notARepo": "選択したフォルダは git リポジトリではありません。",

@@ -66,6 +66,13 @@ export interface AppearanceSettings {
   enableAcrylic?: boolean; // デフォルト: true
 }
 
+export interface NotificationSoundSettings {
+  volume: number;            // 0-100 (デフォルト: 80)
+  approval?: string | null;  // null/"" = 音なし, "system:<filename>", "custom:<filename>"
+  completed?: string | null;
+  general?: string | null;
+}
+
 export interface AppSettings {
   repositories: Repository[];
   worktreeBaseDir: string;
@@ -82,4 +89,5 @@ export interface AppSettings {
   locale?: string;
   codeReview?: CodeReviewSettings;
   appearance?: AppearanceSettings;
+  notificationSound?: NotificationSoundSettings;
 }

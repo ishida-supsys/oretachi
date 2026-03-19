@@ -22,7 +22,7 @@ import { useWorktrees } from "./composables/useWorktrees";
 import { useI18n } from "vue-i18n";
 import { useSubWindows } from "./composables/useSubWindows";
 import { useCodeReviewWindow } from "./composables/useCodeReviewWindow";
-import { useNotifications, sendOsNotification, type NotificationKind } from "./composables/useNotifications";
+import { useNotifications, sendOsNotification, playSoundForKind, type NotificationKind } from "./composables/useNotifications";
 import { useTrayPopup } from "./composables/useTrayPopup";
 import { useWindowFocus } from "./composables/useWindowFocus";
 import { useTasks } from "./composables/useTasks";
@@ -1079,7 +1079,8 @@ onMounted(async () => {
       general: t("notification.title"),
       approval: t("notification.titleApproval"),
       completed: t("notification.titleCompleted"),
-    }
+    },
+    () => settings.value.notificationSound,
   );
 
   // notify-worktree → 自動承認チェック
@@ -1143,6 +1144,7 @@ onMounted(async () => {
     if (!approved && !isWorktreeFocused(wt.id)) {
       await debug(`[AutoApproval] local: not approved → addNotification(${wt.id})`);
       addNotification(wt.id, "approval");
+      playSoundForKind("approval");
       await sendOsNotification(wt.name, t("notification.titleApproval"));
     }
   });
@@ -1153,6 +1155,7 @@ onMounted(async () => {
     await debug(`[AutoApproval] sub-auto-approve-result worktreeId=${wid} approved=${approved}`);
     if (!approved && !isWorktreeFocused(wid)) {
       addNotification(wid, "approval");
+      playSoundForKind("approval");
       const wtName = worktrees.value.find((w) => w.id === wid)?.name;
       if (wtName) await sendOsNotification(wtName, t("notification.titleApproval"));
     }

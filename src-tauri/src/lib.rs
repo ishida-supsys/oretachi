@@ -364,6 +364,8 @@ pub fn run() {
             task_executor::write_temp_prompt,
             start_fs_watch,
             stop_fs_watch,
+            settings::list_system_sounds,
+            settings::copy_custom_sound,
         ])
         .setup(|app| {
             // .env 読み込み（Vite の .env 規約に準拠）

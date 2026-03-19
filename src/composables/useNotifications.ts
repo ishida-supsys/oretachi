@@ -6,6 +6,8 @@ import {
   sendNotification,
   onAction,
 } from "@tauri-apps/plugin-notification";
+import { playNotificationSound } from "../utils/notificationSound";
+import type { NotificationSoundSettings } from "../types/settings";
 
 export type NotificationKind = "approval" | "completed" | "general";
 
@@ -24,11 +26,24 @@ interface NotificationEntry {
 const notifications = reactive(new Map<string, NotificationEntry>());
 let initialized = false;
 let osNotificationEnabled: (() => boolean) | undefined;
+let getSoundSettings: (() => NotificationSoundSettings | undefined) | undefined;
 let storedNotificationTitles: Record<NotificationKind, string> = {
   general: "Notification",
   approval: "Notification",
   completed: "Notification",
 };
+
+/**
+ * 通知音を再生する。OS通知とは独立して動作する。
+ */
+export function playSoundForKind(kind: NotificationKind) {
+  const ss = getSoundSettings?.();
+  if (!ss) return;
+  const sound = ss[kind];
+  if (sound) {
+    playNotificationSound(sound, ss.volume ?? 80).catch(() => {});
+  }
+}
 
 /**
  * OS通知を送信する。App.vue の自動承認不承認ハンドラからも呼ばれる。
@@ -56,11 +71,13 @@ export function useNotifications() {
     shouldHold?: (worktreeId: string, kind: NotificationKind) => boolean,
     isOsNotificationEnabledFn?: () => boolean,
     focusWorktree?: (worktreeId: string) => void,
-    notificationTitles?: Record<NotificationKind, string>
+    notificationTitles?: Record<NotificationKind, string>,
+    getSoundSettingsFn?: () => NotificationSoundSettings | undefined,
   ) {
     if (initialized) return;
     initialized = true;
     osNotificationEnabled = isOsNotificationEnabledFn;
+    getSoundSettings = getSoundSettingsFn;
     if (notificationTitles) storedNotificationTitles = notificationTitles;
 
     await listen<NotifyWorktreeEvent>("notify-worktree", async (event) => {
@@ -69,6 +86,7 @@ export function useNotifications() {
       if (id) {
         if (shouldHold?.(id, kind)) return;
         addNotification(id, kind);
+        playSoundForKind(kind);
         await sendOsNotification(worktreeName, undefined, kind);
       }
     });
