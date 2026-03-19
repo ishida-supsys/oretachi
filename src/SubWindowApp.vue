@@ -515,7 +515,10 @@ async function onCancelAiJudging() {
 </script>
 
 <template>
-  <div class="h-screen flex flex-col bg-transparent text-[#cdd6f4] select-none">
+  <div
+    class="h-screen flex flex-col bg-transparent text-[#cdd6f4] select-none"
+    :class="{ 'gaming-border': settings.appearance?.enableGamingBorder }"
+  >
     <!-- 初期化中 -->
     <div v-if="!initialized" class="flex items-center justify-center h-full text-[#6c7086] text-sm">
       {{ t('connecting') }}

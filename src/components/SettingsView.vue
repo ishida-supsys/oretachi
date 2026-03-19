@@ -628,6 +628,20 @@ function getSoundLabel(sound: string | null | undefined): string {
         />
         <label for="appearance-enable-acrylic" class="inline-label toggle-label">{{ t('appearance.enableAcrylic') }}</label>
       </div>
+      <div class="row-input row-input--inline mt-8">
+        <input
+          id="appearance-enable-gaming-border"
+          type="checkbox"
+          class="toggle-checkbox"
+          :checked="settings.appearance?.enableGamingBorder ?? false"
+          @change="(e) => {
+            if (!settings.appearance) settings.appearance = {};
+            settings.appearance.enableGamingBorder = (e.target as HTMLInputElement).checked;
+            scheduleSave();
+          }"
+        />
+        <label for="appearance-enable-gaming-border" class="inline-label toggle-label">{{ t('appearance.enableGamingBorder') }}</label>
+      </div>
       <p class="appearance-note">{{ t('appearance.restartNote') }}</p>
       <div v-if="settings.appearance?.enableAcrylic ?? true" class="appearance-acrylic-controls">
         <div class="row-input row-input--inline">
@@ -1080,6 +1094,7 @@ function getSoundLabel(sound: string | null | undefined): string {
     "appearance": {
       "label": "Appearance",
       "enableAcrylic": "Enable Acrylic / LiquidGlass effect",
+      "enableGamingBorder": "Enable gaming color border",
       "restartNote": "Enabling/disabling the effect requires restarting the app.",
       "opacity": "Opacity",
       "color": "Tint color"
@@ -1165,6 +1180,7 @@ function getSoundLabel(sound: string | null | undefined): string {
     "appearance": {
       "label": "外観",
       "enableAcrylic": "Acrylic / LiquidGlass エフェクトを有効にする",
+      "enableGamingBorder": "ゲーミングカラーボーダーを有効にする",
       "restartNote": "エフェクトの有効/無効はアプリ再起動後に反映されます。",
       "opacity": "不透明度",
       "color": "背景色"

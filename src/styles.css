@@ -65,3 +65,37 @@ body {
     background-size: 200% 200%;
   }
 }
+
+@property --gaming-angle {
+  syntax: "<angle>";
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes gaming-border-rotate {
+  0%   { --gaming-angle: 0deg; }
+  100% { --gaming-angle: 360deg; }
+}
+
+.gaming-border {
+  position: relative;
+}
+
+.gaming-border::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  padding: 2px;
+  background: conic-gradient(
+    from var(--gaming-angle),
+    #ff0000, #ff8000, #ffff00, #00ff00, #00ffff, #0080ff, #8000ff, #ff00ff, #ff0000
+  );
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  animation: gaming-border-rotate 3s linear infinite;
+  pointer-events: none;
+  z-index: 9999;
+}

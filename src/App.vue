@@ -1397,7 +1397,10 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="h-screen flex flex-col bg-transparent text-[#cdd6f4] select-none">
+  <div
+    class="h-screen flex flex-col bg-transparent text-[#cdd6f4] select-none"
+    :class="{ 'gaming-border': settings.appearance?.enableGamingBorder }"
+  >
     <!-- タブバー -->
     <div 
       class="flex items-center border-b shrink-0 min-h-0 transition-colors duration-200"
