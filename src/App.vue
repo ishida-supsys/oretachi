@@ -286,6 +286,22 @@ function goSettings() {
   activeWorktreeId.value = null;
 }
 
+function onTabBarDrag(e: MouseEvent) {
+  if ((e.target as HTMLElement).closest("button")) return;
+  getCurrentWindow().startDragging();
+}
+
+async function minimizeWindow() {
+  await getCurrentWindow().minimize();
+}
+
+async function toggleMaximizeWindow() {
+  await getCurrentWindow().toggleMaximize();
+}
+
+async function closeWindow() {
+  await getCurrentWindow().close();
+}
 
 async function onAddTerminal(worktreeId: string) {
   clearNotification(worktreeId);
@@ -1394,6 +1410,7 @@ onMounted(async () => {
     await getCurrentWindow().destroy();
   });
 });
+
 </script>
 
 <template>
@@ -1407,6 +1424,7 @@ onMounted(async () => {
       class="flex items-center border-b shrink-0 min-h-0 transition-colors duration-200"
       style="background-color: var(--bg-mantle)"
       :class="isWindowFocused ? 'border-[#cba6f7]/50' : 'opacity-90 border-[#313244]'"
+      @mousedown.left="onTabBarDrag"
     >
       <!-- ホームボタン -->
       <button
@@ -1454,6 +1472,34 @@ onMounted(async () => {
             class="text-[9px] px-1 py-0.5 rounded-full font-bold shrink-0 leading-none"
             style="background: #f38ba8; color: #1e1e2e; min-width: 14px; text-align: center;"
           >{{ notificationCounts.get(wt.id) }}</span>
+        </button>
+      </div>
+
+      <!-- ウィンドウコントロール -->
+      <div class="flex shrink-0 items-stretch">
+        <button
+          class="flex items-center justify-center h-8 hover:bg-[#313244] text-[#6c7086] hover:text-[#cdd6f4] transition-colors"
+          style="width: 42px;"
+          :title="t('minimize')"
+          @click="minimizeWindow"
+        >
+          <span class="pi pi-minus text-xs" />
+        </button>
+        <button
+          class="flex items-center justify-center h-8 hover:bg-[#313244] text-[#6c7086] hover:text-[#cdd6f4] transition-colors"
+          style="width: 42px;"
+          :title="t('maximize')"
+          @click="toggleMaximizeWindow"
+        >
+          <span class="pi pi-stop text-xs" />
+        </button>
+        <button
+          class="flex items-center justify-center h-8 hover:bg-[#c0392b] hover:text-white text-[#6c7086] transition-colors"
+          style="width: 42px;"
+          :title="t('close')"
+          @click="closeWindow"
+        >
+          <span class="pi pi-times text-xs" />
         </button>
       </div>
     </div>
@@ -1662,7 +1708,10 @@ onMounted(async () => {
     "ideLaunchFailed": "Failed to launch IDE: {error}",
     "lfsWarning": "Failed to fetch Git LFS files; worktree was created without LFS files.\nIf you need LFS files, run git lfs pull.",
     "worktreeCreateFailed": "Failed to create worktree: {error}",
-    "shuttingDown": "Waiting for operations to finish..."
+    "shuttingDown": "Waiting for operations to finish...",
+    "minimize": "Minimize",
+    "maximize": "Maximize",
+    "close": "Close"
   },
   "ja": {
     "taskAddSummary": "タスク追加",
@@ -1683,7 +1732,10 @@ onMounted(async () => {
     "ideLaunchFailed": "IDE の起動に失敗しました: {error}",
     "lfsWarning": "Git LFS のファイル取得に失敗したため、LFS ファイルをスキップしてワークツリーを作成しました。\nLFS ファイルが必要な場合は git lfs pull を実行してください。",
     "worktreeCreateFailed": "ワークツリーの作成に失敗しました: {error}",
-    "shuttingDown": "処理の完了を待っています..."
+    "shuttingDown": "処理の完了を待っています...",
+    "minimize": "最小化",
+    "maximize": "最大化",
+    "close": "閉じる"
   }
 }
 </i18n>

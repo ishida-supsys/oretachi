@@ -317,6 +317,10 @@ pub fn run() {
         )
         .plugin(
             tauri_plugin_window_state::Builder::new()
+                .with_state_flags(
+                    tauri_plugin_window_state::StateFlags::all()
+                        .difference(tauri_plugin_window_state::StateFlags::DECORATIONS),
+                )
                 .with_denylist(&["tray-popup"])
                 .build(),
         )
