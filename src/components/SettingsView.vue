@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, message } from "@tauri-apps/plugin-dialog";
 import { useSettings } from "../composables/useSettings";
 import HotkeyInput from "./HotkeyInput.vue";
+import ColorPicker from "primevue/colorpicker";
 import type { AiAgentKind } from "../types/settings";
 import { useI18n } from "vue-i18n";
 import { setLocale } from "../i18n";
@@ -144,6 +145,18 @@ function clearExecScript(repoId: string) {
   if (!repo) return;
   repo.execScript = undefined;
   scheduleSave();
+}
+
+// ─── 外観 ─────────────────────────────────────────────────────────────────────
+
+function applyAcrylicEffect() {
+  const app = settings.value.appearance;
+  const hex = (app?.acrylicColor ?? "#121212").replace("#", "");
+  const r = parseInt(hex.substring(0, 2), 16) || 18;
+  const g = parseInt(hex.substring(2, 4), 16) || 18;
+  const b = parseInt(hex.substring(4, 6), 16) || 18;
+  const a = app?.acrylicOpacity ?? 125;
+  invoke("apply_acrylic_effect", { r, g, b, a }).catch(() => {});
 }
 
 // ─── 通知音 ───────────────────────────────────────────────────────────────────
@@ -616,6 +629,38 @@ function getSoundLabel(sound: string | null | undefined): string {
         <label for="appearance-enable-acrylic" class="inline-label toggle-label">{{ t('appearance.enableAcrylic') }}</label>
       </div>
       <p class="appearance-note">{{ t('appearance.restartNote') }}</p>
+      <div v-if="settings.appearance?.enableAcrylic ?? true" class="appearance-acrylic-controls">
+        <div class="row-input row-input--inline">
+          <label class="inline-label">{{ t('appearance.opacity') }}</label>
+          <input
+            type="range"
+            min="0"
+            max="255"
+            class="acrylic-opacity-slider"
+            :value="settings.appearance?.acrylicOpacity ?? 125"
+            @input="(e) => {
+              if (!settings.appearance) settings.appearance = {};
+              settings.appearance.acrylicOpacity = Number((e.target as HTMLInputElement).value);
+              scheduleSave();
+              applyAcrylicEffect();
+            }"
+          />
+          <span class="acrylic-opacity-value">{{ settings.appearance?.acrylicOpacity ?? 125 }}</span>
+        </div>
+        <div class="row-input row-input--inline">
+          <label class="inline-label">{{ t('appearance.color') }}</label>
+          <ColorPicker
+            :model-value="(settings.appearance?.acrylicColor ?? '#121212').replace('#', '')"
+            format="hex"
+            @update:model-value="(val: string) => {
+              if (!settings.appearance) settings.appearance = {};
+              settings.appearance.acrylicColor = '#' + val;
+              scheduleSave();
+              applyAcrylicEffect();
+            }"
+          />
+        </div>
+      </div>
     </div>
   </div>
 </template>
@@ -899,6 +944,26 @@ function getSoundLabel(sound: string | null | undefined): string {
   color: #6c7086;
 }
 
+.appearance-acrylic-controls {
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.acrylic-opacity-slider {
+  flex: 1;
+  min-width: 80px;
+  accent-color: #89b4fa;
+}
+
+.acrylic-opacity-value {
+  min-width: 28px;
+  text-align: right;
+  font-size: 12px;
+  color: #a6adc8;
+}
+
 .sound-row {
   display: flex;
   align-items: center;
@@ -1015,7 +1080,9 @@ function getSoundLabel(sound: string | null | undefined): string {
     "appearance": {
       "label": "Appearance",
       "enableAcrylic": "Enable Acrylic / LiquidGlass effect",
-      "restartNote": "Changes take effect after restarting the app."
+      "restartNote": "Enabling/disabling the effect requires restarting the app.",
+      "opacity": "Opacity",
+      "color": "Tint color"
     },
     "notificationSound": {
       "label": "Notification Sound",
@@ -1098,7 +1165,9 @@ function getSoundLabel(sound: string | null | undefined): string {
     "appearance": {
       "label": "外観",
       "enableAcrylic": "Acrylic / LiquidGlass エフェクトを有効にする",
-      "restartNote": "変更はアプリ再起動後に反映されます。"
+      "restartNote": "エフェクトの有効/無効はアプリ再起動後に反映されます。",
+      "opacity": "不透明度",
+      "color": "背景色"
     },
     "notificationSound": {
       "label": "通知音",

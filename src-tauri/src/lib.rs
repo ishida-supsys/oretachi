@@ -82,6 +82,19 @@ fn save_settings(state: State<SettingsManager>, settings: AppSettings) -> Result
     state.save(settings)
 }
 
+#[tauri::command]
+fn apply_acrylic_effect(app_handle: tauri::AppHandle, r: u8, g: u8, b: u8, a: u8) {
+    #[cfg(target_os = "windows")]
+    {
+        for (_, window) in app_handle.webview_windows() {
+            if let Ok(hwnd) = window.hwnd() {
+                acrylic::setup(hwnd.0, r, g, b, a);
+            }
+        }
+    }
+    let _ = (app_handle, r, g, b, a);
+}
+
 // ─── Git コマンド ─────────────────────────────────────────────────────────────
 
 async fn run_git<F, T>(f: F) -> Result<T, String>
@@ -263,21 +276,23 @@ pub fn run() {
     }
 
     #[cfg(target_os = "windows")]
-    let acrylic_enabled = acrylic::load_enabled();
+    let (acrylic_enabled, acrylic_opacity, acrylic_color) = acrylic::load_settings();
     #[cfg(not(target_os = "windows"))]
-    let acrylic_enabled = true;
+    let (acrylic_enabled, acrylic_opacity, acrylic_color) = (true, 125u8, "#121212".to_string());
 
     let mut builder = tauri::Builder::default();
     if acrylic_enabled {
+        let (r, g, b) = acrylic::parse_color(&acrylic_color);
+        let a = acrylic_opacity;
         builder = builder
             .plugin(tauri_plugin_liquid_glass::init())
             .plugin(
                 tauri::plugin::Builder::<tauri::Wry>::new("acrylic-effect")
-                    .on_window_ready(|window| {
+                    .on_window_ready(move |window| {
                         #[cfg(target_os = "windows")]
                         {
                             if let Ok(hwnd) = window.hwnd() {
-                                acrylic::setup(hwnd.0, 18, 18, 18, 125);
+                                acrylic::setup(hwnd.0, r, g, b, a);
                             }
                         }
                         let _ = window;
@@ -367,6 +382,7 @@ pub fn run() {
             settings::list_system_sounds,
             settings::copy_custom_sound,
             settings::read_audio_file,
+            apply_acrylic_effect,
         ])
         .setup(|app| {
             // .env 読み込み（Vite の .env 規約に準拠）

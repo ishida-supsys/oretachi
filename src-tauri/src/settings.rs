@@ -205,11 +205,15 @@ fn default_true() -> bool { true }
 pub struct AppearanceSettings {
     #[serde(default = "default_true", rename = "enableAcrylic")]
     pub enable_acrylic: bool,
+    #[serde(default, rename = "acrylicOpacity")]
+    pub acrylic_opacity: Option<u8>,
+    #[serde(default, rename = "acrylicColor")]
+    pub acrylic_color: Option<String>,
 }
 
 impl Default for AppearanceSettings {
     fn default() -> Self {
-        AppearanceSettings { enable_acrylic: true }
+        AppearanceSettings { enable_acrylic: true, acrylic_opacity: None, acrylic_color: None }
     }
 }
 

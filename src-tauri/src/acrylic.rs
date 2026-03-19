@@ -150,24 +150,54 @@ pub fn setup(hwnd: HWND, r: u8, g: u8, b: u8, a: u8) {
     }
 }
 
-/// settings.json から appearance.enableAcrylic を先読みする。
+/// Win11 (backdrop/acrylic) かどうかで適切なデフォルト不透明度を返す。
+pub fn default_opacity() -> u8 {
+    if is_backdrop_supported() { 125 } else { 240 }
+}
+
+/// "#RRGGBB" 文字列を (r, g, b) にパースする。失敗時は (18, 18, 18) を返す。
+pub fn parse_color(hex: &str) -> (u8, u8, u8) {
+    let hex = hex.trim_start_matches('#');
+    if hex.len() == 6 {
+        if let (Ok(r), Ok(g), Ok(b)) = (
+            u8::from_str_radix(&hex[0..2], 16),
+            u8::from_str_radix(&hex[2..4], 16),
+            u8::from_str_radix(&hex[4..6], 16),
+        ) {
+            return (r, g, b);
+        }
+    }
+    (18, 18, 18)
+}
+
+/// settings.json から appearance 設定を先読みする。
 /// SettingsManager の初期化前に呼ぶ必要があるため、ファイルを直接読む。
-pub fn load_enabled() -> bool {
+/// 戻り値: (enabled, opacity, color_hex)
+pub fn load_settings() -> (bool, u8, String) {
     let settings_path = std::env::var("APPDATA")
         .ok()
         .map(|p| std::path::PathBuf::from(p).join("com.ia.oretachi").join("settings.json"));
     if let Some(path) = settings_path {
         if let Ok(content) = std::fs::read_to_string(&path) {
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(enabled) = json
-                    .get("appearance")
+                let appearance = json.get("appearance");
+                let enabled = appearance
                     .and_then(|a| a.get("enableAcrylic"))
                     .and_then(|v| v.as_bool())
-                {
-                    return enabled;
-                }
+                    .unwrap_or(true);
+                let opacity = appearance
+                    .and_then(|a| a.get("acrylicOpacity"))
+                    .and_then(|v| v.as_u64())
+                    .map(|v| v as u8)
+                    .unwrap_or_else(default_opacity);
+                let color = appearance
+                    .and_then(|a| a.get("acrylicColor"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("#121212")
+                    .to_string();
+                return (enabled, opacity, color);
             }
         }
     }
-    true // デフォルト: 有効
+    (true, default_opacity(), "#121212".to_string())
 }
