@@ -245,6 +245,22 @@ async fn restart_mcp_server(app_handle: tauri::AppHandle) -> Result<mcp_server::
     Ok(manager.get_status())
 }
 
+// ─── アーティファクトコマンド ─────────────────────────────────────────────────
+
+#[tauri::command]
+fn delete_artifacts(app_handle: tauri::AppHandle, worktree_id: String) -> Result<(), String> {
+    let artifacts_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("artifacts")
+        .join(&worktree_id);
+    if artifacts_dir.exists() {
+        std::fs::remove_dir_all(&artifacts_dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 // ─── FS ウォッチャーコマンド ──────────────────────────────────────────────────
 
 #[tauri::command]
@@ -377,6 +393,7 @@ pub fn run() {
             terminal_session::delete_terminal_session,
             task_executor::task_generate,
             task_executor::write_temp_prompt,
+            delete_artifacts,
             start_fs_watch,
             stop_fs_watch,
             settings::list_system_sounds,

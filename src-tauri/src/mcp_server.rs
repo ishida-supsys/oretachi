@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, sync::{Arc, Mutex}};
+use std::{fs, path::PathBuf, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}};
 
 use axum::{extract::State, http::StatusCode, routing::post, Json};
 use rmcp::{
@@ -76,6 +76,42 @@ pub struct NotifyWorktreeEvent {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ArtifactParams {
+    #[schemars(description = "操作の種類: \"create\"(新規作成) / \"update\"(差分更新) / \"rewrite\"(全置換)")]
+    pub command: String,
+    #[schemars(description = "アーティファクトを識別する一意なID")]
+    pub id: String,
+    #[schemars(description = "対象ワークツリーのID")]
+    pub worktree_id: String,
+    #[schemars(description = "コンテンツの種類 (create時必須): application/vnd.ant.code, text/markdown, text/html, image/svg+xml, application/vnd.ant.mermaid, application/vnd.ant.react")]
+    #[serde(rename = "type")]
+    pub content_type: Option<String>,
+    #[schemars(description = "アーティファクトのタイトル (create時必須)")]
+    pub title: Option<String>,
+    #[schemars(description = "アーティファクトの中身 (create/rewrite時必須)")]
+    pub content: Option<String>,
+    #[schemars(description = "コード言語 (type=application/vnd.ant.code の時のみ)")]
+    pub language: Option<String>,
+    #[schemars(description = "update時: 置き換え元の文字列 (アーティファクト内に1箇所だけ存在すること)")]
+    pub old_str: Option<String>,
+    #[schemars(description = "update時: 置き換え後の文字列")]
+    pub new_str: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ArtifactData {
+    id: String,
+    #[serde(rename = "type")]
+    content_type: String,
+    title: String,
+    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    language: Option<String>,
+    created_at: u64,
+    updated_at: u64,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListRepositoryParams {}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -96,6 +132,109 @@ impl NotifyService {
             app_handle,
             tool_router: Self::tool_router(),
         }
+    }
+
+    #[tool(description = "アーティファクトを作成・更新・書き換えする。create: 新規作成, update: 差分更新(old_str→new_str), rewrite: 全置換")]
+    fn artifact(
+        &self,
+        Parameters(ArtifactParams {
+            command,
+            id,
+            worktree_id,
+            content_type,
+            title,
+            content,
+            language,
+            old_str,
+            new_str,
+        }): Parameters<ArtifactParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+        if !settings.worktrees.iter().any(|wt| wt.id == worktree_id) {
+            return Err(McpError::invalid_params(
+                format!("worktree_id '{}' は存在しません", worktree_id),
+                None,
+            ));
+        }
+
+        let artifacts_dir = self
+            .app_handle
+            .path()
+            .app_data_dir()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            .join("artifacts")
+            .join(&worktree_id);
+
+        let artifact_path = artifacts_dir.join(format!("{}.json", id));
+
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let data = match command.as_str() {
+            "create" => {
+                let content_type = content_type.ok_or_else(|| {
+                    McpError::invalid_params("create には type が必須です".to_string(), None)
+                })?;
+                let title = title.ok_or_else(|| {
+                    McpError::invalid_params("create には title が必須です".to_string(), None)
+                })?;
+                let content = content.ok_or_else(|| {
+                    McpError::invalid_params("create には content が必須です".to_string(), None)
+                })?;
+                fs::create_dir_all(&artifacts_dir)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                ArtifactData { id: id.clone(), content_type, title, content, language, created_at: now, updated_at: now }
+            }
+            "update" => {
+                let old_str = old_str.ok_or_else(|| {
+                    McpError::invalid_params("update には old_str が必須です".to_string(), None)
+                })?;
+                let new_str = new_str.ok_or_else(|| {
+                    McpError::invalid_params("update には new_str が必須です".to_string(), None)
+                })?;
+                let raw = fs::read_to_string(&artifact_path)
+                    .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))?;
+                let mut data: ArtifactData = serde_json::from_str(&raw)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                let count = data.content.matches(&old_str as &str).count();
+                if count == 0 {
+                    return Err(McpError::invalid_params("old_str がアーティファクト内に見つかりません".to_string(), None));
+                }
+                if count > 1 {
+                    return Err(McpError::invalid_params("old_str がアーティファクト内に複数箇所存在します。より長い文字列を指定してください".to_string(), None));
+                }
+                data.content = data.content.replacen(&old_str as &str, &new_str, 1);
+                data.updated_at = now;
+                data
+            }
+            "rewrite" => {
+                let content = content.ok_or_else(|| {
+                    McpError::invalid_params("rewrite には content が必須です".to_string(), None)
+                })?;
+                let raw = fs::read_to_string(&artifact_path)
+                    .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))?;
+                let mut data: ArtifactData = serde_json::from_str(&raw)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                data.content = content;
+                data.updated_at = now;
+                data
+            }
+            other => return Err(McpError::invalid_params(
+                format!("不明なコマンド '{}'. create / update / rewrite のいずれかを指定してください", other),
+                None,
+            )),
+        };
+
+        let json = serde_json::to_string_pretty(&data)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        fs::write(&artifact_path, &json)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        log::info!("[mcp] artifact command={} id={} worktree_id={}", command, id, worktree_id);
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
     #[tool(description = "ワークツリーに通知を送信する")]
@@ -129,6 +268,7 @@ impl NotifyService {
             .iter()
             .map(|wt| {
                 serde_json::json!({
+                    "id": wt.id,
                     "name": wt.name,
                     "repositoryName": wt.repository_name,
                     "branchName": wt.branch_name,
