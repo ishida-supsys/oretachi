@@ -35,6 +35,8 @@ async function mountApp() {
     rootComponent = (await import("./TrayPopupApp.vue")).default;
   } else if (mode === "codereview") {
     rootComponent = (await import("./CodeReviewApp.vue")).default;
+  } else if (mode === "artifact") {
+    rootComponent = (await import("./ArtifactViewerApp.vue")).default;
   } else {
     rootComponent = (await import("./App.vue")).default;
   }

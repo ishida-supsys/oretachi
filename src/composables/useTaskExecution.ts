@@ -228,9 +228,6 @@ export function useTaskExecution(deps: {
       return;
     }
 
-    // 一時ファイルにプロンプトを書き出し
-    const tempPath = await invoke<string>("write_temp_prompt", { content: code.prompt });
-
     const agentKind = settings.value.aiAgent?.taskAddAgent ?? settings.value.aiAgent?.approvalAgent ?? "claudeCode";
     const isWindows = platform() === "windows";
     const shell = resolveShell(wt.id);
@@ -239,6 +236,12 @@ export function useTaskExecution(deps: {
       shellLower.includes("powershell") ||
       shellLower.includes("pwsh") ||
       (shell === undefined && isWindows);
+
+    const worktreeContext = `[System] あなたが作業中のワークツリーIDは ${wt.id} です。artifactツールを使用する際は、このworktree_idを指定してください。\n\n`;
+    const effectivePrompt = agentKind === "claudeCode" ? code.prompt : worktreeContext + code.prompt;
+
+    // 一時ファイルにプロンプトを書き出し
+    const tempPath = await invoke<string>("write_temp_prompt", { content: effectivePrompt });
 
     let agentCmd: string;
     switch (agentKind) {
@@ -250,7 +253,17 @@ export function useTaskExecution(deps: {
     }
 
     let command: string;
-    if (isPowerShell) {
+    if (agentKind === "claudeCode") {
+      // Claude Code: --append-system-prompt で一時ファイル経由でworktree_idを渡す
+      const systemPromptPath = await invoke<string>("write_temp_prompt", {
+        content: `あなたが作業中のワークツリーIDは ${wt.id} です。artifactツールを使用する際は、このworktree_idを指定してください。`,
+      });
+      if (isPowerShell) {
+        command = `$p = Get-Content "${tempPath}" -Raw -Encoding UTF8; $sp = Get-Content "${systemPromptPath}" -Raw -Encoding UTF8; ${agentCmd} --append-system-prompt $sp $p; Remove-Item "${tempPath}"; Remove-Item "${systemPromptPath}"\r`;
+      } else {
+        command = `${agentCmd} --append-system-prompt "$(cat "${systemPromptPath}")" "$(cat "${tempPath}")"; rm "${tempPath}" "${systemPromptPath}"\r`;
+      }
+    } else if (isPowerShell) {
       command = `$p = Get-Content "${tempPath}" -Raw -Encoding UTF8; ${agentCmd} $p; Remove-Item "${tempPath}"\r`;
     } else {
       command = `${agentCmd} "$(cat "${tempPath}")"; rm "${tempPath}"\r`;

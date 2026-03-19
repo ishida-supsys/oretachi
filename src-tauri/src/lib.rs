@@ -245,6 +245,72 @@ async fn restart_mcp_server(app_handle: tauri::AppHandle) -> Result<mcp_server::
     Ok(manager.get_status())
 }
 
+// ─── アーティファクトコマンド ─────────────────────────────────────────────────
+
+#[tauri::command]
+fn list_artifacts(
+    app_handle: tauri::AppHandle,
+    worktree_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let artifacts_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("artifacts")
+        .join(&worktree_id);
+    if !artifacts_dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut artifacts = Vec::new();
+    let entries = std::fs::read_dir(&artifacts_dir).map_err(|e| e.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            artifacts.push(val);
+        }
+    }
+    // updated_at 降順でソート
+    artifacts.sort_by(|a, b| {
+        let a_time = a.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        let b_time = b.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        b_time.cmp(&a_time)
+    });
+    Ok(artifacts)
+}
+
+#[tauri::command]
+fn read_artifact(
+    app_handle: tauri::AppHandle,
+    worktree_id: String,
+    artifact_id: String,
+) -> Result<String, String> {
+    let artifact_path = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("artifacts")
+        .join(&worktree_id)
+        .join(format!("{}.json", artifact_id));
+    std::fs::read_to_string(&artifact_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn delete_artifacts(app_handle: tauri::AppHandle, worktree_id: String) -> Result<(), String> {
+    let artifacts_dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("artifacts")
+        .join(&worktree_id);
+    if artifacts_dir.exists() {
+        std::fs::remove_dir_all(&artifacts_dir).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 // ─── FS ウォッチャーコマンド ──────────────────────────────────────────────────
 
 #[tauri::command]
@@ -381,6 +447,9 @@ pub fn run() {
             terminal_session::delete_terminal_session,
             task_executor::task_generate,
             task_executor::write_temp_prompt,
+            list_artifacts,
+            read_artifact,
+            delete_artifacts,
             start_fs_watch,
             stop_fs_watch,
             settings::list_system_sounds,

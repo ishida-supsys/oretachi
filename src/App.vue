@@ -22,6 +22,7 @@ import { useWorktrees } from "./composables/useWorktrees";
 import { useI18n } from "vue-i18n";
 import { useSubWindows } from "./composables/useSubWindows";
 import { useCodeReviewWindow } from "./composables/useCodeReviewWindow";
+import { useArtifactWindow } from "./composables/useArtifactWindow";
 import { useNotifications, sendOsNotification, playSoundForKind, type NotificationKind } from "./composables/useNotifications";
 import { useTrayPopup } from "./composables/useTrayPopup";
 import { useWindowFocus } from "./composables/useWindowFocus";
@@ -65,6 +66,7 @@ const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusS
 const { notifications, initNotificationListener, addNotification, clearNotification, purgeStaleNotifications, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
 const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees, setCurrentTrayWorktreeId, isTrayShowingWorktree, focusTrayWindow } = useTrayPopup();
 const { closeAllCodeReviewWindows } = useCodeReviewWindow();
+const { openArtifactViewer } = useArtifactWindow();
 const { tryAutoAssignHotkey } = useAutoHotkey();
 const { sortedTasks, removeTask } = useTasks();
 
@@ -453,6 +455,12 @@ async function onOpenInIde(worktreeId: string) {
   const worktree = worktrees.value.find((w) => w.id === worktreeId);
   if (!worktree) return;
   await openInIde(worktree.path, { worktreeId: worktree.id, worktreeName: worktree.name });
+}
+
+async function onOpenArtifacts(worktreeId: string) {
+  const worktree = worktrees.value.find((w) => w.id === worktreeId);
+  if (!worktree) return;
+  await openArtifactViewer(worktree.id, worktree.name);
 }
 
 async function onAddWorktreeConfirm(entry: WorktreeEntry) {
@@ -1524,6 +1532,7 @@ onMounted(async () => {
         @remove-worktree="onRemoveWorktree"
         @add-terminal="onAddTerminal"
         @open-in-ide="onOpenInIde"
+        @open-artifacts="onOpenArtifacts"
         @move-to-sub-window="onMoveToSubWindow"
         @move-to-main-window="onMoveToMainWindow"
         @focus-sub-window="onFocusSubWindow"

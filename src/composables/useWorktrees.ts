@@ -98,6 +98,13 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
   } catch {
     // ファイルが存在しない場合は無視
   }
+
+  // アーティファクトを削除
+  try {
+    await invoke("delete_artifacts", { worktreeId });
+  } catch {
+    // ディレクトリが存在しない場合は無視
+  }
 }
 
 /** ローカルブランチ一覧を取得 */
