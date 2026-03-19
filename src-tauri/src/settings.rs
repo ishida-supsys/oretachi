@@ -431,6 +431,27 @@ pub async fn copy_custom_sound(app_handle: tauri::AppHandle, source_path: String
     Ok(filename)
 }
 
+/// 音声ファイルをバイト列として読み込み、base64エンコードして返す
+#[tauri::command]
+pub async fn read_audio_file(app_handle: tauri::AppHandle, sound: String) -> Result<String, String> {
+    let path = if let Some(filename) = sound.strip_prefix("system:") {
+        std::path::PathBuf::from(format!(r"C:\Windows\Media\{}", filename))
+    } else if let Some(filename) = sound.strip_prefix("custom:") {
+        app_handle
+            .path()
+            .app_data_dir()
+            .map_err(|e| e.to_string())?
+            .join("notification-sounds")
+            .join(filename)
+    } else {
+        return Err("Invalid sound prefix".to_string());
+    };
+
+    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    use base64::Engine;
+    Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

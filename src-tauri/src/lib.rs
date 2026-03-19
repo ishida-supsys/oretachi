@@ -366,6 +366,7 @@ pub fn run() {
             stop_fs_watch,
             settings::list_system_sounds,
             settings::copy_custom_sound,
+            settings::read_audio_file,
         ])
         .setup(|app| {
             // .env 読み込み（Vite の .env 規約に準拠）
