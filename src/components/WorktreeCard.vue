@@ -31,6 +31,7 @@ const emit = defineEmits<{
   setHotkeyChar: [worktreeId: string];
   toggleAutoApproval: [worktreeId: string];
   cancelAiJudging: [worktreeId: string];
+  openArtifacts: [worktreeId: string];
 }>();
 
 const menuRef = ref<InstanceType<typeof Popover> | null>(null);
@@ -100,6 +101,12 @@ const terminalList = computed(() =>
           :disabled="loading"
           @click="emit('openInIde', worktree.id)"
         ><span class="pi pi-code" /></button>
+        <button
+          class="btn-icon"
+          :title="t('openArtifacts')"
+          :disabled="loading"
+          @click="emit('openArtifacts', worktree.id)"
+        ><span class="pi pi-box" /></button>
         <button
           v-if="!detached"
           class="btn-icon"
@@ -366,6 +373,7 @@ const terminalList = computed(() =>
     "autoApprovalBadge": "Auto approval",
     "aiJudgingBadge": "AI judging",
     "openInIde": "Open in IDE",
+    "openArtifacts": "Open artifacts",
     "addTerminal": "Add terminal",
     "noTerminals": "No terminals",
     "deletingText": "Deleting...",
@@ -382,6 +390,7 @@ const terminalList = computed(() =>
     "autoApprovalBadge": "自動承認",
     "aiJudgingBadge": "AI判定中",
     "openInIde": "IDE で開く",
+    "openArtifacts": "アーティファクト",
     "addTerminal": "ターミナルを追加",
     "noTerminals": "ターミナルがありません",
     "deletingText": "削除中...",

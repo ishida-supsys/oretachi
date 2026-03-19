@@ -234,6 +234,13 @@ impl NotifyService {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         log::info!("[mcp] artifact command={} id={} worktree_id={}", command, id, worktree_id);
+        self.app_handle
+            .emit("artifact-changed", serde_json::json!({
+                "worktreeId": worktree_id,
+                "artifactId": id,
+                "command": command,
+            }))
+            .ok();
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 

@@ -27,6 +27,7 @@ const emit = defineEmits<{
   removeWorktree: [worktreeId: string];
   addTerminal: [worktreeId: string];
   openInIde: [worktreeId: string];
+  openArtifacts: [worktreeId: string];
   moveToSubWindow: [worktreeId: string];
   moveToMainWindow: [worktreeId: string];
   focusSubWindow: [worktreeId: string];
@@ -116,6 +117,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
             @add-terminal="emit('addTerminal', $event)"
             @remove-worktree="emit('removeWorktree', $event)"
             @open-in-ide="emit('openInIde', $event)"
+            @open-artifacts="emit('openArtifacts', $event)"
             @move-to-sub-window="emit('moveToSubWindow', $event)"
             @move-to-main-window="emit('moveToMainWindow', $event)"
             @focus-sub-window="emit('focusSubWindow', $event)"
