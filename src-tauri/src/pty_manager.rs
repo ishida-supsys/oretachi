@@ -467,7 +467,7 @@ impl PtyManager {
     pub fn kill(&self, session_id: u32) -> Result<(), String> {
         log::debug!("[Terminal] pty_manager::kill session_id={}", session_id);
         let watcher_handle = {
-            let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(mut session) = sessions.remove(&session_id) {
                 if let Ok(mut alive) = session.alive.lock() { *alive = false; }
                 // PID ベースで子プロセスツリーを kill
