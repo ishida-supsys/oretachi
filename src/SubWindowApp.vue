@@ -559,7 +559,7 @@ async function onCancelAiJudging() {
   <div
     class="h-screen flex flex-col text-[#cdd6f4] select-none"
     style="background-color: var(--bg-base)"
-    :class="{ 'gaming-border': settings.appearance?.enableGamingBorder }"
+    :class="[{ 'gaming-border': settings.appearance?.enableGamingBorder }, settings.appearance?.enableGamingBorder ? `gaming-theme-${settings.appearance?.gamingBorderTheme ?? 'gaming'}` : '']"
   >
     <!-- 初期化中 -->
     <div v-if="!initialized" class="flex items-center justify-center h-full text-[#6c7086] text-sm">

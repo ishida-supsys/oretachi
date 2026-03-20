@@ -1464,7 +1464,7 @@ onMounted(async () => {
   <div
     class="h-screen flex flex-col text-[#cdd6f4] select-none"
     style="background-color: var(--bg-base)"
-    :class="{ 'gaming-border': settings.appearance?.enableGamingBorder }"
+    :class="[{ 'gaming-border': settings.appearance?.enableGamingBorder }, settings.appearance?.enableGamingBorder ? `gaming-theme-${settings.appearance?.gamingBorderTheme ?? 'gaming'}` : '']"
   >
     <!-- タブバー -->
     <div

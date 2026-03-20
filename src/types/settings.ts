@@ -68,6 +68,7 @@ export interface AppearanceSettings {
   acrylicOpacity?: number; // 0-255, デフォルト: backdrop=125, blur=240
   acrylicColor?: string;   // "#RRGGBB", デフォルト: "#121212"
   enableGamingBorder?: boolean; // デフォルト: false
+  gamingBorderTheme?: string;   // デフォルト: 'gaming'
 }
 
 export interface NotificationSoundSettings {
