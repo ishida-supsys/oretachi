@@ -95,4 +95,5 @@ export interface AppSettings {
   codeReview?: CodeReviewSettings;
   appearance?: AppearanceSettings;
   notificationSound?: NotificationSoundSettings;
+  mcpPort?: number;
 }

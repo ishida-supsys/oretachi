@@ -234,12 +234,16 @@ fn get_mcp_status(state: State<mcp_server::McpServerManager>) -> mcp_server::Mcp
 
 #[tauri::command]
 async fn restart_mcp_server(app_handle: tauri::AppHandle) -> Result<mcp_server::McpStatus, String> {
+    let mcp_port = {
+        let settings_manager = app_handle.state::<SettingsManager>();
+        settings_manager.get().mcp_port
+    };
     {
         let manager = app_handle.state::<mcp_server::McpServerManager>();
         manager.stop();
     }
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-    mcp_server::start_mcp_server(app_handle.clone());
+    mcp_server::start_mcp_server(app_handle.clone(), mcp_port);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     let manager = app_handle.state::<mcp_server::McpServerManager>();
     Ok(manager.get_status())
@@ -475,7 +479,8 @@ pub fn run() {
             pty_manager.start_polling(app.handle().clone());
 
             // 通常モード: MCP サーバー起動 + ウィンドウ表示
-            mcp_server::start_mcp_server(app.handle().clone());
+            let mcp_port = settings_manager.get().mcp_port;
+            mcp_server::start_mcp_server(app.handle().clone(), mcp_port);
 
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();

@@ -311,6 +311,8 @@ pub struct AppSettings {
     pub appearance: Option<AppearanceSettings>,
     #[serde(default, rename = "notificationSound")]
     pub notification_sound: Option<NotificationSoundSettings>,
+    #[serde(default, rename = "mcpPort")]
+    pub mcp_port: u16,
 }
 
 impl Default for AppSettings {
@@ -332,6 +334,7 @@ impl Default for AppSettings {
             code_review: None,
             appearance: None,
             notification_sound: None,
+            mcp_port: 0,
         }
     }
 }

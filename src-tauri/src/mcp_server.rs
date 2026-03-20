@@ -400,7 +400,7 @@ pub fn cleanup_port_file(app_handle: &AppHandle) {
 
 // ─── Server startup ───────────────────────────────────────────────────────────
 
-pub fn start_mcp_server(app_handle: AppHandle) {
+pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
     let manager = app_handle.state::<McpServerManager>();
 
     // 既存サーバーを停止
@@ -431,7 +431,7 @@ pub fn start_mcp_server(app_handle: AppHandle) {
             .route("/notify", post(notify_handler))
             .with_state(app_handle.clone());
 
-        let listener = match tokio::net::TcpListener::bind("127.0.0.1:0").await {
+        let listener = match tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await {
             Ok(l) => l,
             Err(e) => {
                 log::error!("Failed to bind MCP server: {}", e);

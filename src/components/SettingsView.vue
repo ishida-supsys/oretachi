@@ -280,6 +280,23 @@ function getSoundLabel(sound: string | null | undefined): string {
           {{ restarting ? t('mcp.restarting') : t('mcp.restart') }}
         </button>
       </div>
+      <div class="row-input row-input--inline">
+        <label for="mcp-port" class="inline-label">{{ t('mcp.fixedPort') }}</label>
+        <input
+          id="mcp-port"
+          type="number"
+          class="number-input"
+          :value="settings.mcpPort ?? 0"
+          min="0"
+          max="65535"
+          @change="(e) => {
+            const v = parseInt((e.target as HTMLInputElement).value) || 0;
+            settings.mcpPort = Math.max(0, Math.min(65535, v));
+            scheduleSave();
+          }"
+        />
+        <span class="unit-label">{{ t('mcp.fixedPortHint') }}</span>
+      </div>
     </div>
 
     <!-- ウィンドウ設定 -->
@@ -1064,7 +1081,9 @@ function getSoundLabel(sound: string | null | undefined): string {
       "stopped": "Stopped",
       "port": "Port: {port}",
       "restart": "Restart",
-      "restarting": "Restarting..."
+      "restarting": "Restarting...",
+      "fixedPort": "Fixed port",
+      "fixedPortHint": "0 = auto assign. Changes take effect after restart."
     },
     "window": {
       "label": "Window",
@@ -1160,7 +1179,9 @@ function getSoundLabel(sound: string | null | undefined): string {
       "stopped": "停止",
       "port": "ポート: {port}",
       "restart": "再起動",
-      "restarting": "再起動中..."
+      "restarting": "再起動中...",
+      "fixedPort": "固定ポート",
+      "fixedPortHint": "0 = 自動割り当て。変更は再起動後に反映されます。"
     },
     "window": {
       "label": "ウィンドウ",
