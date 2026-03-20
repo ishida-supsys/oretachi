@@ -15,6 +15,7 @@ const props = defineProps<{
 defineEmits<{
   "open-in-ide": [];
   "cancel-ai-judging": [];
+  "click-auto-approval": [];
 }>();
 </script>
 
@@ -43,11 +44,13 @@ defineEmits<{
         class="text-[10px] px-1.5 py-0.5 rounded font-mono font-medium"
         style="background: rgba(203,166,247,0.15); color: #cba6f7; border: 1px solid rgba(203,166,247,0.3)"
       >Alt+{{ props.hotkeyChar.toUpperCase() }}</span>
-      <span
+      <button
         v-if="props.autoApproval"
-        class="text-[10px] px-1.5 py-0.5 rounded font-medium"
+        class="text-[10px] px-1.5 py-0.5 rounded font-medium cursor-pointer border-none"
         style="background: rgba(166, 227, 161, 0.15); color: #a6e3a1; border: 1px solid rgba(166, 227, 161, 0.3)"
-      >{{ t('autoApprovalBadge') }}</span>
+        :title="t('editAutoApprovalPrompt')"
+        @click="$emit('click-auto-approval')"
+      >{{ t('autoApprovalBadge') }}</button>
       <button
         v-if="props.aiJudging"
         class="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-semibold cursor-pointer border-none"
@@ -73,12 +76,14 @@ defineEmits<{
   "en": {
     "autoApprovalBadge": "Auto approval",
     "aiJudgingBadge": "AI judging",
-    "openInIde": "Open in IDE"
+    "openInIde": "Open in IDE",
+    "editAutoApprovalPrompt": "Edit additional prompt"
   },
   "ja": {
     "autoApprovalBadge": "自動承認",
     "aiJudgingBadge": "AI判定中",
-    "openInIde": "IDE で開く"
+    "openInIde": "IDE で開く",
+    "editAutoApprovalPrompt": "追加プロンプトを編集"
   }
 }
 </i18n>

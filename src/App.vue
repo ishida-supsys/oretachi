@@ -13,6 +13,7 @@ import AddTaskDialog from "./components/AddTaskDialog.vue";
 import RemoveWorktreeDialog from "./components/RemoveWorktreeDialog.vue";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import HotkeyCharDialog from "./components/HotkeyCharDialog.vue";
+import AutoApprovalPromptDialog from "./components/AutoApprovalPromptDialog.vue";
 import TrayButton from "./components/TrayButton.vue";
 import { message } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
@@ -30,6 +31,7 @@ import type { TrayWorktreeData, TrayTerminalData } from "./composables/useTrayPo
 import type { WorktreeEntry } from "./types/settings";
 import { useAddTaskDialog } from "./composables/useAddTaskDialog";
 import { useTaskExecution } from "./composables/useTaskExecution";
+import { useAutoApprovalPrompt } from "./composables/useAutoApprovalPrompt";
 import type { FrameNode } from "./types/frame";
 import type { SubTerminalEntry } from "./types/terminal";
 import { useWorktreeFrameBundles } from "./composables/useWorktreeFrameBundles";
@@ -62,6 +64,7 @@ type ViewMode = "home" | "settings" | "terminal";
 const { settings, loadSettings, scheduleSave } = useSettings();
 const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, removeWorktree, listBranches, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, registerTerminalSession, closeAllSubWindows } = useSubWindows();
+const { autoApprovalPromptMap, lastJudgedCommandMap, showAutoApprovalPromptDialog, autoApprovalPromptTargetId, restoreFromSettings: restoreAutoApprovalPrompts, onClickAutoApproval, onSaveAutoApprovalPrompt } = useAutoApprovalPrompt(settings, scheduleSave, isDetached);
 const { notifications, initNotificationListener, addNotification, clearNotification, purgeStaleNotifications, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
 const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees, setCurrentTrayWorktreeId, isTrayShowingWorktree, focusTrayWindow } = useTrayPopup();
 const { closeAllCodeReviewWindows } = useCodeReviewWindow();
@@ -539,7 +542,7 @@ async function onMoveToSubWindow(worktreeId: string) {
     goHome();
   }
 
-  await moveToSubWindow(worktreeId, worktree.name, terminals, autoApprovalMap.get(worktreeId) ?? false, false, worktree.path, layout, worktree.branchName);
+  await moveToSubWindow(worktreeId, worktree.name, terminals, autoApprovalMap.get(worktreeId) ?? false, false, worktree.path, layout, worktree.branchName, autoApprovalPromptMap.get(worktreeId));
 
   // バンドルをクリーンアップ
   worktreeFrameBundles.delete(worktreeId);
@@ -978,6 +981,7 @@ onMounted(async () => {
       autoApprovalMap.set(wt.id, true);
     }
   }
+  restoreAutoApprovalPrompts();
 
   // 保存されたサブウィンドウを復元
   const savedDetachedIds = settings.value.detachedWorktreeIds ?? [];
@@ -1020,6 +1024,7 @@ onMounted(async () => {
         worktreeId,
         terminals: initData.terminals,
         autoApproval: initData.autoApproval,
+        autoApprovalPrompt: initData.autoApprovalPrompt,
         layout: initData.layout,
       });
       clearPendingInitData(worktreeId);
@@ -1050,7 +1055,7 @@ onMounted(async () => {
       // セッション読み込み失敗は無視
     }
 
-    await moveToSubWindow(wt.id, wt.name, subTerminals, autoApprovalMap.get(wt.id) ?? false, true, wt.path, undefined, wt.branchName);
+    await moveToSubWindow(wt.id, wt.name, subTerminals, autoApprovalMap.get(wt.id) ?? false, true, wt.path, undefined, wt.branchName, autoApprovalPromptMap.get(wt.id));
   }
 
   // Alt+char ホットキーリスナー登録
@@ -1106,7 +1111,9 @@ onMounted(async () => {
 
     if (isDetached(wt.id)) {
       await debug(`[AutoApproval] delegating to sub-window ${wt.id}`);
-      await emitTo(`sub-${wt.id}`, "sub-try-auto-approve", {});
+      await emitTo(`sub-${wt.id}`, "sub-try-auto-approve", {
+        additionalPrompt: autoApprovalPromptMap.get(wt.id) ?? "",
+      });
       return;
     }
 
@@ -1122,7 +1129,11 @@ onMounted(async () => {
         if (!terminal) { await debug(`[AutoApproval] tid=${t.id} terminal=null, skip`); continue; }
         const content = getRecentLines(terminal, 200);
         await debug(`[AutoApproval] tid=${t.id} content(last200)=${content.slice(-200)}`);
-        if (await analyzeForApproval(wt.id, content, wt.path)) {
+        const judgeResult = await analyzeForApproval(wt.id, content, wt.path, autoApprovalPromptMap.get(wt.id));
+        if (judgeResult.command) {
+          lastJudgedCommandMap.set(wt.id, judgeResult.command);
+        }
+        if (judgeResult.safe) {
           // バッファ再チェック: AI判定完了後、承認プロンプトがまだあるか確認
           const freshContent = getRecentLines(terminal, 10);
           if (!hasApprovalPrompt(freshContent)) {
@@ -1148,14 +1159,22 @@ onMounted(async () => {
   });
 
   // サブウィンドウからの自動承認結果 → 拒否時のみ通知
-  await listen<{ worktreeId: string; approved: boolean }>("sub-auto-approve-result", async (event) => {
-    const { worktreeId: wid, approved } = event.payload;
-    await debug(`[AutoApproval] sub-auto-approve-result worktreeId=${wid} approved=${approved}`);
+  await listen<{ worktreeId: string; approved: boolean; command?: string }>("sub-auto-approve-result", async (event) => {
+    const { worktreeId: wid, approved, command } = event.payload;
+    await debug(`[AutoApproval] sub-auto-approve-result worktreeId=${wid} approved=${approved} command=${command ?? "none"}`);
+    if (command) {
+      lastJudgedCommandMap.set(wid, command);
+    }
     if (!approved && !isWorktreeFocused(wid)) {
       addNotification(wid, "approval");
       const wtName = worktrees.value.find((w) => w.id === wid)?.name;
       if (wtName) await sendOsNotification(wtName, t("notification.titleApproval"));
     }
+  });
+
+  // サブウィンドウからの自動承認バッジクリック → ダイアログ表示
+  await listen<{ worktreeId: string }>("sub-click-auto-approval", (event) => {
+    onClickAutoApproval(event.payload.worktreeId);
   });
 
   // ターミナル追加リクエスト (サブウィンドウから)
@@ -1505,6 +1524,7 @@ onMounted(async () => {
             :is-window-focused="isWindowFocused"
             @open-in-ide="onOpenInIde(wt.id)"
             @cancel-ai-judging="onCancelAiJudging(wt.id)"
+            @click-auto-approval="onClickAutoApproval(wt.id)"
           />
           <!-- フレームコンテンツ -->
           <div :data-frame-area="wt.id" class="flex-1 min-h-0 overflow-hidden">
@@ -1603,6 +1623,17 @@ onMounted(async () => {
       @confirm="onHotkeyCharConfirm"
       @clear="onHotkeyCharClear"
       @cancel="showHotkeyCharDialog = false"
+    />
+
+    <!-- 自動承認 追加プロンプト編集ダイアログ -->
+    <AutoApprovalPromptDialog
+      v-if="showAutoApprovalPromptDialog"
+      :worktree-id="autoApprovalPromptTargetId"
+      :worktree-name="worktrees.find((w) => w.id === autoApprovalPromptTargetId)?.name ?? ''"
+      :current-prompt="autoApprovalPromptMap.get(autoApprovalPromptTargetId) ?? ''"
+      :last-command="lastJudgedCommandMap.get(autoApprovalPromptTargetId) ?? ''"
+      @save="onSaveAutoApprovalPrompt"
+      @cancel="showAutoApprovalPromptDialog = false"
     />
 
     <!-- 通知トレイボタン (ワークツリー表示中は非表示) -->

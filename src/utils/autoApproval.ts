@@ -2,6 +2,12 @@ import type { Terminal } from "@xterm/xterm";
 import { invoke } from "@tauri-apps/api/core";
 import { debug } from "@tauri-apps/plugin-log";
 
+/** AI判定の結果 */
+export interface JudgeResult {
+  safe: boolean;
+  command?: string;
+}
+
 /** xterm バッファの末尾 N 行をテキストとして取得（ANSI 除去済み） */
 export function getRecentLines(terminal: Terminal, n: number): string {
   const buf = terminal.buffer.active;
@@ -30,8 +36,9 @@ export function hasApprovalPrompt(content: string): boolean {
 export async function analyzeForApproval(
   worktreeId: string,
   content: string,
-  cwd: string = ""
-): Promise<boolean> {
+  cwd: string = "",
+  additionalPrompt?: string,
+): Promise<JudgeResult> {
   const promptFound = hasApprovalPrompt(content);
 
   await debug(
@@ -40,21 +47,22 @@ export async function analyzeForApproval(
 
   if (!promptFound) {
     await debug("[AutoApproval] → skip: no approval prompt detected");
-    return false;
+    return { safe: false };
   }
 
   // AI 判定: claude --model haiku で安全性を判定
   try {
-    const safe = await invoke<boolean>("judge_approval", {
+    const result = await invoke<JudgeResult>("judge_approval", {
       worktreeId,
       content,
       cwd,
+      additionalPrompt: additionalPrompt || null,
     });
-    await debug(`[AutoApproval] AI judgment: ${safe ? "safe" : "unsafe"}`);
-    return safe;
+    await debug(`[AutoApproval] AI judgment: ${result.safe ? "safe" : "unsafe"} command=${result.command ?? "none"}`);
+    return result;
   } catch (e) {
     await debug(`[AutoApproval] AI judgment failed: ${e}`);
-    return false; // エラー時は安全側 (承認しない)
+    return { safe: false }; // エラー時は安全側 (承認しない)
   }
 }
 

@@ -28,6 +28,8 @@ pub struct WorktreeEntry {
     pub hotkey_char: Option<String>,
     #[serde(default, rename = "autoApproval")]
     pub auto_approval: Option<bool>,
+    #[serde(default, rename = "autoApprovalPrompt")]
+    pub auto_approval_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

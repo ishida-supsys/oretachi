@@ -14,6 +14,7 @@ export interface WorktreeEntry {
   branchName: string;
   hotkeyChar?: string; // Alt+[この文字] でフォーカス
   autoApproval?: boolean;
+  autoApprovalPrompt?: string;
 }
 
 export interface TerminalSettings {
