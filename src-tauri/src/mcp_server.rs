@@ -81,8 +81,10 @@ pub struct ArtifactParams {
     pub command: String,
     #[schemars(description = "アーティファクトを識別する一意なID")]
     pub id: String,
-    #[schemars(description = "対象ワークツリーのID")]
-    pub worktree_id: String,
+    #[schemars(description = "リポジトリ名")]
+    pub repository: String,
+    #[schemars(description = "ブランチ名")]
+    pub branch: String,
     #[schemars(description = "コンテンツの種類 (create時必須): application/vnd.ant.code, text/markdown, text/html, image/svg+xml, application/vnd.ant.mermaid, application/vnd.ant.react")]
     #[serde(rename = "type")]
     pub content_type: Option<String>,
@@ -140,7 +142,8 @@ impl NotifyService {
         Parameters(ArtifactParams {
             command,
             id,
-            worktree_id,
+            repository,
+            branch,
             content_type,
             title,
             content,
@@ -151,12 +154,20 @@ impl NotifyService {
     ) -> Result<CallToolResult, McpError> {
         let settings_manager = self.app_handle.state::<SettingsManager>();
         let settings = settings_manager.get();
-        if !settings.worktrees.iter().any(|wt| wt.id == worktree_id) {
-            return Err(McpError::invalid_params(
-                format!("worktree_id '{}' は存在しません", worktree_id),
-                None,
-            ));
-        }
+        let wt = settings
+            .worktrees
+            .iter()
+            .find(|wt| wt.repository_name == repository && wt.branch_name == branch)
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    format!(
+                        "repository='{}', branch='{}' に一致するワークツリーが存在しません",
+                        repository, branch
+                    ),
+                    None,
+                )
+            })?;
+        let worktree_id = &wt.id;
 
         let artifacts_dir = self
             .app_handle
@@ -164,7 +175,7 @@ impl NotifyService {
             .app_data_dir()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?
             .join("artifacts")
-            .join(&worktree_id);
+            .join(worktree_id);
 
         let artifact_path = artifacts_dir.join(format!("{}.json", id));
 
