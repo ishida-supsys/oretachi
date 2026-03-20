@@ -295,7 +295,7 @@ export function useTaskExecution(deps: {
     switch (agentKind) {
       case "claudeCode": {
         if (isPowerShell) {
-          command = `$p = Get-Content "${tempPath}" -Raw -Encoding UTF8; ${agentCmd} $p; Remove-Item "${tempPath}"\r`;
+          command = `$p = Get-Content "${tempPath}" -Raw -Encoding UTF8; ${agentCmd} "$p"; Remove-Item "${tempPath}"\r`;
         } else {
           command = `${agentCmd} "$(cat "${tempPath}")"; rm "${tempPath}"\r`;
         }
@@ -303,7 +303,7 @@ export function useTaskExecution(deps: {
       }
       case "geminiCli": {
         if (isPowerShell) {
-          command = `$p = Get-Content "${tempPath}" -Raw -Encoding UTF8; gemini -i $p; Remove-Item "${tempPath}"\r`;
+          command = `$p = Get-Content "${tempPath}" -Raw -Encoding UTF8; gemini -i "$p"; Remove-Item "${tempPath}"\r`;
         } else {
           command = `gemini -i "$(cat "${tempPath}")"; rm "${tempPath}"\r`;
         }
@@ -311,7 +311,7 @@ export function useTaskExecution(deps: {
       }
       case "codexCli": {
         if (isPowerShell) {
-          command = `$p = Get-Content "${tempPath}" -Raw -Encoding UTF8; codex $p; Remove-Item "${tempPath}"\r`;
+          command = `$p = Get-Content "${tempPath}" -Raw -Encoding UTF8; codex "$p"; Remove-Item "${tempPath}"\r`;
         } else {
           command = `codex "$(cat "${tempPath}")"; rm "${tempPath}"\r`;
         }
@@ -319,7 +319,7 @@ export function useTaskExecution(deps: {
       }
       case "clineCli": {
         if (isPowerShell) {
-          command = `$p = Get-Content "${tempPath}" -Raw -Encoding UTF8; cline --prompt $p; Remove-Item "${tempPath}"\r`;
+          command = `$p = Get-Content "${tempPath}" -Raw -Encoding UTF8; cline --prompt "$p"; Remove-Item "${tempPath}"\r`;
         } else {
           command = `cline --prompt "$(cat "${tempPath}")"; rm "${tempPath}"\r`;
         }
@@ -327,7 +327,7 @@ export function useTaskExecution(deps: {
       }
       default: {
         if (isPowerShell) {
-          command = `$p = Get-Content "${tempPath}" -Raw -Encoding UTF8; ${agentCmd} $p; Remove-Item "${tempPath}"\r`;
+          command = `$p = Get-Content "${tempPath}" -Raw -Encoding UTF8; ${agentCmd} "$p"; Remove-Item "${tempPath}"\r`;
         } else {
           command = `${agentCmd} "$(cat "${tempPath}")"; rm "${tempPath}"\r`;
         }
