@@ -56,10 +56,19 @@ function formatDate(ts: number): string {
   return new Date(ts * 1000).toLocaleString();
 }
 
+// JSONの "type" フィールドを content_type にマッピングする
+// (Rust側は serde(rename="type") でJSONに保存するため)
+function mapMeta(raw: any): ArtifactMeta {
+  return { ...raw, content_type: raw.type ?? raw.content_type };
+}
+function mapArtifact(raw: any): ArtifactData {
+  return { ...raw, content_type: raw.type ?? raw.content_type };
+}
+
 async function loadList() {
   try {
-    const list = await invoke<ArtifactMeta[]>("list_artifacts", { worktreeId });
-    artifacts.value = list;
+    const list = await invoke<any[]>("list_artifacts", { worktreeId });
+    artifacts.value = list.map(mapMeta);
   } catch (e) {
     console.error("list_artifacts failed", e);
   }
@@ -71,7 +80,7 @@ async function selectArtifact(id: string) {
   loading.value = true;
   try {
     const raw = await invoke<string>("read_artifact", { worktreeId, artifactId: id });
-    selectedArtifact.value = JSON.parse(raw) as ArtifactData;
+    selectedArtifact.value = mapArtifact(JSON.parse(raw));
   } catch (e) {
     console.error("read_artifact failed", e);
     selectedArtifact.value = null;
@@ -95,7 +104,7 @@ async function refreshSelected(artifactId: string, command: string) {
   } else if (selectedId.value === artifactId) {
     try {
       const raw = await invoke<string>("read_artifact", { worktreeId, artifactId });
-      selectedArtifact.value = JSON.parse(raw) as ArtifactData;
+      selectedArtifact.value = mapArtifact(JSON.parse(raw));
     } catch { /* ignore */ }
   }
 }
