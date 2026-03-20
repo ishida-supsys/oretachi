@@ -22,6 +22,8 @@ export interface TrayWorktreeData {
   hotkeyChar?: string;
   autoApproval: boolean;
   aiJudging: boolean;
+  autoApprovalPrompt?: string;
+  lastJudgedCommand?: string;
 }
 
 let trayWindow: WebviewWindow | null = null;

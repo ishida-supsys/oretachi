@@ -5,6 +5,7 @@ import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import TerminalView from "./components/TerminalView.vue";
 import FrameContainer from "./components/FrameContainer.vue";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
+import AutoApprovalPromptDialog from "./components/AutoApprovalPromptDialog.vue";
 import { useFrameLayout } from "./composables/useFrameLayout";
 import { useSettings } from "./composables/useSettings";
 import { useHotkeyListener } from "./composables/useHotkeys";
@@ -39,6 +40,9 @@ const terminalRefs = reactive(new Map<number, InstanceType<typeof TerminalView>>
 
 const { setTerminalRef, returnAllToOffscreen, mountTerminalsToHosts } =
   useTerminalReparenting(terminalEntries, terminalRefs);
+
+// 自動承認ダイアログ状態
+const showAutoApprovalPromptDialog = ref(false);
 
 // ────────────────────────────────────────────────
 // 現在ワークツリーの表示
@@ -286,10 +290,14 @@ function onHeaderDrag(e: MouseEvent) {
   getCurrentWindow().startDragging()
 }
 
-async function onClickAutoApproval() {
-  const wt = currentWorktree.value;
-  if (!wt) return;
-  await emitTo("main", "tray-click-auto-approval", { worktreeId: wt.worktreeId });
+function onClickAutoApproval() {
+  if (!currentWorktree.value) return;
+  showAutoApprovalPromptDialog.value = true;
+}
+
+async function onSaveAutoApprovalPrompt(wid: string, prompt: string) {
+  showAutoApprovalPromptDialog.value = false;
+  await emitTo("main", "tray-save-auto-approval-prompt", { worktreeId: wid, prompt: prompt.trim() });
 }
 
 async function onCancelAiJudging() {
@@ -503,6 +511,17 @@ onUnmounted(() => {
       :ides="detectedIdes"
       @select="onIdeSelected"
       @cancel="showIdeDialog = false"
+    />
+
+    <!-- 自動承認 追加プロンプト編集ダイアログ -->
+    <AutoApprovalPromptDialog
+      v-if="showAutoApprovalPromptDialog"
+      :worktree-id="currentWorktree?.worktreeId ?? ''"
+      :worktree-name="currentWorktree?.worktreeName ?? ''"
+      :current-prompt="currentWorktree?.autoApprovalPrompt ?? ''"
+      :last-command="currentWorktree?.lastJudgedCommand ?? ''"
+      @save="onSaveAutoApprovalPrompt"
+      @cancel="showAutoApprovalPromptDialog = false"
     />
 
     <!-- TerminalView のマウント先 -->

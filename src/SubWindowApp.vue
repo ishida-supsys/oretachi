@@ -17,6 +17,7 @@ import { useArtifactWindow } from "./composables/useArtifactWindow";
 import { invoke } from "@tauri-apps/api/core";
 import { debug } from "@tauri-apps/plugin-log";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
+import AutoApprovalPromptDialog from "./components/AutoApprovalPromptDialog.vue";
 import type { SubTerminalEntry, WebSessionInfo } from "./types/terminal";
 import type { FrameNode } from "./types/frame";
 import { useI18n } from "vue-i18n";
@@ -49,6 +50,10 @@ const autoApproval = ref(false);
 // 自動承認 追加プロンプト
 const additionalPrompt = ref("");
 
+// 自動承認ダイアログ状態
+const showAutoApprovalPromptDialog = ref(false);
+const lastJudgedCommand = ref("");
+
 // IDE 選択
 const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect();
 
@@ -57,6 +62,12 @@ const { openArtifactViewer } = useArtifactWindow();
 
 async function requestOpenArtifacts() {
   await openArtifactViewer(worktreeId, worktreeName);
+}
+
+async function onSaveAutoApprovalPrompt(wid: string, prompt: string) {
+  additionalPrompt.value = prompt.trim();
+  showAutoApprovalPromptDialog.value = false;
+  await emitTo("main", "sub-save-auto-approval-prompt", { worktreeId: wid, prompt: prompt.trim() });
 }
 
 // AI判定進行中フラグ
@@ -516,6 +527,7 @@ onMounted(async () => {
       aiJudging.value = false;
     }
     await debug(`[AutoApproval] sub result: approved=${approved} command=${lastCommand ?? "none"}`);
+    if (lastCommand) lastJudgedCommand.value = lastCommand;
     await emitTo("main", "sub-auto-approve-result", { worktreeId, approved, command: lastCommand });
   });
 
@@ -587,7 +599,7 @@ async function onCancelAiJudging() {
         @open-in-ide="requestOpenInIde"
         @open-artifacts="requestOpenArtifacts"
         @cancel-ai-judging="onCancelAiJudging"
-        @click-auto-approval="emitTo('main', 'sub-click-auto-approval', { worktreeId })"
+        @click-auto-approval="showAutoApprovalPromptDialog = true"
       />
 
       <!-- フレームレイアウト -->
@@ -617,6 +629,17 @@ async function onCancelAiJudging() {
       :ides="detectedIdes"
       @select="onIdeSelected"
       @cancel="showIdeDialog = false"
+    />
+
+    <!-- 自動承認 追加プロンプト編集ダイアログ -->
+    <AutoApprovalPromptDialog
+      v-if="showAutoApprovalPromptDialog"
+      :worktree-id="worktreeId"
+      :worktree-name="worktreeName"
+      :current-prompt="additionalPrompt"
+      :last-command="lastJudgedCommand"
+      @save="onSaveAutoApprovalPrompt"
+      @cancel="showAutoApprovalPromptDialog = false"
     />
 
     <!-- TerminalView のマウント先。手動 DOM reparenting で terminal-host に移動する -->

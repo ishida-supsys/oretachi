@@ -810,6 +810,8 @@ async function onTrayButtonClick() {
         hotkeyChar: hotkeyChars.value.get(worktreeId),
         autoApproval: autoApprovalMap.get(worktreeId) ?? false,
         aiJudging: aiJudgingWorktrees.has(worktreeId),
+        autoApprovalPrompt: autoApprovalPromptMap.get(worktreeId) ?? '',
+        lastJudgedCommand: lastJudgedCommandMap.get(worktreeId) ?? '',
       });
     }
   }
@@ -1229,14 +1231,14 @@ onMounted(async () => {
     }
   });
 
-  // サブウィンドウからの自動承認バッジクリック → ダイアログ表示
-  await listen<{ worktreeId: string }>("sub-click-auto-approval", (event) => {
-    onClickAutoApproval(event.payload.worktreeId);
+  // サブウィンドウからの自動承認プロンプト保存
+  await listen<{ worktreeId: string; prompt: string }>("sub-save-auto-approval-prompt", (event) => {
+    onSaveAutoApprovalPrompt(event.payload.worktreeId, event.payload.prompt);
   });
 
-  // トレイポップアップからの自動承認バッジクリック → ダイアログ表示
-  await listen<{ worktreeId: string }>("tray-click-auto-approval", (event) => {
-    onClickAutoApproval(event.payload.worktreeId);
+  // トレイポップアップからの自動承認プロンプト保存
+  await listen<{ worktreeId: string; prompt: string }>("tray-save-auto-approval-prompt", (event) => {
+    onSaveAutoApprovalPrompt(event.payload.worktreeId, event.payload.prompt);
   });
 
   // トレイポップアップからのAI判定キャンセル
