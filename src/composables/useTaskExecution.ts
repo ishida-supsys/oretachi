@@ -6,6 +6,7 @@ import type TerminalView from "../components/TerminalView.vue";
 import type { WorktreeEntry, Repository, AppSettings } from "../types/settings";
 import type { Worktree } from "../types/worktree";
 import type { AddWorktreeTaskCode, AgentWorktreeTaskCode } from "../types/task";
+import type { WebSessionInfo } from "../types/terminal";
 
 export function useTaskExecution(deps: {
   t: (key: string) => string;
@@ -25,6 +26,7 @@ export function useTaskExecution(deps: {
   loadingWorktrees: Map<string, string>;
   pendingScripts: Map<string, string>;
   autoApprovalMap: Map<string, boolean>;
+  onWebSessionDetected?: (terminalId: number, info: WebSessionInfo) => void;
 }) {
   const {
     t,
@@ -44,6 +46,7 @@ export function useTaskExecution(deps: {
     loadingWorktrees,
     pendingScripts,
     autoApprovalMap,
+    onWebSessionDetected,
   } = deps;
 
   function randomSuffix(): string {
@@ -86,6 +89,45 @@ export function useTaskExecution(deps: {
       await new Promise((r) => setTimeout(r, 100));
     }
     return null;
+  }
+
+  function listenForWebSession(targetSessionId: number, terminalId: number): void {
+    if (!onWebSessionDetected) return;
+
+    let buffer = "";
+    let url: string | null = null;
+    let sessionCode: string | null = null;
+    let unlistenFn: (() => void) | null = null;
+
+    const timer = setTimeout(() => {
+      unlistenFn?.();
+    }, 30_000);
+
+    listen<{ sessionId: number; data: number[] }>("pty-output", (event) => {
+      if (event.payload.sessionId !== targetSessionId) return;
+      const chunk = new TextDecoder().decode(new Uint8Array(event.payload.data));
+      // ANSI エスケープシーケンスを除去
+      buffer += chunk.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
+      // 長くなりすぎたら先頭を切り捨て
+      if (buffer.length > 4096) buffer = buffer.slice(-2048);
+
+      if (!url) {
+        const m = buffer.match(/View:\s+(https:\/\/\S+)/);
+        if (m) url = m[1];
+      }
+      if (!sessionCode) {
+        const m = buffer.match(/--teleport\s+(session_\S+)/);
+        if (m) sessionCode = m[1];
+      }
+
+      if (url && sessionCode) {
+        clearTimeout(timer);
+        unlistenFn?.();
+        onWebSessionDetected(terminalId, { url, sessionCode });
+      }
+    }).then((fn) => {
+      unlistenFn = fn;
+    });
   }
 
   async function waitForScriptCompletion(worktreeId: string, timeoutMs = 300_000): Promise<void> {
@@ -265,6 +307,7 @@ export function useTaskExecution(deps: {
       const bytes = Array.from(new TextEncoder().encode(command));
       await invoke("pty_write", { sessionId: sid, data: bytes });
       await invoke("pty_set_ai_agent", { sessionId: sid, isAgent: true });
+      if (code.remoteExec) listenForWebSession(sid, terminal.id);
     } else {
       // メインウィンドウ: terminalRef 経由で書き込む
       const termRef = getTerminalRef(terminal.id);
@@ -274,7 +317,10 @@ export function useTaskExecution(deps: {
       await termRef.waitForReady();
       await termRef.write(command);
       const sid = termRef.sessionId;
-      if (sid != null) await invoke("pty_set_ai_agent", { sessionId: sid, isAgent: true });
+      if (sid != null) {
+        await invoke("pty_set_ai_agent", { sessionId: sid, isAgent: true });
+        if (code.remoteExec) listenForWebSession(sid, terminal.id);
+      }
     }
   }
 

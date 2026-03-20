@@ -84,6 +84,9 @@ const terminalExitCodes = reactive(new Map<number, number>());
 // terminalId → AIエージェント稼働中フラグ
 const terminalAgentStatus = reactive(new Map<number, boolean>());
 
+// terminalId → Webセッション情報（claude --remote で起動したターミナル）
+const terminalWebSessions = reactive(new Map<number, import("./types/terminal").WebSessionInfo>());
+
 // terminalId → worktreeId のマッピング（ターミナルがどのワークツリーに属するか）
 const terminalWorktreeMap = new Map<number, string>();
 
@@ -105,6 +108,7 @@ const {
   terminalWorktreeMap,
   terminalExitCodes,
   terminalAgentStatus,
+  terminalWebSessions,
   removeTerminal,
   clearNotification,
 });
@@ -167,6 +171,14 @@ const { executeAddWorktree, executeAgentWorktree, resolveShell, buildScriptComma
     loadingWorktrees,
     pendingScripts,
     autoApprovalMap,
+    onWebSessionDetected: (terminalId, info) => {
+      terminalWebSessions.set(terminalId, info);
+      // ターミナルがサブウィンドウに移動済みの場合は同期イベントを送る
+      const worktreeId = terminalWorktreeMap.get(terminalId);
+      if (worktreeId && isDetached(worktreeId)) {
+        emitTo(`sub-${worktreeId}`, "sub-web-session", { terminalId, info });
+      }
+    },
   });
 const { showAddTaskDialog, rerunTaskId, rerunPrompt, onAddTaskConfirm, onAddTaskCancel } =
   useAddTaskDialog(async (code) => {
@@ -1016,11 +1028,18 @@ onMounted(async () => {
     subWindowFocusMap.set(worktreeId, true);
     const initData = getPendingInitData(worktreeId);
     if (initData) {
+      // このワークツリーに属するターミナルのWebセッション情報を収集
+      const webSessions: Record<number, import("./types/terminal").WebSessionInfo> = {};
+      for (const t of initData.terminals) {
+        const info = terminalWebSessions.get(t.id);
+        if (info) webSessions[t.id] = info;
+      }
       await emitTo(`sub-${worktreeId}`, "sub-init", {
         worktreeId,
         terminals: initData.terminals,
         autoApproval: initData.autoApproval,
         layout: initData.layout,
+        webSessions,
       });
       clearPendingInitData(worktreeId);
     }
@@ -1194,6 +1213,7 @@ onMounted(async () => {
     terminalWorktreeMap.delete(terminalId);
     thumbnailUrls.delete(terminalId);
     terminalAgentStatus.delete(terminalId);
+    terminalWebSessions.delete(terminalId);
   });
 
   // サブウィンドウからのサムネイル受信
@@ -1514,6 +1534,7 @@ onMounted(async () => {
               :terminal-entries="worktreeFrameBundles.get(wt.id)!.terminalEntries"
               :terminal-exit-codes="terminalExitCodes"
               :terminal-agent-status="terminalAgentStatus"
+              :terminal-web-sessions="terminalWebSessions"
               @switch-terminal="(leafId, tid) => onFrameSwitch(wt.id, leafId, tid)"
               @close-terminal="(leafId, tid) => onFrameClose(wt.id, leafId, tid)"
               @tab-drop="(sl, tid, tl, idx) => onFrameTabDrop(wt.id, sl, tid, tl, idx)"

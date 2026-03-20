@@ -16,7 +16,7 @@ import { useIdeSelect } from "./composables/useIdeSelect";
 import { invoke } from "@tauri-apps/api/core";
 import { debug } from "@tauri-apps/plugin-log";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
-import type { SubTerminalEntry } from "./types/terminal";
+import type { SubTerminalEntry, WebSessionInfo } from "./types/terminal";
 import type { FrameNode } from "./types/frame";
 import { useI18n } from "vue-i18n";
 
@@ -38,6 +38,9 @@ const terminalExitCodes = reactive(new Map<number, number>());
 
 // terminalId → AIエージェント稼働中フラグ
 const terminalAgentStatus = reactive(new Map<number, boolean>());
+
+// terminalId → Webセッション情報
+const terminalWebSessions = reactive(new Map<number, WebSessionInfo>());
 
 // 自動承認フラグ
 const autoApproval = ref(false);
@@ -82,6 +85,7 @@ const {
   onTerminalClosed: async (terminalId) => {
     terminalExitCodes.delete(terminalId);
     terminalAgentStatus.delete(terminalId);
+    terminalWebSessions.delete(terminalId);
     await emitTo("main", "sub-remove-terminal", { worktreeId, terminalId });
   },
 });
@@ -220,6 +224,7 @@ let unlistenCancelAutoApprove: UnlistenFn | null = null;
 let unlistenSettingsChanged: UnlistenFn | null = null;
 let unlistenSessionSaveRequest: UnlistenFn | null = null;
 let unlistenAiAgentChanged: UnlistenFn | null = null;
+let unlistenWebSession: UnlistenFn | null = null;
 let thumbnailInterval: ReturnType<typeof setInterval> | null = null;
 let closingByMain = false;
 
@@ -250,6 +255,11 @@ onMounted(async () => {
     }
   });
 
+  // メインウィンドウからのWebセッション情報を受信
+  unlistenWebSession = await listen<{ terminalId: number; info: WebSessionInfo }>("sub-web-session", (event) => {
+    terminalWebSessions.set(event.payload.terminalId, event.payload.info);
+  });
+
   const appWindow = getCurrentWindow();
 
   // 初期ターミナルデータを受信
@@ -258,6 +268,7 @@ onMounted(async () => {
     terminals: SubTerminalEntry[];
     autoApproval?: boolean;
     layout?: FrameNode;
+    webSessions?: Record<number, WebSessionInfo>;
   }>(
     "sub-init",
     async (event) => {
@@ -269,6 +280,12 @@ onMounted(async () => {
         terminalEntries.set(t.id, { ...t });
         if (t.isAiAgent) {
           terminalAgentStatus.set(t.id, true);
+        }
+      }
+
+      if (event.payload.webSessions) {
+        for (const [idStr, info] of Object.entries(event.payload.webSessions)) {
+          terminalWebSessions.set(Number(idStr), info);
         }
       }
 
@@ -506,6 +523,7 @@ onUnmounted(() => {
   unlistenSettingsChanged?.();
   unlistenSessionSaveRequest?.();
   unlistenAiAgentChanged?.();
+  unlistenWebSession?.();
 });
 
 async function onCancelAiJudging() {
@@ -541,6 +559,7 @@ async function onCancelAiJudging() {
           :terminal-entries="terminalEntries"
           :terminal-exit-codes="terminalExitCodes"
           :terminal-agent-status="terminalAgentStatus"
+          :terminal-web-sessions="terminalWebSessions"
           @switch-terminal="switchTerminal"
           @close-terminal="closeTerminal"
           @title-change="onTerminalTitleChange"
