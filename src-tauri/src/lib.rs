@@ -344,27 +344,27 @@ pub fn run() {
     #[cfg(target_os = "windows")]
     let (acrylic_enabled, acrylic_opacity, acrylic_color) = acrylic::load_settings();
     #[cfg(not(target_os = "windows"))]
-    let (acrylic_enabled, acrylic_opacity, acrylic_color) = (true, 125u8, "#121212".to_string());
+    let acrylic_enabled = true;
 
     let mut builder = tauri::Builder::default();
     if acrylic_enabled {
-        let (r, g, b) = acrylic::parse_color(&acrylic_color);
-        let a = acrylic_opacity;
-        builder = builder
-            .plugin(tauri_plugin_liquid_glass::init())
-            .plugin(
+        builder = builder.plugin(tauri_plugin_liquid_glass::init());
+
+        #[cfg(target_os = "windows")]
+        {
+            let (r, g, b) = acrylic::parse_color(&acrylic_color);
+            let a = acrylic_opacity;
+            builder = builder.plugin(
                 tauri::plugin::Builder::<tauri::Wry>::new("acrylic-effect")
                     .on_window_ready(move |window| {
-                        #[cfg(target_os = "windows")]
-                        {
-                            if let Ok(hwnd) = window.hwnd() {
-                                acrylic::setup(hwnd.0, r, g, b, a);
-                            }
+                        if let Ok(hwnd) = window.hwnd() {
+                            acrylic::setup(hwnd.0, r, g, b, a);
                         }
                         let _ = window;
                     })
                     .build(),
             );
+        }
     }
     let mut builder = builder
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
