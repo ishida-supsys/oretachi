@@ -51,6 +51,22 @@ export function eventToBinding(event: KeyboardEvent): HotkeyBinding {
 }
 
 /**
+ * Alt+[単一文字] キー入力をキャプチャフェーズで処理する共通ハンドラ。
+ * handler には (char, event) が渡される。preventDefault/stopPropagation は handler 内で行う。
+ */
+export function useAltCharKeyListener(handler: (char: string, event: KeyboardEvent) => void) {
+  const onKeydown = (event: KeyboardEvent) => {
+    if (event.type !== "keydown") return;
+    if (event.isComposing || event.keyCode === 229) return;
+    if (!event.altKey || event.ctrlKey || event.shiftKey) return;
+    if (event.key.length !== 1) return;
+    handler(event.key.toLowerCase(), event);
+  };
+  onMounted(() => window.addEventListener("keydown", onKeydown, true));
+  onUnmounted(() => window.removeEventListener("keydown", onKeydown, true));
+}
+
+/**
  * window keydown をキャプチャフェーズで登録するホットキーリスナー。
  * getActions はリアクティブな設定変更を反映できるようゲッター関数で渡す。
  */

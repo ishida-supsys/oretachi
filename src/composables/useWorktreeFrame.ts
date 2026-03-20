@@ -13,6 +13,8 @@ export function useWorktreeFrame(options: {
   terminalRefs: Map<number, InstanceType<typeof TerminalView>>;
   /** ターミナルが閉じられた後に呼ばれるコールバック（App.vue固有のクリーンアップ等） */
   onTerminalClosed?: (terminalId: number) => void | Promise<void>;
+  /** switchTerminal 後に呼ばれるコールバック（TrayPopupApp 等の追加処理用） */
+  onAfterSwitch?: (leafId: string, terminalId: number) => void | Promise<void>;
 }) {
   const { terminalEntries, terminalRefs, onTerminalClosed } = options;
 
@@ -46,6 +48,9 @@ export function useWorktreeFrame(options: {
     if (term) {
       await term.handleTabActivated();
       term.focus();
+    }
+    if (options.onAfterSwitch) {
+      await options.onAfterSwitch(leafId, terminalId);
     }
   }
 

@@ -9,7 +9,7 @@ import FrameContainer from "./components/FrameContainer.vue";
 import WorktreeHeader from "./components/WorktreeHeader.vue";
 import { useWorktreeFrame } from "./composables/useWorktreeFrame";
 import { useSettings } from "./composables/useSettings";
-import { useHotkeyListener } from "./composables/useHotkeys";
+import { useHotkeyListener, useAltCharKeyListener } from "./composables/useHotkeys";
 import { renderToDataUrl } from "./composables/useTerminalThumbnail";
 import { useWindowFocus } from "./composables/useWindowFocus";
 import { runApprovalLoop } from "./utils/autoApproval";
@@ -176,21 +176,13 @@ useHotkeyListener(() => {
   ];
 });
 
-// Alt+[char] を受けてメインに委譲
-function handleAltCharKey(event: KeyboardEvent) {
-  if (event.type !== "keydown") return;
-  if (event.isComposing || event.keyCode === 229) return;
-  if (!event.altKey || event.ctrlKey || event.shiftKey) return;
-  if (event.key.length !== 1) return;
-
-  const char = event.key.toLowerCase();
-  // 自分自身のホットキー文字は無視
+// Alt+[char] を受けてメインに委譲（自分自身の hotkeyChar は無視）
+useAltCharKeyListener((char, event) => {
   if (char === hotkeyChar.value?.toLowerCase()) return;
-
   event.preventDefault();
   event.stopPropagation();
   emitTo("main", "sub-alt-char-focus", { char });
-}
+});
 
 const { collect } = useEventListeners();
 let thumbnailInterval: ReturnType<typeof setInterval> | null = null;
@@ -198,7 +190,6 @@ let closingByMain = false;
 
 onMounted(async () => {
   await loadSettings();
-  window.addEventListener("keydown", handleAltCharKey, true);
 
   collect(await listen("settings-changed", async () => {
     await loadSettings();
@@ -475,7 +466,6 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  window.removeEventListener("keydown", handleAltCharKey, true);
   if (thumbnailInterval) clearInterval(thumbnailInterval);
 });
 

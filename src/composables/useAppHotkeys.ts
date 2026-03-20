@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
-import { useHotkeyListener, bindingToAccelerator, matchesHotkey } from "./useHotkeys";
+import { useHotkeyListener, useAltCharKeyListener, bindingToAccelerator } from "./useHotkeys";
 import type { Ref } from "vue";
 import type { Worktree } from "../types/worktree";
 import type { AppSettings } from "../types/settings";
@@ -63,26 +63,22 @@ export function useAppHotkeys(deps: UseAppHotkeysDeps) {
     }
   }
 
-  function handleAltCharKey(event: KeyboardEvent) {
-    if (event.type !== "keydown") return;
-    if (event.isComposing || event.keyCode === 229) return;
-    if (!event.altKey || event.ctrlKey || event.shiftKey) return;
-    if (event.key.length !== 1) return;
-
-    const char = event.key.toLowerCase();
+  // Alt+[char] ワークツリーフォーカス（setup時登録）
+  useAltCharKeyListener((char, event) => {
     const homeTabBinding = deps.settings.value.hotkeys?.homeTab;
-    if (homeTabBinding && matchesHotkey(event, homeTabBinding)) return;
-
+    if (homeTabBinding) {
+      const { alt, key } = homeTabBinding;
+      if (alt && key.length === 1 && key.toLowerCase() === char) return;
+    }
     const wt = deps.worktrees.value.find((w) => {
       const entry = deps.settings.value.worktrees.find((e) => e.id === w.id);
       return entry?.hotkeyChar === char;
     });
     if (!wt) return;
-
     event.preventDefault();
     event.stopPropagation();
     focusWorktreeByChar(char);
-  }
+  });
 
   // ホットキーリスナー登録（setup時）
   useHotkeyListener(() => {
@@ -138,7 +134,6 @@ export function useAppHotkeys(deps: UseAppHotkeysDeps) {
   });
 
   async function init() {
-    window.addEventListener("keydown", handleAltCharKey, true);
     await registerGlobalShortcut();
 
     await listen("settings-changed", async () => {

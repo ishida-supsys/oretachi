@@ -2,8 +2,6 @@ use crate::ai_provider::{self, AiAgentKind};
 use crate::process_utils::CancellableManager;
 use crate::settings::SettingsManager;
 use tauri::State;
-use tokio::io::AsyncWriteExt;
-use tokio::time::{timeout, Duration};
 
 const TIMEOUT_SECS: u64 = 120;
 
@@ -77,65 +75,9 @@ pub async fn judge_approval(
         .unwrap_or(AiAgentKind::ClaudeCode);
 
     let plan = ai_provider::build_execution_plan(&agent_kind, &prompt, JSON_SCHEMA, ai_provider::default_model(&agent_kind), true);
-
-    let mut cmd = crate::process_utils::make_async_command(&plan.program);
-    cmd.args(&plan.args);
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
     let worktree_base_dir = settings_state.get().worktree_base_dir.clone();
-    if !worktree_base_dir.is_empty() {
-        cmd.current_dir(&worktree_base_dir);
-    }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn AI agent: {}", e))?;
-
-    // stdin にプロンプトを送信して閉じる
-    if !plan.stdin_content.is_empty() {
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(plan.stdin_content.as_bytes())
-                .await
-                .map_err(|e| format!("Failed to write stdin: {}", e))?;
-        }
-    }
-
-    // PID を登録 (cancel_approval から kill できるようにする)
-    if let Some(pid) = child.id() {
-        state.register(worktree_id.clone(), pid)?;
-    }
-
-    // タイムアウト付きで待機
-    let wait_result = timeout(
-        Duration::from_secs(TIMEOUT_SECS),
-        child.wait_with_output(),
-    )
-    .await;
-
-    // タイムアウト時はプロセスをkill
-    if wait_result.is_err() {
-        state.cancel(&worktree_id)?;
-    }
-
-    // 完了後に登録を削除（finally 相当）
-    let _ = state.remove(&worktree_id);
-
-    let output = wait_result
-        .map_err(|_| format!("AI agent timed out after {}s", TIMEOUT_SECS))?
-        .map_err(|e| format!("Failed to wait for AI agent: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "AI agent exited with {}: {}",
-            output.status, stderr
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = ai_provider::run_ai_command(&plan, &state, &worktree_id, &worktree_base_dir, TIMEOUT_SECS).await?;
     log::debug!("[AutoApproval] AI agent response: {}", stdout.trim());
 
     let structured = ai_provider::parse_response(&agent_kind, &stdout)?;

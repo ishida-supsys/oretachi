@@ -1,5 +1,7 @@
-use crate::process_utils::make_command;
+use crate::process_utils::{make_command, make_async_command, CancellableManager};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
+use tokio::time::{timeout, Duration};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -180,6 +182,64 @@ pub fn parse_response(kind: &AiAgentKind, stdout: &str) -> Result<serde_json::Va
             })
         }
     }
+}
+
+/// AI コマンドを実行して stdout を返す共通ヘルパー。
+/// - プロセスのスポーン・stdin 書き込み・PID 登録・タイムアウト待機・キャンセル処理を一元化。
+pub async fn run_ai_command(
+    plan: &AiExecutionPlan,
+    state: &CancellableManager,
+    key: &str,
+    working_dir: &str,
+    timeout_secs: u64,
+) -> Result<String, String> {
+    let mut cmd = make_async_command(&plan.program);
+    cmd.args(&plan.args);
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if !working_dir.is_empty() {
+        cmd.current_dir(working_dir);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn AI agent: {}", e))?;
+
+    if !plan.stdin_content.is_empty() {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(plan.stdin_content.as_bytes())
+                .await
+                .map_err(|e| format!("Failed to write stdin: {}", e))?;
+        }
+    }
+
+    if let Some(pid) = child.id() {
+        state.register(key.to_string(), pid)?;
+    }
+
+    let wait_result = timeout(
+        Duration::from_secs(timeout_secs),
+        child.wait_with_output(),
+    )
+    .await;
+
+    if wait_result.is_err() {
+        let _ = state.cancel(key);
+    }
+    let _ = state.remove(key);
+
+    let output = wait_result
+        .map_err(|_| format!("AI agent timed out after {}s", timeout_secs))?
+        .map_err(|e| format!("Failed to wait for AI agent: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("AI agent exited with {}: {}", output.status, stderr));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn extract_json_from_text(text: &str) -> Option<serde_json::Value> {
