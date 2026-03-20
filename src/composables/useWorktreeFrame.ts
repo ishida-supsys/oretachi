@@ -13,6 +13,8 @@ export function useWorktreeFrame(options: {
   terminalRefs: Map<number, InstanceType<typeof TerminalView>>;
   /** ターミナルが閉じられた後に呼ばれるコールバック（App.vue固有のクリーンアップ等） */
   onTerminalClosed?: (terminalId: number) => void | Promise<void>;
+  /** switchTerminal 後に呼ばれるコールバック（TrayPopupApp 等の追加処理用） */
+  onAfterSwitch?: (leafId: string, terminalId: number) => void | Promise<void>;
 }) {
   const { terminalEntries, terminalRefs, onTerminalClosed } = options;
 
@@ -46,6 +48,9 @@ export function useWorktreeFrame(options: {
     if (term) {
       await term.handleTabActivated();
       term.focus();
+    }
+    if (options.onAfterSwitch) {
+      await options.onAfterSwitch(leafId, terminalId);
     }
   }
 
@@ -163,6 +168,35 @@ export function useWorktreeFrame(options: {
     if (movedTerm) movedTerm.focus();
   }
 
+  function switchNextTerminal() {
+    const leafId = lastFocusedLeafId.value;
+    if (!leafId) return;
+    const leaf = getLeafsWithTerminals().find((l) => l.id === leafId);
+    if (!leaf || leaf.terminalIds.length === 0) return;
+    const idx = leaf.terminalIds.indexOf(leaf.activeTerminalId ?? -1);
+    const nextIdx = idx === -1 ? 0 : (idx + 1) % leaf.terminalIds.length;
+    switchTerminal(leafId, leaf.terminalIds[nextIdx]);
+  }
+
+  function switchPrevTerminal() {
+    const leafId = lastFocusedLeafId.value;
+    if (!leafId) return;
+    const leaf = getLeafsWithTerminals().find((l) => l.id === leafId);
+    if (!leaf || leaf.terminalIds.length === 0) return;
+    const idx = leaf.terminalIds.indexOf(leaf.activeTerminalId ?? -1);
+    const prevIdx = idx <= 0 ? leaf.terminalIds.length - 1 : idx - 1;
+    switchTerminal(leafId, leaf.terminalIds[prevIdx]);
+  }
+
+  function closeActiveTerminal() {
+    const leafId = lastFocusedLeafId.value;
+    if (!leafId) return;
+    const leaf = getLeafsWithTerminals().find((l) => l.id === leafId);
+    if (leaf?.activeTerminalId != null) {
+      closeTerminal(leafId, leaf.activeTerminalId);
+    }
+  }
+
   return {
     root,
     initLayout,
@@ -175,6 +209,9 @@ export function useWorktreeFrame(options: {
     getAllLeafs,
     getLeafsWithTerminals,
     switchTerminal,
+    switchNextTerminal,
+    switchPrevTerminal,
+    closeActiveTerminal,
     closeTerminal,
     handleTerminalExit,
     onSplitRequest,

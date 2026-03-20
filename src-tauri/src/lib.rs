@@ -20,6 +20,18 @@ use settings::{AppSettings, SettingsManager};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
+fn artifacts_dir(
+    app_handle: &tauri::AppHandle,
+    worktree_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    Ok(app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("artifacts")
+        .join(worktree_id))
+}
+
 // ─── PTY コマンド ────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -256,12 +268,7 @@ fn list_artifacts(
     app_handle: tauri::AppHandle,
     worktree_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let artifacts_dir = app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("artifacts")
-        .join(&worktree_id);
+    let artifacts_dir = artifacts_dir(&app_handle, &worktree_id)?;
     if !artifacts_dir.exists() {
         return Ok(vec![]);
     }
@@ -291,26 +298,16 @@ fn read_artifact(
     worktree_id: String,
     artifact_id: String,
 ) -> Result<String, String> {
-    let artifact_path = app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("artifacts")
-        .join(&worktree_id)
+    let artifact_path = artifacts_dir(&app_handle, &worktree_id)?
         .join(format!("{}.json", artifact_id));
     std::fs::read_to_string(&artifact_path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 fn delete_artifacts(app_handle: tauri::AppHandle, worktree_id: String) -> Result<(), String> {
-    let artifacts_dir = app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("artifacts")
-        .join(&worktree_id);
-    if artifacts_dir.exists() {
-        std::fs::remove_dir_all(&artifacts_dir).map_err(|e| e.to_string())?;
+    let dir = artifacts_dir(&app_handle, &worktree_id)?;
+    if dir.exists() {
+        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
     }
     Ok(())
 }

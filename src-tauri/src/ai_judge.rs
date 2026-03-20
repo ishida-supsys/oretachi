@@ -1,10 +1,7 @@
 use crate::ai_provider::{self, AiAgentKind};
+use crate::process_utils::CancellableManager;
 use crate::settings::SettingsManager;
-use std::collections::HashMap;
-use std::sync::Mutex;
 use tauri::State;
-use tokio::io::AsyncWriteExt;
-use tokio::time::{timeout, Duration};
 
 const TIMEOUT_SECS: u64 = 120;
 
@@ -44,17 +41,7 @@ pub struct JudgeResult {
 }
 
 /// ワークツリーIDごとの進行中AI判定プロセスのPIDを管理する
-pub struct ApprovalManager {
-    in_progress: Mutex<HashMap<String, u32>>,
-}
-
-impl ApprovalManager {
-    pub fn new() -> Self {
-        Self {
-            in_progress: Mutex::new(HashMap::new()),
-        }
-    }
-}
+pub type ApprovalManager = CancellableManager;
 
 #[tauri::command]
 pub async fn judge_approval(
@@ -66,11 +53,8 @@ pub async fn judge_approval(
     additional_prompt: Option<String>,
 ) -> Result<JudgeResult, String> {
     // 重複防止: 既に同一ワークツリーの判定が進行中ならエラーを返す
-    {
-        let map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;
-        if map.contains_key(&worktree_id) {
-            return Err("already in progress".to_string());
-        }
+    if state.is_in_progress(&worktree_id)? {
+        return Err("already in progress".to_string());
     }
 
     let additional = additional_prompt
@@ -91,73 +75,9 @@ pub async fn judge_approval(
         .unwrap_or(AiAgentKind::ClaudeCode);
 
     let plan = ai_provider::build_execution_plan(&agent_kind, &prompt, JSON_SCHEMA, ai_provider::default_model(&agent_kind), true);
-
-    let mut cmd = crate::process_utils::make_async_command(&plan.program);
-    cmd.args(&plan.args);
-    cmd.stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
     let worktree_base_dir = settings_state.get().worktree_base_dir.clone();
-    if !worktree_base_dir.is_empty() {
-        cmd.current_dir(&worktree_base_dir);
-    }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to spawn AI agent: {}", e))?;
-
-    // stdin にプロンプトを送信して閉じる
-    if !plan.stdin_content.is_empty() {
-        if let Some(mut stdin) = child.stdin.take() {
-            stdin
-                .write_all(plan.stdin_content.as_bytes())
-                .await
-                .map_err(|e| format!("Failed to write stdin: {}", e))?;
-        }
-    }
-
-    // PID を HashMap に登録 (cancel_approval から kill できるようにする)
-    let pid = child.id();
-    if let Some(pid) = pid {
-        let mut map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;
-        map.insert(worktree_id.clone(), pid);
-    }
-
-    // タイムアウト付きで待機
-    let wait_result = timeout(
-        Duration::from_secs(TIMEOUT_SECS),
-        child.wait_with_output(),
-    )
-    .await;
-
-    // タイムアウト時はプロセスをkill
-    if wait_result.is_err() {
-        let map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;
-        if let Some(&pid) = map.get(&worktree_id) {
-            crate::process_utils::kill_process_tree(pid);
-        }
-    }
-
-    // 完了後に HashMap から削除（finally 相当）
-    {
-        let mut map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;
-        map.remove(&worktree_id);
-    }
-
-    let output = wait_result
-        .map_err(|_| format!("AI agent timed out after {}s", TIMEOUT_SECS))?
-        .map_err(|e| format!("Failed to wait for AI agent: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!(
-            "AI agent exited with {}: {}",
-            output.status, stderr
-        ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = ai_provider::run_ai_command(&plan, &state, &worktree_id, &worktree_base_dir, TIMEOUT_SECS).await?;
     log::debug!("[AutoApproval] AI agent response: {}", stdout.trim());
 
     let structured = ai_provider::parse_response(&agent_kind, &stdout)?;
@@ -189,18 +109,12 @@ pub async fn cancel_approval(
     state: State<'_, ApprovalManager>,
     worktree_id: String,
 ) -> Result<(), String> {
-    let pid = {
-        let mut map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;
-        map.remove(&worktree_id)
-    };
-
+    let pid = state.remove(&worktree_id)?;
     if let Some(pid) = pid {
         log::debug!("[AutoApproval] cancel_approval: killing PID={} for worktree_id={}", pid, worktree_id);
-
         crate::process_utils::kill_process_tree(pid);
     } else {
         log::debug!("[AutoApproval] cancel_approval: no in-progress process for worktree_id={}", worktree_id);
     }
-
     Ok(())
 }

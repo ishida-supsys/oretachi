@@ -26,10 +26,6 @@ export function useArtifactWindow() {
       transparent: true,
     });
 
-    win.once("tauri://created", () => {
-      console.log(`アーティファクトウィンドウ作成成功: artifact-${worktreeId}`);
-    });
-
     win.once("tauri://error", (e) => {
       console.error(`アーティファクトウィンドウ作成失敗: artifact-${worktreeId}`, e);
       artifactWindowMap.delete(worktreeId);

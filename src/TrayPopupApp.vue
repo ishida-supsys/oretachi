@@ -5,10 +5,9 @@ import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import TerminalView from "./components/TerminalView.vue";
 import FrameContainer from "./components/FrameContainer.vue";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
-import { useFrameLayout } from "./composables/useFrameLayout";
+import { useWorktreeFrame } from "./composables/useWorktreeFrame";
 import { useSettings } from "./composables/useSettings";
 import { useHotkeyListener } from "./composables/useHotkeys";
-import { useTerminalReparenting } from "./composables/useTerminalReparenting";
 import { useIdeSelect } from "./composables/useIdeSelect";
 import type { TrayWorktreeData } from "./composables/useTrayPopup";
 import type { FrameNode } from "./types/frame";
@@ -27,18 +26,48 @@ const allWorktrees = ref<TrayWorktreeData[]>([]);
 const currentIndex = ref(0);
 const initialized = ref(false);
 
-// フレームレイアウト
-const { root, initLayout, removeTerminalFromLeaf, moveTerminal, setActiveTerminal, splitLeaf, pruneTree, findLeafByTerminalId, getAllLeafs } = useFrameLayout();
-
 // ターミナルエントリ（現在のワークツリーのみ）
 const terminalEntries = reactive(new Map<number, TrayTerminalEntry>());
-const lastFocusedLeafId = ref<string>("");
 
 // TerminalView ref 管理
 const terminalRefs = reactive(new Map<number, InstanceType<typeof TerminalView>>());
 
-const { setTerminalRef, returnAllToOffscreen, mountTerminalsToHosts } =
-  useTerminalReparenting(terminalEntries, terminalRefs);
+// フレームレイアウト（useWorktreeFrameで共通化）
+const {
+  root,
+  initLayout,
+  lastFocusedLeafId,
+  setTerminalRef,
+  returnAllToOffscreen,
+  mountTerminalsToHosts,
+  getAllLeafs,
+  switchTerminal,
+  closeTerminal,
+  handleTerminalExit,
+  onSplitRequest,
+  onTabDrop,
+  onTabEdgeDrop,
+  onTabReorder,
+  switchNextTerminal,
+  switchPrevTerminal,
+  closeActiveTerminal,
+} = useWorktreeFrame({
+  terminalEntries,
+  terminalRefs,
+  // noResize=true のためタブ切替時に PTY サイズを手動適用
+  async onAfterSwitch(_leafId, terminalId) {
+    const entry = terminalEntries.get(terminalId);
+    const term = terminalRefs.get(terminalId);
+    if (entry && term) {
+      const termObj = term.getTerminal();
+      if (termObj) {
+        termObj.resize(entry.cols, entry.rows);
+        termObj.refresh(0, termObj.rows - 1);
+        termObj.scrollToBottom();
+      }
+    }
+  },
+});
 
 // ────────────────────────────────────────────────
 // 現在ワークツリーの表示
@@ -114,110 +143,6 @@ async function showWorktree(data: TrayWorktreeData) {
 // ────────────────────────────────────────────────
 // イベントハンドラ
 // ────────────────────────────────────────────────
-
-async function switchTerminal(leafId: string, terminalId: number) {
-  setActiveTerminal(leafId, terminalId);
-  lastFocusedLeafId.value = leafId;
-  await nextTick();
-  const term = terminalRefs.get(terminalId);
-  if (term) {
-    await term.handleTabActivated();
-    // PTYサイズに合わせてxterm.jsをリサイズ（noResize=trueのためfit()は呼ばれない）
-    const entry = terminalEntries.get(terminalId);
-    if (entry) {
-      const termObj = term.getTerminal();
-      if (termObj) {
-        termObj.resize(entry.cols, entry.rows);
-        termObj.refresh(0, termObj.rows - 1);
-        termObj.scrollToBottom();
-      }
-    }
-    term.focus();
-  }
-}
-
-function handleTerminalExit(tid: number) {
-  const leaf = findLeafByTerminalId(tid);
-  if (leaf) closeTerminal(leaf.id, tid);
-}
-
-async function closeTerminal(leafId: string, terminalId: number) {
-  if (!terminalEntries.has(terminalId)) return;
-
-  const term = terminalRefs.get(terminalId);
-  if (term?.isRunning) {
-    await term.kill();
-  }
-
-  if (!terminalEntries.has(terminalId)) return;
-
-  returnAllToOffscreen();
-
-  terminalEntries.delete(terminalId);
-  removeTerminalFromLeaf(leafId, terminalId);
-  pruneTree();
-
-  await nextTick();
-  mountTerminalsToHosts();
-
-  for (const [tid] of terminalEntries) {
-    const t = terminalRefs.get(tid);
-    if (t) await t.handleTabActivated();
-  }
-}
-
-async function onSplitRequest(leafId: string, direction: "left" | "right" | "top" | "bottom") {
-  returnAllToOffscreen();
-  splitLeaf(leafId, direction);
-  lastFocusedLeafId.value = leafId;
-  await nextTick();
-  mountTerminalsToHosts();
-  for (const [tid] of terminalEntries) {
-    const t = terminalRefs.get(tid);
-    if (t) await t.handleTabActivated();
-  }
-}
-
-function onTabReorder(leafId: string, terminalId: number, insertIndex: number) {
-  moveTerminal(terminalId, leafId, leafId, insertIndex);
-}
-
-async function onTabDrop(sourceLeafId: string, terminalId: number, targetLeafId: string, insertIndex?: number) {
-  if (sourceLeafId === targetLeafId) return;
-  returnAllToOffscreen();
-  moveTerminal(terminalId, sourceLeafId, targetLeafId, insertIndex);
-  pruneTree();
-  lastFocusedLeafId.value = targetLeafId;
-  await nextTick();
-  mountTerminalsToHosts();
-  for (const [tid] of terminalEntries) {
-    const t = terminalRefs.get(tid);
-    if (t) await t.handleTabActivated();
-  }
-  const movedTerm = terminalRefs.get(terminalId);
-  if (movedTerm) movedTerm.focus();
-}
-
-async function onTabEdgeDrop(
-  sourceLeafId: string,
-  terminalId: number,
-  targetLeafId: string,
-  direction: "left" | "right" | "top" | "bottom"
-) {
-  returnAllToOffscreen();
-  const newLeaf = splitLeaf(targetLeafId, direction);
-  moveTerminal(terminalId, sourceLeafId, newLeaf.id);
-  pruneTree();
-  lastFocusedLeafId.value = newLeaf.id;
-  await nextTick();
-  mountTerminalsToHosts();
-  for (const [tid] of terminalEntries) {
-    const t = terminalRefs.get(tid);
-    if (t) await t.handleTabActivated();
-  }
-  const movedTerm = terminalRefs.get(terminalId);
-  if (movedTerm) movedTerm.focus();
-}
 
 // ────────────────────────────────────────────────
 // ナビゲーション
@@ -319,41 +244,9 @@ useHotkeyListener(() => {
         }
       },
     },
-    {
-      binding: hk.terminalNext,
-      handler: () => {
-        const leafId = lastFocusedLeafId.value;
-        if (!leafId) return;
-        const leaf = getAllLeafs().filter(l => l.terminalIds.length > 0).find(l => l.id === leafId);
-        if (!leaf || leaf.terminalIds.length === 0) return;
-        const idx = leaf.terminalIds.indexOf(leaf.activeTerminalId ?? -1);
-        const nextIdx = idx === -1 ? 0 : (idx + 1) % leaf.terminalIds.length;
-        switchTerminal(leafId, leaf.terminalIds[nextIdx]);
-      },
-    },
-    {
-      binding: hk.terminalPrev,
-      handler: () => {
-        const leafId = lastFocusedLeafId.value;
-        if (!leafId) return;
-        const leaf = getAllLeafs().filter(l => l.terminalIds.length > 0).find(l => l.id === leafId);
-        if (!leaf || leaf.terminalIds.length === 0) return;
-        const idx = leaf.terminalIds.indexOf(leaf.activeTerminalId ?? -1);
-        const prevIdx = idx <= 0 ? leaf.terminalIds.length - 1 : idx - 1;
-        switchTerminal(leafId, leaf.terminalIds[prevIdx]);
-      },
-    },
-    {
-      binding: hk.terminalClose,
-      handler: () => {
-        const leafId = lastFocusedLeafId.value;
-        if (!leafId) return;
-        const leaf = getAllLeafs().filter(l => l.terminalIds.length > 0).find(l => l.id === leafId);
-        if (leaf?.activeTerminalId != null) {
-          closeTerminal(leafId, leaf.activeTerminalId);
-        }
-      },
-    },
+    { binding: hk.terminalNext, handler: switchNextTerminal },
+    { binding: hk.terminalPrev, handler: switchPrevTerminal },
+    { binding: hk.terminalClose, handler: closeActiveTerminal },
   ];
 });
 

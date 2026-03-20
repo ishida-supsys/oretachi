@@ -250,19 +250,6 @@ export function useFrameLayout() {
   // ユーティリティ
   // ────────────────────────────────────────────────
 
-  function getAllTerminalIds(): number[] {
-    const ids: number[] = [];
-    function collect(node: FrameNode) {
-      if (node.type === "leaf") {
-        ids.push(...node.terminalIds);
-      } else {
-        node.children.forEach(collect);
-      }
-    }
-    collect(root.value);
-    return ids;
-  }
-
   function getAllLeafs(): FrameLeaf[] {
     const leafs: FrameLeaf[] = [];
     function collect(node: FrameNode) {
@@ -279,16 +266,13 @@ export function useFrameLayout() {
   return {
     root,
     initLayout,
-    findLeafById,
     findLeafByTerminalId,
-    findParent,
     splitLeaf,
     addTerminalToLeaf,
     removeTerminalFromLeaf,
     moveTerminal,
     setActiveTerminal,
     pruneTree,
-    getAllTerminalIds,
     getAllLeafs,
   };
 }

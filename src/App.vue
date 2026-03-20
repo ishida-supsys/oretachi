@@ -21,7 +21,7 @@ import { useIdeSelect } from "./composables/useIdeSelect";
 import { useSettings } from "./composables/useSettings";
 import { useWorktrees } from "./composables/useWorktrees";
 import { useI18n } from "vue-i18n";
-import { useSubWindows } from "./composables/useSubWindows";
+import { useSubWindows, requestSubWindowLayout } from "./composables/useSubWindows";
 import { useCodeReviewWindow } from "./composables/useCodeReviewWindow";
 import { useArtifactWindow } from "./composables/useArtifactWindow";
 import { useNotifications, sendOsNotification, playSoundForKind, type NotificationKind } from "./composables/useNotifications";
@@ -34,14 +34,14 @@ import { useAddTaskDialog } from "./composables/useAddTaskDialog";
 import { useTaskExecution } from "./composables/useTaskExecution";
 import { useAutoApprovalPrompt } from "./composables/useAutoApprovalPrompt";
 import type { FrameNode } from "./types/frame";
-import type { SubTerminalEntry } from "./types/terminal";
 import { useWorktreeFrameBundles } from "./composables/useWorktreeFrameBundles";
-import { useHotkeyListener, bindingToAccelerator, matchesHotkey } from "./composables/useHotkeys";
 import { useCodeReviewChatListener } from "./composables/useCodeReviewLineChat";
-import { register, unregister } from "@tauri-apps/plugin-global-shortcut";
 import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
-import { getRecentLines, analyzeForApproval, hasApprovalPrompt, cancelApproval } from "./utils/autoApproval";
+import { cancelApproval } from "./utils/autoApproval";
 import { useAutoHotkey } from "./composables/useAutoHotkey";
+import { useAppAutoApproval } from "./composables/useAppAutoApproval";
+import { useAppHotkeys } from "./composables/useAppHotkeys";
+import { useSubWindowEvents } from "./composables/useSubWindowEvents";
 import { useShutdownGuard } from "./composables/useShutdownGuard";
 import { debug } from "@tauri-apps/plugin-log";
 import Toast from "primevue/toast";
@@ -51,14 +51,7 @@ const { t } = useI18n();
 // ウィンドウのフォーカス状態
 const { isWindowFocused } = useWindowFocus();
 
-// 自動承認: ワークツリー ID → 有効/無効
-const autoApprovalMap = reactive(new Map<string, boolean>());
-
-// AI判定進行中のワークツリー ID セット
-const aiJudgingWorktrees = reactive(new Set<string>());
-
-// サブウィンドウフォーカス状態: ワークツリー ID → フォーカス中か
-const subWindowFocusMap = reactive(new Map<string, boolean>());
+// サブウィンドウフォーカス状態: ワークツリー ID → フォーカス中か (useSubWindowEvents で管理)
 
 type ViewMode = "home" | "settings" | "terminal";
 
@@ -155,6 +148,41 @@ const showAddDialog = ref(false);
 const loadingWorktrees = reactive(new Map<string, string>());
 
 const { isWaitingForShutdown, isBusyForShutdown, waitForBusyOperations } = useShutdownGuard(loadingWorktrees);
+
+// サブウィンドウイベント管理
+const subWindowEvents = useSubWindowEvents({
+  worktrees,
+  removeTerminal,
+  unregisterSubWindow,
+  terminalWorktreeMap,
+  thumbnailUrls,
+  terminalAgentStatus,
+  terminalWebSessions,
+  updateTerminalTitle,
+  clearNotification,
+  requestSubWindowLayout,
+});
+
+// 自動承認管理
+const autoApproval = useAppAutoApproval({
+  worktrees,
+  settings,
+  scheduleSave,
+  isDetached,
+  getTerminalRef,
+  autoApprovalPromptMap,
+  lastJudgedCommandMap,
+  addNotification,
+  isWorktreeFocused,
+  onClickAutoApproval,
+  playSoundForKind,
+  sendOsNotification,
+  t,
+});
+
+// 短縮参照
+const { autoApprovalMap, aiJudgingWorktrees } = autoApproval;
+const { onToggleAutoApproval, onCancelAiJudging } = autoApproval;
 
 // タスク実行 (executeAddWorktree / executeAgentWorktree)
 const { executeAddWorktree, executeAgentWorktree, resolveShell, buildScriptCommand } =
@@ -431,7 +459,7 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
     // detached の場合はサブウィンドウを閉じる
     if (isDetached(worktreeId)) {
       await moveToMainWindow(worktreeId);
-      subWindowFocusMap.delete(worktreeId);
+      subWindowEvents.subWindowFocusMap.delete(worktreeId);
     }
 
     // アーティファクトウィンドウを閉じる
@@ -589,7 +617,7 @@ async function onMoveToSubWindow(worktreeId: string) {
 
 function isWorktreeFocused(worktreeId: string): boolean {
   if (isDetached(worktreeId)) {
-    return subWindowFocusMap.get(worktreeId) === true;
+    return subWindowEvents.subWindowFocusMap.get(worktreeId) === true;
   }
   return isWindowFocused.value && viewMode.value === "terminal" && activeWorktreeId.value === worktreeId;
 }
@@ -604,68 +632,11 @@ watch(
   },
 );
 
-async function onToggleAutoApproval(worktreeId: string) {
-  const current = autoApprovalMap.get(worktreeId) ?? false;
-  autoApprovalMap.set(worktreeId, !current);
-
-  // 設定ファイルに永続化
-  const wtEntry = settings.value.worktrees.find((w) => w.id === worktreeId);
-  if (wtEntry) {
-    wtEntry.autoApproval = !current;
-    scheduleSave();
-  }
-
-  // 自動承認を OFF にした時、AI判定中ならキャンセル
-  if (current && aiJudgingWorktrees.has(worktreeId)) {
-    await cancelApproval(worktreeId);
-    if (isDetached(worktreeId)) {
-      await emitTo(`sub-${worktreeId}`, "sub-cancel-auto-approve", {});
-    }
-  }
-
-  if (isDetached(worktreeId)) {
-    await emitTo(`sub-${worktreeId}`, "sub-set-auto-approval", { autoApproval: !current });
-  }
-}
-
-async function onCancelAiJudging(worktreeId: string) {
-  await cancelApproval(worktreeId);
-  if (isDetached(worktreeId)) {
-    await emitTo(`sub-${worktreeId}`, "sub-cancel-auto-approve", {});
-  }
-}
-
-async function getSubWindowLayout(worktreeId: string): Promise<{ layout: FrameNode | null; terminals: SubTerminalEntry[] }> {
-  return new Promise((resolve) => {
-    const timeout = setTimeout(() => {
-      unlisten();
-      resolve({ layout: null, terminals: [] });
-    }, 3000);
-
-    let unlisten = () => {};
-    listen<{ worktreeId: string; layout: FrameNode | null; terminals: SubTerminalEntry[]; windowSize?: unknown }>(
-      "sub-layout-response",
-      (event) => {
-        if (event.payload.worktreeId === worktreeId) {
-          clearTimeout(timeout);
-          unlisten();
-          resolve({ layout: event.payload.layout, terminals: event.payload.terminals ?? [] });
-        }
-      }
-    ).then((fn) => { unlisten = fn; });
-
-    emitTo(`sub-${worktreeId}`, "sub-get-layout", {}).catch(() => {
-      clearTimeout(timeout);
-      unlisten();
-      resolve({ layout: null, terminals: [] });
-    });
-  });
-}
 
 async function onMoveToMainWindow(worktreeId: string) {
   // サブウィンドウからレイアウトとターミナル情報を取得（destroy前に）
   const { layout: savedLayout, terminals: savedTerminals } = isDetached(worktreeId)
-    ? await getSubWindowLayout(worktreeId)
+    ? await subWindowEvents.getSubWindowLayout(worktreeId)
     : { layout: null, terminals: [] };
 
   debug(`[MoveToMain] start worktreeId=${worktreeId} savedTerminals=${JSON.stringify(savedTerminals.map(t => ({ id: t.id, sessionId: t.sessionId })))}`);
@@ -690,7 +661,7 @@ async function onMoveToMainWindow(worktreeId: string) {
   await moveToMainWindow(worktreeId);
   debug(`[MoveToMain] moveToMainWindow done, isDetached=${isDetached(worktreeId)}`);
 
-  subWindowFocusMap.delete(worktreeId);
+  subWindowEvents.subWindowFocusMap.delete(worktreeId);
 }
 
 async function onTrayButtonClick() {
@@ -714,30 +685,7 @@ async function onTrayButtonClick() {
 
     if (isDetached(worktreeId)) {
       // サブウィンドウのレイアウト情報を要求
-      const layoutData = await new Promise<{ layout: FrameNode | null; terminals: TrayTerminalData[]; windowSize?: { width: number; height: number } } | null>((resolve) => {
-        const timeout = setTimeout(() => {
-          unlisten();
-          resolve(null);
-        }, 3000);
-
-        let unlisten = () => {};
-        listen<{ worktreeId: string; layout: FrameNode | null; terminals: TrayTerminalData[]; windowSize?: { width: number; height: number } }>(
-          "sub-layout-response",
-          (event) => {
-            if (event.payload.worktreeId === worktreeId) {
-              clearTimeout(timeout);
-              unlisten();
-              resolve({ layout: event.payload.layout, terminals: event.payload.terminals, windowSize: event.payload.windowSize });
-            }
-          }
-        ).then((fn) => { unlisten = fn; });
-
-        emitTo(`sub-${worktreeId}`, "sub-get-layout", {}).catch(() => {
-          clearTimeout(timeout);
-          unlisten();
-          resolve(null);
-        });
-      });
+      const layoutData = await requestSubWindowLayout(worktreeId) as { layout: FrameNode | null; terminals: TrayTerminalData[]; windowSize?: { width: number; height: number } } | null;
 
       worktreeDataList.push({
         worktreeId,
@@ -860,174 +808,29 @@ function onHotkeyCharClear(worktreeId: string) {
   showHotkeyCharDialog.value = false;
 }
 
-// メインウィンドウのホットキー登録
-useHotkeyListener(() => {
-  const hk = settings.value.hotkeys;
-  if (!hk) return [];
+// ─── composable instantiation ────────────────────────────────────────────────
 
-  const actions = [];
-
-  // terminalNext: アクティブワークツリーのフォーカスリーフで次のタブへ
-  actions.push({
-    binding: hk.terminalNext,
-    handler: () => {
-      if (!activeWorktreeId.value) return;
-      const bundle = worktreeFrameBundles.get(activeWorktreeId.value);
-      if (!bundle) return;
-      const leafId = bundle.frame.lastFocusedLeafId.value;
-      if (!leafId) return;
-      const leaf = bundle.frame.getLeafsWithTerminals().find((l) => l.id === leafId);
-      if (!leaf || leaf.terminalIds.length === 0) return;
-      const idx = leaf.terminalIds.indexOf(leaf.activeTerminalId ?? -1);
-      const nextIdx = idx === -1 ? 0 : (idx + 1) % leaf.terminalIds.length;
-      bundle.frame.switchTerminal(leafId, leaf.terminalIds[nextIdx]);
-    },
-  });
-
-  // terminalPrev: アクティブワークツリーのフォーカスリーフで前のタブへ
-  actions.push({
-    binding: hk.terminalPrev,
-    handler: () => {
-      if (!activeWorktreeId.value) return;
-      const bundle = worktreeFrameBundles.get(activeWorktreeId.value);
-      if (!bundle) return;
-      const leafId = bundle.frame.lastFocusedLeafId.value;
-      if (!leafId) return;
-      const leaf = bundle.frame.getLeafsWithTerminals().find((l) => l.id === leafId);
-      if (!leaf || leaf.terminalIds.length === 0) return;
-      const idx = leaf.terminalIds.indexOf(leaf.activeTerminalId ?? -1);
-      const prevIdx = idx <= 0 ? leaf.terminalIds.length - 1 : idx - 1;
-      bundle.frame.switchTerminal(leafId, leaf.terminalIds[prevIdx]);
-    },
-  });
-
-  // terminalAdd: アクティブワークツリーにターミナル追加
-  actions.push({
-    binding: hk.terminalAdd,
-    handler: () => {
-      const worktreeId = activeWorktreeId.value
-        ?? worktrees.value.find((w) => !isDetached(w.id))?.id;
-      if (worktreeId) onAddTerminal(worktreeId);
-    },
-  });
-
-  // terminalClose: アクティブワークツリーのフォーカスリーフのアクティブターミナルを閉じる
-  actions.push({
-    binding: hk.terminalClose,
-    handler: () => {
-      if (viewMode.value !== "terminal" || !activeWorktreeId.value) return;
-      const bundle = worktreeFrameBundles.get(activeWorktreeId.value);
-      if (!bundle) return;
-      const leafId = bundle.frame.lastFocusedLeafId.value;
-      if (!leafId) return;
-      const leaf = bundle.frame.getLeafsWithTerminals().find((l) => l.id === leafId);
-      if (leaf?.activeTerminalId != null) {
-        bundle.frame.closeTerminal(leafId, leaf.activeTerminalId);
-      }
-    },
-  });
-
-  // addTask: タスク追加ダイアログを開く
-  if (hk.addTask) {
-    actions.push({
-      binding: hk.addTask,
-      handler: () => {
-        showAddTaskDialog.value = true;
-      },
-    });
-  }
-
-  // homeTab: ホームタブへ戻る
-  if (hk.homeTab) {
-    actions.push({
-      binding: hk.homeTab,
-      handler: () => {
-        goHome();
-      },
-    });
-  }
-
-  // Alt+[char]: 対応するワークツリーにフォーカス
-  // (matchesHotkey は使わず個別に処理するため空の binding で追加しない)
-  // → 別途 keydown リスナーで対応
-
-  return actions;
+const hotkeys = useAppHotkeys({
+  settings,
+  loadSettings,
+  activeWorktreeId,
+  worktreeFrameBundles,
+  viewMode,
+  worktrees,
+  isDetached,
+  switchToWorktree,
+  focusSubWindow,
+  onAddTerminal,
+  showAddTaskDialog,
+  goHome,
+  onTrayButtonClick,
 });
 
-// Alt+[char] ワークツリーフォーカス用の共通ロジック
-function focusWorktreeByChar(char: string) {
-  const wt = worktrees.value.find((w) => {
-    const entry = settings.value.worktrees.find((e) => e.id === w.id);
-    return entry?.hotkeyChar === char;
-  });
-  if (!wt) return;
-
-  if (isDetached(wt.id)) {
-    focusSubWindow(wt.id);
-  } else if (wt.terminals.length > 0) {
-    switchToWorktree(wt.id);
-  } else {
-    onAddTerminal(wt.id);
-  }
-}
-
-// Alt+[char] ワークツリーフォーカス用の keydown リスナー
-function handleAltCharKey(event: KeyboardEvent) {
-  if (event.type !== "keydown") return;
-  if (event.isComposing || event.keyCode === 229) return;
-  if (!event.altKey || event.ctrlKey || event.shiftKey) return;
-  if (event.key.length !== 1) return;
-
-  const char = event.key.toLowerCase();
-  // homeTab ホットキーと重複する場合は Alt+[char] の処理をスキップ
-  const homeTabBinding = settings.value.hotkeys?.homeTab;
-  if (homeTabBinding && matchesHotkey(event, homeTabBinding)) return;
-
-  const wt = worktrees.value.find((w) => {
-    const entry = settings.value.worktrees.find((e) => e.id === w.id);
-    return entry?.hotkeyChar === char;
-  });
-  if (!wt) return;
-
-  event.preventDefault();
-  event.stopPropagation();
-  focusWorktreeByChar(char);
-}
-
-let globalShortcutRegistered = false;
-let registeredAccelerator: string | null = null;
-
-async function registerGlobalShortcut() {
-  const binding = settings.value.hotkeys?.globalTrayPopup;
-  if (!binding) return;
-  const accelerator = bindingToAccelerator(binding);
-  try {
-    if (globalShortcutRegistered && registeredAccelerator) {
-      await unregister(registeredAccelerator);
-      globalShortcutRegistered = false;
-      registeredAccelerator = null;
-    }
-    await register(accelerator, () => {
-      onTrayButtonClick();
-    });
-    globalShortcutRegistered = true;
-    registeredAccelerator = accelerator;
-  } catch (e) {
-    console.error("[GlobalShortcut] 登録失敗:", e);
-  }
-}
 
 onMounted(async () => {
   await loadSettings();
   await getCurrentWindow().setAlwaysOnTop(settings.value.alwaysOnTop);
   loadWorktreesFromSettings();
-
-  // 保存された自動承認状態を復元
-  for (const wt of settings.value.worktrees) {
-    if (wt.autoApproval === true) {
-      autoApprovalMap.set(wt.id, true);
-    }
-  }
   restoreAutoApprovalPrompts();
 
   // 保存されたサブウィンドウを復元
@@ -1064,7 +867,7 @@ onMounted(async () => {
   await listen<{ worktreeId: string }>("sub-ready", async (event) => {
     const { worktreeId } = event.payload;
     // 新しいサブウィンドウは作成時にフォーカスされている
-    subWindowFocusMap.set(worktreeId, true);
+    subWindowEvents.subWindowFocusMap.set(worktreeId, true);
     const initData = getPendingInitData(worktreeId);
     if (initData) {
       // このワークツリーに属するターミナルのWebセッション情報を収集
@@ -1112,9 +915,6 @@ onMounted(async () => {
     await moveToSubWindow(wt.id, wt.name, subTerminals, autoApprovalMap.get(wt.id) ?? false, true, wt.path, undefined, wt.branchName, autoApprovalPromptMap.get(wt.id));
   }
 
-  // Alt+char ホットキーリスナー登録
-  window.addEventListener("keydown", handleAltCharKey, true);
-
   // 通知リスナー初期化 (ワークツリー名 → ID 解決関数と自動承認中は保留するコールバックを渡す)
   await initNotificationListener(
     (name: string) => worktrees.value.find((w) => w.name === name)?.id,
@@ -1142,107 +942,8 @@ onMounted(async () => {
     () => settings.value.notificationSound,
   );
 
-  // notify-worktree → 自動承認チェック
-  await listen<{ worktree_name: string; kind: string }>("notify-worktree", async (event) => {
-    const { worktree_name: worktreeName, kind } = event.payload;
-    const wt = worktrees.value.find((w) => w.name === worktreeName);
-
-    await debug(
-      `[AutoApproval] notify-worktree received worktreeName=${worktreeName} resolved=${wt?.id ?? "null"} autoApproval=${wt ? autoApprovalMap.get(wt.id) : "undefined"}`
-    );
-
-    if (!wt) return;
-
-    // 作業完了通知は承認チェック不要 (通知追加は initNotificationListener 側で行う)
-    if (kind === "completed") return;
-
-    if (!autoApprovalMap.get(wt.id)) return;
-
-    // 重複防止: 既に同一ワークツリーのAI判定が進行中ならスキップ
-    if (aiJudgingWorktrees.has(wt.id)) {
-      await debug(`[AutoApproval] already in progress for ${wt.id}, skipping`);
-      return;
-    }
-
-    if (isDetached(wt.id)) {
-      await debug(`[AutoApproval] delegating to sub-window ${wt.id}`);
-      await emitTo(`sub-${wt.id}`, "sub-try-auto-approve", {
-        additionalPrompt: autoApprovalPromptMap.get(wt.id) ?? "",
-      });
-      return;
-    }
-
-    // ローカルターミナルのバッファを読み取り承認判定
-    await debug(`[AutoApproval] local terminals check, count=${wt.terminals.length}`);
-    aiJudgingWorktrees.add(wt.id);
-    let approved = false;
-    try {
-      for (const t of wt.terminals) {
-        const termRef = getTerminalRef(t.id);
-        if (!termRef) { await debug(`[AutoApproval] tid=${t.id} termRef=null, skip`); continue; }
-        const terminal = termRef.getTerminal();
-        if (!terminal) { await debug(`[AutoApproval] tid=${t.id} terminal=null, skip`); continue; }
-        const content = getRecentLines(terminal, 200);
-        await debug(`[AutoApproval] tid=${t.id} content(last200)=${content.slice(-200)}`);
-        const judgeResult = await analyzeForApproval(wt.id, content, wt.path, autoApprovalPromptMap.get(wt.id));
-        if (judgeResult.command) {
-          lastJudgedCommandMap.set(wt.id, judgeResult.command);
-        }
-        if (judgeResult.safe) {
-          // バッファ再チェック: AI判定完了後、承認プロンプトがまだあるか確認
-          const freshContent = getRecentLines(terminal, 10);
-          if (!hasApprovalPrompt(freshContent)) {
-            await debug(`[AutoApproval] tid=${t.id} → prompt disappeared, skip Enter`);
-            break;
-          }
-          await debug(`[AutoApproval] tid=${t.id} → approved, sending Enter`);
-          await termRef.write("\r");
-          approved = true;
-          break;
-        } else {
-          await debug(`[AutoApproval] tid=${t.id} → not approved`);
-        }
-      }
-    } finally {
-      aiJudgingWorktrees.delete(wt.id);
-    }
-    if (!approved && !isWorktreeFocused(wt.id)) {
-      await debug(`[AutoApproval] local: not approved → addNotification(${wt.id})`);
-      addNotification(wt.id, "approval");
-      playSoundForKind("approval");
-      await sendOsNotification(wt.name, t("notification.titleApproval"));
-    }
-  });
-
-  // サブウィンドウからの自動承認結果 → 拒否時のみ通知
-  await listen<{ worktreeId: string; approved: boolean; command?: string }>("sub-auto-approve-result", async (event) => {
-    const { worktreeId: wid, approved, command } = event.payload;
-    await debug(`[AutoApproval] sub-auto-approve-result worktreeId=${wid} approved=${approved} command=${command ?? "none"}`);
-    if (command) {
-      lastJudgedCommandMap.set(wid, command);
-    }
-    if (!approved && !isWorktreeFocused(wid)) {
-      addNotification(wid, "approval");
-      playSoundForKind("approval");
-      const wtName = worktrees.value.find((w) => w.id === wid)?.name;
-      if (wtName) await sendOsNotification(wtName, t("notification.titleApproval"));
-    }
-  });
-
-  // サブウィンドウからの自動承認バッジクリック → ダイアログ表示
-  await listen<{ worktreeId: string }>("sub-click-auto-approval", (event) => {
-    onClickAutoApproval(event.payload.worktreeId);
-  });
-
-  // トレイポップアップからの自動承認バッジクリック → ダイアログ表示
-  await listen<{ worktreeId: string }>("tray-click-auto-approval", (event) => {
-    onClickAutoApproval(event.payload.worktreeId);
-  });
-
-  // トレイポップアップからのAI判定キャンセル
-  await listen<{ worktreeId: string }>("tray-cancel-ai-judging", (event) => {
-    onCancelAiJudging(event.payload.worktreeId);
-  });
+  // 自動承認リスナーを初期化（notify-worktree, sub-auto-approve-result 等）
+  await autoApproval.init();
 
   // ターミナル追加リクエスト (サブウィンドウから)
   await listen<{ worktreeId: string }>("sub-add-terminal-request", async (event) => {
@@ -1259,56 +960,8 @@ onMounted(async () => {
     await openArtifactViewer(wt.id, wt.name);
   });
 
-  // サブウィンドウ close 通知 (ユーザーが X ボタンで閉じた場合のみ)
-  // 注: SubWindowApp は既に kill 済みのため、ここでは状態解除のみ
-  await listen<{ worktreeId: string }>("sub-window-closing", async (event) => {
-    const { worktreeId } = event.payload;
-
-    subWindowFocusMap.delete(worktreeId);
-
-    // detached 解除（ターミナルは SubWindowApp 側で既に kill 済み）
-    unregisterSubWindow(worktreeId);
-
-    // terminalWorktreeMap からエントリを削除
-    const worktree = worktrees.value.find((w) => w.id === worktreeId);
-    if (worktree) {
-      for (const terminal of [...worktree.terminals]) {
-        terminalWorktreeMap.delete(terminal.id);
-      }
-    }
-  });
-
-  // サブウィンドウのフォーカス状態変化を受信
-  await listen<{ worktreeId: string; focused: boolean }>("sub-window-focus-changed", (event) => {
-    subWindowFocusMap.set(event.payload.worktreeId, event.payload.focused);
-  });
-
-  // サブウィンドウでターミナルが削除された通知
-  await listen<{ worktreeId: string; terminalId: number }>("sub-remove-terminal", (event) => {
-    const { worktreeId, terminalId } = event.payload;
-    removeTerminal(worktreeId, terminalId);
-    terminalWorktreeMap.delete(terminalId);
-    thumbnailUrls.delete(terminalId);
-    terminalAgentStatus.delete(terminalId);
-    terminalWebSessions.delete(terminalId);
-  });
-
-  // サブウィンドウからのサムネイル受信
-  await listen<{ terminalId: number; imageUrl: string }>(
-    "sub-thumbnail-update",
-    (event) => {
-      thumbnailUrls.set(event.payload.terminalId, event.payload.imageUrl);
-    }
-  );
-
-  // サブウィンドウからのタイトル変更通知
-  await listen<{ worktreeId: string; terminalId: number; title: string }>(
-    "sub-title-update",
-    (event) => {
-      const { worktreeId: wid, terminalId, title } = event.payload;
-      updateTerminalTitle(wid, terminalId, title);
-    }
-  );
+  // サブウィンドウイベントリスナーを初期化
+  await subWindowEvents.init();
 
   // AIエージェントインジケーター: pty-ai-agent-changed を受信して terminalAgentStatus を更新
   await listen<{ sessions: Record<number, boolean> }>("pty-ai-agent-changed", (event) => {
@@ -1333,15 +986,7 @@ onMounted(async () => {
     }
   });
 
-  // グローバルショートカット登録
-  await registerGlobalShortcut();
-
-  // 設定変更時にグローバルショートカット再登録 + always-on-top 反映
-  await listen("settings-changed", async () => {
-    await loadSettings();
-    await getCurrentWindow().setAlwaysOnTop(settings.value.alwaysOnTop);
-    await registerGlobalShortcut();
-  });
+  await hotkeys.init();
 
   // トレイポップアップ準備完了 → init データ送信
   await listen("tray-ready", async () => {
@@ -1367,16 +1012,6 @@ onMounted(async () => {
   // トレイポップアップからの通知クリア
   await listen<{ worktreeId: string }>("tray-clear-notification", (event) => {
     clearNotification(event.payload.worktreeId);
-  });
-
-  // サブウィンドウでのターミナルフォーカス時の通知クリア
-  await listen<{ worktreeId: string }>("sub-clear-notification", (event) => {
-    clearNotification(event.payload.worktreeId);
-  });
-
-  // サブウィンドウからの Alt+char ワークツリーフォーカス委譲
-  await listen<{ char: string }>("sub-alt-char-focus", (event) => {
-    focusWorktreeByChar(event.payload.char);
   });
 
   // トレイポップアップ閉鎖通知

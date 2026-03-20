@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted, nextTick, watch, computed } from "vue";
-import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { emitTo, listen } from "@tauri-apps/api/event";
+import { useEventListeners } from "./composables/useEventListeners";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import TerminalView from "./components/TerminalView.vue";
@@ -8,10 +9,11 @@ import FrameContainer from "./components/FrameContainer.vue";
 import WorktreeHeader from "./components/WorktreeHeader.vue";
 import { useWorktreeFrame } from "./composables/useWorktreeFrame";
 import { useSettings } from "./composables/useSettings";
-import { useHotkeyListener } from "./composables/useHotkeys";
+import { useHotkeyListener, useAltCharKeyListener } from "./composables/useHotkeys";
 import { renderToDataUrl } from "./composables/useTerminalThumbnail";
 import { useWindowFocus } from "./composables/useWindowFocus";
-import { getRecentLines, analyzeForApproval, hasApprovalPrompt } from "./utils/autoApproval";
+import { runApprovalLoop } from "./utils/autoApproval";
+import type { TerminalForApproval } from "./utils/autoApproval";
 import { useIdeSelect } from "./composables/useIdeSelect";
 import { useArtifactWindow } from "./composables/useArtifactWindow";
 import { invoke } from "@tauri-apps/api/core";
@@ -84,6 +86,9 @@ const {
   getAllLeafs,
   getLeafsWithTerminals,
   switchTerminal,
+  switchNextTerminal,
+  switchPrevTerminal,
+  closeActiveTerminal,
   closeTerminal,
   handleTerminalExit,
   onSplitRequest,
@@ -164,92 +169,34 @@ useHotkeyListener(() => {
         });
       },
     },
-    {
-      binding: hk.terminalNext,
-      handler: () => {
-        const leafId = lastFocusedLeafId.value;
-        if (!leafId) return;
-        const leaf = getLeafsWithTerminals().find((l) => l.id === leafId);
-        if (!leaf || leaf.terminalIds.length === 0) return;
-        const idx = leaf.terminalIds.indexOf(leaf.activeTerminalId ?? -1);
-        const nextIdx = idx === -1 ? 0 : (idx + 1) % leaf.terminalIds.length;
-        switchTerminal(leafId, leaf.terminalIds[nextIdx]);
-      },
-    },
-    {
-      binding: hk.terminalPrev,
-      handler: () => {
-        const leafId = lastFocusedLeafId.value;
-        if (!leafId) return;
-        const leaf = getLeafsWithTerminals().find((l) => l.id === leafId);
-        if (!leaf || leaf.terminalIds.length === 0) return;
-        const idx = leaf.terminalIds.indexOf(leaf.activeTerminalId ?? -1);
-        const prevIdx = idx <= 0 ? leaf.terminalIds.length - 1 : idx - 1;
-        switchTerminal(leafId, leaf.terminalIds[prevIdx]);
-      },
-    },
-    {
-      binding: hk.terminalAdd,
-      handler: () => {
-        requestAddTerminal(lastFocusedLeafId.value || undefined);
-      },
-    },
-    {
-      binding: hk.terminalClose,
-      handler: () => {
-        const leafId = lastFocusedLeafId.value;
-        if (!leafId) return;
-        const leaf = getLeafsWithTerminals().find((l) => l.id === leafId);
-        if (leaf?.activeTerminalId !== null && leaf?.activeTerminalId !== undefined) {
-          closeTerminal(leafId, leaf.activeTerminalId);
-        }
-      },
-    },
+    { binding: hk.terminalNext, handler: switchNextTerminal },
+    { binding: hk.terminalPrev, handler: switchPrevTerminal },
+    { binding: hk.terminalAdd, handler: () => requestAddTerminal(lastFocusedLeafId.value || undefined) },
+    { binding: hk.terminalClose, handler: closeActiveTerminal },
   ];
 });
 
-// Alt+[char] を受けてメインに委譲
-function handleAltCharKey(event: KeyboardEvent) {
-  if (event.type !== "keydown") return;
-  if (event.isComposing || event.keyCode === 229) return;
-  if (!event.altKey || event.ctrlKey || event.shiftKey) return;
-  if (event.key.length !== 1) return;
-
-  const char = event.key.toLowerCase();
-  // 自分自身のホットキー文字は無視
+// Alt+[char] を受けてメインに委譲（自分自身の hotkeyChar は無視）
+useAltCharKeyListener((char, event) => {
   if (char === hotkeyChar.value?.toLowerCase()) return;
-
   event.preventDefault();
   event.stopPropagation();
   emitTo("main", "sub-alt-char-focus", { char });
-}
+});
 
-let unlistenInit: UnlistenFn | null = null;
-let unlistenAddResponse: UnlistenFn | null = null;
-let unlistenFocusTerminal: UnlistenFn | null = null;
-let unlistenClosingByMain: UnlistenFn | null = null;
-let unlistenGetLayout: UnlistenFn | null = null;
-let unlistenSetAutoApproval: UnlistenFn | null = null;
-let unlistenSetAutoApprovalPrompt: UnlistenFn | null = null;
-let unlistenTryAutoApprove: UnlistenFn | null = null;
-let unlistenCancelAutoApprove: UnlistenFn | null = null;
-let unlistenSettingsChanged: UnlistenFn | null = null;
-let unlistenSessionSaveRequest: UnlistenFn | null = null;
-let unlistenAiAgentChanged: UnlistenFn | null = null;
-let unlistenWebSession: UnlistenFn | null = null;
+const { collect } = useEventListeners();
 let thumbnailInterval: ReturnType<typeof setInterval> | null = null;
 let closingByMain = false;
 
 onMounted(async () => {
   await loadSettings();
-  window.addEventListener("keydown", handleAltCharKey, true);
 
-  unlistenSettingsChanged = await listen("settings-changed", async () => {
+  collect(await listen("settings-changed", async () => {
     await loadSettings();
-  });
+  }));
 
   // AIエージェントインジケーター: sessionId → terminalId に変換して terminalAgentStatus を更新
-  unlistenAiAgentChanged = await listen<{ sessions: Record<number, boolean> }>("pty-ai-agent-changed", (event) => {
+  collect(await listen<{ sessions: Record<number, boolean> }>("pty-ai-agent-changed", (event) => {
     const sessionToTerminal = new Map<number, number>();
     for (const [tid, entry] of terminalEntries) {
       if (entry.sessionId) sessionToTerminal.set(entry.sessionId, tid);
@@ -265,17 +212,17 @@ onMounted(async () => {
         }
       }
     }
-  });
+  }));
 
   // メインウィンドウからのWebセッション情報を受信
-  unlistenWebSession = await listen<{ terminalId: number; info: WebSessionInfo }>("sub-web-session", (event) => {
+  collect(await listen<{ terminalId: number; info: WebSessionInfo }>("sub-web-session", (event) => {
     terminalWebSessions.set(event.payload.terminalId, event.payload.info);
-  });
+  }));
 
   const appWindow = getCurrentWindow();
 
   // 初期ターミナルデータを受信
-  unlistenInit = await appWindow.listen<{
+  collect(await appWindow.listen<{
     worktreeId: string;
     terminals: SubTerminalEntry[];
     autoApproval?: boolean;
@@ -333,10 +280,10 @@ onMounted(async () => {
         }
       }
     }
-  );
+  ));
 
   // ターミナル追加レスポンス
-  unlistenAddResponse = await appWindow.listen<{ terminalId: number; sessionId: number; title: string }>(
+  collect(await appWindow.listen<{ terminalId: number; sessionId: number; title: string }>(
     "sub-add-terminal-response",
     async (event) => {
       const { terminalId, sessionId, title } = event.payload;
@@ -357,10 +304,10 @@ onMounted(async () => {
         term.focus();
       }
     }
-  );
+  ));
 
   // メインウィンドウからのフォーカスリクエスト
-  unlistenFocusTerminal = await appWindow.listen<{ terminalId: number }>(
+  collect(await appWindow.listen<{ terminalId: number }>(
     "sub-focus-terminal",
     async (event) => {
       const { terminalId } = event.payload;
@@ -369,10 +316,10 @@ onMounted(async () => {
         await switchTerminal(leaf.id, terminalId);
       }
     }
-  );
+  ));
 
   // メインウィンドウが「メインに戻す」を選択
-  unlistenClosingByMain = await appWindow.listen<{ worktreeId: string }>(
+  collect(await appWindow.listen<{ worktreeId: string }>(
     "sub-closing-by-main",
     async (event) => {
       if (event.payload.worktreeId === worktreeId) {
@@ -389,7 +336,7 @@ onMounted(async () => {
         await appWindow.destroy();
       }
     }
-  );
+  ));
 
   // X ボタンでクローズ
   appWindow.onCloseRequested(async (event) => {
@@ -423,7 +370,7 @@ onMounted(async () => {
   }, 1000);
 
   // メインウィンドウからのレイアウト情報取得要求
-  unlistenGetLayout = await appWindow.listen("sub-get-layout", async () => {
+  collect(await appWindow.listen("sub-get-layout", async () => {
     const layout = JSON.parse(JSON.stringify(root.value));
     const terminals = Array.from(terminalEntries.values()).map((entry) => {
       const termRef = terminalRefs.get(entry.id);
@@ -446,26 +393,26 @@ onMounted(async () => {
       height: Math.round(physicalSize.height / scaleFactor),
     };
     await emitTo("main", "sub-layout-response", { worktreeId, layout, terminals, windowSize });
-  });
+  }));
 
   // 自動承認フラグ更新
-  unlistenSetAutoApproval = await appWindow.listen<{ autoApproval: boolean }>(
+  collect(await appWindow.listen<{ autoApproval: boolean }>(
     "sub-set-auto-approval",
     (event) => {
       autoApproval.value = event.payload.autoApproval;
     }
-  );
+  ));
 
   // 自動承認 追加プロンプト更新
-  unlistenSetAutoApprovalPrompt = await appWindow.listen<{ prompt: string }>(
+  collect(await appWindow.listen<{ prompt: string }>(
     "sub-set-auto-approval-prompt",
     (event) => {
       additionalPrompt.value = event.payload.prompt;
     }
-  );
+  ));
 
   // 自動承認チェック（notify-worktree トリガー）
-  unlistenTryAutoApprove = await appWindow.listen<{ additionalPrompt?: string }>("sub-try-auto-approve", async (event) => {
+  collect(await appWindow.listen<{ additionalPrompt?: string }>("sub-try-auto-approve", async (event) => {
     if (event.payload.additionalPrompt !== undefined) {
       additionalPrompt.value = event.payload.additionalPrompt;
     }
@@ -483,78 +430,43 @@ onMounted(async () => {
 
     await debug(`[AutoApproval] terminalEntries.size=${terminalEntries.size}`);
     aiJudging.value = true;
-    let approved = false;
-    let lastCommand: string | undefined;
+    let loopResult: { approved: boolean; lastCommand: string | undefined };
     try {
-      for (const [tid] of terminalEntries) {
-        const termRef = terminalRefs.get(tid);
-        if (!termRef) { await debug(`[AutoApproval] tid=${tid} termRef=null, skip`); continue; }
-        const terminal = termRef.getTerminal();
-        if (!terminal) { await debug(`[AutoApproval] tid=${tid} terminal=null, skip`); continue; }
-        const content = getRecentLines(terminal, 200);
-        await debug(`[AutoApproval] tid=${tid} content(last200)=${content.slice(-200)}`);
-        const judgeResult = await analyzeForApproval(worktreeId, content, worktreePath, additionalPrompt.value);
-        if (judgeResult.command) {
-          lastCommand = judgeResult.command;
-        }
-        if (judgeResult.safe) {
-          // バッファ再チェック: AI判定完了後、承認プロンプトがまだあるか確認
-          const freshContent = getRecentLines(terminal, 10);
-          if (!hasApprovalPrompt(freshContent)) {
-            await debug(`[AutoApproval] tid=${tid} → prompt disappeared, skip Enter`);
-            break;
-          }
-          await debug(`[AutoApproval] tid=${tid} → approved, sending Enter`);
-          await termRef.write("\r");
-          approved = true;
-          break;
-        } else {
-          await debug(`[AutoApproval] tid=${tid} → not approved`);
-        }
-      }
+      const terminalForApproval: TerminalForApproval[] = Array.from(terminalEntries.keys()).flatMap((tid) => {
+        const ref = terminalRefs.get(tid);
+        if (!ref) return [];
+        return [{ id: tid, getTerminal: () => ref.getTerminal(), write: (d: string) => ref.write(d) }];
+      });
+      loopResult = await runApprovalLoop(terminalForApproval, worktreeId, worktreePath, additionalPrompt.value);
     } finally {
       aiJudging.value = false;
     }
-    await debug(`[AutoApproval] sub result: approved=${approved} command=${lastCommand ?? "none"}`);
-    await emitTo("main", "sub-auto-approve-result", { worktreeId, approved, command: lastCommand });
-  });
+    await debug(`[AutoApproval] sub result: approved=${loopResult.approved} command=${loopResult.lastCommand ?? "none"}`);
+    await emitTo("main", "sub-auto-approve-result", { worktreeId, approved: loopResult.approved, command: loopResult.lastCommand });
+  }));
 
   // AI判定キャンセル
-  unlistenCancelAutoApprove = await appWindow.listen("sub-cancel-auto-approve", async () => {
+  collect(await appWindow.listen("sub-cancel-auto-approve", async () => {
     await debug(`[AutoApproval] sub-cancel-auto-approve received`);
     await invoke("cancel_approval", { worktreeId });
     aiJudging.value = false;
-  });
+  }));
 
   // セッション保存リクエスト
-  unlistenSessionSaveRequest = await appWindow.listen("sub-session-save-request", async () => {
+  collect(await appWindow.listen("sub-session-save-request", async () => {
     const terminals = Array.from(terminalEntries.values()).map((entry) => {
       const termRef = terminalRefs.get(entry.id);
       return { title: entry.title, buffer: termRef?.serializeBuffer() ?? "" };
     }).filter((t) => t.buffer !== "");
     await emitTo("main", "sub-session-save-response", { worktreeId, terminals });
-  });
+  }));
 
   // メインに準備完了を通知
   await emitTo("main", "sub-ready", { worktreeId });
 });
 
 onUnmounted(() => {
-  window.removeEventListener("keydown", handleAltCharKey, true);
   if (thumbnailInterval) clearInterval(thumbnailInterval);
-  unlistenInit?.();
-  unlistenAddResponse?.();
-  unlistenFocusTerminal?.();
-  unlistenClosingByMain?.();
-  unlistenGetLayout?.();
-  unlistenSetAutoApproval?.();
-  unlistenSetAutoApprovalPrompt?.();
-  unlistenTryAutoApprove?.();
-  unlistenCancelAutoApprove?.();
-  unlistenSettingsChanged?.();
-  unlistenSessionSaveRequest?.();
-  unlistenAiAgentChanged?.();
-  unlistenWebSession?.();
 });
 
 async function onCancelAiJudging() {

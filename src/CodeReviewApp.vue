@@ -231,7 +231,7 @@ const { handleChatWithAgent } = useCodeReviewChat(worktreeId, origin);
       <div class="flex-1" />
       <button
         class="p-1 rounded hover:bg-surface-700 transition-colors"
-        :class="activeTab()?.type === 'settings' ? 'text-primary-400' : 'text-surface-400'"
+        :class="activeTab?.type === 'settings' ? 'text-primary-400' : 'text-surface-400'"
         :title="t('panel.settings')"
         @click="openSettingsTab()"
       >
@@ -278,34 +278,34 @@ const { handleChatWithAgent } = useCodeReviewChat(worktreeId, origin);
         @close="handleCloseTab"
       />
       <div class="flex-1 overflow-hidden">
-        <template v-if="activeTab()">
+        <template v-if="activeTab">
           <CodeReviewSettingsView
-            v-if="activeTab()!.type === 'settings'"
+            v-if="activeTab.type === 'settings'"
           />
           <ReviewSessionView
-            v-else-if="activeTab()!.type === 'review'"
+            v-else-if="activeTab.type === 'review'"
             :repo-path="worktreePath"
             @close="handleReviewClose"
             @chat="handleChatWithAgent"
           />
           <MonacoFileViewer
-            v-else-if="activeTab()!.type === 'file'"
-            :content="activeTab()!.content ?? ''"
-            :language="activeTab()!.language"
-            :file-path="activeTab()!.filePath"
+            v-else-if="activeTab.type === 'file'"
+            :content="activeTab.content ?? ''"
+            :language="activeTab.language"
+            :file-path="activeTab.filePath"
             @chat="handleChatWithAgent"
           />
           <div
-            v-else-if="activeTab()!.isBinary"
+            v-else-if="activeTab.isBinary"
             class="flex items-center justify-center h-full text-surface-500 text-sm"
           >
             <i class="pi pi-ban mr-2" />{{ t("editor.binaryFile") }}
           </div>
           <MonacoDiffViewer
             v-else
-            :old-content="activeTab()!.oldContent ?? ''"
-            :new-content="activeTab()!.newContent ?? ''"
-            :file-path="activeTab()!.filePath.replace(/:(?:staged|unstaged)$/, '')"
+            :old-content="activeTab.oldContent ?? ''"
+            :new-content="activeTab.newContent ?? ''"
+            :file-path="activeTab.filePath.replace(/:(?:staged|unstaged)$/, '')"
             @chat="handleChatWithAgent"
           />
         </template>

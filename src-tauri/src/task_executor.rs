@@ -156,13 +156,7 @@ pub async fn task_generate(
                 format!("Failed to write MCP config: {}", e)
             })?;
 
-        #[cfg(target_os = "windows")]
-        let (prog, mut a) = (
-            "cmd".to_string(),
-            vec!["/c".to_string(), "claude".to_string()],
-        );
-        #[cfg(not(target_os = "windows"))]
-        let (prog, mut a) = ("claude".to_string(), vec![]);
+        let (prog, mut a) = ai_provider::make_platform_cmd("claude");
 
         a.extend([
             "-p".to_string(),

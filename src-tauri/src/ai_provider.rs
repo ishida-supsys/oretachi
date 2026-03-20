@@ -1,5 +1,7 @@
-use crate::process_utils::make_command;
+use crate::process_utils::{make_command, make_async_command, CancellableManager};
 use serde::{Deserialize, Serialize};
+use tokio::io::AsyncWriteExt;
+use tokio::time::{timeout, Duration};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -90,6 +92,17 @@ pub struct AiExecutionPlan {
     pub stdin_content: String,
 }
 
+/// Windows では `cmd /c <name>`, それ以外では `<name>` を返す
+pub fn make_platform_cmd(name: &str) -> (String, Vec<String>) {
+    #[cfg(target_os = "windows")]
+    return (
+        "cmd".to_string(),
+        vec!["/c".to_string(), name.to_string()],
+    );
+    #[cfg(not(target_os = "windows"))]
+    return (name.to_string(), vec![]);
+}
+
 fn json_schema_prompt_suffix(json_schema: &str) -> String {
     format!(
         "\n\nYou MUST respond with ONLY valid JSON matching this schema: {}\nDo not include any other text, markdown formatting, or code fences.",
@@ -106,14 +119,7 @@ pub fn build_execution_plan(
 ) -> AiExecutionPlan {
     match kind {
         AiAgentKind::ClaudeCode => {
-            #[cfg(target_os = "windows")]
-            let (program, mut args) = (
-                "cmd".to_string(),
-                vec!["/c".to_string(), "claude".to_string()],
-            );
-            #[cfg(not(target_os = "windows"))]
-            let (program, mut args) = ("claude".to_string(), vec![]);
-
+            let (program, mut args) = make_platform_cmd("claude");
             args.extend([
                 "--model".to_string(),
                 model.to_string(),
@@ -126,23 +132,11 @@ pub fn build_execution_plan(
             if disable_mcp {
                 args.push("--strict-mcp-config".to_string());
             }
-            AiExecutionPlan {
-                program,
-                args,
-                stdin_content: prompt.to_string(),
-            }
+            AiExecutionPlan { program, args, stdin_content: prompt.to_string() }
         }
         AiAgentKind::GeminiCli => {
-            #[cfg(target_os = "windows")]
-            let (program, mut args) = (
-                "cmd".to_string(),
-                vec!["/c".to_string(), "gemini".to_string()],
-            );
-            #[cfg(not(target_os = "windows"))]
-            let (program, mut args) = ("gemini".to_string(), vec![]);
-
+            let (program, mut args) = make_platform_cmd("gemini");
             args.extend(["--model".to_string(), model.to_string()]);
-
             AiExecutionPlan {
                 program,
                 args,
@@ -150,20 +144,8 @@ pub fn build_execution_plan(
             }
         }
         AiAgentKind::CodexCli => {
-            #[cfg(target_os = "windows")]
-            let (program, mut args) = (
-                "cmd".to_string(),
-                vec!["/c".to_string(), "codex".to_string()],
-            );
-            #[cfg(not(target_os = "windows"))]
-            let (program, mut args) = ("codex".to_string(), vec![]);
-
-            args.extend([
-                "--model".to_string(),
-                model.to_string(),
-                "-q".to_string(),
-            ]);
-
+            let (program, mut args) = make_platform_cmd("codex");
+            args.extend(["--model".to_string(), model.to_string(), "-q".to_string()]);
             AiExecutionPlan {
                 program,
                 args,
@@ -171,24 +153,9 @@ pub fn build_execution_plan(
             }
         }
         AiAgentKind::ClineCli => {
-            let prompt_with_schema =
-                format!("{}{}", prompt, json_schema_prompt_suffix(json_schema));
-
-            #[cfg(target_os = "windows")]
-            let (program, mut args) = (
-                "cmd".to_string(),
-                vec!["/c".to_string(), "cline".to_string()],
-            );
-            #[cfg(not(target_os = "windows"))]
-            let (program, mut args) = ("cline".to_string(), vec![]);
-
-            args.extend(["--prompt".to_string(), prompt_with_schema]);
-
-            AiExecutionPlan {
-                program,
-                args,
-                stdin_content: String::new(),
-            }
+            let (program, mut args) = make_platform_cmd("cline");
+            args.extend(["--prompt".to_string(), format!("{}{}", prompt, json_schema_prompt_suffix(json_schema))]);
+            AiExecutionPlan { program, args, stdin_content: String::new() }
         }
     }
 }
@@ -215,6 +182,64 @@ pub fn parse_response(kind: &AiAgentKind, stdout: &str) -> Result<serde_json::Va
             })
         }
     }
+}
+
+/// AI コマンドを実行して stdout を返す共通ヘルパー。
+/// - プロセスのスポーン・stdin 書き込み・PID 登録・タイムアウト待機・キャンセル処理を一元化。
+pub async fn run_ai_command(
+    plan: &AiExecutionPlan,
+    state: &CancellableManager,
+    key: &str,
+    working_dir: &str,
+    timeout_secs: u64,
+) -> Result<String, String> {
+    let mut cmd = make_async_command(&plan.program);
+    cmd.args(&plan.args);
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    if !working_dir.is_empty() {
+        cmd.current_dir(working_dir);
+    }
+
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to spawn AI agent: {}", e))?;
+
+    if !plan.stdin_content.is_empty() {
+        if let Some(mut stdin) = child.stdin.take() {
+            stdin
+                .write_all(plan.stdin_content.as_bytes())
+                .await
+                .map_err(|e| format!("Failed to write stdin: {}", e))?;
+        }
+    }
+
+    if let Some(pid) = child.id() {
+        state.register(key.to_string(), pid)?;
+    }
+
+    let wait_result = timeout(
+        Duration::from_secs(timeout_secs),
+        child.wait_with_output(),
+    )
+    .await;
+
+    if wait_result.is_err() {
+        let _ = state.cancel(key);
+    }
+    let _ = state.remove(key);
+
+    let output = wait_result
+        .map_err(|_| format!("AI agent timed out after {}s", timeout_secs))?
+        .map_err(|e| format!("Failed to wait for AI agent: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("AI agent exited with {}: {}", output.status, stderr));
+    }
+
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 fn extract_json_from_text(text: &str) -> Option<serde_json::Value> {
