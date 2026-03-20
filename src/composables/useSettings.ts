@@ -1,6 +1,7 @@
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
+import { error } from "@tauri-apps/plugin-log";
 import { platform } from "@tauri-apps/plugin-os";
 import type { AppSettings, HotkeyBinding, HotkeySettings } from "../types/settings";
 import { setLocale } from "../i18n";
@@ -107,6 +108,19 @@ function scheduleSave() {
   }, 500);
 }
 
+async function flushSave() {
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  try {
+    await invoke("save_settings", { settings: settings.value });
+    await emit("settings-changed");
+  } catch (e) {
+    error(`設定の保存に失敗: ${e}`);
+  }
+}
+
 export function useSettings() {
-  return { settings, loadSettings, scheduleSave };
+  return { settings, loadSettings, scheduleSave, flushSave };
 }

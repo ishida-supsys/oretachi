@@ -13,7 +13,7 @@ import type { NotificationKind } from "../composables/useNotifications";
 
 const { t } = useI18n();
 
-const { settings, scheduleSave } = useSettings();
+const { settings, scheduleSave, flushSave } = useSettings();
 
 // ─── AIエージェント ───────────────────────────────────────────────────────────
 
@@ -67,6 +67,7 @@ async function fetchMcpStatus() {
 async function restartMcp() {
   restarting.value = true;
   try {
+    await flushSave();
     mcpStatus.value = await invoke<McpStatus>("restart_mcp_server");
   } catch (e) {
     console.error("restart_mcp_server failed:", e);
