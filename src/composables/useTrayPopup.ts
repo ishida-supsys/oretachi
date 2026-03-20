@@ -18,6 +18,10 @@ export interface TrayWorktreeData {
   layout: FrameNode | null;
   terminals: TrayTerminalData[];
   windowSize?: { width: number; height: number };
+  branchName: string;
+  hotkeyChar?: string;
+  autoApproval: boolean;
+  aiJudging: boolean;
 }
 
 let trayWindow: WebviewWindow | null = null;

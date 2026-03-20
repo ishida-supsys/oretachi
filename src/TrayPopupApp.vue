@@ -286,6 +286,18 @@ function onHeaderDrag(e: MouseEvent) {
   getCurrentWindow().startDragging()
 }
 
+async function onClickAutoApproval() {
+  const wt = currentWorktree.value;
+  if (!wt) return;
+  await emitTo("main", "tray-click-auto-approval", { worktreeId: wt.worktreeId });
+}
+
+async function onCancelAiJudging() {
+  const wt = currentWorktree.value;
+  if (!wt) return;
+  await emitTo("main", "tray-cancel-ai-judging", { worktreeId: wt.worktreeId });
+}
+
 // ────────────────────────────────────────────────
 // ライフサイクル
 // ────────────────────────────────────────────────
@@ -383,17 +395,45 @@ onUnmounted(() => {
       style="background-color: var(--bg-mantle-translucent)"
       @mousedown.left="onHeaderDrag"
     >
-      <div class="flex items-center gap-3 pointer-events-none">
-        <span class="pi pi-bell text-[#cba6f7]" />
-        <span class="text-sm font-semibold text-[#cba6f7]">
+      <div class="flex items-center gap-2">
+        <span class="pi pi-bell text-[#cba6f7] pointer-events-none" />
+        <span class="text-sm font-semibold text-[#cba6f7] pointer-events-none">
           {{ currentWorktree?.worktreeName ?? t('notification') }}
         </span>
         <span
           v-if="allWorktrees.length > 1"
-          class="text-xs text-[#6c7086]"
+          class="text-xs text-[#6c7086] pointer-events-none"
         >
           {{ currentIndex + 1 }} / {{ allWorktrees.length }}
         </span>
+        <span
+          v-if="currentWorktree?.branchName"
+          class="flex items-center gap-1 text-xs font-mono text-[#9399b2] pointer-events-none"
+        >
+          <span class="pi pi-code-branch" style="font-size: 10px" />
+          {{ currentWorktree.branchName }}
+        </span>
+        <span
+          v-if="currentWorktree?.hotkeyChar"
+          class="text-[10px] px-1.5 py-0.5 rounded font-mono font-medium pointer-events-none"
+          style="background: rgba(203,166,247,0.15); color: #cba6f7; border: 1px solid rgba(203,166,247,0.3)"
+        >Alt+{{ currentWorktree.hotkeyChar.toUpperCase() }}</span>
+        <button
+          v-if="currentWorktree?.autoApproval"
+          class="text-[10px] px-1.5 py-0.5 rounded font-medium cursor-pointer border-none"
+          style="background: rgba(166, 227, 161, 0.15); color: #a6e3a1; border: 1px solid rgba(166, 227, 161, 0.3)"
+          :title="t('editAutoApprovalPrompt')"
+          @click="onClickAutoApproval"
+        >{{ t('autoApprovalBadge') }}</button>
+        <button
+          v-if="currentWorktree?.aiJudging"
+          class="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-semibold cursor-pointer border-none"
+          style="background: #f9e2af; color: #1e1e2e"
+          @click="onCancelAiJudging"
+        >
+          <span class="pi pi-spin pi-spinner" style="font-size: 9px" />
+          {{ t('aiJudgingBadge') }}
+        </button>
       </div>
       <div class="flex items-center gap-4">
         <button
@@ -496,7 +536,10 @@ onUnmounted(() => {
     "loading": "Loading...",
     "noTerminals": "No terminals",
     "next": "Next →",
-    "done": "Done ✓"
+    "done": "Done ✓",
+    "autoApprovalBadge": "Auto approval",
+    "aiJudgingBadge": "AI judging",
+    "editAutoApprovalPrompt": "Edit additional prompt"
   },
   "ja": {
     "notification": "通知",
@@ -505,7 +548,10 @@ onUnmounted(() => {
     "loading": "読み込み中...",
     "noTerminals": "ターミナルがありません",
     "next": "次へ →",
-    "done": "完了 ✓"
+    "done": "完了 ✓",
+    "autoApprovalBadge": "自動承認",
+    "aiJudgingBadge": "AI判定中",
+    "editAutoApprovalPrompt": "追加プロンプトを編集"
   }
 }
 </i18n>

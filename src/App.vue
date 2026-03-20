@@ -744,6 +744,10 @@ async function onTrayButtonClick() {
         layout: (layoutData?.layout ?? null) as import("./types/frame").FrameNode | null,
         terminals: layoutData?.terminals ?? [],
         windowSize: layoutData?.windowSize,
+        branchName: worktree.branchName,
+        hotkeyChar: hotkeyChars.value.get(worktreeId),
+        autoApproval: autoApprovalMap.get(worktreeId) ?? false,
+        aiJudging: aiJudgingWorktrees.has(worktreeId),
       });
     } else {
       // メインウィンドウのターミナル情報を収集
@@ -799,6 +803,10 @@ async function onTrayButtonClick() {
         layout: mainLayout,
         terminals,
         windowSize: mainWindowSize,
+        branchName: worktree.branchName,
+        hotkeyChar: hotkeyChars.value.get(worktreeId),
+        autoApproval: autoApprovalMap.get(worktreeId) ?? false,
+        aiJudging: aiJudgingWorktrees.has(worktreeId),
       });
     }
   }
@@ -1221,6 +1229,16 @@ onMounted(async () => {
   // サブウィンドウからの自動承認バッジクリック → ダイアログ表示
   await listen<{ worktreeId: string }>("sub-click-auto-approval", (event) => {
     onClickAutoApproval(event.payload.worktreeId);
+  });
+
+  // トレイポップアップからの自動承認バッジクリック → ダイアログ表示
+  await listen<{ worktreeId: string }>("tray-click-auto-approval", (event) => {
+    onClickAutoApproval(event.payload.worktreeId);
+  });
+
+  // トレイポップアップからのAI判定キャンセル
+  await listen<{ worktreeId: string }>("tray-cancel-ai-judging", (event) => {
+    onCancelAiJudging(event.payload.worktreeId);
   });
 
   // ターミナル追加リクエスト (サブウィンドウから)
