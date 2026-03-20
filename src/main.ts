@@ -5,6 +5,7 @@ import ToastService from "primevue/toastservice";
 import Aura from "@primeuix/themes/aura";
 import { attachConsole } from "@tauri-apps/plugin-log";
 import { invoke } from "@tauri-apps/api/core";
+import { platform } from "@tauri-apps/plugin-os";
 import { i18n, setLocale } from "./i18n";
 import type { AppSettings } from "./types/settings";
 
@@ -20,12 +21,14 @@ async function mountApp() {
     if (loaded.locale) {
       setLocale(loaded.locale as "en" | "ja");
     }
-    if (loaded.appearance?.enableAcrylic !== false) {
+    if (loaded.appearance?.enableAcrylic !== false && platform() !== "macos") {
       document.documentElement.classList.add("transparent-mode");
     }
   } catch {
     // settings 読み込み失敗時はデフォルト (enableAcrylic=true) として透明モードに
-    document.documentElement.classList.add("transparent-mode");
+    if (platform() !== "macos") {
+      document.documentElement.classList.add("transparent-mode");
+    }
   }
 
   let rootComponent;
