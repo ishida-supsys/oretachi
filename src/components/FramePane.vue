@@ -7,8 +7,10 @@ let isDraggingTab = false;
 
 <script setup lang="ts">
 import { ref, computed } from "vue";
+import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import type { FrameLeaf } from "../types/frame";
-import type { SubTerminalEntry } from "../types/terminal";
+import type { SubTerminalEntry, WebSessionInfo } from "../types/terminal";
 import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
@@ -27,6 +29,7 @@ const props = defineProps<{
   terminalEntries: Map<number, SubTerminalEntry>;
   terminalExitCodes?: Map<number, number>;
   terminalAgentStatus?: Map<number, boolean>;
+  terminalWebSessions?: Map<number, WebSessionInfo>;
 }>();
 
 const emit = defineEmits<{
@@ -39,6 +42,30 @@ const emit = defineEmits<{
   tabReorder: [leafId: string, terminalId: number, insertIndex: number];
   requestAddTerminal: [leafId: string];
 }>();
+
+// アクティブターミナルのWebセッション情報
+const activeWebSession = computed(() => {
+  const tid = props.leaf.activeTerminalId;
+  if (tid == null) return null;
+  return props.terminalWebSessions?.get(tid) ?? null;
+});
+
+async function openWebSession() {
+  const info = activeWebSession.value;
+  if (!info) return;
+  await openUrl(info.url);
+}
+
+async function teleportSession() {
+  const info = activeWebSession.value;
+  const tid = props.leaf.activeTerminalId;
+  if (!info || tid == null) return;
+  const entry = props.terminalEntries.get(tid);
+  if (!entry) return;
+  const cmd = `claude --teleport ${info.sessionCode}\r`;
+  const bytes = Array.from(new TextEncoder().encode(cmd));
+  await invoke("pty_write", { sessionId: entry.sessionId, data: bytes });
+}
 
 // ドロップゾーン表示
 type DropZone = "left" | "right" | "top" | "bottom" | "center" | null;
@@ -273,6 +300,24 @@ function overlayStyle(zone: DropZone): Record<string, string> {
 
       <!-- ドロップゾーンオーバーレイ -->
       <div v-if="isDragOver && dropZone" :style="overlayStyle(dropZone)" />
+
+      <!-- Webセッションボタン -->
+      <div v-if="activeWebSession" class="web-session-buttons">
+        <button
+          class="web-session-btn"
+          :title="t('openWebSession')"
+          @click="openWebSession"
+        >
+          <span class="pi pi-external-link" />
+        </button>
+        <button
+          class="web-session-btn"
+          :title="t('teleportSession')"
+          @click="teleportSession"
+        >
+          <span class="pi pi-arrow-right-arrow-left" />
+        </button>
+      </div>
     </div>
   </div>
 </template>
@@ -408,17 +453,52 @@ function overlayStyle(zone: DropZone): Record<string, string> {
   z-index: 10;
   transition: left 0.05s ease;
 }
+
+.web-session-buttons {
+  position: absolute;
+  bottom: 8px;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+  z-index: 50;
+}
+
+.web-session-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  background-color: rgba(30, 30, 46, 0.85);
+  border: 1px solid #45475a;
+  color: #cdd6f4;
+  cursor: pointer;
+  font-size: 12px;
+  transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+  backdrop-filter: blur(4px);
+}
+
+.web-session-btn:hover {
+  background-color: rgba(49, 50, 68, 0.95);
+  border-color: #cba6f7;
+  color: #cba6f7;
+}
 </style>
 
 <i18n lang="json">
 {
   "en": {
     "addTerminal": "Add terminal",
-    "noTerminals": "No terminals"
+    "noTerminals": "No terminals",
+    "openWebSession": "Open web session",
+    "teleportSession": "Teleport (resume locally)"
   },
   "ja": {
     "addTerminal": "ターミナルを追加",
-    "noTerminals": "ターミナルがありません"
+    "noTerminals": "ターミナルがありません",
+    "openWebSession": "Webセッションを開く",
+    "teleportSession": "テレポート（ローカルで再開）"
   }
 }
 </i18n>

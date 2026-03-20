@@ -4,13 +4,14 @@ import Splitter from "primevue/splitter";
 import SplitterPanel from "primevue/splitterpanel";
 import FramePane from "./FramePane.vue";
 import type { FrameNode, FrameLeaf } from "../types/frame";
-import type { SubTerminalEntry } from "../types/terminal";
+import type { SubTerminalEntry, WebSessionInfo } from "../types/terminal";
 
 const props = defineProps<{
   node: FrameNode;
   terminalEntries: Map<number, SubTerminalEntry>;
   terminalExitCodes?: Map<number, number>;
   terminalAgentStatus?: Map<number, boolean>;
+  terminalWebSessions?: Map<number, WebSessionInfo>;
 }>();
 
 const emit = defineEmits<{
@@ -48,6 +49,7 @@ function onResizeEnd(event: { sizes: number[] }) {
     :terminal-entries="terminalEntries"
     :terminal-exit-codes="terminalExitCodes"
     :terminal-agent-status="terminalAgentStatus"
+    :terminal-web-sessions="terminalWebSessions"
     @switch-terminal="(leafId, terminalId) => emit('switchTerminal', leafId, terminalId)"
     @close-terminal="(leafId, terminalId) => emit('closeTerminal', leafId, terminalId)"
     @title-change="(terminalId, title) => emit('titleChange', terminalId, title)"
@@ -80,6 +82,7 @@ function onResizeEnd(event: { sizes: number[] }) {
         :terminal-entries="terminalEntries"
         :terminal-exit-codes="terminalExitCodes"
         :terminal-agent-status="terminalAgentStatus"
+        :terminal-web-sessions="terminalWebSessions"
         @switch-terminal="(leafId, terminalId) => emit('switchTerminal', leafId, terminalId)"
         @close-terminal="(leafId, terminalId) => emit('closeTerminal', leafId, terminalId)"
         @title-change="(terminalId, title) => emit('titleChange', terminalId, title)"
