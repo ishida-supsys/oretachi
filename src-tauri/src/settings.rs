@@ -213,11 +213,13 @@ pub struct AppearanceSettings {
     pub acrylic_color: Option<String>,
     #[serde(default, rename = "enableGamingBorder")]
     pub enable_gaming_border: bool,
+    #[serde(default, rename = "gamingBorderTheme")]
+    pub gaming_border_theme: Option<String>,
 }
 
 impl Default for AppearanceSettings {
     fn default() -> Self {
-        AppearanceSettings { enable_acrylic: true, acrylic_opacity: None, acrylic_color: None, enable_gaming_border: false }
+        AppearanceSettings { enable_acrylic: true, acrylic_opacity: None, acrylic_color: None, enable_gaming_border: false, gaming_border_theme: None }
     }
 }
 

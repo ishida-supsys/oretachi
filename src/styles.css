@@ -95,6 +95,59 @@ body {
 
 .gaming-border {
   position: relative;
+  --gaming-border-gradient: conic-gradient(
+    from var(--gaming-angle),
+    #ff0000, #ff8000, #ffff00, #00ff00, #00ffff, #0080ff, #8000ff, #ff00ff, #ff0000
+  );
+}
+
+.gaming-border.gaming-theme-gaming {
+  --gaming-border-gradient: conic-gradient(
+    from var(--gaming-angle),
+    #ff0000, #ff8000, #ffff00, #00ff00, #00ffff, #0080ff, #8000ff, #ff00ff, #ff0000
+  );
+}
+
+.gaming-border.gaming-theme-snow-white {
+  --gaming-border-gradient: conic-gradient(
+    from var(--gaming-angle),
+    #ffffff, #e8e8f0, #c0c0d0, #e8e8f0, #ffffff, #d0d0e0, #ffffff
+  );
+}
+
+.gaming-border.gaming-theme-gold {
+  --gaming-border-gradient: conic-gradient(
+    from var(--gaming-angle),
+    #ffd700, #ffb800, #ff9500, #ffcc00, #ffe066, #ffb800, #ffd700
+  );
+}
+
+.gaming-border.gaming-theme-flame {
+  --gaming-border-gradient: conic-gradient(
+    from var(--gaming-angle),
+    #ff0000, #ff4500, #ff8c00, #ffcc00, #ff8c00, #ff4500, #ff0000
+  );
+}
+
+.gaming-border.gaming-theme-aqua {
+  --gaming-border-gradient: conic-gradient(
+    from var(--gaming-angle),
+    #00ffff, #0080ff, #00bfff, #00ffcc, #00e5ff, #0080ff, #00ffff
+  );
+}
+
+.gaming-border.gaming-theme-dark {
+  --gaming-border-gradient: conic-gradient(
+    from var(--gaming-angle),
+    #1a1a2e, #4a4a8a, #6a6aaa, #4a4a8a, #2a2a5e, #8080c0, #1a1a2e
+  );
+}
+
+.gaming-border.gaming-theme-nature {
+  --gaming-border-gradient: conic-gradient(
+    from var(--gaming-angle),
+    #00ff00, #32cd32, #90ee90, #228b22, #32cd32, #006400, #00ff00
+  );
 }
 
 .gaming-border::before {
@@ -102,10 +155,7 @@ body {
   position: absolute;
   inset: 0;
   padding: 1px;
-  background: conic-gradient(
-    from var(--gaming-angle),
-    #ff0000, #ff8000, #ffff00, #00ff00, #00ffff, #0080ff, #8000ff, #ff00ff, #ff0000
-  );
+  background: var(--gaming-border-gradient);
   -webkit-mask:
     linear-gradient(#fff 0 0) content-box,
     linear-gradient(#fff 0 0);

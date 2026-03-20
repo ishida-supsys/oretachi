@@ -149,6 +149,16 @@ function clearExecScript(repoId: string) {
 
 // ─── 外観 ─────────────────────────────────────────────────────────────────────
 
+const gamingBorderThemes = [
+  { value: "gaming",     labelKey: "appearance.gamingBorderThemes.gaming" },
+  { value: "snow-white", labelKey: "appearance.gamingBorderThemes.snowWhite" },
+  { value: "gold",       labelKey: "appearance.gamingBorderThemes.gold" },
+  { value: "flame",      labelKey: "appearance.gamingBorderThemes.flame" },
+  { value: "aqua",       labelKey: "appearance.gamingBorderThemes.aqua" },
+  { value: "dark",       labelKey: "appearance.gamingBorderThemes.dark" },
+  { value: "nature",     labelKey: "appearance.gamingBorderThemes.nature" },
+];
+
 function applyAcrylicEffect() {
   const app = settings.value.appearance;
   const hex = (app?.acrylicColor ?? "#121212").replace("#", "");
@@ -675,6 +685,20 @@ function getSoundLabel(sound: string | null | undefined): string {
         />
         <label for="appearance-enable-gaming-border" class="inline-label toggle-label">{{ t('appearance.enableGamingBorder') }}</label>
       </div>
+      <div v-if="settings.appearance?.enableGamingBorder" class="row-input mt-8">
+        <label class="row-label">{{ t('appearance.gamingBorderTheme') }}</label>
+        <select
+          class="text-input select-input"
+          :value="settings.appearance?.gamingBorderTheme ?? 'gaming'"
+          @change="(e) => {
+            if (!settings.appearance) settings.appearance = {};
+            settings.appearance.gamingBorderTheme = (e.target as HTMLSelectElement).value;
+            scheduleSave();
+          }"
+        >
+          <option v-for="theme in gamingBorderThemes" :key="theme.value" :value="theme.value">{{ t(theme.labelKey) }}</option>
+        </select>
+      </div>
     </div>
   </div>
 </template>
@@ -1095,6 +1119,16 @@ function getSoundLabel(sound: string | null | undefined): string {
       "label": "Appearance",
       "enableAcrylic": "Enable Acrylic / LiquidGlass effect",
       "enableGamingBorder": "Enable gaming color border",
+      "gamingBorderTheme": "Border theme",
+      "gamingBorderThemes": {
+        "gaming": "Gaming",
+        "snowWhite": "Snow White",
+        "gold": "Gold",
+        "flame": "Flame",
+        "aqua": "Aqua",
+        "dark": "Dark",
+        "nature": "Nature"
+      },
       "restartNote": "Enabling/disabling the effect requires restarting the app.",
       "opacity": "Opacity",
       "color": "Tint color"
@@ -1181,6 +1215,16 @@ function getSoundLabel(sound: string | null | undefined): string {
       "label": "外観",
       "enableAcrylic": "Acrylic / LiquidGlass エフェクトを有効にする",
       "enableGamingBorder": "ゲーミングカラーボーダーを有効にする",
+      "gamingBorderTheme": "ボーダーテーマ",
+      "gamingBorderThemes": {
+        "gaming": "ゲーミング",
+        "snowWhite": "スノーホワイト",
+        "gold": "ゴールド",
+        "flame": "フレイム",
+        "aqua": "アクア",
+        "dark": "ダーク",
+        "nature": "ネイチャー"
+      },
       "restartNote": "エフェクトの有効/無効はアプリ再起動後に反映されます。",
       "opacity": "不透明度",
       "color": "背景色"
