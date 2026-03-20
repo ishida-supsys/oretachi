@@ -41,7 +41,20 @@ pub struct JudgeResult {
 }
 
 /// ワークツリーIDごとの進行中AI判定プロセスのPIDを管理する
-pub type ApprovalManager = CancellableManager;
+pub struct ApprovalManager(CancellableManager);
+
+impl ApprovalManager {
+    pub fn new() -> Self {
+        Self(CancellableManager::new())
+    }
+}
+
+impl std::ops::Deref for ApprovalManager {
+    type Target = CancellableManager;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 #[tauri::command]
 pub async fn judge_approval(

@@ -25,7 +25,20 @@ The "body" field may be empty string. Do not add any other fields or text."#;
 
 const JSON_SCHEMA: &str = r#"{"type":"object","properties":{"subject":{"type":"string"},"body":{"type":"string"}},"required":["subject","body"]}"#;
 
-pub type CommitMessageManager = CancellableManager;
+pub struct CommitMessageManager(CancellableManager);
+
+impl CommitMessageManager {
+    pub fn new() -> Self {
+        Self(CancellableManager::new())
+    }
+}
+
+impl std::ops::Deref for CommitMessageManager {
+    type Target = CancellableManager;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
 
 #[tauri::command]
 pub async fn generate_commit_message(
