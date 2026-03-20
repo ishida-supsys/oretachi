@@ -9,7 +9,7 @@ defineProps<{
 
 <template>
   <div class="markdown-view">
-    <MdPreview :modelValue="content" theme="dark" language="ja-JP" />
+    <MdPreview :modelValue="content" theme="dark" language="ja-JP" :style="{ padding: '1rem 1.5rem' }" />
   </div>
 </template>
 
@@ -18,6 +18,5 @@ defineProps<{
   overflow-y: auto;
   height: 100%;
   box-sizing: border-box;
-  padding: 1rem 1.5rem;
 }
 </style>
