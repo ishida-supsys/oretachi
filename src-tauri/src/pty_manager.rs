@@ -474,9 +474,14 @@ impl PtyManager {
             }
         };
         // sessions ロック解放後に watcher スレッドの終了を待つ
-        // (watcher は child.wait() しているので、kill 後に即座に返る)
+        // タイムアウト付きで待機: child.wait() が返らない場合に無期限ブロックするのを防ぐ
         if let Some(handle) = watcher_handle {
-            let _ = handle.join();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = handle.join();
+                let _ = tx.send(());
+            });
+            let _ = rx.recv_timeout(std::time::Duration::from_secs(2));
         }
         Ok(())
     }
@@ -520,6 +525,9 @@ impl Drop for PtyManager {
         if let Ok(mut alive) = self.polling_alive.lock() {
             *alive = false;
         }
-        self.kill_all();
+        // sessions が空なら既に kill_all 済みなのでスキップ
+        if self.sessions.lock().map_or(false, |s| !s.is_empty()) {
+            self.kill_all();
+        }
     }
 }
