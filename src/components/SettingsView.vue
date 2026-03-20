@@ -1153,8 +1153,8 @@ function getSoundLabel(sound: string | null | undefined): string {
     "appearance": {
       "label": "Appearance",
       "enableAcrylic": "Enable Acrylic / LiquidGlass effect",
-      "enableGamingBorder": "Enable gaming color border",
-      "gamingBorderTheme": "Border theme",
+      "enableGamingBorder": "Enable outline effect",
+      "gamingBorderTheme": "Theme color",
       "gamingBorderThemes": {
         "gaming": "Gaming",
         "snowWhite": "Snow White",
@@ -1252,8 +1252,8 @@ function getSoundLabel(sound: string | null | undefined): string {
     "appearance": {
       "label": "外観",
       "enableAcrylic": "Acrylic / LiquidGlass エフェクトを有効にする",
-      "enableGamingBorder": "ゲーミングカラーボーダーを有効にする",
-      "gamingBorderTheme": "ボーダーテーマ",
+      "enableGamingBorder": "アウトラインエフェクト有効",
+      "gamingBorderTheme": "テーマカラー",
       "gamingBorderThemes": {
         "gaming": "ゲーミング",
         "snowWhite": "スノーホワイト",
