@@ -1,15 +1,16 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { open, message } from "@tauri-apps/plugin-dialog";
+import { open } from "@tauri-apps/plugin-dialog";
 import { useSettings } from "../composables/useSettings";
-import HotkeyInput from "./HotkeyInput.vue";
 import ColorPicker from "primevue/colorpicker";
 import type { AiAgentKind } from "../types/settings";
 import { useI18n } from "vue-i18n";
 import { setLocale } from "../i18n";
 import { playNotificationSound } from "../utils/notificationSound";
 import type { NotificationKind } from "../composables/useNotifications";
+import SettingsHotkeySection from "./settings/SettingsHotkeySection.vue";
+import SettingsRepositoriesSection from "./settings/SettingsRepositoriesSection.vue";
 
 const { t } = useI18n();
 
@@ -85,67 +86,6 @@ async function selectWorktreeBaseDir() {
     settings.value.worktreeBaseDir = selected;
     scheduleSave();
   }
-}
-
-async function addRepository() {
-  const selected = await open({ directory: true, multiple: false });
-  if (typeof selected !== "string") return;
-
-  try {
-    const valid = await invoke<boolean>("git_validate_repo", { path: selected });
-    if (!valid) {
-      await message(t("error.notARepo"), { kind: "error" });
-      return;
-    }
-  } catch {
-    await message(t("error.notARepo"), { kind: "error" });
-    return;
-  }
-
-  const name = selected.split(/[/\\]/).pop() ?? selected;
-
-  // 重複チェック
-  if (settings.value.repositories.some((r) => r.path === selected)) {
-    await message(t("error.alreadyRegistered"), { kind: "warning" });
-    return;
-  }
-
-  settings.value.repositories.push({
-    id: selected, // id にパスをそのまま使用
-    name,
-    path: selected,
-  });
-  scheduleSave();
-}
-
-function removeRepository(id: string) {
-  settings.value.repositories = settings.value.repositories.filter(
-    (r) => r.id !== id
-  );
-  scheduleSave();
-}
-
-function hasWorktrees(repoId: string): boolean {
-  return settings.value.worktrees.some((w) => w.repositoryId === repoId);
-}
-
-async function selectExecScript(repoId: string) {
-  const selected = await open({
-    multiple: false,
-    filters: [{ name: "Scripts", extensions: ["ps1", "sh"] }],
-  });
-  if (typeof selected !== "string") return;
-  const repo = settings.value.repositories.find((r) => r.id === repoId);
-  if (!repo) return;
-  repo.execScript = selected;
-  scheduleSave();
-}
-
-function clearExecScript(repoId: string) {
-  const repo = settings.value.repositories.find((r) => r.id === repoId);
-  if (!repo) return;
-  repo.execScript = undefined;
-  scheduleSave();
 }
 
 // ─── 外観 ─────────────────────────────────────────────────────────────────────
@@ -515,143 +455,10 @@ function getSoundLabel(sound: string | null | undefined): string {
     </div>
 
     <!-- ホットキー設定 -->
-    <div class="field-group">
-      <label class="field-label">{{ t('hotkeys.label') }}</label>
-      <div class="row-input row-input--inline">
-        <input
-          id="auto-assign-hotkey"
-          type="checkbox"
-          class="toggle-checkbox"
-          :checked="settings.autoAssignHotkey"
-          @change="(e) => { settings.autoAssignHotkey = (e.target as HTMLInputElement).checked; scheduleSave(); }"
-        />
-        <label for="auto-assign-hotkey" class="inline-label toggle-label">{{ t('hotkeys.autoAssign') }}</label>
-      </div>
-      <table v-if="settings.hotkeys" class="hotkey-table">
-        <thead>
-          <tr>
-            <th class="hotkey-th">{{ t('hotkeys.action') }}</th>
-            <th class="hotkey-th">{{ t('hotkeys.key') }}</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr>
-            <td class="hotkey-td-label">{{ t('hotkeys.trayPopup') }}</td>
-            <td class="hotkey-td-input">
-              <HotkeyInput
-                :model-value="settings.hotkeys.globalTrayPopup"
-                @update:model-value="(v) => { settings.hotkeys.globalTrayPopup = v; scheduleSave(); }"
-              />
-            </td>
-          </tr>
-          <tr>
-            <td class="hotkey-td-label">{{ t('hotkeys.terminalNext') }}</td>
-            <td class="hotkey-td-input">
-              <HotkeyInput
-                :model-value="settings.hotkeys.terminalNext"
-                @update:model-value="(v) => { settings.hotkeys.terminalNext = v; scheduleSave(); }"
-              />
-            </td>
-          </tr>
-          <tr>
-            <td class="hotkey-td-label">{{ t('hotkeys.terminalPrev') }}</td>
-            <td class="hotkey-td-input">
-              <HotkeyInput
-                :model-value="settings.hotkeys.terminalPrev"
-                @update:model-value="(v) => { settings.hotkeys.terminalPrev = v; scheduleSave(); }"
-              />
-            </td>
-          </tr>
-          <tr>
-            <td class="hotkey-td-label">{{ t('hotkeys.terminalAdd') }}</td>
-            <td class="hotkey-td-input">
-              <HotkeyInput
-                :model-value="settings.hotkeys.terminalAdd"
-                @update:model-value="(v) => { settings.hotkeys.terminalAdd = v; scheduleSave(); }"
-              />
-            </td>
-          </tr>
-          <tr>
-            <td class="hotkey-td-label">{{ t('hotkeys.terminalClose') }}</td>
-            <td class="hotkey-td-input">
-              <HotkeyInput
-                :model-value="settings.hotkeys.terminalClose"
-                @update:model-value="(v) => { settings.hotkeys.terminalClose = v; scheduleSave(); }"
-              />
-            </td>
-          </tr>
-          <tr>
-            <td class="hotkey-td-label">{{ t('hotkeys.trayNext') }}</td>
-            <td class="hotkey-td-input">
-              <HotkeyInput
-                :model-value="settings.hotkeys.trayNext"
-                @update:model-value="(v) => { settings.hotkeys.trayNext = v; scheduleSave(); }"
-              />
-            </td>
-          </tr>
-          <tr>
-            <td class="hotkey-td-label">{{ t('hotkeys.homeTab') }}</td>
-            <td class="hotkey-td-input">
-              <HotkeyInput
-                :model-value="settings.hotkeys.homeTab"
-                @update:model-value="(v) => { settings.hotkeys.homeTab = v; scheduleSave(); }"
-              />
-            </td>
-          </tr>
-          <tr>
-            <td class="hotkey-td-label">{{ t('hotkeys.addTask') }}</td>
-            <td class="hotkey-td-input">
-              <HotkeyInput
-                :model-value="settings.hotkeys.addTask"
-                @update:model-value="(v) => { settings.hotkeys.addTask = v; scheduleSave(); }"
-              />
-            </td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
+    <SettingsHotkeySection />
 
     <!-- リポジトリ一覧 -->
-    <div class="field-group">
-      <div class="field-header">
-        <label class="field-label">{{ t('repositories.label') }}</label>
-        <button class="btn-primary" @click="addRepository">{{ t('repositories.add') }}</button>
-      </div>
-      <div class="repo-list">
-        <div
-          v-if="settings.repositories.length === 0"
-          class="empty-state"
-        >
-          {{ t('repositories.empty') }}
-        </div>
-        <div
-          v-for="repo in settings.repositories"
-          :key="repo.id"
-          class="repo-item"
-        >
-          <div class="repo-row-main">
-            <span class="repo-name">{{ repo.name }}</span>
-            <span class="repo-path">{{ repo.path }}</span>
-            <button class="btn-remove" :disabled="hasWorktrees(repo.id)" :title="hasWorktrees(repo.id) ? t('repositories.hasWorktrees') : undefined" @click="removeRepository(repo.id)">×</button>
-          </div>
-          <div class="repo-row-script">
-            <span class="script-label">{{ t('repositories.execScript') }}</span>
-            <input
-              class="text-input script-input"
-              :value="repo.execScript ?? ''"
-              readonly
-              :placeholder="t('common.notConfigured')"
-            />
-            <button class="btn-secondary" @click="selectExecScript(repo.id)">{{ t('worktreeBaseDir.select') }}</button>
-            <button
-              v-if="repo.execScript"
-              class="btn-secondary"
-              @click="clearExecScript(repo.id)"
-            >{{ t('common.clear') }}</button>
-          </div>
-        </div>
-      </div>
-    </div>
+    <SettingsRepositoriesSection />
 
     <!-- 外観設定 -->
     <div class="field-group">
@@ -1129,27 +936,6 @@ function getSoundLabel(sound: string | null | undefined): string {
       "enableAutoApproval": "Enable auto approval",
       "autoOpenArtifact": "Auto-open artifact viewer on new artifact"
     },
-    "hotkeys": {
-      "label": "Hotkeys",
-      "autoAssign": "Auto-assign hotkeys",
-      "action": "Action",
-      "key": "Key",
-      "trayPopup": "Show Tray Popup (global)",
-      "terminalNext": "Switch terminal: next",
-      "terminalPrev": "Switch terminal: prev",
-      "terminalAdd": "Add terminal",
-      "terminalClose": "Close terminal",
-      "trayNext": "Next notification (tray)",
-      "homeTab": "Home tab",
-      "addTask": "Add task"
-    },
-    "repositories": {
-      "label": "Repositories",
-      "add": "+ Add",
-      "empty": "No repositories registered",
-      "hasWorktrees": "Cannot delete: worktrees exist",
-      "execScript": "Exec script"
-    },
     "appearance": {
       "label": "Appearance",
       "enableAcrylic": "Enable Acrylic / LiquidGlass effect",
@@ -1180,10 +966,6 @@ function getSoundLabel(sound: string | null | undefined): string {
         "completed": "Completed",
         "general": "General"
       }
-    },
-    "error": {
-      "notARepo": "The selected folder is not a git repository.",
-      "alreadyRegistered": "This repository is already registered."
     }
   },
   "ja": {
@@ -1228,27 +1010,6 @@ function getSoundLabel(sound: string | null | undefined): string {
       "enableAutoApproval": "自動承認を有効にする",
       "autoOpenArtifact": "アーティファクト追加時にビューアを自動で開く"
     },
-    "hotkeys": {
-      "label": "ホットキー",
-      "autoAssign": "ホットキー自動割り当て",
-      "action": "操作",
-      "key": "キー",
-      "trayPopup": "Tray Popup 表示 (グローバル)",
-      "terminalNext": "ターミナル切り替え: 次",
-      "terminalPrev": "ターミナル切り替え: 前",
-      "terminalAdd": "ターミナル追加",
-      "terminalClose": "ターミナルを閉じる",
-      "trayNext": "次の通知へ (トレイ)",
-      "homeTab": "ホームタブへ戻る",
-      "addTask": "タスク追加"
-    },
-    "repositories": {
-      "label": "リポジトリ一覧",
-      "add": "+ 追加",
-      "empty": "リポジトリが登録されていません",
-      "hasWorktrees": "ワークツリーが存在するため削除できません",
-      "execScript": "実行スクリプト"
-    },
     "appearance": {
       "label": "外観",
       "enableAcrylic": "Acrylic / LiquidGlass エフェクトを有効にする",
@@ -1280,10 +1041,6 @@ function getSoundLabel(sound: string | null | undefined): string {
         "general": "汎用"
       }
     },
-    "error": {
-      "notARepo": "選択したフォルダは git リポジトリではありません。",
-      "alreadyRegistered": "このリポジトリはすでに登録されています。"
-    }
   }
 }
 </i18n>

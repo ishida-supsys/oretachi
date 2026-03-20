@@ -341,7 +341,7 @@ impl PtyManager {
             .map_err(|e| format!("Reader error: {}", e))?;
 
         let session_id = {
-            let mut id = self.next_id.lock().unwrap();
+            let mut id = self.next_id.lock().map_err(|e| format!("lock error: {}", e))?;
             let current = *id;
             *id += 1;
             current
@@ -408,14 +408,14 @@ impl PtyManager {
             cwd,
         };
 
-        self.sessions.lock().unwrap().insert(session_id, session);
+        self.sessions.lock().map_err(|e| format!("lock error: {}", e))?.insert(session_id, session);
 
         log::debug!("[Terminal] pty_manager::spawn done session_id={} rows={} cols={}", session_id, rows, cols);
         Ok(session_id)
     }
 
     pub fn write(&self, session_id: u32, data: Vec<u8>) -> Result<(), String> {
-        let mut sessions = self.sessions.lock().unwrap();
+        let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
         let session = sessions
             .get_mut(&session_id)
             .ok_or_else(|| format!("Session {} not found", session_id))?;
@@ -434,12 +434,12 @@ impl PtyManager {
 
     pub fn resize(&self, session_id: u32, rows: u16, cols: u16) -> Result<(), String> {
         log::debug!("[Terminal] pty_manager::resize session_id={} rows={} cols={}", session_id, rows, cols);
-        let sessions = self.sessions.lock().unwrap();
+        let sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
         let session = sessions
             .get(&session_id)
             .ok_or_else(|| format!("Session {} not found", session_id))?;
 
-        if let Some(master) = session.master.lock().unwrap().as_ref() {
+        if let Some(master) = session.master.lock().map_err(|e| format!("lock error: {}", e))?.as_ref() {
             master
                 .resize(PtySize {
                     rows,
@@ -456,9 +456,9 @@ impl PtyManager {
     pub fn kill(&self, session_id: u32) -> Result<(), String> {
         log::debug!("[Terminal] pty_manager::kill session_id={}", session_id);
         let watcher_handle = {
-            let mut sessions = self.sessions.lock().unwrap();
+            let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
             if let Some(mut session) = sessions.remove(&session_id) {
-                *session.alive.lock().unwrap() = false;
+                if let Ok(mut alive) = session.alive.lock() { *alive = false; }
                 // PID ベースで子プロセスツリーを kill
                 if let Some(pid) = session.child_pid {
                     crate::process_utils::kill_process_tree(pid);
@@ -466,7 +466,7 @@ impl PtyManager {
                 // child_killer でバックアップ kill（child が監視スレッドに渡済みでも動作）
                 let _ = session.child_killer.kill();
                 // master を drop して reader に EOF を送る
-                let _ = session.master.lock().unwrap().take();
+                let _ = session.master.lock().map(|mut g| g.take());
                 drop(session.writer);
                 session.watcher_handle
             } else {

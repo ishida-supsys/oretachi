@@ -163,11 +163,6 @@ async function loadTerminalSession(worktreeId: string): Promise<TerminalSessionF
   }
 }
 
-/** ターミナルセッションを削除 */
-async function deleteTerminalSession(worktreeId: string): Promise<void> {
-  await invoke("delete_terminal_session", { worktreeId });
-}
-
 /** ターミナルタイトルを更新 */
 function updateTerminalTitle(worktreeId: string, terminalId: number, title: string) {
   const worktree = worktrees.value.find((w) => w.id === worktreeId);
@@ -192,6 +187,5 @@ export function useWorktrees() {
     updateTerminalTitle,
     saveTerminalSession,
     loadTerminalSession,
-    deleteTerminalSession,
   };
 }

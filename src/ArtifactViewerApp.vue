@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from "vue";
+import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import Toast from "primevue/toast";
@@ -8,29 +9,13 @@ import ArtifactMarkdownView from "./components/artifact/ArtifactMarkdownView.vue
 import ArtifactHtmlView from "./components/artifact/ArtifactHtmlView.vue";
 import ArtifactSvgView from "./components/artifact/ArtifactSvgView.vue";
 import ArtifactMermaidView from "./components/artifact/ArtifactMermaidView.vue";
+import type { ArtifactMeta, ArtifactData, ArtifactChangedEvent } from "./types/artifact";
+
+const { t } = useI18n();
 
 const params = new URLSearchParams(window.location.search);
 const worktreeId = params.get("worktreeId") ?? "";
 const worktreeName = params.get("worktreeName") ?? "";
-
-interface ArtifactMeta {
-  id: string;
-  title: string;
-  content_type: string;
-  language?: string;
-  created_at: number;
-  updated_at: number;
-}
-
-interface ArtifactData extends ArtifactMeta {
-  content: string;
-}
-
-interface ArtifactChangedEvent {
-  worktreeId: string;
-  artifactId: string;
-  command: string;
-}
 
 const artifacts = ref<ArtifactMeta[]>([]);
 const selectedId = ref<string | null>(null);
@@ -126,7 +111,7 @@ onUnmounted(() => {
         <span class="sidebar-title">{{ worktreeName }}</span>
       </div>
       <div v-if="artifacts.length === 0" class="empty-list">
-        アーティファクトがありません
+        {{ t("emptyList") }}
       </div>
       <div
         v-for="artifact in artifacts"
@@ -146,7 +131,7 @@ onUnmounted(() => {
     <div class="main-content">
       <div v-if="!selectedArtifact && !loading" class="empty-main">
         <span class="pi pi-box empty-icon" />
-        <span>アーティファクトを選択してください</span>
+        <span>{{ t("selectPrompt") }}</span>
       </div>
 
       <div v-else-if="loading" class="loading-main">
@@ -359,3 +344,16 @@ onUnmounted(() => {
   flex-direction: column;
 }
 </style>
+
+<i18n lang="json">
+{
+  "en": {
+    "emptyList": "No artifacts",
+    "selectPrompt": "Select an artifact to view"
+  },
+  "ja": {
+    "emptyList": "アーティファクトがありません",
+    "selectPrompt": "アーティファクトを選択してください"
+  }
+}
+</i18n>

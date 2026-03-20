@@ -45,6 +45,17 @@ pub struct HotkeyBinding {
     pub key: String,
 }
 
+/// macOS では Meta (Cmd), それ以外では Ctrl を使うホットキーを生成するヘルパー
+fn platform_hotkey(shift: bool, alt: bool, key: &str) -> HotkeyBinding {
+    HotkeyBinding {
+        ctrl: !cfg!(target_os = "macos"),
+        meta: cfg!(target_os = "macos"),
+        shift,
+        alt,
+        key: key.to_string(),
+    }
+}
+
 fn default_terminal_next() -> HotkeyBinding {
     HotkeyBinding { ctrl: true, meta: false, shift: false, alt: false, key: "Tab".to_string() }
 }
@@ -54,27 +65,15 @@ fn default_terminal_prev() -> HotkeyBinding {
 }
 
 fn default_terminal_add() -> HotkeyBinding {
-    if cfg!(target_os = "macos") {
-        HotkeyBinding { ctrl: false, meta: true, shift: false, alt: false, key: "t".to_string() }
-    } else {
-        HotkeyBinding { ctrl: true, meta: false, shift: false, alt: false, key: "t".to_string() }
-    }
+    platform_hotkey(false, false, "t")
 }
 
 fn default_terminal_close() -> HotkeyBinding {
-    if cfg!(target_os = "macos") {
-        HotkeyBinding { ctrl: false, meta: true, shift: false, alt: false, key: "w".to_string() }
-    } else {
-        HotkeyBinding { ctrl: true, meta: false, shift: false, alt: false, key: "w".to_string() }
-    }
+    platform_hotkey(false, false, "w")
 }
 
 fn default_tray_next() -> HotkeyBinding {
-    if cfg!(target_os = "macos") {
-        HotkeyBinding { ctrl: false, meta: true, shift: false, alt: false, key: "n".to_string() }
-    } else {
-        HotkeyBinding { ctrl: true, meta: false, shift: false, alt: false, key: "n".to_string() }
-    }
+    platform_hotkey(false, false, "n")
 }
 
 fn default_home_tab() -> HotkeyBinding {
@@ -82,19 +81,11 @@ fn default_home_tab() -> HotkeyBinding {
 }
 
 fn default_add_task() -> HotkeyBinding {
-    if cfg!(target_os = "macos") {
-        HotkeyBinding { ctrl: false, meta: true, shift: true, alt: false, key: "n".to_string() }
-    } else {
-        HotkeyBinding { ctrl: true, meta: false, shift: true, alt: false, key: "n".to_string() }
-    }
+    platform_hotkey(true, false, "n")
 }
 
 fn default_global_tray_popup() -> HotkeyBinding {
-    if cfg!(target_os = "macos") {
-        HotkeyBinding { ctrl: false, meta: true, shift: true, alt: false, key: "o".to_string() }
-    } else {
-        HotkeyBinding { ctrl: true, meta: false, shift: true, alt: false, key: "o".to_string() }
-    }
+    platform_hotkey(true, false, "o")
 }
 
 // 旧フォーマット (string) と新フォーマット (HotkeyBinding object) の両方を受け入れる

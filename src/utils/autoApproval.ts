@@ -2,6 +2,17 @@ import type { Terminal } from "@xterm/xterm";
 import { invoke } from "@tauri-apps/api/core";
 import { debug } from "@tauri-apps/plugin-log";
 
+export interface TerminalForApproval {
+  id: number;
+  getTerminal(): Terminal | null;
+  write(data: string): Promise<void>;
+}
+
+export interface ApprovalLoopResult {
+  approved: boolean;
+  lastCommand: string | undefined;
+}
+
 /** AI判定の結果 */
 export interface JudgeResult {
   safe: boolean;
@@ -64,6 +75,47 @@ export async function analyzeForApproval(
     await debug(`[AutoApproval] AI judgment failed: ${e}`);
     return { safe: false }; // エラー時は安全側 (承認しない)
   }
+}
+
+/** 全ターミナルを走査し最初に承認できたものでEnterを送信する */
+export async function runApprovalLoop(
+  terminals: TerminalForApproval[],
+  worktreeId: string,
+  cwd: string,
+  additionalPrompt?: string,
+): Promise<ApprovalLoopResult> {
+  let approved = false;
+  let lastCommand: string | undefined;
+
+  for (const termRef of terminals) {
+    const terminal = termRef.getTerminal();
+    if (!terminal) {
+      await debug(`[AutoApproval] tid=${termRef.id} terminal=null, skip`);
+      continue;
+    }
+    const content = getRecentLines(terminal, 200);
+    await debug(`[AutoApproval] tid=${termRef.id} content(last200)=${content.slice(-200)}`);
+    const judgeResult = await analyzeForApproval(worktreeId, content, cwd, additionalPrompt);
+    if (judgeResult.command) {
+      lastCommand = judgeResult.command;
+    }
+    if (judgeResult.safe) {
+      // バッファ再チェック: AI判定完了後、承認プロンプトがまだあるか確認
+      const freshContent = getRecentLines(terminal, 10);
+      if (!hasApprovalPrompt(freshContent)) {
+        await debug(`[AutoApproval] tid=${termRef.id} → prompt disappeared, skip Enter`);
+        break;
+      }
+      await debug(`[AutoApproval] tid=${termRef.id} → approved, sending Enter`);
+      await termRef.write("\r");
+      approved = true;
+      break;
+    } else {
+      await debug(`[AutoApproval] tid=${termRef.id} → not approved`);
+    }
+  }
+
+  return { approved, lastCommand };
 }
 
 /** 進行中のAI判定をキャンセル */

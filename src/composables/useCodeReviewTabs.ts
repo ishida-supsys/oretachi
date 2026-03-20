@@ -1,4 +1,4 @@
-import { ref, reactive } from "vue";
+import { ref, reactive, computed } from "vue";
 
 export interface CodeReviewTab {
   id: string;
@@ -83,7 +83,7 @@ export function useCodeReviewTabs() {
     activeTabId.value = id;
   }
 
-  const activeTab = () => tabs.find((t) => t.id === activeTabId.value);
+  const activeTab = computed(() => tabs.find((t) => t.id === activeTabId.value));
 
   function updateFileTab(filePath: string, content: string): void {
     const tab = tabs.find((t) => t.type === "file" && t.filePath === filePath);

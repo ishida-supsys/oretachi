@@ -1,7 +1,6 @@
 use crate::ai_provider::{self, AiAgentKind};
+use crate::process_utils::CancellableManager;
 use crate::settings::SettingsManager;
-use std::collections::HashMap;
-use std::sync::Mutex;
 use tauri::State;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{timeout, Duration};
@@ -44,17 +43,7 @@ pub struct JudgeResult {
 }
 
 /// ワークツリーIDごとの進行中AI判定プロセスのPIDを管理する
-pub struct ApprovalManager {
-    in_progress: Mutex<HashMap<String, u32>>,
-}
-
-impl ApprovalManager {
-    pub fn new() -> Self {
-        Self {
-            in_progress: Mutex::new(HashMap::new()),
-        }
-    }
-}
+pub type ApprovalManager = CancellableManager;
 
 #[tauri::command]
 pub async fn judge_approval(
@@ -66,11 +55,8 @@ pub async fn judge_approval(
     additional_prompt: Option<String>,
 ) -> Result<JudgeResult, String> {
     // 重複防止: 既に同一ワークツリーの判定が進行中ならエラーを返す
-    {
-        let map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;
-        if map.contains_key(&worktree_id) {
-            return Err("already in progress".to_string());
-        }
+    if state.is_in_progress(&worktree_id)? {
+        return Err("already in progress".to_string());
     }
 
     let additional = additional_prompt
@@ -117,11 +103,9 @@ pub async fn judge_approval(
         }
     }
 
-    // PID を HashMap に登録 (cancel_approval から kill できるようにする)
-    let pid = child.id();
-    if let Some(pid) = pid {
-        let mut map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;
-        map.insert(worktree_id.clone(), pid);
+    // PID を登録 (cancel_approval から kill できるようにする)
+    if let Some(pid) = child.id() {
+        state.register(worktree_id.clone(), pid)?;
     }
 
     // タイムアウト付きで待機
@@ -133,17 +117,11 @@ pub async fn judge_approval(
 
     // タイムアウト時はプロセスをkill
     if wait_result.is_err() {
-        let map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;
-        if let Some(&pid) = map.get(&worktree_id) {
-            crate::process_utils::kill_process_tree(pid);
-        }
+        state.cancel(&worktree_id)?;
     }
 
-    // 完了後に HashMap から削除（finally 相当）
-    {
-        let mut map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;
-        map.remove(&worktree_id);
-    }
+    // 完了後に登録を削除（finally 相当）
+    let _ = state.remove(&worktree_id);
 
     let output = wait_result
         .map_err(|_| format!("AI agent timed out after {}s", TIMEOUT_SECS))?
@@ -189,18 +167,12 @@ pub async fn cancel_approval(
     state: State<'_, ApprovalManager>,
     worktree_id: String,
 ) -> Result<(), String> {
-    let pid = {
-        let mut map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;
-        map.remove(&worktree_id)
-    };
-
+    let pid = state.remove(&worktree_id)?;
     if let Some(pid) = pid {
         log::debug!("[AutoApproval] cancel_approval: killing PID={} for worktree_id={}", pid, worktree_id);
-
         crate::process_utils::kill_process_tree(pid);
     } else {
         log::debug!("[AutoApproval] cancel_approval: no in-progress process for worktree_id={}", worktree_id);
     }
-
     Ok(())
 }

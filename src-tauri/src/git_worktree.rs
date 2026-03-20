@@ -1,6 +1,20 @@
 use crate::process_utils::make_command;
 use serde::Serialize;
 
+/// git コマンドを repo_path で実行して stdout を返す共通ヘルパー
+fn run_git_in(repo_path: &str, args: &[&str]) -> Result<String, String> {
+    let output = make_command("git")
+        .args(args)
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git {} failed: {}", args.join(" "), stderr));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
 pub fn get_git_remotes(repo_path: &str) -> Vec<serde_json::Value> {
     let output = make_command("git")
         .args(["remote", "-v"])
@@ -101,18 +115,7 @@ pub fn worktree_add(
 }
 
 pub fn list_branches(repo_path: &str) -> Result<Vec<String>, String> {
-    let output = make_command("git")
-        .args(["branch", "--format=%(refname:short)"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("git command error: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git branch failed: {}", stderr));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = run_git_in(repo_path, &["branch", "--format=%(refname:short)"])?;
     let branches = stdout
         .lines()
         .map(|l| l.trim().to_string())
@@ -122,18 +125,7 @@ pub fn list_branches(repo_path: &str) -> Result<Vec<String>, String> {
 }
 
 fn find_branch_worktree(repo_path: &str, branch_name: &str) -> Result<Option<String>, String> {
-    let output = make_command("git")
-        .args(["worktree", "list", "--porcelain"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("git command error: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git worktree list failed: {}", stderr));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = run_git_in(repo_path, &["worktree", "list", "--porcelain"])?;
     let mut current_path: Option<String> = None;
 
     for line in stdout.lines() {
@@ -216,35 +208,14 @@ pub fn merge_branch(repo_path: &str, source_branch: &str, target_branch: &str) -
 
 pub fn delete_branch(repo_path: &str, branch_name: &str, force: bool) -> Result<(), String> {
     let flag = if force { "-D" } else { "-d" };
-    let output = make_command("git")
-        .args(["branch", flag, branch_name])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("git command error: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git branch {} failed: {}", flag, stderr));
-    }
-
+    run_git_in(repo_path, &["branch", flag, branch_name])?;
     Ok(())
 }
 
 // ─── コードレビュー用 Git 関数 ───────────────────────────────────────────────
 
 pub fn list_tracked_files(repo_path: &str) -> Result<Vec<String>, String> {
-    let output = make_command("git")
-        .args(["ls-files"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("git command error: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git ls-files failed: {}", stderr));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = run_git_in(repo_path, &["ls-files"])?;
     let files = stdout
         .lines()
         .map(|l| l.trim().to_string())
@@ -316,18 +287,7 @@ pub fn get_merge_message(repo_path: &str) -> Result<Option<String>, String> {
 }
 
 pub fn get_status(repo_path: &str) -> Result<Vec<GitStatusEntry>, String> {
-    let output = make_command("git")
-        .args(["status", "--porcelain=v1", "-uall"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("git command error: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git status failed: {}", stderr));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = run_git_in(repo_path, &["status", "--porcelain=v1", "-uall"])?;
     let mut entries = Vec::new();
 
     for line in stdout.lines() {
@@ -426,29 +386,12 @@ pub struct CommitEntry {
 }
 
 pub fn get_log(repo_path: &str, skip: usize, limit: usize) -> Result<Vec<CommitEntry>, String> {
-    // セパレータを使ってフィールドを区切る
     let format = "%H%x00%h%x00%an%x00%ai%x00%s%x00%P%x00%D%x1e";
+    let fmt_arg = format!("--format={}", format);
     let skip_arg = format!("--skip={}", skip);
     let limit_arg = format!("-n{}", limit);
 
-    let output = make_command("git")
-        .args([
-            "log",
-            "--all",
-            &format!("--format={}", format),
-            &skip_arg,
-            &limit_arg,
-        ])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("git command error: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git log failed: {}", stderr));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = run_git_in(repo_path, &["log", "--all", &fmt_arg, &skip_arg, &limit_arg])?;
     let mut entries = Vec::new();
 
     for record in stdout.split('\x1e') {
@@ -510,39 +453,14 @@ pub fn get_diff_text(repo_path: &str) -> Result<String, String> {
 }
 
 pub fn stage_all(repo_path: &str) -> Result<(), String> {
-    let output = make_command("git")
-        .args(["add", "-A"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("git command error: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git add -A failed: {}", stderr));
-    }
+    run_git_in(repo_path, &["add", "-A"])?;
     Ok(())
 }
 
 pub fn commit(repo_path: &str, message: &str) -> Result<String, String> {
-    let output = make_command("git")
-        .args(["commit", "-m", message])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("git command error: {}", e))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git commit failed: {}", stderr));
-    }
-
-    // short hash を返す
-    let hash_output = make_command("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("git command error: {}", e))?;
-
-    Ok(String::from_utf8_lossy(&hash_output.stdout).trim().to_string())
+    run_git_in(repo_path, &["commit", "-m", message])?;
+    let stdout = run_git_in(repo_path, &["rev-parse", "--short", "HEAD"])?;
+    Ok(stdout.trim().to_string())
 }
 
 pub fn worktree_remove(repo_path: &str, worktree_path: &str) -> Result<(), String> {

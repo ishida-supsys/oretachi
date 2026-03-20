@@ -15,32 +15,25 @@ fn main() {
     oretachi_lib::run()
 }
 
-fn find_notify_arg(args: &[String]) -> Option<String> {
+fn find_arg(args: &[String], long: &str, short: &str) -> Option<String> {
+    let long_eq = format!("{}=", long);
     let mut iter = args.iter().skip(1);
     while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--notify" | "-n" => return iter.next().cloned(),
-            _ if arg.starts_with("--notify=") => {
-                return Some(arg["--notify=".len()..].to_string());
-            }
-            _ => {}
+        if arg == long || arg == short {
+            return iter.next().cloned();
+        } else if arg.starts_with(&long_eq) {
+            return Some(arg[long_eq.len()..].to_string());
         }
     }
     None
 }
 
+fn find_notify_arg(args: &[String]) -> Option<String> {
+    find_arg(args, "--notify", "-n")
+}
+
 fn find_kind_arg(args: &[String]) -> Option<String> {
-    let mut iter = args.iter().skip(1);
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--kind" | "-k" => return iter.next().cloned(),
-            _ if arg.starts_with("--kind=") => {
-                return Some(arg["--kind=".len()..].to_string());
-            }
-            _ => {}
-        }
-    }
-    None
+    find_arg(args, "--kind", "-k")
 }
 
 #[cfg(test)]

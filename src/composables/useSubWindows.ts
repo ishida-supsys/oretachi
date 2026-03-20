@@ -3,6 +3,41 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emitTo, listen } from "@tauri-apps/api/event";
 import type { FrameNode } from "../types/frame";
 
+export interface SubLayoutResponse {
+  layout: FrameNode | null;
+  terminals: unknown[];
+  windowSize?: { width: number; height: number };
+}
+
+/** サブウィンドウにレイアウト情報を要求してPromiseで返す共通ヘルパー */
+export async function requestSubWindowLayout(worktreeId: string): Promise<SubLayoutResponse | null> {
+  return new Promise((resolve) => {
+    const timeoutId = setTimeout(() => {
+      unlisten();
+      resolve(null);
+    }, 3000);
+
+    let unlisten = () => {};
+    listen<SubLayoutResponse & { worktreeId: string }>(
+      "sub-layout-response",
+      (event) => {
+        if (event.payload.worktreeId === worktreeId) {
+          clearTimeout(timeoutId);
+          unlisten();
+          const { worktreeId: _wid, ...rest } = event.payload;
+          resolve(rest);
+        }
+      }
+    ).then((fn) => { unlisten = fn; });
+
+    emitTo(`sub-${worktreeId}`, "sub-get-layout", {}).catch(() => {
+      clearTimeout(timeoutId);
+      unlisten();
+      resolve(null);
+    });
+  });
+}
+
 export interface SubWindowTerminal {
   id: number;
   title: string;
@@ -59,10 +94,6 @@ export function useSubWindows() {
       dragDropEnabled: false,  // HTML5 D&D を有効にするために必要 (Windows)
       transparent: true,
       decorations: false,
-    });
-
-    win.once("tauri://created", () => {
-      console.log(`サブウィンドウ作成成功: sub-${worktreeId}`);
     });
 
     win.once("tauri://error", (e) => {

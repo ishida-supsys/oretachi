@@ -30,10 +30,6 @@ export function useCodeReviewWindow() {
       transparent: true,
     });
 
-    win.once("tauri://created", () => {
-      console.log(`コードレビューウィンドウ作成成功: codereview-${worktreeId}`);
-    });
-
     win.once("tauri://error", (e) => {
       console.error(`コードレビューウィンドウ作成失敗: codereview-${worktreeId}`, e);
       codeReviewWindowMap.delete(worktreeId);

@@ -1,7 +1,6 @@
 use crate::ai_provider::{self, AiAgentKind};
+use crate::process_utils::CancellableManager;
 use crate::settings::SettingsManager;
-use std::collections::HashMap;
-use std::sync::Mutex;
 use tauri::State;
 use tokio::io::AsyncWriteExt;
 use tokio::time::{timeout, Duration};
@@ -28,17 +27,7 @@ The "body" field may be empty string. Do not add any other fields or text."#;
 
 const JSON_SCHEMA: &str = r#"{"type":"object","properties":{"subject":{"type":"string"},"body":{"type":"string"}},"required":["subject","body"]}"#;
 
-pub struct CommitMessageManager {
-    in_progress: Mutex<HashMap<String, u32>>,
-}
-
-impl CommitMessageManager {
-    pub fn new() -> Self {
-        Self {
-            in_progress: Mutex::new(HashMap::new()),
-        }
-    }
-}
+pub type CommitMessageManager = CancellableManager;
 
 #[tauri::command]
 pub async fn generate_commit_message(
@@ -47,11 +36,8 @@ pub async fn generate_commit_message(
     repo_path: String,
 ) -> Result<String, String> {
     // 重複防止
-    {
-        let map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;
-        if map.contains_key(&repo_path) {
-            return Err("already in progress".to_string());
-        }
+    if state.is_in_progress(&repo_path)? {
+        return Err("already in progress".to_string());
     }
 
     let diff = crate::git_worktree::get_diff_text(&repo_path)?;
@@ -123,10 +109,8 @@ pub async fn generate_commit_message(
         }
     }
 
-    let pid = child.id();
-    if let Some(pid) = pid {
-        let mut map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;
-        map.insert(repo_path.clone(), pid);
+    if let Some(pid) = child.id() {
+        state.register(repo_path.clone(), pid)?;
     }
 
     let wait_result = timeout(
@@ -136,16 +120,10 @@ pub async fn generate_commit_message(
     .await;
 
     if wait_result.is_err() {
-        let map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;
-        if let Some(&pid) = map.get(&repo_path) {
-            crate::process_utils::kill_process_tree(pid);
-        }
+        state.cancel(&repo_path)?;
     }
 
-    {
-        let mut map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;
-        map.remove(&repo_path);
-    }
+    let _ = state.remove(&repo_path);
 
     let output = wait_result
         .map_err(|_| format!("AI agent timed out after {}s", TIMEOUT_SECS))?
@@ -187,15 +165,10 @@ pub async fn cancel_commit_message_generation(
     state: State<'_, CommitMessageManager>,
     repo_path: String,
 ) -> Result<(), String> {
-    let pid = {
-        let mut map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;
-        map.remove(&repo_path)
-    };
-
+    let pid = state.remove(&repo_path)?;
     if let Some(pid) = pid {
         log::debug!("[CommitMessage] cancelling PID={} for repo_path={}", pid, repo_path);
         crate::process_utils::kill_process_tree(pid);
     }
-
     Ok(())
 }

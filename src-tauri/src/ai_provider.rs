@@ -90,6 +90,17 @@ pub struct AiExecutionPlan {
     pub stdin_content: String,
 }
 
+/// Windows では `cmd /c <name>`, それ以外では `<name>` を返す
+pub fn make_platform_cmd(name: &str) -> (String, Vec<String>) {
+    #[cfg(target_os = "windows")]
+    return (
+        "cmd".to_string(),
+        vec!["/c".to_string(), name.to_string()],
+    );
+    #[cfg(not(target_os = "windows"))]
+    return (name.to_string(), vec![]);
+}
+
 fn json_schema_prompt_suffix(json_schema: &str) -> String {
     format!(
         "\n\nYou MUST respond with ONLY valid JSON matching this schema: {}\nDo not include any other text, markdown formatting, or code fences.",
@@ -106,14 +117,7 @@ pub fn build_execution_plan(
 ) -> AiExecutionPlan {
     match kind {
         AiAgentKind::ClaudeCode => {
-            #[cfg(target_os = "windows")]
-            let (program, mut args) = (
-                "cmd".to_string(),
-                vec!["/c".to_string(), "claude".to_string()],
-            );
-            #[cfg(not(target_os = "windows"))]
-            let (program, mut args) = ("claude".to_string(), vec![]);
-
+            let (program, mut args) = make_platform_cmd("claude");
             args.extend([
                 "--model".to_string(),
                 model.to_string(),
@@ -126,23 +130,11 @@ pub fn build_execution_plan(
             if disable_mcp {
                 args.push("--strict-mcp-config".to_string());
             }
-            AiExecutionPlan {
-                program,
-                args,
-                stdin_content: prompt.to_string(),
-            }
+            AiExecutionPlan { program, args, stdin_content: prompt.to_string() }
         }
         AiAgentKind::GeminiCli => {
-            #[cfg(target_os = "windows")]
-            let (program, mut args) = (
-                "cmd".to_string(),
-                vec!["/c".to_string(), "gemini".to_string()],
-            );
-            #[cfg(not(target_os = "windows"))]
-            let (program, mut args) = ("gemini".to_string(), vec![]);
-
+            let (program, mut args) = make_platform_cmd("gemini");
             args.extend(["--model".to_string(), model.to_string()]);
-
             AiExecutionPlan {
                 program,
                 args,
@@ -150,20 +142,8 @@ pub fn build_execution_plan(
             }
         }
         AiAgentKind::CodexCli => {
-            #[cfg(target_os = "windows")]
-            let (program, mut args) = (
-                "cmd".to_string(),
-                vec!["/c".to_string(), "codex".to_string()],
-            );
-            #[cfg(not(target_os = "windows"))]
-            let (program, mut args) = ("codex".to_string(), vec![]);
-
-            args.extend([
-                "--model".to_string(),
-                model.to_string(),
-                "-q".to_string(),
-            ]);
-
+            let (program, mut args) = make_platform_cmd("codex");
+            args.extend(["--model".to_string(), model.to_string(), "-q".to_string()]);
             AiExecutionPlan {
                 program,
                 args,
@@ -171,24 +151,9 @@ pub fn build_execution_plan(
             }
         }
         AiAgentKind::ClineCli => {
-            let prompt_with_schema =
-                format!("{}{}", prompt, json_schema_prompt_suffix(json_schema));
-
-            #[cfg(target_os = "windows")]
-            let (program, mut args) = (
-                "cmd".to_string(),
-                vec!["/c".to_string(), "cline".to_string()],
-            );
-            #[cfg(not(target_os = "windows"))]
-            let (program, mut args) = ("cline".to_string(), vec![]);
-
-            args.extend(["--prompt".to_string(), prompt_with_schema]);
-
-            AiExecutionPlan {
-                program,
-                args,
-                stdin_content: String::new(),
-            }
+            let (program, mut args) = make_platform_cmd("cline");
+            args.extend(["--prompt".to_string(), format!("{}{}", prompt, json_schema_prompt_suffix(json_schema))]);
+            AiExecutionPlan { program, args, stdin_content: String::new() }
         }
     }
 }
