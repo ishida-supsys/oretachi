@@ -367,14 +367,25 @@ impl PtyManager {
         let watcher_handle = std::thread::spawn(move || {
             let child_opt = child_watcher.lock().unwrap().take();
             if let Some(mut child) = child_opt {
-                let _ = child.wait();
-                // プロセス終了後、alive が true (kill() 未呼び出し) なら master を drop
-                let mut alive_guard = alive_watcher.lock().unwrap();
-                if *alive_guard {
-                    *alive_guard = false;
-                    drop(alive_guard);
-                    // master を drop して reader に EOF を送る
-                    let _ = master_watcher.lock().unwrap().take();
+                // try_wait() ポーリング: alive=false (kill() 呼び出し済み) なら即座に終了
+                let exited = loop {
+                    if !*alive_watcher.lock().unwrap() {
+                        break false;
+                    }
+                    match child.try_wait() {
+                        Ok(Some(_)) => break true,
+                        Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
+                        Err(_) => break false,
+                    }
+                };
+                // 自然終了した場合のみ master を drop して reader に EOF を送る
+                if exited {
+                    let mut alive_guard = alive_watcher.lock().unwrap();
+                    if *alive_guard {
+                        *alive_guard = false;
+                        drop(alive_guard);
+                        let _ = master_watcher.lock().unwrap().take();
+                    }
                 }
             }
         });
@@ -456,7 +467,7 @@ impl PtyManager {
     pub fn kill(&self, session_id: u32) -> Result<(), String> {
         log::debug!("[Terminal] pty_manager::kill session_id={}", session_id);
         let watcher_handle = {
-            let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(mut session) = sessions.remove(&session_id) {
                 if let Ok(mut alive) = session.alive.lock() { *alive = false; }
                 // PID ベースで子プロセスツリーを kill
@@ -474,7 +485,7 @@ impl PtyManager {
             }
         };
         // sessions ロック解放後に watcher スレッドの終了を待つ
-        // (watcher は child.wait() しているので、kill 後に即座に返る)
+        // watcher は alive=false を検知して必ず終了するため直接 join できる
         if let Some(handle) = watcher_handle {
             let _ = handle.join();
         }
@@ -482,7 +493,9 @@ impl PtyManager {
     }
 
     pub fn kill_all(&self) {
-        let ids: Vec<u32> = self.sessions.lock().unwrap().keys().cloned().collect();
+        let ids: Vec<u32> = self.sessions.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .keys().cloned().collect();
         for id in ids {
             let _ = self.kill(id);
         }
@@ -517,9 +530,18 @@ impl PtyManager {
 
 impl Drop for PtyManager {
     fn drop(&mut self) {
-        if let Ok(mut alive) = self.polling_alive.lock() {
-            *alive = false;
+        match self.polling_alive.lock() {
+            Ok(mut alive) => *alive = false,
+            Err(e) => *e.into_inner() = false,
         }
-        self.kill_all();
+        // sessions が空なら既に kill_all 済みなのでスキップ
+        // poison されていても into_inner() で中身を取り出してチェックする
+        let has_sessions = match self.sessions.lock() {
+            Ok(s) => !s.is_empty(),
+            Err(e) => !e.into_inner().is_empty(),
+        };
+        if has_sessions {
+            self.kill_all();
+        }
     }
 }

@@ -81,5 +81,11 @@ pub fn kill_process_tree(pid: u32) {
         let _ = Command::new("kill")
             .args(["-TERM", &pid.to_string()])
             .output();
+        // SIGTERM を無視するプロセス対策: 短い猶予後に SIGKILL で強制終了
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        unsafe {
+            libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
     }
 }
