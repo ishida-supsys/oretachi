@@ -77,7 +77,7 @@ pub struct NotifyWorktreeEvent {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ArtifactParams {
-    #[schemars(description = "操作の種類: \"create\"(新規作成) / \"update\"(差分更新) / \"rewrite\"(全置換)")]
+    #[schemars(description = "操作の種類: \"create\"(新規作成) / \"update\"(差分更新) / \"rewrite\"(全置換) / \"get\"(1件取得)")]
     pub command: String,
     #[schemars(description = "アーティファクトを識別する一意なID")]
     pub id: String,
@@ -114,6 +114,16 @@ struct ArtifactData {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SearchArtifactParams {
+    #[schemars(description = "リポジトリ名")]
+    pub repository: String,
+    #[schemars(description = "ブランチ名")]
+    pub branch: String,
+    #[schemars(description = "検索キーワード (省略時は全件返却)。title, content, type, language を対象に部分一致検索")]
+    pub query: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListRepositoryParams {}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -136,7 +146,7 @@ impl NotifyService {
         }
     }
 
-    #[tool(description = "アーティファクトを作成・更新・書き換えする。create: 新規作成, update: 差分更新(old_str→new_str), rewrite: 全置換")]
+    #[tool(description = "アーティファクトを操作する。create: 新規作成, update: 差分更新(old_str→new_str), rewrite: 全置換, get: 1件取得(全フィールド含む)")]
     fn artifact(
         &self,
         Parameters(ArtifactParams {
@@ -178,6 +188,13 @@ impl NotifyService {
             .join(worktree_id);
 
         let artifact_path = artifacts_dir.join(format!("{}.json", id));
+
+        if command == "get" {
+            let raw = fs::read_to_string(&artifact_path)
+                .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))?;
+            log::info!("[mcp] artifact command=get id={} worktree_id={}", id, worktree_id);
+            return Ok(CallToolResult::success(vec![Content::text(raw)]));
+        }
 
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -234,7 +251,7 @@ impl NotifyService {
                 data
             }
             other => return Err(McpError::invalid_params(
-                format!("不明なコマンド '{}'. create / update / rewrite のいずれかを指定してください", other),
+                format!("不明なコマンド '{}'. create / update / rewrite / get のいずれかを指定してください", other),
                 None,
             )),
         };
@@ -320,6 +337,93 @@ impl NotifyService {
         let json = serde_json::to_string_pretty(&repos)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         log::info!("[mcp] oretachi_list_repository: {} repos", repos.len());
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "アーティファクトを検索する。queryを省略すると全件返却。title/content/type/languageを対象に部分一致検索。結果はcontentを除いたメタデータのみ")]
+    fn search_artifact(
+        &self,
+        Parameters(SearchArtifactParams { repository, branch, query }): Parameters<SearchArtifactParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+        let wt = settings
+            .worktrees
+            .iter()
+            .find(|wt| wt.repository_name == repository && wt.branch_name == branch)
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    format!(
+                        "repository='{}', branch='{}' に一致するワークツリーが存在しません",
+                        repository, branch
+                    ),
+                    None,
+                )
+            })?;
+        let worktree_id = &wt.id;
+
+        let artifacts_dir = self
+            .app_handle
+            .path()
+            .app_data_dir()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            .join("artifacts")
+            .join(worktree_id);
+
+        let mut results: Vec<serde_json::Value> = Vec::new();
+
+        if artifacts_dir.exists() {
+            let entries = fs::read_dir(&artifacts_dir)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            for entry in entries {
+                let entry = entry.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let raw = match fs::read_to_string(&path) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let data: ArtifactData = match serde_json::from_str(&raw) {
+                    Ok(d) => d,
+                    Err(_) => continue,
+                };
+                if let Some(ref q) = query {
+                    let q_lower = q.to_lowercase();
+                    let matches = data.title.to_lowercase().contains(&q_lower)
+                        || data.content.to_lowercase().contains(&q_lower)
+                        || data.content_type.to_lowercase().contains(&q_lower)
+                        || data.language.as_deref().unwrap_or("").to_lowercase().contains(&q_lower);
+                    if !matches {
+                        continue;
+                    }
+                }
+                let mut meta = serde_json::json!({
+                    "id": data.id,
+                    "type": data.content_type,
+                    "title": data.title,
+                    "created_at": data.created_at,
+                    "updated_at": data.updated_at,
+                });
+                if let Some(lang) = data.language {
+                    meta["language"] = serde_json::Value::String(lang);
+                }
+                results.push(meta);
+            }
+            results.sort_by(|a, b| {
+                let a_time = a.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+                let b_time = b.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+                b_time.cmp(&a_time)
+            });
+        }
+
+        let json = serde_json::to_string_pretty(&results)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        log::info!(
+            "[mcp] search_artifact query={:?} worktree_id={} count={}",
+            query, worktree_id, results.len()
+        );
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 }
