@@ -191,6 +191,8 @@ pub struct WorktreeDefaults {
     pub open_in_sub_window: bool,
     #[serde(default)]
     pub auto_approval: bool,
+    #[serde(default = "default_true")]
+    pub auto_open_artifact: bool,
 }
 
 fn default_monaco_font_size() -> u32 { 13 }

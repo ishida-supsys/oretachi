@@ -13,6 +13,7 @@ import { renderToDataUrl } from "./composables/useTerminalThumbnail";
 import { useWindowFocus } from "./composables/useWindowFocus";
 import { getRecentLines, analyzeForApproval, hasApprovalPrompt } from "./utils/autoApproval";
 import { useIdeSelect } from "./composables/useIdeSelect";
+import { useArtifactWindow } from "./composables/useArtifactWindow";
 import { invoke } from "@tauri-apps/api/core";
 import { debug } from "@tauri-apps/plugin-log";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
@@ -50,6 +51,13 @@ const additionalPrompt = ref("");
 
 // IDE 選択
 const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect();
+
+// アーティファクト
+const { openArtifactViewer } = useArtifactWindow();
+
+async function requestOpenArtifacts() {
+  await openArtifactViewer(worktreeId, worktreeName);
+}
 
 // AI判定進行中フラグ
 const aiJudging = ref(false);
@@ -577,6 +585,7 @@ async function onCancelAiJudging() {
         :is-window-focused="isWindowFocused"
         :show-window-controls="true"
         @open-in-ide="requestOpenInIde"
+        @open-artifacts="requestOpenArtifacts"
         @cancel-ai-judging="onCancelAiJudging"
         @click-auto-approval="emitTo('main', 'sub-click-auto-approval', { worktreeId })"
       />

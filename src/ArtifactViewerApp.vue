@@ -80,9 +80,19 @@ async function selectArtifact(id: string) {
   }
 }
 
-async function refreshSelected(artifactId: string) {
+async function refreshSelected(artifactId: string, command: string) {
   await loadList();
-  if (selectedId.value === artifactId) {
+  if (command === "delete") {
+    if (selectedId.value === artifactId) {
+      selectedId.value = null;
+      selectedArtifact.value = null;
+      if (artifacts.value.length > 0) {
+        await selectArtifact(artifacts.value[0].id);
+      }
+    }
+  } else if (command === "create") {
+    await selectArtifact(artifactId);
+  } else if (selectedId.value === artifactId) {
     try {
       const raw = await invoke<string>("read_artifact", { worktreeId, artifactId });
       selectedArtifact.value = JSON.parse(raw) as ArtifactData;
@@ -98,7 +108,7 @@ onMounted(async () => {
 
   unlisten = await listen<ArtifactChangedEvent>("artifact-changed", async (event) => {
     if (event.payload.worktreeId !== worktreeId) return;
-    await refreshSelected(event.payload.artifactId);
+    await refreshSelected(event.payload.artifactId, event.payload.command);
   });
 });
 

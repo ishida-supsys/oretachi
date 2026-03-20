@@ -498,6 +498,20 @@ function getSoundLabel(sound: string | null | undefined): string {
         />
         <label for="worktree-default-auto-approval" class="inline-label toggle-label">{{ t('worktreeDefaults.enableAutoApproval') }}</label>
       </div>
+      <div class="row-input row-input--inline mt-8">
+        <input
+          id="worktree-default-auto-open-artifact"
+          type="checkbox"
+          class="toggle-checkbox"
+          :checked="settings.worktreeDefaults?.autoOpenArtifact ?? true"
+          @change="(e) => {
+            if (!settings.worktreeDefaults) settings.worktreeDefaults = {};
+            settings.worktreeDefaults.autoOpenArtifact = (e.target as HTMLInputElement).checked;
+            scheduleSave();
+          }"
+        />
+        <label for="worktree-default-auto-open-artifact" class="inline-label toggle-label">{{ t('worktreeDefaults.autoOpenArtifact') }}</label>
+      </div>
     </div>
 
     <!-- ホットキー設定 -->
@@ -1112,7 +1126,8 @@ function getSoundLabel(sound: string | null | undefined): string {
     "worktreeDefaults": {
       "label": "Default worktree behavior",
       "openInSubWindow": "Open in sub window",
-      "enableAutoApproval": "Enable auto approval"
+      "enableAutoApproval": "Enable auto approval",
+      "autoOpenArtifact": "Auto-open artifact viewer on new artifact"
     },
     "hotkeys": {
       "label": "Hotkeys",
@@ -1210,7 +1225,8 @@ function getSoundLabel(sound: string | null | undefined): string {
     "worktreeDefaults": {
       "label": "ワークツリー追加時のデフォルト動作",
       "openInSubWindow": "サブウィンドウで開く",
-      "enableAutoApproval": "自動承認を有効にする"
+      "enableAutoApproval": "自動承認を有効にする",
+      "autoOpenArtifact": "アーティファクト追加時にビューアを自動で開く"
     },
     "hotkeys": {
       "label": "ホットキー",

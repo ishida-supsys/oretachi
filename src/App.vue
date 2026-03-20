@@ -69,7 +69,7 @@ const { autoApprovalPromptMap, lastJudgedCommandMap, showAutoApprovalPromptDialo
 const { notifications, initNotificationListener, addNotification, clearNotification, purgeStaleNotifications, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
 const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees, setCurrentTrayWorktreeId, isTrayShowingWorktree, focusTrayWindow } = useTrayPopup();
 const { closeAllCodeReviewWindows } = useCodeReviewWindow();
-const { openArtifactViewer } = useArtifactWindow();
+const { openArtifactViewer, closeArtifactWindow } = useArtifactWindow();
 const { tryAutoAssignHotkey } = useAutoHotkey();
 const { sortedTasks, removeTask } = useTasks();
 
@@ -433,6 +433,9 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
       await moveToMainWindow(worktreeId);
       subWindowFocusMap.delete(worktreeId);
     }
+
+    // アーティファクトウィンドウを閉じる
+    await closeArtifactWindow(worktreeId);
 
     // AI判定プロセスをキャンセル
     await cancelApproval(worktreeId);
@@ -1246,6 +1249,16 @@ onMounted(async () => {
     await handleSubAddTerminalRequest(event.payload.worktreeId);
   });
 
+  // アーティファクト追加時に自動でビューアを開く
+  await listen<{ worktreeId: string; artifactId: string; command: string }>("artifact-changed", async (event) => {
+    const { worktreeId: wid, command } = event.payload;
+    if (command !== "create") return;
+    if (settings.value.worktreeDefaults?.autoOpenArtifact === false) return;
+    const wt = worktrees.value.find((w) => w.id === wid);
+    if (!wt) return;
+    await openArtifactViewer(wt.id, wt.name);
+  });
+
   // サブウィンドウ close 通知 (ユーザーが X ボタンで閉じた場合のみ)
   // 注: SubWindowApp は既に kill 済みのため、ここでは状態解除のみ
   await listen<{ worktreeId: string }>("sub-window-closing", async (event) => {
@@ -1624,6 +1637,7 @@ onMounted(async () => {
             :ai-judging="aiJudgingWorktrees.has(wt.id)"
             :is-window-focused="isWindowFocused"
             @open-in-ide="onOpenInIde(wt.id)"
+            @open-artifacts="onOpenArtifacts(wt.id)"
             @cancel-ai-judging="onCancelAiJudging(wt.id)"
             @click-auto-approval="onClickAutoApproval(wt.id)"
           />

@@ -42,6 +42,14 @@ export function useArtifactWindow() {
     artifactWindowMap.set(worktreeId, win);
   }
 
+  async function closeArtifactWindow(worktreeId: string): Promise<void> {
+    const win = artifactWindowMap.get(worktreeId);
+    if (win) {
+      try { await win.destroy(); } catch { /* 既に閉じ済み */ }
+      artifactWindowMap.delete(worktreeId);
+    }
+  }
+
   async function closeAllArtifactWindows(): Promise<void> {
     for (const [, win] of artifactWindowMap) {
       try { await win.destroy(); } catch { /* 既に閉じ済み */ }
@@ -49,5 +57,5 @@ export function useArtifactWindow() {
     artifactWindowMap.clear();
   }
 
-  return { openArtifactViewer, closeAllArtifactWindows };
+  return { openArtifactViewer, closeArtifactWindow, closeAllArtifactWindows };
 }

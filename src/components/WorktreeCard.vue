@@ -49,6 +49,11 @@ function onMoveWindow() {
   }
 }
 
+function onOpenArtifacts() {
+  menuRef.value?.hide();
+  emit("openArtifacts", props.worktree.id);
+}
+
 function onDelete() {
   menuRef.value?.hide();
   emit("removeWorktree", props.worktree.id);
@@ -102,12 +107,6 @@ const terminalList = computed(() =>
           @click="emit('openInIde', worktree.id)"
         ><span class="pi pi-code" /></button>
         <button
-          class="btn-icon"
-          :title="t('openArtifacts')"
-          :disabled="loading"
-          @click="emit('openArtifacts', worktree.id)"
-        ><span class="pi pi-box" /></button>
-        <button
           v-if="!detached"
           class="btn-icon"
           :title="t('addTerminal')"
@@ -152,6 +151,10 @@ const terminalList = computed(() =>
         <button class="popup-item" :disabled="loading" @click="onSetHotkeyChar">
           <span class="pi pi-key" />
           {{ t('menu.setHotkey') }}
+        </button>
+        <button class="popup-item" :disabled="loading" @click="onOpenArtifacts">
+          <span class="pi pi-box" />
+          {{ t('menu.openArtifacts') }}
         </button>
         <button class="popup-item" :disabled="loading" @click="onMoveWindow">
           <span :class="detached ? 'pi pi-window-maximize' : 'pi pi-external-link'" />
@@ -380,6 +383,7 @@ const terminalList = computed(() =>
     "menu": {
       "autoApproval": "Auto approval",
       "setHotkey": "Assign hotkey",
+      "openArtifacts": "Artifacts",
       "moveToSubWindow": "Move to sub window",
       "moveToMainWindow": "Move to main window",
       "delete": "Delete"
@@ -397,6 +401,7 @@ const terminalList = computed(() =>
     "menu": {
       "autoApproval": "自動承認",
       "setHotkey": "ホットキー割り当て",
+      "openArtifacts": "アーティファクト",
       "moveToSubWindow": "サブウィンドウに移動",
       "moveToMainWindow": "メインウィンドウに戻す",
       "delete": "削除"

@@ -52,6 +52,7 @@ export interface AiAgentSettings {
 export interface WorktreeDefaults {
   openInSubWindow?: boolean;
   autoApproval?: boolean;
+  autoOpenArtifact?: boolean;
 }
 
 export interface CodeReviewSettings {

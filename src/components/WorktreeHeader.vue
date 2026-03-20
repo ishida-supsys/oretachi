@@ -16,6 +16,7 @@ const props = defineProps<{
 
 defineEmits<{
   "open-in-ide": [];
+  "open-artifacts": [];
   "cancel-ai-judging": [];
   "click-auto-approval": [];
 }>();
@@ -83,12 +84,19 @@ async function closeWindow() {
     </div>
     <div class="flex items-center">
       <button
-        class="flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
-        :class="props.showWindowControls ? 'mr-4' : ''"
+        class="flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors mr-1"
         :title="t('openInIde')"
         @click="$emit('open-in-ide')"
       >
         <span class="pi pi-code text-sm" />
+      </button>
+      <button
+        class="flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
+        :class="props.showWindowControls ? 'mr-4' : ''"
+        :title="t('openArtifacts')"
+        @click="$emit('open-artifacts')"
+      >
+        <span class="pi pi-box text-sm" />
       </button>
       <template v-if="props.showWindowControls">
         <button
@@ -126,6 +134,7 @@ async function closeWindow() {
     "autoApprovalBadge": "Auto approval",
     "aiJudgingBadge": "AI judging",
     "openInIde": "Open in IDE",
+    "openArtifacts": "Artifacts",
     "minimize": "Minimize",
     "maximize": "Maximize",
     "close": "Close",
@@ -135,6 +144,7 @@ async function closeWindow() {
     "autoApprovalBadge": "自動承認",
     "aiJudgingBadge": "AI判定中",
     "openInIde": "IDE で開く",
+    "openArtifacts": "アーティファクト",
     "minimize": "最小化",
     "maximize": "最大化",
     "close": "閉じる",
