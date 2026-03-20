@@ -18,5 +18,6 @@ defineProps<{
   overflow-y: auto;
   height: 100%;
   box-sizing: border-box;
+  padding: 1rem 1.5rem;
 }
 </style>
