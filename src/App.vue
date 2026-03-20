@@ -758,6 +758,8 @@ async function onTrayButtonClick() {
         hotkeyChar: hotkeyChars.value.get(worktreeId),
         autoApproval: autoApprovalMap.get(worktreeId) ?? false,
         aiJudging: aiJudgingWorktrees.has(worktreeId),
+        autoApprovalPrompt: autoApprovalPromptMap.get(worktreeId) ?? '',
+        lastJudgedCommand: lastJudgedCommandMap.get(worktreeId) ?? '',
       });
     }
   }
@@ -944,6 +946,16 @@ onMounted(async () => {
 
   // 自動承認リスナーを初期化（notify-worktree, sub-auto-approve-result 等）
   await autoApproval.init();
+
+  // サブウィンドウからの自動承認プロンプト保存
+  await listen<{ worktreeId: string; prompt: string }>("sub-save-auto-approval-prompt", (event) => {
+    onSaveAutoApprovalPrompt(event.payload.worktreeId, event.payload.prompt);
+  });
+
+  // トレイポップアップからの自動承認プロンプト保存
+  await listen<{ worktreeId: string; prompt: string }>("tray-save-auto-approval-prompt", (event) => {
+    onSaveAutoApprovalPrompt(event.payload.worktreeId, event.payload.prompt);
+  });
 
   // ターミナル追加リクエスト (サブウィンドウから)
   await listen<{ worktreeId: string }>("sub-add-terminal-request", async (event) => {
