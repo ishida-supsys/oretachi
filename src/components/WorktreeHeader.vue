@@ -17,6 +17,7 @@ const props = defineProps<{
 defineEmits<{
   "open-in-ide": [];
   "cancel-ai-judging": [];
+  "click-auto-approval": [];
 }>();
 
 function onHeaderDrag(e: MouseEvent) {
@@ -63,11 +64,13 @@ async function closeWindow() {
         class="text-[10px] px-1.5 py-0.5 rounded font-mono font-medium"
         style="background: rgba(203,166,247,0.15); color: #cba6f7; border: 1px solid rgba(203,166,247,0.3)"
       >Alt+{{ props.hotkeyChar.toUpperCase() }}</span>
-      <span
+      <button
         v-if="props.autoApproval"
-        class="text-[10px] px-1.5 py-0.5 rounded font-medium"
+        class="text-[10px] px-1.5 py-0.5 rounded font-medium cursor-pointer border-none"
         style="background: rgba(166, 227, 161, 0.15); color: #a6e3a1; border: 1px solid rgba(166, 227, 161, 0.3)"
-      >{{ t('autoApprovalBadge') }}</span>
+        :title="t('editAutoApprovalPrompt')"
+        @click="$emit('click-auto-approval')"
+      >{{ t('autoApprovalBadge') }}</button>
       <button
         v-if="props.aiJudging"
         class="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-semibold cursor-pointer border-none"
@@ -125,7 +128,8 @@ async function closeWindow() {
     "openInIde": "Open in IDE",
     "minimize": "Minimize",
     "maximize": "Maximize",
-    "close": "Close"
+    "close": "Close",
+    "editAutoApprovalPrompt": "Edit additional prompt"
   },
   "ja": {
     "autoApprovalBadge": "自動承認",
@@ -133,7 +137,8 @@ async function closeWindow() {
     "openInIde": "IDE で開く",
     "minimize": "最小化",
     "maximize": "最大化",
-    "close": "閉じる"
+    "close": "閉じる",
+    "editAutoApprovalPrompt": "追加プロンプトを編集"
   }
 }
 </i18n>

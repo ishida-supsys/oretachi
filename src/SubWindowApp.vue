@@ -42,6 +42,9 @@ const terminalAgentStatus = reactive(new Map<number, boolean>());
 // 自動承認フラグ
 const autoApproval = ref(false);
 
+// 自動承認 追加プロンプト
+const additionalPrompt = ref("");
+
 // IDE 選択
 const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect();
 
@@ -215,6 +218,7 @@ let unlistenFocusTerminal: UnlistenFn | null = null;
 let unlistenClosingByMain: UnlistenFn | null = null;
 let unlistenGetLayout: UnlistenFn | null = null;
 let unlistenSetAutoApproval: UnlistenFn | null = null;
+let unlistenSetAutoApprovalPrompt: UnlistenFn | null = null;
 let unlistenTryAutoApprove: UnlistenFn | null = null;
 let unlistenCancelAutoApprove: UnlistenFn | null = null;
 let unlistenSettingsChanged: UnlistenFn | null = null;
@@ -257,6 +261,7 @@ onMounted(async () => {
     worktreeId: string;
     terminals: SubTerminalEntry[];
     autoApproval?: boolean;
+    autoApprovalPrompt?: string;
     layout?: FrameNode;
   }>(
     "sub-init",
@@ -264,6 +269,7 @@ onMounted(async () => {
       if (event.payload.worktreeId !== worktreeId) return;
 
       autoApproval.value = event.payload.autoApproval ?? false;
+      additionalPrompt.value = event.payload.autoApprovalPrompt ?? "";
 
       for (const t of event.payload.terminals) {
         terminalEntries.set(t.id, { ...t });
@@ -425,8 +431,19 @@ onMounted(async () => {
     }
   );
 
+  // 自動承認 追加プロンプト更新
+  unlistenSetAutoApprovalPrompt = await appWindow.listen<{ prompt: string }>(
+    "sub-set-auto-approval-prompt",
+    (event) => {
+      additionalPrompt.value = event.payload.prompt;
+    }
+  );
+
   // 自動承認チェック（notify-worktree トリガー）
-  unlistenTryAutoApprove = await appWindow.listen("sub-try-auto-approve", async () => {
+  unlistenTryAutoApprove = await appWindow.listen<{ additionalPrompt?: string }>("sub-try-auto-approve", async (event) => {
+    if (event.payload.additionalPrompt !== undefined) {
+      additionalPrompt.value = event.payload.additionalPrompt;
+    }
     await debug(`[AutoApproval] sub-try-auto-approve received autoApproval=${autoApproval.value}`);
     if (!autoApproval.value) {
       await emitTo("main", "sub-auto-approve-result", { worktreeId, approved: false });
@@ -442,6 +459,7 @@ onMounted(async () => {
     await debug(`[AutoApproval] terminalEntries.size=${terminalEntries.size}`);
     aiJudging.value = true;
     let approved = false;
+    let lastCommand: string | undefined;
     try {
       for (const [tid] of terminalEntries) {
         const termRef = terminalRefs.get(tid);
@@ -450,7 +468,11 @@ onMounted(async () => {
         if (!terminal) { await debug(`[AutoApproval] tid=${tid} terminal=null, skip`); continue; }
         const content = getRecentLines(terminal, 200);
         await debug(`[AutoApproval] tid=${tid} content(last200)=${content.slice(-200)}`);
-        if (await analyzeForApproval(worktreeId, content, worktreePath)) {
+        const judgeResult = await analyzeForApproval(worktreeId, content, worktreePath, additionalPrompt.value);
+        if (judgeResult.command) {
+          lastCommand = judgeResult.command;
+        }
+        if (judgeResult.safe) {
           // バッファ再チェック: AI判定完了後、承認プロンプトがまだあるか確認
           const freshContent = getRecentLines(terminal, 10);
           if (!hasApprovalPrompt(freshContent)) {
@@ -468,8 +490,8 @@ onMounted(async () => {
     } finally {
       aiJudging.value = false;
     }
-    await debug(`[AutoApproval] sub result: approved=${approved}`);
-    await emitTo("main", "sub-auto-approve-result", { worktreeId, approved });
+    await debug(`[AutoApproval] sub result: approved=${approved} command=${lastCommand ?? "none"}`);
+    await emitTo("main", "sub-auto-approve-result", { worktreeId, approved, command: lastCommand });
   });
 
   // AI判定キャンセル
@@ -501,6 +523,7 @@ onUnmounted(() => {
   unlistenClosingByMain?.();
   unlistenGetLayout?.();
   unlistenSetAutoApproval?.();
+  unlistenSetAutoApprovalPrompt?.();
   unlistenTryAutoApprove?.();
   unlistenCancelAutoApprove?.();
   unlistenSettingsChanged?.();
@@ -537,6 +560,7 @@ async function onCancelAiJudging() {
         :show-window-controls="true"
         @open-in-ide="requestOpenInIde"
         @cancel-ai-judging="onCancelAiJudging"
+        @click-auto-approval="emitTo('main', 'sub-click-auto-approval', { worktreeId })"
       />
 
       <!-- フレームレイアウト -->

@@ -13,6 +13,7 @@ export interface SubWindowTerminal {
 interface PendingInitData {
   terminals: SubWindowTerminal[];
   autoApproval: boolean;
+  autoApprovalPrompt?: string;
   layout?: FrameNode;
 }
 
@@ -36,6 +37,7 @@ export function useSubWindows() {
     worktreePath: string = "",
     layout?: FrameNode,
     branchName: string = "",
+    autoApprovalPrompt?: string,
   ): Promise<void> {
     if (detachedWorktrees.has(worktreeId)) {
       const win = subWindowMap.get(worktreeId);
@@ -71,7 +73,7 @@ export function useSubWindows() {
     });
 
     // ターミナルデータはサブウィンドウ準備完了後にイベントで送る
-    pendingInitData.set(worktreeId, { terminals, autoApproval, layout });
+    pendingInitData.set(worktreeId, { terminals, autoApproval, autoApprovalPrompt, layout });
 
     // サブウィンドウ移動時のsessionIdマッピングを保持
     const terminalIds: number[] = [];

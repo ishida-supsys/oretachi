@@ -29,11 +29,19 @@ Return false (auto-approve) when:
 - The output shows strictly read-only, low-risk operations (e.g., git log/diff/status/show/branch, lint/test passing, help text, formatting dry runs, simple logs, cat/head/tail/ls on local files, cd into subdirectories of the current working directory) with no pending commands that could change the system or touch sensitive data.
 
 When unsure, return true.
+{{ADDITIONAL_PROMPT}}
+Respond with ONLY valid JSON matching: {"needsPermission": true|false, "reason"?: string, "command"?: string}.
+When needsPermission is true, include a brief reason (<=140 chars) explaining why permission is needed.
+Always include "command": a concise summary (<=100 chars) of the command or action being judged (e.g., "npm install express", "rm -rf ./dist"). Do not add any other fields or text."#;
 
-Respond with ONLY valid JSON matching: {"needsPermission": true|false, "reason"?: string}.
-When needsPermission is true, include a brief reason (<=140 chars) explaining why permission is needed. Do not add any other fields or text."#;
+const JSON_SCHEMA: &str = r#"{"type":"object","properties":{"needsPermission":{"type":"boolean"},"reason":{"type":"string"},"command":{"type":"string"}},"required":["needsPermission"]}"#;
 
-const JSON_SCHEMA: &str = r#"{"type":"object","properties":{"needsPermission":{"type":"boolean"},"reason":{"type":"string"}},"required":["needsPermission"]}"#;
+/// AI判定の結果
+#[derive(serde::Serialize)]
+pub struct JudgeResult {
+    pub safe: bool,
+    pub command: Option<String>,
+}
 
 /// ワークツリーIDごとの進行中AI判定プロセスのPIDを管理する
 pub struct ApprovalManager {
@@ -55,7 +63,8 @@ pub async fn judge_approval(
     worktree_id: String,
     content: String,
     cwd: String,
-) -> Result<bool, String> {
+    additional_prompt: Option<String>,
+) -> Result<JudgeResult, String> {
     // 重複防止: 既に同一ワークツリーの判定が進行中ならエラーを返す
     {
         let map = state.in_progress.lock().map_err(|e| format!("lock error: {}", e))?;
@@ -64,9 +73,15 @@ pub async fn judge_approval(
         }
     }
 
+    let additional = additional_prompt
+        .filter(|s| !s.is_empty())
+        .map(|s| format!("\nAdditional instructions from user:\n{}", s))
+        .unwrap_or_default();
+
     let prompt = PROMPT_TEMPLATE
         .replace("{{CWD}}", &cwd)
-        .replace("{{TERMINAL_OUTPUT}}", &content);
+        .replace("{{TERMINAL_OUTPUT}}", &content)
+        .replace("{{ADDITIONAL_PROMPT}}", &additional);
 
     // 設定からAIエージェント種別を取得（デフォルト: ClaudeCode）
     let agent_kind = settings_state
@@ -156,7 +171,17 @@ pub async fn judge_approval(
         log::debug!("[AutoApproval] reason: {}", reason);
     }
 
-    Ok(!needs_permission) // needsPermission=false → safe → true を返す
+    let command = structured
+        .get("command")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    log::debug!("[AutoApproval] command: {:?}", command);
+
+    Ok(JudgeResult {
+        safe: !needs_permission,
+        command,
+    })
 }
 
 #[tauri::command]
