@@ -68,6 +68,9 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
   }
 
   async function onAddTaskConfirm(prompt: string, remoteExec: boolean = false): Promise<void> {
+    const trimmed = prompt.trim();
+    if (!trimmed) return;
+    prompt = trimmed;
     showAddTaskDialog.value = false;
     rerunTaskId.value = null;
     if (settings.value.aiAgent) {
