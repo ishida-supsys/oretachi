@@ -3379,6 +3379,7 @@ dependencies = [
  "base64 0.22.1",
  "content_inspector",
  "dotenvy",
+ "glob",
  "libc",
  "log",
  "notify",

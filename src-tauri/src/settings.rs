@@ -11,6 +11,8 @@ pub struct Repository {
     pub path: String,
     #[serde(default, rename = "execScript")]
     pub exec_script: Option<String>,
+    #[serde(default, rename = "copyTargets")]
+    pub copy_targets: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

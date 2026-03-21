@@ -529,8 +529,17 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry) {
       if (wtEntry) wtEntry.autoApproval = true;
     }
 
-    // スクリプトがあればターミナルで実行するためにペンディング登録
+    // gitignoreコピー対象があればコピー実行（スクリプト実行前）
     const repo = settings.value.repositories.find((r) => r.id === entry.repositoryId);
+    if (repo?.copyTargets?.length) {
+      await invoke("copy_gitignore_targets", {
+        repoPath: repo.path,
+        worktreePath: entry.path,
+        targets: repo.copyTargets,
+      }).catch((e: unknown) => console.warn("gitignore targets copy failed:", e));
+    }
+
+    // スクリプトがあればターミナルで実行するためにペンディング登録
     if (repo?.execScript) {
       pendingScripts.set(entry.id, buildScriptCommand(repo, entry));
     }

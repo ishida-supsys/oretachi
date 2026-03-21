@@ -463,6 +463,105 @@ pub fn commit(repo_path: &str, message: &str) -> Result<String, String> {
     Ok(stdout.trim().to_string())
 }
 
+pub fn read_gitignore(repo_path: &str) -> Result<Vec<String>, String> {
+    let gitignore_path = std::path::Path::new(repo_path).join(".gitignore");
+    if !gitignore_path.exists() {
+        return Ok(vec![]);
+    }
+    let content = std::fs::read_to_string(&gitignore_path)
+        .map_err(|e| format!("failed to read .gitignore: {}", e))?;
+    let entries = content
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with('#') && !l.starts_with('!'))
+        .map(|l| l.to_string())
+        .collect();
+    Ok(entries)
+}
+
+fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<u32, String> {
+    std::fs::create_dir_all(dst).map_err(|e| format!("failed to create dir {:?}: {}", dst, e))?;
+    let mut count = 0u32;
+    for entry in std::fs::read_dir(src).map_err(|e| format!("failed to read dir {:?}: {}", src, e))? {
+        let entry = entry.map_err(|e| format!("dir entry error: {}", e))?;
+        let ty = entry.file_type().map_err(|e| format!("file type error: {}", e))?;
+        let dst_path = dst.join(entry.file_name());
+        if ty.is_dir() {
+            count += copy_dir_recursive(&entry.path(), &dst_path)?;
+        } else {
+            std::fs::copy(&entry.path(), &dst_path)
+                .map_err(|e| format!("failed to copy {:?}: {}", entry.path(), e))?;
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+pub fn copy_gitignore_targets(
+    repo_path: &str,
+    worktree_path: &str,
+    targets: Vec<String>,
+) -> Result<u32, String> {
+    let repo = std::path::Path::new(repo_path);
+    let worktree = std::path::Path::new(worktree_path);
+    let mut total = 0u32;
+
+    for target in &targets {
+        // target がワイルドカードを含む場合は glob 展開
+        let pattern = format!("{}/{}", repo_path.replace('\\', "/"), target.replace('\\', "/"));
+        let paths: Vec<_> = match glob::glob(&pattern) {
+            Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
+            Err(e) => {
+                log::warn!("invalid glob pattern '{}': {}", pattern, e);
+                continue;
+            }
+        };
+
+        if paths.is_empty() {
+            // glob で何もマッチしなかった場合、単純なパスとして試みる
+            let src = repo.join(target);
+            if !src.exists() {
+                log::debug!("copy target not found, skipping: {:?}", src);
+                continue;
+            }
+            let dst = worktree.join(target);
+            if src.is_dir() {
+                total += copy_dir_recursive(&src, &dst)?;
+            } else {
+                if let Some(parent) = dst.parent() {
+                    std::fs::create_dir_all(parent)
+                        .map_err(|e| format!("failed to create parent dir: {}", e))?;
+                }
+                std::fs::copy(&src, &dst)
+                    .map_err(|e| format!("failed to copy {:?}: {}", src, e))?;
+                total += 1;
+            }
+        } else {
+            for src in paths {
+                if !src.exists() {
+                    continue;
+                }
+                // repo からの相対パスを計算
+                let rel = src.strip_prefix(repo).unwrap_or(&src);
+                let dst = worktree.join(rel);
+                if src.is_dir() {
+                    total += copy_dir_recursive(&src, &dst)?;
+                } else {
+                    if let Some(parent) = dst.parent() {
+                        std::fs::create_dir_all(parent)
+                            .map_err(|e| format!("failed to create parent dir: {}", e))?;
+                    }
+                    std::fs::copy(&src, &dst)
+                        .map_err(|e| format!("failed to copy {:?}: {}", src, e))?;
+                    total += 1;
+                }
+            }
+        }
+    }
+
+    Ok(total)
+}
+
 pub fn worktree_remove(repo_path: &str, worktree_path: &str) -> Result<(), String> {
     let output = make_command("git")
         .args(["worktree", "remove", "--force", "--force", worktree_path])

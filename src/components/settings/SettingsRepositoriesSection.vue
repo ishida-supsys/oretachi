@@ -3,9 +3,19 @@ import { invoke } from "@tauri-apps/api/core";
 import { open, message } from "@tauri-apps/plugin-dialog";
 import { useI18n } from "vue-i18n";
 import { useSettings } from "../../composables/useSettings";
+import { usePostAddSettings } from "../../composables/usePostAddSettings";
+import PostAddSettingsDialog from "../PostAddSettingsDialog.vue";
 
 const { t } = useI18n();
 const { settings, scheduleSave } = useSettings();
+const {
+  showCopyDialog,
+  copyDialogRepoPath,
+  copyDialogCurrentTargets,
+  openCopyDialog,
+  onCopyDialogConfirm,
+  clearCopyTargets,
+} = usePostAddSettings();
 
 async function addRepository() {
   const selected = await open({ directory: true, multiple: false });
@@ -69,6 +79,8 @@ function clearExecScript(repoId: string) {
   repo.execScript = undefined;
   scheduleSave();
 }
+
+
 </script>
 
 <template>
@@ -106,27 +118,51 @@ function clearExecScript(repoId: string) {
         </div>
 
         <div class="repo-row-script">
-          <span class="script-label">{{ t("repositories.execScript") }}</span>
-          <input
-            class="text-input script-input"
-            :value="repo.execScript ?? ''"
-            readonly
-            :placeholder="t('common.notConfigured')"
-          />
-          <button class="btn-secondary" @click="selectExecScript(repo.id)">
-            {{ t("worktreeBaseDir.select") }}
-          </button>
-          <button
-            v-if="repo.execScript"
-            class="btn-secondary"
-            @click="clearExecScript(repo.id)"
-          >
-            {{ t("common.clear") }}
-          </button>
+          <div class="row-col row-col-left">
+            <span class="script-label">{{ t("postAdd.label") }}</span>
+            <span class="copy-summary">{{ t("postAdd.itemsSelected", { count: repo.copyTargets?.length ?? 0 }) }}</span>
+            <button class="btn-secondary" @click="openCopyDialog(repo.id)">
+              {{ t("postAdd.configure") }}
+            </button>
+            <button
+              v-if="repo.copyTargets?.length"
+              class="btn-secondary"
+              @click="clearCopyTargets(repo.id)"
+            >
+              {{ t("common.clear") }}
+            </button>
+          </div>
+          <div class="row-col row-col-right">
+            <span class="script-label">{{ t("repositories.execScript") }}</span>
+            <input
+              class="text-input script-input"
+              :value="repo.execScript ?? ''"
+              readonly
+              :placeholder="t('common.notConfigured')"
+            />
+            <button class="btn-secondary" @click="selectExecScript(repo.id)">
+              {{ t("worktreeBaseDir.select") }}
+            </button>
+            <button
+              v-if="repo.execScript"
+              class="btn-secondary"
+              @click="clearExecScript(repo.id)"
+            >
+              {{ t("common.clear") }}
+            </button>
+          </div>
         </div>
       </div>
     </div>
   </div>
+
+  <PostAddSettingsDialog
+    v-if="showCopyDialog"
+    :repo-path="copyDialogRepoPath"
+    :current-targets="copyDialogCurrentTargets"
+    @confirm="onCopyDialogConfirm"
+    @cancel="showCopyDialog = false"
+  />
 </template>
 
 <style scoped>
@@ -216,6 +252,12 @@ function clearExecScript(repoId: string) {
 }
 
 .repo-row-script {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.row-col {
   display: flex;
   align-items: center;
   gap: 8px;
@@ -238,10 +280,15 @@ function clearExecScript(repoId: string) {
 }
 
 .script-label {
-  min-width: 80px;
   white-space: nowrap;
   font-size: 11px;
   color: #6c7086;
+}
+
+.copy-summary {
+  font-size: 11px;
+  color: #a6adc8;
+  white-space: nowrap;
 }
 
 .script-input {
@@ -286,6 +333,11 @@ function clearExecScript(repoId: string) {
       "hasWorktrees": "Cannot delete: worktrees exist",
       "execScript": "Exec script"
     },
+    "postAdd": {
+      "label": "Post-add",
+      "configure": "Configure",
+      "itemsSelected": "{count} selected"
+    },
     "error": {
       "notARepo": "The selected folder is not a git repository.",
       "alreadyRegistered": "This repository is already registered."
@@ -305,6 +357,11 @@ function clearExecScript(repoId: string) {
       "empty": "リポジトリが登録されていません",
       "hasWorktrees": "ワークツリーが存在するため削除できません",
       "execScript": "実行スクリプト"
+    },
+    "postAdd": {
+      "label": "追加後",
+      "configure": "設定",
+      "itemsSelected": "{count}件選択中"
     },
     "error": {
       "notARepo": "選択したフォルダは git リポジトリではありません。",

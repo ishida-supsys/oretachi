@@ -3,6 +3,7 @@ export interface Repository {
   name: string;
   path: string;
   execScript?: string; // 実行スクリプトの絶対パス
+  copyTargets?: string[]; // .gitignoreから選択されたコピー対象エントリ
 }
 
 export interface WorktreeEntry {

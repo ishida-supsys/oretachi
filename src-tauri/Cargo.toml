@@ -39,6 +39,7 @@ tokio = { version = "1", features = ["net", "sync", "time", "process", "io-util"
 notify = "7"
 notify-debouncer-mini = "0.5"
 content_inspector = "0.2"
+glob = "0.3"
 dotenvy = "0.15"
 base64 = "0.22"
 tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp" }

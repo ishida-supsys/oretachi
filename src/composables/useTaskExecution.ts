@@ -210,6 +210,15 @@ export function useTaskExecution(deps: {
         if (wtEntry) wtEntry.autoApproval = true;
       }
 
+      // gitignoreコピー対象があればコピー実行（スクリプト実行前）
+      if (repo.copyTargets?.length) {
+        await invoke("copy_gitignore_targets", {
+          repoPath: repo.path,
+          worktreePath: entry.path,
+          targets: repo.copyTargets,
+        }).catch((e: unknown) => console.warn("gitignore targets copy failed:", e));
+      }
+
       if (repo.execScript) {
         pendingScripts.set(entry.id, buildScriptCommand(repo, entry));
       }
