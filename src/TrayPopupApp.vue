@@ -10,6 +10,7 @@ import { useWorktreeFrame } from "./composables/useWorktreeFrame";
 import { useSettings } from "./composables/useSettings";
 import { useHotkeyListener } from "./composables/useHotkeys";
 import { useIdeSelect } from "./composables/useIdeSelect";
+import { useArtifactWindow } from "./composables/useArtifactWindow";
 import type { TrayWorktreeData } from "./composables/useTrayPopup";
 import type { FrameNode } from "./types/frame";
 import type { TrayTerminalEntry } from "./types/terminal";
@@ -157,6 +158,14 @@ const isLast = computed(() => currentIndex.value >= allWorktrees.value.length - 
 
 // IDE で開く
 const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect();
+
+// アーティファクト
+const { openArtifactViewer } = useArtifactWindow();
+
+async function onOpenArtifacts() {
+  if (!currentWorktree.value) return;
+  await openArtifactViewer(currentWorktree.value.worktreeId, currentWorktree.value.worktreeName);
+}
 
 async function onOpenInIde() {
   const wt = currentWorktree.value;
@@ -346,6 +355,14 @@ onUnmounted(() => {
           <span class="pi pi-code text-xs" />
         </button>
         <button
+          v-if="currentWorktree"
+          class="pointer-events-auto w-6 h-6 flex items-center justify-center rounded hover:bg-[#313244] text-[#6c7086] hover:text-[#cdd6f4] transition-colors"
+          :title="t('openArtifacts')"
+          @click="onOpenArtifacts"
+        >
+          <span class="pi pi-box text-xs" />
+        </button>
+        <button
           class="pointer-events-auto w-6 h-6 flex items-center justify-center rounded hover:bg-[#313244] text-[#6c7086] hover:text-[#f38ba8] transition-colors"
           :title="t('close')"
           @click="onClose"
@@ -445,6 +462,7 @@ onUnmounted(() => {
     "notification": "Notification",
     "close": "Close",
     "openInIde": "Open in IDE",
+    "openArtifacts": "Artifacts",
     "loading": "Loading...",
     "noTerminals": "No terminals",
     "next": "Next →",
@@ -457,6 +475,7 @@ onUnmounted(() => {
     "notification": "通知",
     "close": "閉じる",
     "openInIde": "IDE で開く",
+    "openArtifacts": "アーティファクト",
     "loading": "読み込み中...",
     "noTerminals": "ターミナルがありません",
     "next": "次へ →",
