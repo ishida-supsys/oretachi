@@ -10,7 +10,7 @@ import type { AddWorktreeTaskCode, AgentWorktreeTaskCode } from "../types/task";
 import type { WebSessionInfo } from "../types/terminal";
 
 export function useTaskExecution(deps: {
-  t: (key: string) => string;
+  t: (key: string, values?: Record<string, unknown>) => string;
   settings: Ref<AppSettings>;
   worktrees: Ref<Worktree[]>;
   addWorktreePlaceholder: (entry: WorktreeEntry) => void;
@@ -220,7 +220,7 @@ export function useTaskExecution(deps: {
             targets: repo.copyTargets,
           });
         } catch (e) {
-          await message(t("copyTargetsFailed") + `: ${e}`, { kind: "warning" });
+          await message(t("copyTargetsFailed", { error: e }), { kind: "warning" });
         }
       }
 
