@@ -441,11 +441,15 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "タスクを追加して実行する。プロンプトを元にAIがタスクコードを生成し、ワークツリー作成やエージェント実行を自動で行う")]
+    #[tool(description = "タスク追加リクエストを送信する。AIがタスクコードを生成し、ワークツリー作成やエージェント実行を非同期で行う")]
     fn oretachi_add_task(
         &self,
         Parameters(AddTaskParams { prompt, remote_exec }): Parameters<AddTaskParams>,
     ) -> Result<CallToolResult, McpError> {
+        let prompt = prompt.trim().to_string();
+        if prompt.is_empty() {
+            return Err(McpError::invalid_params("prompt must not be empty", None));
+        }
         let remote = remote_exec.unwrap_or(false);
         let event = AddTaskEvent {
             prompt: prompt.clone(),
@@ -456,7 +460,7 @@ impl NotifyService {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         log::info!("[mcp] oretachi_add_task: prompt={} remote_exec={}", prompt, remote);
         Ok(CallToolResult::success(vec![Content::text(
-            "タスクを追加しました。フロントエンドで生成・実行が開始されます。",
+            "タスク追加リクエストを送信しました。タスクの生成・実行は非同期に行われます。",
         )]))
     }
 }
