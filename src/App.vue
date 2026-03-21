@@ -865,6 +865,11 @@ onMounted(async () => {
     goHome();
   });
 
+  // MCPからのタスク追加
+  await listen<{ prompt: string; remote_exec: boolean }>("mcp-add-task", (event) => {
+    onAddTaskConfirm(event.payload.prompt, event.payload.remote_exec);
+  });
+
   // サブウィンドウ準備完了 → init データをイベントで送信（サブウィンドウ復元より前に登録必須）
   await listen<{ worktreeId: string }>("sub-ready", async (event) => {
     const { worktreeId } = event.payload;

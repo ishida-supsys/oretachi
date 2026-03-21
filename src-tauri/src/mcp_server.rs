@@ -129,6 +129,20 @@ pub struct ListRepositoryParams {}
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetWorktreeStatusParams {}
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AddTaskParams {
+    #[schemars(description = "タスクのプロンプト (AIに実行させたい作業の説明)")]
+    pub prompt: String,
+    #[schemars(description = "リモート実行するかどうか (省略時は false)")]
+    pub remote_exec: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct AddTaskEvent {
+    prompt: String,
+    remote_exec: bool,
+}
+
 // ─── MCP Service ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -425,6 +439,25 @@ impl NotifyService {
             query, worktree_id, results.len()
         );
         Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "タスクを追加して実行する。プロンプトを元にAIがタスクコードを生成し、ワークツリー作成やエージェント実行を自動で行う")]
+    fn oretachi_add_task(
+        &self,
+        Parameters(AddTaskParams { prompt, remote_exec }): Parameters<AddTaskParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let remote = remote_exec.unwrap_or(false);
+        let event = AddTaskEvent {
+            prompt: prompt.clone(),
+            remote_exec: remote,
+        };
+        self.app_handle
+            .emit("mcp-add-task", &event)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        log::info!("[mcp] oretachi_add_task: prompt={} remote_exec={}", prompt, remote);
+        Ok(CallToolResult::success(vec![Content::text(
+            "タスクを追加しました。フロントエンドで生成・実行が開始されます。",
+        )]))
     }
 }
 
