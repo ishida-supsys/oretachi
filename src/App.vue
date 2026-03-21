@@ -532,11 +532,15 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry) {
     // gitignoreコピー対象があればコピー実行（スクリプト実行前）
     const repo = settings.value.repositories.find((r) => r.id === entry.repositoryId);
     if (repo?.copyTargets?.length) {
-      await invoke("copy_gitignore_targets", {
-        repoPath: repo.path,
-        worktreePath: entry.path,
-        targets: repo.copyTargets,
-      }).catch((e: unknown) => console.warn("gitignore targets copy failed:", e));
+      try {
+        await invoke("copy_gitignore_targets", {
+          repoPath: repo.path,
+          worktreePath: entry.path,
+          targets: repo.copyTargets,
+        });
+      } catch (e) {
+        await message(t("copyTargetsFailed", { error: e }), { kind: "warning" });
+      }
     }
 
     // スクリプトがあればターミナルで実行するためにペンディング登録
@@ -1462,6 +1466,7 @@ onMounted(async () => {
     "ideLaunchFailed": "Failed to launch IDE: {error}",
     "lfsWarning": "Failed to fetch Git LFS files; worktree was created without LFS files.\nIf you need LFS files, run git lfs pull.",
     "worktreeCreateFailed": "Failed to create worktree: {error}",
+    "copyTargetsFailed": "Some files could not be copied after worktree creation: {error}",
     "shuttingDown": "Waiting for operations to finish...",
     "minimize": "Minimize",
     "maximize": "Maximize",
@@ -1486,6 +1491,7 @@ onMounted(async () => {
     "ideLaunchFailed": "IDE の起動に失敗しました: {error}",
     "lfsWarning": "Git LFS のファイル取得に失敗したため、LFS ファイルをスキップしてワークツリーを作成しました。\nLFS ファイルが必要な場合は git lfs pull を実行してください。",
     "worktreeCreateFailed": "ワークツリーの作成に失敗しました: {error}",
+    "copyTargetsFailed": "ワークツリー追加後のファイルコピーに失敗しました: {error}",
     "shuttingDown": "処理の完了を待っています...",
     "minimize": "最小化",
     "maximize": "最大化",

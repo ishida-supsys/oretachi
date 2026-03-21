@@ -1,5 +1,6 @@
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
+import { message } from "@tauri-apps/plugin-dialog";
 import { platform } from "@tauri-apps/plugin-os";
 import type { Ref } from "vue";
 import type TerminalView from "../components/TerminalView.vue";
@@ -212,11 +213,15 @@ export function useTaskExecution(deps: {
 
       // gitignoreコピー対象があればコピー実行（スクリプト実行前）
       if (repo.copyTargets?.length) {
-        await invoke("copy_gitignore_targets", {
-          repoPath: repo.path,
-          worktreePath: entry.path,
-          targets: repo.copyTargets,
-        }).catch((e: unknown) => console.warn("gitignore targets copy failed:", e));
+        try {
+          await invoke("copy_gitignore_targets", {
+            repoPath: repo.path,
+            worktreePath: entry.path,
+            targets: repo.copyTargets,
+          });
+        } catch (e) {
+          await message(t("copyTargetsFailed") + `: ${e}`, { kind: "warning" });
+        }
       }
 
       if (repo.execScript) {

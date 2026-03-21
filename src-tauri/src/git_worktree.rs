@@ -507,24 +507,42 @@ pub fn copy_gitignore_targets(
     let mut total = 0u32;
 
     for target in &targets {
-        // target がワイルドカードを含む場合は glob 展開
-        let pattern = format!("{}/{}", repo_path.replace('\\', "/"), target.replace('\\', "/"));
-        let paths: Vec<_> = match glob::glob(&pattern) {
-            Ok(iter) => iter.filter_map(|r| r.ok()).collect(),
-            Err(e) => {
-                log::warn!("invalid glob pattern '{}': {}", pattern, e);
-                continue;
-            }
-        };
+        let normalized = target.replace('\\', "/").trim_end_matches('/').to_string();
+        let repo_unix = repo_path.replace('\\', "/");
 
-        if paths.is_empty() {
-            // glob で何もマッチしなかった場合、単純なパスとして試みる
-            let src = repo.join(target);
+        // '/' を含まないパターン（例: *.local, node_modules）は再帰パターンも追加
+        let has_slash = normalized.contains('/');
+        let mut patterns = vec![format!("{}/{}", repo_unix, normalized)];
+        if !has_slash {
+            patterns.push(format!("{}/**/{}", repo_unix, normalized));
+        }
+
+        // 各パターンをglob展開して重複を除去したパスセットを構築
+        let mut matched: std::collections::HashSet<std::path::PathBuf> = std::collections::HashSet::new();
+        for pattern in &patterns {
+            match glob::glob(pattern) {
+                Ok(iter) => {
+                    for path in iter.filter_map(|r| r.ok()) {
+                        matched.insert(path);
+                    }
+                }
+                Err(e) => {
+                    log::warn!("invalid glob pattern '{}': {}", pattern, e);
+                }
+            }
+        }
+
+        if matched.is_empty() {
+            log::debug!("copy target not found, skipping: {}", normalized);
+            continue;
+        }
+
+        for src in matched {
             if !src.exists() {
-                log::debug!("copy target not found, skipping: {:?}", src);
                 continue;
             }
-            let dst = worktree.join(target);
+            let rel = src.strip_prefix(repo).unwrap_or(&src);
+            let dst = worktree.join(rel);
             if src.is_dir() {
                 total += copy_dir_recursive(&src, &dst)?;
             } else {
@@ -535,26 +553,6 @@ pub fn copy_gitignore_targets(
                 std::fs::copy(&src, &dst)
                     .map_err(|e| format!("failed to copy {:?}: {}", src, e))?;
                 total += 1;
-            }
-        } else {
-            for src in paths {
-                if !src.exists() {
-                    continue;
-                }
-                // repo からの相対パスを計算
-                let rel = src.strip_prefix(repo).unwrap_or(&src);
-                let dst = worktree.join(rel);
-                if src.is_dir() {
-                    total += copy_dir_recursive(&src, &dst)?;
-                } else {
-                    if let Some(parent) = dst.parent() {
-                        std::fs::create_dir_all(parent)
-                            .map_err(|e| format!("failed to create parent dir: {}", e))?;
-                    }
-                    std::fs::copy(&src, &dst)
-                        .map_err(|e| format!("failed to copy {:?}: {}", src, e))?;
-                    total += 1;
-                }
             }
         }
     }
