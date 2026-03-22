@@ -637,12 +637,18 @@ pub fn write_claude_hooks(
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|_| "oretachi".to_string());
 
+    // oretachiが管理するイベント一覧（このリスト外は保持）
+    const MANAGED_EVENTS: &[&str] =
+        &["Stop", "Notification", "SubagentStop", "PreToolUse", "PostToolUse"];
+
     // 既存のhooksオブジェクトを取得し、oretachiが管理するeventキーのみ上書き（他は保持）
     let mut hooks_obj = json
         .get("hooks")
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
-    for entry in hooks {
+
+    // 有効なイベントを上書き
+    for entry in &hooks {
         let command = format!(
             "\"{}\" --notify \"{}\" --kind {}",
             exe_path, worktree_name, entry.kind
@@ -651,7 +657,15 @@ pub fn write_claude_hooks(
             "matcher": "",
             "hooks": [{ "type": "command", "command": command }]
         }]);
-        hooks_obj.insert(entry.event, hook_entry);
+        hooks_obj.insert(entry.event.clone(), hook_entry);
+    }
+
+    // oretachi管理イベントのうち無効化されたものを既存hooksから削除
+    let enabled: std::collections::HashSet<&str> = hooks.iter().map(|h| h.event.as_str()).collect();
+    for &ev in MANAGED_EVENTS {
+        if !enabled.contains(ev) {
+            hooks_obj.remove(ev);
+        }
     }
 
     json["hooks"] = serde_json::Value::Object(hooks_obj);
