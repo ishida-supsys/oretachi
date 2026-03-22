@@ -185,7 +185,7 @@ const { autoApprovalMap, aiJudgingWorktrees } = autoApproval;
 const { onToggleAutoApproval, onCancelAiJudging } = autoApproval;
 
 // タスク実行 (executeAddWorktree / executeAgentWorktree)
-const { executeAddWorktree, executeAgentWorktree, resolveShell, buildPendingCommand } =
+const { executeAddWorktree, executeAgentWorktree, resolveShell, buildPendingCommand, waitForScriptCompletion } =
   useTaskExecution({
     t,
     settings,
@@ -553,6 +553,11 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry) {
 
     // ワークツリー作成後、自動でターミナルを1つ追加
     await onAddTerminal(entry.id);
+
+    // パッケージマネージャーinstall・スクリプトの完了を待つ
+    if (repo?.packageManager || repo?.execScript) {
+      await waitForScriptCompletion(entry.id);
+    }
 
     // デフォルト: サブウィンドウで開く
     if (settings.value.worktreeDefaults?.openInSubWindow) {

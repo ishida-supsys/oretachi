@@ -414,5 +414,6 @@ export function useTaskExecution(deps: {
     resolveShell,
     buildScriptCommand,
     buildPendingCommand,
+    waitForScriptCompletion,
   };
 }
