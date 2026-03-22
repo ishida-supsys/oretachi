@@ -257,6 +257,19 @@ export function useTaskExecution(deps: {
         }
       }
 
+      // Claude Code通知フックが設定されていれば settings.local.json を生成
+      if (repo.notificationHooks?.length) {
+        try {
+          await invoke("write_claude_hooks", {
+            worktreePath: entry.path,
+            worktreeName: entry.name,
+            hooks: repo.notificationHooks,
+          });
+        } catch (e) {
+          await message(t("claudeHooksFailed", { error: e }), { kind: "warning" });
+        }
+      }
+
       const pending = buildPendingCommand(repo, entry);
       if (pending) {
         pendingScripts.set(entry.id, pending);
