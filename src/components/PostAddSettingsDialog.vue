@@ -26,14 +26,14 @@ const selectedPM = ref<string | undefined>(props.currentPackageManager);
 
 const ALL_PMS = ["npm", "pnpm", "yarn", "bun"];
 
-const HOOK_EVENTS = ["Stop", "Notification", "SubagentStop", "PreToolUse", "PostToolUse"] as const;
+const HOOK_EVENTS = ["Stop", "Notification", "SubagentStop", "PreToolUse", "PostToolUse", "PermissionRequest"] as const;
 const NOTIFY_KINDS = ["completed", "approval", "general"] as const;
 // event → { enabled, kind }
 const hookState = ref<Map<string, { enabled: boolean; kind: string }>>(new Map());
 
 // 初期化: 既存設定またはデフォルト推奨設定
 {
-  const DEFAULTS: Record<string, string> = { Stop: "completed", Notification: "approval" };
+  const DEFAULTS: Record<string, string> = { Stop: "completed", Notification: "approval", PermissionRequest: "approval" };
   for (const ev of HOOK_EVENTS) {
     const existing = props.currentNotificationHooks?.find((h) => h.event === ev);
     if (existing) {

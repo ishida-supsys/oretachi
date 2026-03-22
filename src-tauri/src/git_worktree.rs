@@ -639,7 +639,7 @@ pub fn write_claude_hooks(
 
     // oretachiが管理するイベント一覧（このリスト外は保持）
     const MANAGED_EVENTS: &[&str] =
-        &["Stop", "Notification", "SubagentStop", "PreToolUse", "PostToolUse"];
+        &["Stop", "Notification", "SubagentStop", "PreToolUse", "PostToolUse", "PermissionRequest"];
 
     // 既存のhooksオブジェクトを取得し、oretachiが管理するeventキーのみ上書き（他は保持）
     let mut hooks_obj = json

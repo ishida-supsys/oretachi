@@ -1,5 +1,5 @@
 export interface NotificationHookEntry {
-  event: 'Stop' | 'Notification' | 'SubagentStop' | 'PreToolUse' | 'PostToolUse';
+  event: 'Stop' | 'Notification' | 'SubagentStop' | 'PreToolUse' | 'PostToolUse' | 'PermissionRequest';
   kind: 'completed' | 'approval' | 'general';
 }
 

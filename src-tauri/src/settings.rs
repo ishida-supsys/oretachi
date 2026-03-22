@@ -6,7 +6,7 @@ use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationHookEntry {
-    pub event: String, // "Stop", "Notification", "SubagentStop", "PreToolUse", "PostToolUse"
+    pub event: String, // "Stop", "Notification", "SubagentStop", "PreToolUse", "PostToolUse", "PermissionRequest"
     pub kind: String,  // "completed", "approval", "general"
 }
 
