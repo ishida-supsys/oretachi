@@ -1,4 +1,5 @@
 use crate::process_utils::make_command;
+use crate::settings::NotificationHookEntry;
 use serde::Serialize;
 
 /// git コマンドを repo_path で実行して stdout を返す共通ヘルパー
@@ -603,6 +604,62 @@ pub fn worktree_remove(repo_path: &str, worktree_path: &str) -> Result<(), Strin
         .args(["worktree", "prune"])
         .current_dir(repo_path)
         .output();
+
+    Ok(())
+}
+
+/// ワークツリーの `.claude/settings.local.json` に Claude Code 通知フックを書き込む
+pub fn write_claude_hooks(
+    worktree_path: &str,
+    worktree_name: &str,
+    hooks: Vec<NotificationHookEntry>,
+) -> Result<(), String> {
+    use std::path::Path;
+
+    let claude_dir = Path::new(worktree_path).join(".claude");
+    std::fs::create_dir_all(&claude_dir)
+        .map_err(|e| format!("Failed to create .claude dir: {}", e))?;
+
+    let settings_path = claude_dir.join("settings.local.json");
+
+    // 既存ファイルを読み込む（存在しなければ空オブジェクト）
+    let mut json: serde_json::Value = if settings_path.exists() {
+        let content = std::fs::read_to_string(&settings_path)
+            .map_err(|e| format!("Failed to read settings.local.json: {}", e))?;
+        serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse settings.local.json: {}", e))?
+    } else {
+        serde_json::json!({})
+    };
+
+    // oretachi.exe のパスを取得してforward slashに統一
+    let exe_path = std::env::current_exe()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|_| "oretachi".to_string());
+
+    // 既存のhooksオブジェクトを取得し、oretachiが管理するeventキーのみ上書き（他は保持）
+    let mut hooks_obj = json
+        .get("hooks")
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+    for entry in hooks {
+        let command = format!(
+            "\"{}\" --notify \"{}\" --kind {}",
+            exe_path, worktree_name, entry.kind
+        );
+        let hook_entry = serde_json::json!([{
+            "matcher": "",
+            "hooks": [{ "type": "command", "command": command }]
+        }]);
+        hooks_obj.insert(entry.event, hook_entry);
+    }
+
+    json["hooks"] = serde_json::Value::Object(hooks_obj);
+
+    let content = serde_json::to_string_pretty(&json)
+        .map_err(|e| format!("Failed to serialize settings.local.json: {}", e))?;
+    std::fs::write(&settings_path, content)
+        .map_err(|e| format!("Failed to write settings.local.json: {}", e))?;
 
     Ok(())
 }

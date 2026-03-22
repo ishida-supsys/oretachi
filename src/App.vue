@@ -543,6 +543,19 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry) {
       }
     }
 
+    // Claude Code通知フックが設定されていれば settings.local.json を生成
+    if (repo?.notificationHooks?.length) {
+      try {
+        await invoke("write_claude_hooks", {
+          worktreePath: entry.path,
+          worktreeName: entry.name,
+          hooks: repo.notificationHooks,
+        });
+      } catch (e) {
+        await message(t("claudeHooksFailed", { error: e }), { kind: "warning" });
+      }
+    }
+
     // パッケージマネージャーinstall・スクリプトをペンディング登録
     if (repo) {
       const pending = buildPendingCommand(repo, entry);
@@ -1475,6 +1488,7 @@ onMounted(async () => {
     "lfsWarning": "Failed to fetch Git LFS files; worktree was created without LFS files.\nIf you need LFS files, run git lfs pull.",
     "worktreeCreateFailed": "Failed to create worktree: {error}",
     "copyTargetsFailed": "Some files could not be copied after worktree creation: {error}",
+    "claudeHooksFailed": "Failed to write Claude Code notification hooks: {error}",
     "shuttingDown": "Waiting for operations to finish...",
     "minimize": "Minimize",
     "maximize": "Maximize",
@@ -1500,6 +1514,7 @@ onMounted(async () => {
     "lfsWarning": "Git LFS のファイル取得に失敗したため、LFS ファイルをスキップしてワークツリーを作成しました。\nLFS ファイルが必要な場合は git lfs pull を実行してください。",
     "worktreeCreateFailed": "ワークツリーの作成に失敗しました: {error}",
     "copyTargetsFailed": "ワークツリー追加後のファイルコピーに失敗しました: {error}",
+    "claudeHooksFailed": "Claude Code通知フックの書き込みに失敗しました: {error}",
     "shuttingDown": "処理の完了を待っています...",
     "minimize": "最小化",
     "maximize": "最大化",

@@ -13,6 +13,7 @@ const {
   copyDialogRepoPath,
   copyDialogCurrentTargets,
   copyDialogCurrentPM,
+  copyDialogCurrentHooks,
   openCopyDialog,
   onDialogConfirm,
 } = usePostAddSettings();
@@ -124,7 +125,8 @@ function clearExecScript(repoId: string) {
               <template v-if="repo.packageManager">{{ repo.packageManager }}</template>
               <template v-if="repo.packageManager && repo.copyTargets?.length"> | </template>
               <template v-if="repo.copyTargets?.length">{{ t("postAdd.itemsSelected", { count: repo.copyTargets.length }) }}</template>
-              <template v-if="!repo.packageManager && !repo.copyTargets?.length">{{ t("postAdd.notConfigured") }}</template>
+              <template v-if="repo.notificationHooks?.length"> | {{ t("postAdd.hooksCount", { count: repo.notificationHooks.length }) }}</template>
+              <template v-if="!repo.packageManager && !repo.copyTargets?.length && !repo.notificationHooks?.length">{{ t("postAdd.notConfigured") }}</template>
             </span>
             <button class="btn-secondary" @click="openCopyDialog(repo.id)">
               {{ t("postAdd.configure") }}
@@ -159,6 +161,7 @@ function clearExecScript(repoId: string) {
     :repo-path="copyDialogRepoPath"
     :current-targets="copyDialogCurrentTargets"
     :current-package-manager="copyDialogCurrentPM"
+    :current-notification-hooks="copyDialogCurrentHooks"
     @confirm="onDialogConfirm"
     @cancel="showCopyDialog = false"
   />
@@ -336,6 +339,7 @@ function clearExecScript(repoId: string) {
       "label": "Post-add",
       "configure": "Configure",
       "itemsSelected": "{count} selected",
+      "hooksCount": "{count} hooks",
       "notConfigured": "Not configured"
     },
     "error": {
@@ -362,6 +366,7 @@ function clearExecScript(repoId: string) {
       "label": "追加後設定",
       "configure": "設定",
       "itemsSelected": "{count}件選択中",
+      "hooksCount": "{count}件フック",
       "notConfigured": "未設定"
     },
     "error": {

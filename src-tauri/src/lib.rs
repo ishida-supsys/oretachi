@@ -169,6 +169,15 @@ async fn copy_gitignore_targets(
 }
 
 #[tauri::command]
+async fn write_claude_hooks(
+    worktree_path: String,
+    worktree_name: String,
+    hooks: Vec<crate::settings::NotificationHookEntry>,
+) -> Result<(), String> {
+    run_git(move || git_worktree::write_claude_hooks(&worktree_path, &worktree_name, hooks)).await
+}
+
+#[tauri::command]
 async fn git_merge_branch(
     repo_path: String,
     source_branch: String,
@@ -446,6 +455,7 @@ pub fn run() {
             detect_package_manager,
             read_gitignore,
             copy_gitignore_targets,
+            write_claude_hooks,
             git_merge_branch,
             git_delete_branch,
             git_list_files,

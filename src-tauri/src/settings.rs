@@ -5,6 +5,12 @@ use std::sync::Mutex;
 use tauri::{AppHandle, Manager};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NotificationHookEntry {
+    pub event: String, // "Stop", "Notification", "SubagentStop", "PreToolUse", "PostToolUse"
+    pub kind: String,  // "completed", "approval", "general"
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Repository {
     pub id: String,
     pub name: String,
@@ -15,6 +21,8 @@ pub struct Repository {
     pub copy_targets: Option<Vec<String>>,
     #[serde(default, rename = "packageManager")]
     pub package_manager: Option<String>,
+    #[serde(default, rename = "notificationHooks")]
+    pub notification_hooks: Option<Vec<NotificationHookEntry>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

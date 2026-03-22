@@ -1,5 +1,6 @@
 import { ref } from "vue";
 import { useSettings } from "./useSettings";
+import type { NotificationHookEntry } from "../types/settings";
 
 export function usePostAddSettings() {
   const { settings, scheduleSave } = useSettings();
@@ -9,6 +10,7 @@ export function usePostAddSettings() {
   const copyDialogRepoPath = ref("");
   const copyDialogCurrentTargets = ref<string[]>([]);
   const copyDialogCurrentPM = ref<string | undefined>(undefined);
+  const copyDialogCurrentHooks = ref<NotificationHookEntry[]>([]);
 
   function openCopyDialog(repoId: string) {
     const repo = settings.value.repositories.find((r) => r.id === repoId);
@@ -17,14 +19,20 @@ export function usePostAddSettings() {
     copyDialogRepoPath.value = repo.path;
     copyDialogCurrentTargets.value = repo.copyTargets ?? [];
     copyDialogCurrentPM.value = repo.packageManager;
+    copyDialogCurrentHooks.value = repo.notificationHooks ?? [];
     showCopyDialog.value = true;
   }
 
-  function onDialogConfirm(targets: string[], packageManager: string | undefined) {
+  function onDialogConfirm(
+    targets: string[],
+    packageManager: string | undefined,
+    notificationHooks: NotificationHookEntry[],
+  ) {
     const repo = settings.value.repositories.find((r) => r.id === copyDialogRepoId.value);
     if (!repo) return;
     repo.copyTargets = targets.length > 0 ? targets : undefined;
     repo.packageManager = packageManager;
+    repo.notificationHooks = notificationHooks.length > 0 ? notificationHooks : undefined;
     scheduleSave();
     showCopyDialog.value = false;
   }
@@ -41,6 +49,7 @@ export function usePostAddSettings() {
     copyDialogRepoPath,
     copyDialogCurrentTargets,
     copyDialogCurrentPM,
+    copyDialogCurrentHooks,
     openCopyDialog,
     onDialogConfirm,
     clearCopyTargets,

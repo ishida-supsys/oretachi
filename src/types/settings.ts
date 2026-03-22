@@ -1,3 +1,8 @@
+export interface NotificationHookEntry {
+  event: 'Stop' | 'Notification' | 'SubagentStop' | 'PreToolUse' | 'PostToolUse';
+  kind: 'completed' | 'approval' | 'general';
+}
+
 export interface Repository {
   id: string;
   name: string;
@@ -5,6 +10,7 @@ export interface Repository {
   execScript?: string; // 実行スクリプトの絶対パス
   copyTargets?: string[]; // .gitignoreから選択されたコピー対象エントリ
   packageManager?: string; // "npm" | "pnpm" | "yarn" | "bun" | undefined
+  notificationHooks?: NotificationHookEntry[]; // Claude Code通知フック設定
 }
 
 export interface WorktreeEntry {

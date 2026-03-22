@@ -2,15 +2,17 @@
 import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useI18n } from "vue-i18n";
+import type { NotificationHookEntry } from "../types/settings";
 
 const props = defineProps<{
   repoPath: string;
   currentTargets: string[];
   currentPackageManager?: string;
+  currentNotificationHooks?: NotificationHookEntry[];
 }>();
 
 const emit = defineEmits<{
-  confirm: [targets: string[], packageManager: string | undefined];
+  confirm: [targets: string[], packageManager: string | undefined, notificationHooks: NotificationHookEntry[]];
   cancel: [];
 }>();
 
@@ -23,6 +25,24 @@ const detectedPMs = ref<string[]>([]);
 const selectedPM = ref<string | undefined>(props.currentPackageManager);
 
 const ALL_PMS = ["npm", "pnpm", "yarn", "bun"];
+
+const HOOK_EVENTS = ["Stop", "Notification", "SubagentStop", "PreToolUse", "PostToolUse"] as const;
+const NOTIFY_KINDS = ["completed", "approval", "general"] as const;
+// event → { enabled, kind }
+const hookState = ref<Map<string, { enabled: boolean; kind: string }>>(new Map());
+
+// 初期化: 既存設定またはデフォルト推奨設定
+{
+  const DEFAULTS: Record<string, string> = { Stop: "completed", Notification: "approval" };
+  for (const ev of HOOK_EVENTS) {
+    const existing = props.currentNotificationHooks?.find((h) => h.event === ev);
+    if (existing) {
+      hookState.value.set(ev, { enabled: true, kind: existing.kind });
+    } else {
+      hookState.value.set(ev, { enabled: ev in DEFAULTS, kind: DEFAULTS[ev] ?? "completed" });
+    }
+  }
+}
 
 onMounted(async () => {
   try {
@@ -60,7 +80,14 @@ function deselectAll() {
 }
 
 function onConfirm() {
-  emit("confirm", Array.from(selected.value), selectedPM.value || undefined);
+  const hooks: NotificationHookEntry[] = [];
+  for (const ev of HOOK_EVENTS) {
+    const state = hookState.value.get(ev);
+    if (state?.enabled) {
+      hooks.push({ event: ev as NotificationHookEntry["event"], kind: state.kind as NotificationHookEntry["kind"] });
+    }
+  }
+  emit("confirm", Array.from(selected.value), selectedPM.value || undefined, hooks);
 }
 </script>
 
@@ -89,6 +116,36 @@ function onConfirm() {
               :value="pm"
             >{{ pm }} install{{ detectedPMs.includes(pm) ? " ✓" : "" }}</option>
           </select>
+        </div>
+      </div>
+
+      <!-- Claude Code通知フックセクション -->
+      <div class="section">
+        <div class="section-header">{{ t("hooks.sectionLabel") }}</div>
+        <p class="section-description">{{ t("hooks.description") }}</p>
+        <div class="hook-list">
+          <div
+            v-for="ev in HOOK_EVENTS"
+            :key="ev"
+            class="hook-row"
+          >
+            <label class="hook-checkbox-label">
+              <input
+                type="checkbox"
+                :checked="hookState.get(ev)?.enabled"
+                @change="hookState.get(ev)!.enabled = ($event.target as HTMLInputElement).checked"
+              />
+              <span class="hook-event-name">{{ ev }}</span>
+            </label>
+            <select
+              class="hook-kind-select"
+              :disabled="!hookState.get(ev)?.enabled"
+              :value="hookState.get(ev)?.kind"
+              @change="hookState.get(ev)!.kind = ($event.target as HTMLSelectElement).value"
+            >
+              <option v-for="kind in NOTIFY_KINDS" :key="kind" :value="kind">{{ kind }}</option>
+            </select>
+          </div>
         </div>
       </div>
 
@@ -306,6 +363,58 @@ function onConfirm() {
 .btn-confirm:hover {
   background: #b4befe;
 }
+
+.hook-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.hook-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.hook-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  flex: 1;
+}
+
+.hook-checkbox-label input[type="checkbox"] {
+  accent-color: #cba6f7;
+  cursor: pointer;
+}
+
+.hook-event-name {
+  font-size: 12px;
+  color: #cdd6f4;
+  font-family: monospace;
+}
+
+.hook-kind-select {
+  background: #313244;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  padding: 3px 6px;
+  font-size: 12px;
+  color: #cdd6f4;
+  outline: none;
+  cursor: pointer;
+}
+
+.hook-kind-select:focus {
+  border-color: #cba6f7;
+}
+
+.hook-kind-select:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
 </style>
 
 <i18n lang="json">
@@ -317,6 +426,10 @@ function onConfirm() {
       "detected": "Detected: {pms}",
       "notDetected": "No lock file found",
       "none": "None"
+    },
+    "hooks": {
+      "sectionLabel": "Claude Code notification hooks",
+      "description": "Configure which hooks trigger notifications via oretachi. Enabled hooks will write to .claude/settings.local.json on worktree creation."
     },
     "copy": {
       "sectionLabel": "Gitignore copy",
@@ -336,6 +449,10 @@ function onConfirm() {
       "detected": "検出: {pms}",
       "notDetected": "ロックファイルが見つかりません",
       "none": "なし"
+    },
+    "hooks": {
+      "sectionLabel": "Claude Code 通知フック",
+      "description": "oretachi経由で通知するフックを設定します。有効なフックはワークツリー追加時に .claude/settings.local.json に書き込まれます。"
     },
     "copy": {
       "sectionLabel": "gitignore コピー",
