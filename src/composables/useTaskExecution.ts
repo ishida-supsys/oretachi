@@ -58,6 +58,39 @@ export function useTaskExecution(deps: {
     return settings.value.terminal.shell || undefined;
   }
 
+  function buildPendingCommand(repo: Repository, entry: WorktreeEntry): string | null {
+    const hasInstall = !!repo.packageManager;
+    const hasScript = !!repo.execScript;
+    if (!hasInstall && !hasScript) return null;
+
+    const shell = resolveShell(entry.id);
+    const shellLower = (shell ?? "").toLowerCase();
+    const isWindows = platform() === "windows";
+    const isPowerShell = shellLower.includes("powershell") || shellLower.includes("pwsh") || (shell === undefined && isWindows);
+    const isCmd = !isPowerShell && shellLower.includes("cmd");
+
+    const parts: string[] = [];
+    if (hasInstall) {
+      parts.push(`${repo.packageManager} install`);
+    }
+    if (hasScript) {
+      const scriptPath = repo.execScript!;
+      const repoName = repo.name;
+      const wtName = entry.name;
+      if (isCmd) {
+        parts.push(`set ORETACHI_REPO_NAME=${repoName}&& set ORETACHI_WORKTREE_NAME=${wtName}&& call "${scriptPath}"`);
+      } else if (isPowerShell) {
+        parts.push(`$env:ORETACHI_REPO_NAME="${repoName}"; $env:ORETACHI_WORKTREE_NAME="${wtName}"; Set-ExecutionPolicy -Scope Process Bypass; & "${scriptPath}"`);
+      } else {
+        parts.push(`ORETACHI_REPO_NAME="${repoName}" ORETACHI_WORKTREE_NAME="${wtName}" sh "${scriptPath}"`);
+      }
+    }
+
+    // PowerShell は ; で結合 (PS5互換)、他は && で結合
+    const sep = isPowerShell ? "; " : " && ";
+    return parts.join(sep) + "\r";
+  }
+
   function buildScriptCommand(repo: Repository, entry: WorktreeEntry): string {
     const scriptPath = repo.execScript!;
     const shell = resolveShell(entry.id);
@@ -224,15 +257,9 @@ export function useTaskExecution(deps: {
         }
       }
 
-      const commands: string[] = [];
-      if (repo.packageManager) {
-        commands.push(`${repo.packageManager} install`);
-      }
-      if (repo.execScript) {
-        commands.push(buildScriptCommand(repo, entry).replace(/\r$/, ""));
-      }
-      if (commands.length > 0) {
-        pendingScripts.set(entry.id, commands.join("\r") + "\r");
+      const pending = buildPendingCommand(repo, entry);
+      if (pending) {
+        pendingScripts.set(entry.id, pending);
       }
 
       await onAddTerminal(entry.id);
@@ -386,5 +413,6 @@ export function useTaskExecution(deps: {
     executeAgentWorktree,
     resolveShell,
     buildScriptCommand,
+    buildPendingCommand,
   };
 }

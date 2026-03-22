@@ -185,7 +185,7 @@ const { autoApprovalMap, aiJudgingWorktrees } = autoApproval;
 const { onToggleAutoApproval, onCancelAiJudging } = autoApproval;
 
 // タスク実行 (executeAddWorktree / executeAgentWorktree)
-const { executeAddWorktree, executeAgentWorktree, resolveShell, buildScriptCommand } =
+const { executeAddWorktree, executeAgentWorktree, resolveShell, buildPendingCommand } =
   useTaskExecution({
     t,
     settings,
@@ -544,15 +544,11 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry) {
     }
 
     // パッケージマネージャーinstall・スクリプトをペンディング登録
-    const commands: string[] = [];
-    if (repo?.packageManager) {
-      commands.push(`${repo.packageManager} install`);
-    }
-    if (repo?.execScript) {
-      commands.push(buildScriptCommand(repo, entry).replace(/\r$/, ""));
-    }
-    if (commands.length > 0) {
-      pendingScripts.set(entry.id, commands.join("\r") + "\r");
+    if (repo) {
+      const pending = buildPendingCommand(repo, entry);
+      if (pending) {
+        pendingScripts.set(entry.id, pending);
+      }
     }
 
     // ワークツリー作成後、自動でターミナルを1つ追加
