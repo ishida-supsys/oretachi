@@ -124,6 +124,7 @@ pub fn build_execution_plan(
                 "--model".to_string(),
                 model.to_string(),
                 "-p".to_string(),
+                "--bare".to_string(),
                 "--output-format".to_string(),
                 "json".to_string(),
                 "--json-schema".to_string(),
