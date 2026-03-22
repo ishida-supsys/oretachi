@@ -150,6 +150,11 @@ async fn git_list_branches(repo_path: String) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+async fn detect_package_manager(repo_path: String) -> Result<Vec<String>, String> {
+    run_git(move || git_worktree::detect_package_manager(&repo_path)).await
+}
+
+#[tauri::command]
 async fn read_gitignore(repo_path: String) -> Result<Vec<String>, String> {
     run_git(move || git_worktree::read_gitignore(&repo_path)).await
 }
@@ -438,6 +443,7 @@ pub fn run() {
             git_worktree_add,
             git_worktree_remove,
             git_list_branches,
+            detect_package_manager,
             read_gitignore,
             copy_gitignore_targets,
             git_merge_branch,

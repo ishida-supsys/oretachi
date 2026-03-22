@@ -224,14 +224,21 @@ export function useTaskExecution(deps: {
         }
       }
 
+      const commands: string[] = [];
+      if (repo.packageManager) {
+        commands.push(`${repo.packageManager} install`);
+      }
       if (repo.execScript) {
-        pendingScripts.set(entry.id, buildScriptCommand(repo, entry));
+        commands.push(buildScriptCommand(repo, entry).replace(/\r$/, ""));
+      }
+      if (commands.length > 0) {
+        pendingScripts.set(entry.id, commands.join("\r") + "\r");
       }
 
       await onAddTerminal(entry.id);
       await waitForSessionReady(entry.id);
 
-      if (repo.execScript) {
+      if (repo.packageManager || repo.execScript) {
         await waitForScriptCompletion(entry.id);
       }
 

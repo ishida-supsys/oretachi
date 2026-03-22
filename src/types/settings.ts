@@ -4,6 +4,7 @@ export interface Repository {
   path: string;
   execScript?: string; // 実行スクリプトの絶対パス
   copyTargets?: string[]; // .gitignoreから選択されたコピー対象エントリ
+  packageManager?: string; // "npm" | "pnpm" | "yarn" | "bun" | undefined
 }
 
 export interface WorktreeEntry {

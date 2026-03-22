@@ -12,9 +12,9 @@ const {
   showCopyDialog,
   copyDialogRepoPath,
   copyDialogCurrentTargets,
+  copyDialogCurrentPM,
   openCopyDialog,
-  onCopyDialogConfirm,
-  clearCopyTargets,
+  onDialogConfirm,
 } = usePostAddSettings();
 
 async function addRepository() {
@@ -120,16 +120,14 @@ function clearExecScript(repoId: string) {
         <div class="repo-row-script">
           <div class="row-col row-col-left">
             <span class="script-label">{{ t("postAdd.label") }}</span>
-            <span class="copy-summary">{{ t("postAdd.itemsSelected", { count: repo.copyTargets?.length ?? 0 }) }}</span>
+            <span class="copy-summary">
+              <template v-if="repo.packageManager">{{ repo.packageManager }}</template>
+              <template v-if="repo.packageManager && repo.copyTargets?.length"> | </template>
+              <template v-if="repo.copyTargets?.length">{{ t("postAdd.itemsSelected", { count: repo.copyTargets.length }) }}</template>
+              <template v-if="!repo.packageManager && !repo.copyTargets?.length">{{ t("postAdd.notConfigured") }}</template>
+            </span>
             <button class="btn-secondary" @click="openCopyDialog(repo.id)">
               {{ t("postAdd.configure") }}
-            </button>
-            <button
-              v-if="repo.copyTargets?.length"
-              class="btn-secondary"
-              @click="clearCopyTargets(repo.id)"
-            >
-              {{ t("common.clear") }}
             </button>
           </div>
           <div class="row-col row-col-right">
@@ -160,7 +158,8 @@ function clearExecScript(repoId: string) {
     v-if="showCopyDialog"
     :repo-path="copyDialogRepoPath"
     :current-targets="copyDialogCurrentTargets"
-    @confirm="onCopyDialogConfirm"
+    :current-package-manager="copyDialogCurrentPM"
+    @confirm="onDialogConfirm"
     @cancel="showCopyDialog = false"
   />
 </template>
@@ -336,7 +335,8 @@ function clearExecScript(repoId: string) {
     "postAdd": {
       "label": "Post-add",
       "configure": "Configure",
-      "itemsSelected": "{count} selected"
+      "itemsSelected": "{count} selected",
+      "notConfigured": "Not configured"
     },
     "error": {
       "notARepo": "The selected folder is not a git repository.",
@@ -359,9 +359,10 @@ function clearExecScript(repoId: string) {
       "execScript": "実行スクリプト"
     },
     "postAdd": {
-      "label": "追加後",
+      "label": "追加後設定",
       "configure": "設定",
-      "itemsSelected": "{count}件選択中"
+      "itemsSelected": "{count}件選択中",
+      "notConfigured": "未設定"
     },
     "error": {
       "notARepo": "選択したフォルダは git リポジトリではありません。",

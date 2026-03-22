@@ -13,6 +13,8 @@ pub struct Repository {
     pub exec_script: Option<String>,
     #[serde(default, rename = "copyTargets")]
     pub copy_targets: Option<Vec<String>>,
+    #[serde(default, rename = "packageManager")]
+    pub package_manager: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

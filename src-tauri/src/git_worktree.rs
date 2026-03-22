@@ -463,6 +463,24 @@ pub fn commit(repo_path: &str, message: &str) -> Result<String, String> {
     Ok(stdout.trim().to_string())
 }
 
+pub fn detect_package_manager(repo_path: &str) -> Result<Vec<String>, String> {
+    let path = std::path::Path::new(repo_path);
+    let mut detected = Vec::new();
+    if path.join("pnpm-lock.yaml").exists() {
+        detected.push("pnpm".to_string());
+    }
+    if path.join("package-lock.json").exists() {
+        detected.push("npm".to_string());
+    }
+    if path.join("yarn.lock").exists() {
+        detected.push("yarn".to_string());
+    }
+    if path.join("bun.lockb").exists() || path.join("bun.lock").exists() {
+        detected.push("bun".to_string());
+    }
+    Ok(detected)
+}
+
 pub fn read_gitignore(repo_path: &str) -> Result<Vec<String>, String> {
     let gitignore_path = std::path::Path::new(repo_path).join(".gitignore");
     if !gitignore_path.exists() {

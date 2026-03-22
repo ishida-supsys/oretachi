@@ -8,6 +8,7 @@ export function usePostAddSettings() {
   const copyDialogRepoId = ref("");
   const copyDialogRepoPath = ref("");
   const copyDialogCurrentTargets = ref<string[]>([]);
+  const copyDialogCurrentPM = ref<string | undefined>(undefined);
 
   function openCopyDialog(repoId: string) {
     const repo = settings.value.repositories.find((r) => r.id === repoId);
@@ -15,13 +16,15 @@ export function usePostAddSettings() {
     copyDialogRepoId.value = repoId;
     copyDialogRepoPath.value = repo.path;
     copyDialogCurrentTargets.value = repo.copyTargets ?? [];
+    copyDialogCurrentPM.value = repo.packageManager;
     showCopyDialog.value = true;
   }
 
-  function onCopyDialogConfirm(targets: string[]) {
+  function onDialogConfirm(targets: string[], packageManager: string | undefined) {
     const repo = settings.value.repositories.find((r) => r.id === copyDialogRepoId.value);
     if (!repo) return;
     repo.copyTargets = targets.length > 0 ? targets : undefined;
+    repo.packageManager = packageManager;
     scheduleSave();
     showCopyDialog.value = false;
   }
@@ -37,8 +40,9 @@ export function usePostAddSettings() {
     showCopyDialog,
     copyDialogRepoPath,
     copyDialogCurrentTargets,
+    copyDialogCurrentPM,
     openCopyDialog,
-    onCopyDialogConfirm,
+    onDialogConfirm,
     clearCopyTargets,
   };
 }

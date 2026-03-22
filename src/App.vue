@@ -543,9 +543,16 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry) {
       }
     }
 
-    // スクリプトがあればターミナルで実行するためにペンディング登録
+    // パッケージマネージャーinstall・スクリプトをペンディング登録
+    const commands: string[] = [];
+    if (repo?.packageManager) {
+      commands.push(`${repo.packageManager} install`);
+    }
     if (repo?.execScript) {
-      pendingScripts.set(entry.id, buildScriptCommand(repo, entry));
+      commands.push(buildScriptCommand(repo, entry).replace(/\r$/, ""));
+    }
+    if (commands.length > 0) {
+      pendingScripts.set(entry.id, commands.join("\r") + "\r");
     }
 
     // ワークツリー作成後、自動でターミナルを1つ追加
