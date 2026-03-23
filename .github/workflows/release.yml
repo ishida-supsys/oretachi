@@ -50,9 +50,9 @@ jobs:
 
       - name: Extract release notes
         id: changelog
-        uses: taiki-e/parse-changelog@v0.6.16
+        uses: mindsers/changelog-reader-action@v2
         with:
-          path: CHANGELOG.md
+          path: ./CHANGELOG.md
           version: ${{ github.ref_name }}
 
       - name: Build Tauri app
@@ -64,7 +64,7 @@ jobs:
         with:
           tagName: __VERSION__
           releaseName: "__VERSION__"
-          releaseBody: ${{ steps.changelog.outputs.notes }}
+          releaseBody: ${{ steps.changelog.outputs.changes }}
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
