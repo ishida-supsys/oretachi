@@ -78,11 +78,18 @@ pub fn worktree_add(
     if let Some(sb) = source_branch {
         if let Some(remote) = extract_remote_name(repo_path, sb) {
             let branch_part = &sb[remote.len() + 1..];
-            log::info!("[worktree_add] fetching remote={} branch={}", remote, branch_part);
-            let _ = make_command("git")
-                .args(["fetch", &remote, branch_part])
+            // refs/remotes/<remote>/<branch> を明示的に更新して worktree add で参照できるようにする
+            let refspec = format!("{}:refs/remotes/{}/{}", branch_part, remote, branch_part);
+            log::info!("[worktree_add] fetching remote={} refspec={}", remote, refspec);
+            let fetch_output = make_command("git")
+                .args(["fetch", &remote, &refspec])
                 .current_dir(repo_path)
-                .output();
+                .output()
+                .map_err(|e| format!("git fetch error: {}", e))?;
+            if !fetch_output.status.success() {
+                let stderr = String::from_utf8_lossy(&fetch_output.stderr);
+                return Err(format!("git fetch {}/{} failed: {}", remote, branch_part, stderr));
+            }
         }
     }
 
