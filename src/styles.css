@@ -99,7 +99,7 @@ body {
 
 .gaming-border::before {
   content: "";
-  position: absolute;
+  position: fixed;
   inset: 0;
   padding: 1px;
   --gaming-border-gradient: conic-gradient(
