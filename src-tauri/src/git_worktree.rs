@@ -51,13 +51,48 @@ pub fn validate_repo(path: &str) -> Result<bool, String> {
     Ok(output.status.success())
 }
 
+/// リモート名を抽出する: "<remote>/<branch>" 形式の場合にリモート名を返す
+fn extract_remote_name(repo_path: &str, branch: &str) -> Option<String> {
+    if !branch.contains('/') {
+        return None;
+    }
+    let remotes = get_git_remotes(repo_path);
+    for remote in &remotes {
+        if let Some(name) = remote["name"].as_str() {
+            let prefix = format!("{}/", name);
+            if branch.starts_with(&prefix) {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
 pub fn worktree_add(
     repo_path: &str,
     worktree_path: &str,
     branch_name: &str,
+    source_branch: Option<&str>,
 ) -> Result<bool, String> {
+    // リモートブランチが指定された場合はフェッチ
+    if let Some(sb) = source_branch {
+        if let Some(remote) = extract_remote_name(repo_path, sb) {
+            let branch_part = &sb[remote.len() + 1..];
+            log::info!("[worktree_add] fetching remote={} branch={}", remote, branch_part);
+            let _ = make_command("git")
+                .args(["fetch", &remote, branch_part])
+                .current_dir(repo_path)
+                .output();
+        }
+    }
+
+    let mut args = vec!["worktree", "add", "-b", branch_name, worktree_path];
+    if let Some(sb) = source_branch {
+        args.push(sb);
+    }
+
     let output = make_command("git")
-        .args(["worktree", "add", "-b", branch_name, worktree_path])
+        .args(&args)
         .current_dir(repo_path)
         .output()
         .map_err(|e| format!("git command error: {}", e))?;
@@ -101,7 +136,7 @@ pub fn worktree_add(
 
     // LFS smudgeをスキップしてリトライ
     let retry_output = make_command("git")
-        .args(["worktree", "add", "-b", branch_name, worktree_path])
+        .args(&args)
         .current_dir(repo_path)
         .env("GIT_LFS_SKIP_SMUDGE", "1")
         .output()

@@ -12,7 +12,7 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  confirm: [entry: WorktreeEntry];
+  confirm: [entry: WorktreeEntry, sourceBranch: string | undefined];
   cancel: [];
 }>();
 
@@ -20,6 +20,7 @@ const selectedRepoId = ref<string>("");
 const worktreeName = ref("");
 const branchName = ref("");
 const branchManuallyEdited = ref(false);
+const sourceBranch = ref("");
 
 const selectedRepo = computed(() =>
   props.repositories.find((r) => r.id === selectedRepoId.value) ?? null
@@ -59,7 +60,7 @@ function confirm() {
     branchName: branchName.value,
   };
 
-  emit("confirm", entry);
+  emit("confirm", entry, sourceBranch.value.trim() || undefined);
 }
 </script>
 
@@ -108,6 +109,17 @@ function confirm() {
           :placeholder="t('branchPlaceholder')"
           :disabled="submitting"
           @input="branchManuallyEdited = true"
+        />
+      </div>
+
+      <!-- 元ブランチ（オプション） -->
+      <div class="field">
+        <label class="label">{{ t('sourceBranch') }}</label>
+        <input
+          v-model="sourceBranch"
+          class="input"
+          :placeholder="t('sourceBranchPlaceholder')"
+          :disabled="submitting"
         />
       </div>
 
@@ -252,6 +264,8 @@ function confirm() {
     "branch": "Branch name",
     "branchPlaceholder": "e.g. worktree/my-feature",
     "path": "Path (auto)",
+    "sourceBranch": "Source branch",
+    "sourceBranchPlaceholder": "e.g. main, origin/develop (optional)",
     "creating": "Creating...",
     "create": "Create",
     "baseDirNotSet": "Set the worktree base directory in settings."
@@ -264,6 +278,8 @@ function confirm() {
     "namePlaceholder": "例: my-feature-a3f2",
     "branch": "ブランチ名",
     "branchPlaceholder": "例: worktree/my-feature",
+    "sourceBranch": "元ブランチ",
+    "sourceBranchPlaceholder": "例: main, origin/develop（省略可）",
     "path": "作成先パス（自動）",
     "creating": "作成中...",
     "create": "作成",

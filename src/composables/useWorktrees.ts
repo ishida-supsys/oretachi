@@ -24,11 +24,12 @@ function addWorktreePlaceholder(entry: WorktreeEntry): void {
 }
 
 /** ワークツリーをバックエンドで作成（git worktree add） */
-async function invokeWorktreeAdd(entry: WorktreeEntry): Promise<boolean> {
+async function invokeWorktreeAdd(entry: WorktreeEntry, sourceBranch?: string): Promise<boolean> {
   return invoke<boolean>("git_worktree_add", {
     repoPath: entry.repositoryId,
     worktreePath: entry.path,
     branchName: entry.branchName,
+    sourceBranch: sourceBranch ?? null,
   });
 }
 

@@ -39,12 +39,12 @@ request and repositories, and perform appropriate worktree operations.
 ## Task Process Code Schema
 {
   "code": [
-    { "type": "add_worktree", "repository": "<repo_name>", "branch": "<branch_name>" },
+    { "type": "add_worktree", "repository": "<repo_name>", "branch": "<branch_name>", "source_branch": "<source_branch_optional>" },
     { "type": "agent_worktree", "repository": "<repo_name>", "branch": "<branch_name>", "prompt": "<instruction>" }
   ]
 }
 
-- add_worktree: Add a worktree for the specified repository and branch.
+- add_worktree: Add a worktree for the specified repository and branch. Optionally specify source_branch to base the new worktree on a specific branch (e.g. "main", "origin/develop"). If source_branch starts with a remote name (e.g. "origin/..."), a fetch will be performed automatically.
 - agent_worktree: Launch an AI agent on the worktree's terminal with the given prompt. The worktree must already exist (either pre-existing or created via add_worktree).
 - When you want to add a NEW worktree and launch an agent, output BOTH add_worktree and agent_worktree as separate entries in the code array, in order.
 - When targeting an EXISTING worktree, output only agent_worktree (no add_worktree needed).
@@ -54,7 +54,7 @@ request and repositories, and perform appropriate worktree operations.
 ## User Request
 {{USER_PROMPT}}"#;
 
-const JSON_SCHEMA: &str = r#"{"type":"object","properties":{"code":{"type":"array","items":{"oneOf":[{"type":"object","properties":{"type":{"const":"add_worktree"},"repository":{"type":"string"},"branch":{"type":"string"}},"required":["type","repository","branch"]},{"type":"object","properties":{"type":{"const":"agent_worktree"},"repository":{"type":"string"},"branch":{"type":"string"},"prompt":{"type":"string"}},"required":["type","repository","branch","prompt"]}]}}},"required":["code"]}"#;
+const JSON_SCHEMA: &str = r#"{"type":"object","properties":{"code":{"type":"array","items":{"oneOf":[{"type":"object","properties":{"type":{"const":"add_worktree"},"repository":{"type":"string"},"branch":{"type":"string"},"source_branch":{"type":"string"}},"required":["type","repository","branch"]},{"type":"object","properties":{"type":{"const":"agent_worktree"},"repository":{"type":"string"},"branch":{"type":"string"},"prompt":{"type":"string"}},"required":["type","repository","branch","prompt"]}]}}},"required":["code"]}"#;
 
 fn build_worktree_list_text(settings: &crate::settings::AppSettings) -> String {
     if settings.worktrees.is_empty() {

@@ -129,8 +129,9 @@ async fn git_worktree_add(
     repo_path: String,
     worktree_path: String,
     branch_name: String,
+    source_branch: Option<String>,
 ) -> Result<bool, String> {
-    run_git(move || git_worktree::worktree_add(&repo_path, &worktree_path, &branch_name)).await
+    run_git(move || git_worktree::worktree_add(&repo_path, &worktree_path, &branch_name, source_branch.as_deref())).await
 }
 
 #[tauri::command]

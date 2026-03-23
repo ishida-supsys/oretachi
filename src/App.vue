@@ -509,14 +509,14 @@ async function onOpenArtifacts(worktreeId: string) {
   await openArtifactViewer(worktree.id, worktree.name);
 }
 
-async function onAddWorktreeConfirm(entry: WorktreeEntry) {
+async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string) {
   // ダイアログを即閉じ、一覧に仮エントリを表示
   showAddDialog.value = false;
   addWorktreePlaceholder(entry);
   loadingWorktrees.set(entry.id, t("creatingText"));
 
   try {
-    const lfsSkipped = await invokeWorktreeAdd(entry);
+    const lfsSkipped = await invokeWorktreeAdd(entry, sourceBranch);
 
     // 成功時: 設定に永続化
     commitWorktree(entry);
@@ -1392,7 +1392,7 @@ onMounted(async () => {
       :repositories="settings.repositories"
       :worktree-base-dir="settings.worktreeBaseDir"
       :submitting="false"
-      @confirm="onAddWorktreeConfirm"
+      @confirm="(entry, sourceBranch) => onAddWorktreeConfirm(entry, sourceBranch)"
       @cancel="showAddDialog = false"
     />
 

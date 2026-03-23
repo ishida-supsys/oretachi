@@ -14,7 +14,7 @@ export function useTaskExecution(deps: {
   settings: Ref<AppSettings>;
   worktrees: Ref<Worktree[]>;
   addWorktreePlaceholder: (entry: WorktreeEntry) => void;
-  invokeWorktreeAdd: (entry: WorktreeEntry) => Promise<boolean>;
+  invokeWorktreeAdd: (entry: WorktreeEntry, sourceBranch?: string) => Promise<boolean>;
   commitWorktree: (entry: WorktreeEntry) => void;
   rollbackWorktree: (worktreeId: string) => void;
   isDetached: (worktreeId: string) => boolean;
@@ -234,7 +234,7 @@ export function useTaskExecution(deps: {
     loadingWorktrees.set(entry.id, t("creatingText"));
 
     try {
-      await invokeWorktreeAdd(entry);
+      await invokeWorktreeAdd(entry, code.source_branch);
       commitWorktree(entry);
       tryAutoAssignHotkey(entry.id);
 
