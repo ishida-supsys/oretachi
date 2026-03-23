@@ -16,4 +16,8 @@ export default {
     titleApproval: 'Approval Required',
     titleCompleted: 'Task Completed',
   },
+  update: {
+    title: 'oretachi Update',
+    available: 'A new version {version} is available. Update now?',
+  },
 }
