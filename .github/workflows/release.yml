@@ -50,7 +50,7 @@ jobs:
 
       - name: Extract release notes
         id: changelog
-        uses: taiki-e/parse-changelog@v1
+        uses: taiki-e/parse-changelog@v0.6.16
         with:
           path: CHANGELOG.md
           version: ${{ github.ref_name }}
