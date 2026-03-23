@@ -21,6 +21,8 @@ pub struct Repository {
     pub copy_targets: Option<Vec<String>>,
     #[serde(default, rename = "packageManager")]
     pub package_manager: Option<String>,
+    #[serde(default, rename = "packageManagerArgs")]
+    pub package_manager_args: Option<String>,
     #[serde(default, rename = "notificationHooks")]
     pub notification_hooks: Option<Vec<NotificationHookEntry>>,
 }

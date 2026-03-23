@@ -13,6 +13,7 @@ const {
   copyDialogRepoPath,
   copyDialogCurrentTargets,
   copyDialogCurrentPM,
+  copyDialogCurrentPMArgs,
   copyDialogCurrentHooks,
   openCopyDialog,
   onDialogConfirm,
@@ -161,6 +162,7 @@ function clearExecScript(repoId: string) {
     :repo-path="copyDialogRepoPath"
     :current-targets="copyDialogCurrentTargets"
     :current-package-manager="copyDialogCurrentPM"
+    :current-package-manager-args="copyDialogCurrentPMArgs"
     :current-notification-hooks="copyDialogCurrentHooks"
     @confirm="onDialogConfirm"
     @cancel="showCopyDialog = false"

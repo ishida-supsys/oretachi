@@ -160,7 +160,6 @@ pub async fn task_generate(
 
         a.extend([
             "-p".to_string(),
-            "--bare".to_string(),
             "--output-format".to_string(),
             "json".to_string(),
             "--json-schema".to_string(),

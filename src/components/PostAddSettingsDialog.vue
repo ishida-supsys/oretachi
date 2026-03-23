@@ -8,11 +8,12 @@ const props = defineProps<{
   repoPath: string;
   currentTargets: string[];
   currentPackageManager?: string;
+  currentPackageManagerArgs?: string;
   currentNotificationHooks?: NotificationHookEntry[];
 }>();
 
 const emit = defineEmits<{
-  confirm: [targets: string[], packageManager: string | undefined, notificationHooks: NotificationHookEntry[]];
+  confirm: [targets: string[], packageManager: string | undefined, packageManagerArgs: string | undefined, notificationHooks: NotificationHookEntry[]];
   cancel: [];
 }>();
 
@@ -23,6 +24,7 @@ const selected = ref<Set<string>>(new Set(props.currentTargets));
 const loading = ref(true);
 const detectedPMs = ref<string[]>([]);
 const selectedPM = ref<string | undefined>(props.currentPackageManager);
+const pmArgs = ref<string>(props.currentPackageManagerArgs ?? "");
 
 const ALL_PMS = ["npm", "pnpm", "yarn", "bun"];
 
@@ -87,7 +89,7 @@ function onConfirm() {
       hooks.push({ event: ev as NotificationHookEntry["event"], kind: state.kind as NotificationHookEntry["kind"] });
     }
   }
-  emit("confirm", Array.from(selected.value), selectedPM.value || undefined, hooks);
+  emit("confirm", Array.from(selected.value), selectedPM.value || undefined, pmArgs.value.trim() || undefined, hooks);
 }
 </script>
 
@@ -116,6 +118,15 @@ function onConfirm() {
               :value="pm"
             >{{ pm }} install{{ detectedPMs.includes(pm) ? " ✓" : "" }}</option>
           </select>
+        </div>
+        <div class="pm-args-row" v-if="selectedPM">
+          <span class="pm-args-label">{{ t("pkgManager.argsLabel") }}</span>
+          <input
+            class="pm-args-input"
+            type="text"
+            v-model="pmArgs"
+            :placeholder="t('pkgManager.argsPlaceholder')"
+          />
         </div>
       </div>
 
@@ -264,6 +275,34 @@ function onConfirm() {
 }
 
 .pm-select:focus {
+  border-color: #cba6f7;
+}
+
+.pm-args-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pm-args-label {
+  font-size: 11px;
+  color: #6c7086;
+  white-space: nowrap;
+}
+
+.pm-args-input {
+  flex: 1;
+  background: #313244;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: #cdd6f4;
+  outline: none;
+  font-family: monospace;
+}
+
+.pm-args-input:focus {
   border-color: #cba6f7;
 }
 
@@ -425,7 +464,9 @@ function onConfirm() {
       "sectionLabel": "Package install",
       "detected": "Detected: {pms}",
       "notDetected": "No lock file found",
-      "none": "None"
+      "none": "None",
+      "argsLabel": "Extra args",
+      "argsPlaceholder": "e.g. --config.node-linker=hoisted"
     },
     "hooks": {
       "sectionLabel": "Claude Code notification hooks",
@@ -448,7 +489,9 @@ function onConfirm() {
       "sectionLabel": "パッケージインストール",
       "detected": "検出: {pms}",
       "notDetected": "ロックファイルが見つかりません",
-      "none": "なし"
+      "none": "なし",
+      "argsLabel": "追加引数",
+      "argsPlaceholder": "例: --config.node-linker=hoisted"
     },
     "hooks": {
       "sectionLabel": "Claude Code 通知フック",

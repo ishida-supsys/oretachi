@@ -10,6 +10,7 @@ export interface Repository {
   execScript?: string; // 実行スクリプトの絶対パス
   copyTargets?: string[]; // .gitignoreから選択されたコピー対象エントリ
   packageManager?: string; // "npm" | "pnpm" | "yarn" | "bun" | undefined
+  packageManagerArgs?: string; // install コマンドに追加する引数 (例: --config.node-linker=hoisted)
   notificationHooks?: NotificationHookEntry[]; // Claude Code通知フック設定
 }
 

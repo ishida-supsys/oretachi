@@ -71,7 +71,8 @@ export function useTaskExecution(deps: {
 
     const parts: string[] = [];
     if (hasInstall) {
-      parts.push(`${repo.packageManager} install`);
+      const extraArgs = repo.packageManagerArgs ? ` ${repo.packageManagerArgs}` : "";
+      parts.push(`${repo.packageManager} install${extraArgs}`);
     }
     if (hasScript) {
       const scriptPath = repo.execScript!;
