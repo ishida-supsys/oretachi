@@ -20,4 +20,10 @@ export default {
     title: 'oretachi Update',
     available: 'A new version {version} is available. Update now?',
   },
+  about: {
+    label: 'About',
+    checkUpdate: 'Check for updates',
+    checking: 'Checking...',
+    upToDate: 'You are using the latest version.',
+  },
 }

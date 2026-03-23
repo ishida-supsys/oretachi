@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { getVersion } from "@tauri-apps/api/app";
+import { open, ask, message } from "@tauri-apps/plugin-dialog";
 import { useSettings } from "../composables/useSettings";
+import { useUpdater } from "../composables/useUpdater";
 import ColorPicker from "primevue/colorpicker";
 import type { AiAgentKind } from "../types/settings";
 import { useI18n } from "vue-i18n";
@@ -15,6 +17,23 @@ import SettingsRepositoriesSection from "./settings/SettingsRepositoriesSection.
 const { t } = useI18n();
 
 const { settings, scheduleSave, flushSave } = useSettings();
+
+const { isChecking, checkForUpdate, downloadAndInstall } = useUpdater();
+
+const appVersion = ref("");
+
+async function onCheckUpdate() {
+  const update = await checkForUpdate();
+  if (update) {
+    const yes = await ask(
+      t("update.available", { version: update.version }),
+      { title: t("update.title"), kind: "info" }
+    );
+    if (yes) await downloadAndInstall(update);
+  } else {
+    await message(t("about.upToDate"), { title: t("update.title"), kind: "info" });
+  }
+}
 
 // ─── AIエージェント ───────────────────────────────────────────────────────────
 
@@ -41,6 +60,7 @@ onMounted(async () => {
   } catch (e) {
     console.error("detect_ai_agents failed:", e);
   }
+  appVersion.value = await getVersion();
 });
 
 function isAgentDetected(kind: AiAgentKind): boolean {
@@ -537,6 +557,17 @@ function getSoundLabel(sound: string | null | undefined): string {
         >
           <option v-for="theme in gamingBorderThemes" :key="theme.value" :value="theme.value">{{ t(theme.labelKey) }}</option>
         </select>
+      </div>
+    </div>
+
+    <!-- バージョン情報 -->
+    <div class="field-group">
+      <label class="field-label">{{ t('about.label') }}</label>
+      <div class="row-input">
+        <span class="version-text">v{{ appVersion }}</span>
+        <button class="btn btn-sm" :disabled="isChecking" @click="onCheckUpdate">
+          {{ isChecking ? t('about.checking') : t('about.checkUpdate') }}
+        </button>
       </div>
     </div>
   </div>
