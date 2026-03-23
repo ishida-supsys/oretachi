@@ -44,12 +44,15 @@ import { useAppHotkeys } from "./composables/useAppHotkeys";
 import { useSubWindowEvents } from "./composables/useSubWindowEvents";
 import { useShutdownGuard } from "./composables/useShutdownGuard";
 import { debug } from "@tauri-apps/plugin-log";
+import { ask } from "@tauri-apps/plugin-dialog";
+import { useUpdater } from "./composables/useUpdater";
 import Toast from "primevue/toast";
 
 const { t } = useI18n();
 
 // ウィンドウのフォーカス状態
 const { isWindowFocused } = useWindowFocus();
+const { checkForUpdate, downloadAndInstall } = useUpdater();
 
 // サブウィンドウフォーカス状態: ワークツリー ID → フォーカス中か (useSubWindowEvents で管理)
 
@@ -1173,6 +1176,20 @@ onMounted(async () => {
     );
     await getCurrentWindow().destroy();
   });
+
+  // 起動後にアップデートを確認
+  setTimeout(async () => {
+    const update = await checkForUpdate();
+    if (update) {
+      const yes = await ask(
+        t("update.available", { version: update.version }),
+        { title: t("update.title"), kind: "info" }
+      );
+      if (yes) {
+        await downloadAndInstall(update);
+      }
+    }
+  }, 3000);
 });
 
 </script>

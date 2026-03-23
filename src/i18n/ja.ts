@@ -16,4 +16,14 @@ export default {
     titleApproval: '承認が必要です',
     titleCompleted: 'タスク完了',
   },
+  update: {
+    title: 'oretachi アップデート',
+    available: '新しいバージョン {version} が利用可能です。今すぐ更新しますか？',
+  },
+  about: {
+    label: 'バージョン情報',
+    checkUpdate: 'アップデートを確認',
+    checking: '確認中...',
+    upToDate: '最新バージョンを使用しています。',
+  },
 }

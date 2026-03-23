@@ -27,6 +27,9 @@
     "os:default",
     "notification:default",
     "notification:allow-register-listener",
-    "liquid-glass:default"
+    "liquid-glass:default",
+    "updater:default",
+    "process:allow-restart",
+    "core:app:default"
   ]
 }

@@ -10,6 +10,12 @@
     "frontendDist": "../dist"
   },
   "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://github.com/ishida-supsys/oretachi/releases/latest/download/latest.json"
+      ],
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDMxQjBDQTZBOEUyNjBDRDEKUldUUkRDYU9hc3F3TVhwbFhFTlVEb0lJcVJENjlZMENuRVlRSjkvalIrakZLbW9qT1VpOGZ5cGoK"
+    },
     "cli": {
       "args": [
         {
@@ -42,6 +48,7 @@
   "bundle": {
     "active": true,
     "targets": "all",
+    "createUpdaterArtifacts": true,
     "publisher": "ishida-supsys",
     "shortDescription": "Multi-session terminal manager for developers",
     "longDescription": "oretachi is a desktop application for managing multiple terminal sessions with a tabbed interface, split-pane layout, worktree support, and tray notifications to keep your development workflow organized.",
