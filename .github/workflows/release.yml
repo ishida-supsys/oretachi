@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*"
+      - "[0-9]+.[0-9]+.[0-9]+"
 
 jobs:
   release:
@@ -42,8 +42,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
-          tagName: v__VERSION__
-          releaseName: "oretachi v__VERSION__"
+          tagName: __VERSION__
+          releaseName: "oretachi __VERSION__"
           releaseBody: "リリースノートはアセットを確認してください。"
           releaseDraft: true
           prerelease: false
