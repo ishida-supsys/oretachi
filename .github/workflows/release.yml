@@ -10,7 +10,17 @@ jobs:
   release:
     permissions:
       contents: write
-    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+          - os: macos-latest  # Intel
+            args: --target x86_64-apple-darwin
+          - os: macos-latest  # Apple Silicon
+            args: --target aarch64-apple-darwin
+
+    runs-on: ${{ matrix.os }}
 
     steps:
       - uses: actions/checkout@v4
@@ -27,6 +37,8 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.args != '' && (contains(matrix.args, 'x86_64') && 'x86_64-apple-darwin' || 'aarch64-apple-darwin') || '' }}
 
       - name: Rust cache
         uses: swatinem/rust-cache@v2
@@ -36,6 +48,13 @@ jobs:
       - name: Install frontend dependencies
         run: pnpm install
 
+      - name: Extract release notes
+        id: changelog
+        uses: taiki-e/parse-changelog@v1
+        with:
+          path: CHANGELOG.md
+          version: ${{ github.ref_name }}
+
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -44,7 +63,8 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           tagName: __VERSION__
-          releaseName: "oretachi __VERSION__"
-          releaseBody: "リリースノートはアセットを確認してください。"
+          releaseName: "__VERSION__"
+          releaseBody: ${{ steps.changelog.outputs.notes }}
           releaseDraft: true
           prerelease: false
+          args: ${{ matrix.args }}
