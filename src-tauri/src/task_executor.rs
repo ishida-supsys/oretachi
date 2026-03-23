@@ -30,11 +30,13 @@ request and repositories, and perform appropriate worktree operations.
 - NEVER generate your own instructions or ideas to put in the prompt. Your role is routing and
   splitting only — the downstream AI agent will interpret the prompt.
 - When only an issue URL is provided or context is unclear, pass the full text as-is.
-- If a PR URL is specified, extract the branch name from the PR and check if an existing worktree
-  has a matching branchName. If a match exists, use that worktree (output only agent_worktree,
-  no add_worktree).
-- If an existing worktree already has the matching repository and branch, output only agent_worktree
-  (no add_worktree). Only output add_worktree when no matching worktree exists.
+- By default, each task creates a new worktree (add_worktree + agent_worktree).
+- Use an EXISTING worktree (agent_worktree only, no add_worktree) in these cases:
+  - A pull request URL is provided: fetch the PR's branch name and check if it matches
+    an existing worktree's branch. If it matches, use that worktree.
+  - The user explicitly refers to a previous task (e.g. "continue the task for X"):
+    use the existing worktree only if the repository AND branch/name exactly match.
+    Do not reuse a worktree just because the repository is the same.
 
 ## Task Process Code Schema
 {
@@ -63,7 +65,12 @@ fn build_worktree_list_text(settings: &crate::settings::AppSettings) -> String {
     let lines: Vec<String> = settings
         .worktrees
         .iter()
-        .map(|wt| format!("- {} (repository: {}, branch: {})", wt.name, wt.repository_name, wt.branch_name))
+        .map(|wt| {
+            format!(
+                "- {} (repository: {}, branch: {})",
+                wt.name, wt.repository_name, wt.branch_name
+            )
+        })
         .collect();
     format!("Existing worktrees:\n{}", lines.join("\n"))
 }
@@ -114,9 +121,8 @@ pub async fn task_generate(
 
     let full_prompt = SYSTEM_PROMPT_TEMPLATE.replace("{{USER_PROMPT}}", &prompt);
 
-    let use_mcp = agent_kind == AiAgentKind::ClaudeCode
-        && mcp_status.running
-        && mcp_status.port.is_some();
+    let use_mcp =
+        agent_kind == AiAgentKind::ClaudeCode && mcp_status.running && mcp_status.port.is_some();
 
     // For non-MCP agents, embed repo list and worktree list directly in prompt
     let final_prompt = if use_mcp {
@@ -142,19 +148,17 @@ pub async fn task_generate(
                 }
             }
         });
-        let config_str = serde_json::to_string(&mcp_config)
-            .map_err(|e| {
-                log::error!("[TaskGenerate] Failed to serialize MCP config: {}", e);
-                format!("Failed to serialize MCP config: {}", e)
-            })?;
+        let config_str = serde_json::to_string(&mcp_config).map_err(|e| {
+            log::error!("[TaskGenerate] Failed to serialize MCP config: {}", e);
+            format!("Failed to serialize MCP config: {}", e)
+        })?;
 
-        let config_path = std::env::temp_dir()
-            .join(format!("oretachi-task-mcp-{}.json", std::process::id()));
-        std::fs::write(&config_path, &config_str)
-            .map_err(|e| {
-                log::error!("[TaskGenerate] Failed to write MCP config: {}", e);
-                format!("Failed to write MCP config: {}", e)
-            })?;
+        let config_path =
+            std::env::temp_dir().join(format!("oretachi-task-mcp-{}.json", std::process::id()));
+        std::fs::write(&config_path, &config_str).map_err(|e| {
+            log::error!("[TaskGenerate] Failed to write MCP config: {}", e);
+            format!("Failed to write MCP config: {}", e)
+        })?;
 
         let (prog, mut a) = ai_provider::make_platform_cmd("claude");
 
@@ -170,8 +174,13 @@ pub async fn task_generate(
 
         (prog, a, final_prompt)
     } else {
-        let plan =
-            ai_provider::build_execution_plan(&agent_kind, &final_prompt, JSON_SCHEMA, ai_provider::default_model(&agent_kind), false);
+        let plan = ai_provider::build_execution_plan(
+            &agent_kind,
+            &final_prompt,
+            JSON_SCHEMA,
+            ai_provider::default_model(&agent_kind),
+            false,
+        );
         (plan.program, plan.args, plan.stdin_content)
     };
 
@@ -187,12 +196,10 @@ pub async fn task_generate(
         cmd.current_dir(&worktree_base_dir);
     }
 
-    let mut child = cmd
-        .spawn()
-        .map_err(|e| {
-            log::error!("[TaskGenerate] Failed to spawn AI agent: {}", e);
-            format!("Failed to spawn AI agent: {}", e)
-        })?;
+    let mut child = cmd.spawn().map_err(|e| {
+        log::error!("[TaskGenerate] Failed to spawn AI agent: {}", e);
+        format!("Failed to spawn AI agent: {}", e)
+    })?;
 
     if !stdin_content.is_empty() {
         if let Some(mut stdin) = child.stdin.take() {
@@ -208,11 +215,7 @@ pub async fn task_generate(
 
     let pid = child.id();
 
-    let wait_result = timeout(
-        Duration::from_secs(TIMEOUT_SECS),
-        child.wait_with_output(),
-    )
-    .await;
+    let wait_result = timeout(Duration::from_secs(TIMEOUT_SECS), child.wait_with_output()).await;
 
     // タイムアウト時はプロセスをkill
     if wait_result.is_err() {
@@ -233,7 +236,11 @@ pub async fn task_generate(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        log::error!("[TaskGenerate] AI agent exited with {}: {}", output.status, stderr);
+        log::error!(
+            "[TaskGenerate] AI agent exited with {}: {}",
+            output.status,
+            stderr
+        );
         return Err(format!(
             "AI agent exited with {}: {}",
             output.status, stderr
@@ -245,11 +252,10 @@ pub async fn task_generate(
 
     let structured = ai_provider::parse_response(&agent_kind, &stdout)?;
 
-    serde_json::to_string(&structured)
-        .map_err(|e| {
-            log::error!("[TaskGenerate] Failed to serialize response: {}", e);
-            format!("Failed to serialize response: {}", e)
-        })
+    serde_json::to_string(&structured).map_err(|e| {
+        log::error!("[TaskGenerate] Failed to serialize response: {}", e);
+        format!("Failed to serialize response: {}", e)
+    })
 }
 
 #[tauri::command]
@@ -296,7 +302,11 @@ mod tests {
     #[test]
     fn test_build_worktree_list_text_with_entries() {
         let mut settings = AppSettings::default();
-        settings.worktrees = vec![make_worktree_entry("my-feature", "myrepo", "worktree/my-feature")];
+        settings.worktrees = vec![make_worktree_entry(
+            "my-feature",
+            "myrepo",
+            "worktree/my-feature",
+        )];
         let text = build_worktree_list_text(&settings);
         assert!(text.contains("my-feature"));
         assert!(text.contains("myrepo"));
