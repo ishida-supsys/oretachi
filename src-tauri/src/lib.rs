@@ -20,10 +20,19 @@ use settings::{AppSettings, SettingsManager};
 use tauri::{Emitter, Manager, State};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
+/// パスコンポーネントに `..`、絶対パス区切り文字、NULバイトが含まれていないか検証する
+fn validate_path_component(s: &str) -> Result<(), String> {
+    if s.contains("..") || s.contains('/') || s.contains('\\') || s.contains('\0') {
+        return Err(format!("不正なパス文字が含まれています: {}", s));
+    }
+    Ok(())
+}
+
 fn artifacts_dir(
     app_handle: &tauri::AppHandle,
     worktree_id: &str,
 ) -> Result<std::path::PathBuf, String> {
+    validate_path_component(worktree_id)?;
     Ok(app_handle
         .path()
         .app_data_dir()
@@ -330,6 +339,7 @@ fn read_artifact(
     worktree_id: String,
     artifact_id: String,
 ) -> Result<String, String> {
+    validate_path_component(&artifact_id)?;
     let artifact_path = artifacts_dir(&app_handle, &worktree_id)?
         .join(format!("{}.json", artifact_id));
     std::fs::read_to_string(&artifact_path).map_err(|e| e.to_string())

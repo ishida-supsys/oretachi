@@ -277,7 +277,25 @@ pub fn read_file_content(
     file_path: &str,
     revision: Option<&str>,
 ) -> Result<String, String> {
+    // file_path にパストラバーサル用コンポーネントが含まれていないか検証
+    let normalized = std::path::Path::new(file_path);
+    for component in normalized.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                return Err("ファイルパスに '..' は使用できません".to_string());
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err("絶対パスは使用できません".to_string());
+            }
+            _ => {}
+        }
+    }
+
     if let Some(rev) = revision {
+        // revision がオプションインジェクション（'-' で始まる）になっていないか確認
+        if rev.starts_with('-') {
+            return Err("revision にハイフンで始まる値は使用できません".to_string());
+        }
         let spec = format!("{}:{}", rev, file_path);
         let output = make_command("git")
             .args(["show", &spec])

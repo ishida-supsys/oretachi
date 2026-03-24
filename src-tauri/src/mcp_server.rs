@@ -205,6 +205,11 @@ impl NotifyService {
             })?;
         let worktree_id = wt.id.clone();
 
+        // artifact ID のパストラバーサル防止
+        if id.contains("..") || id.contains('/') || id.contains('\\') || id.contains('\0') {
+            return Err(McpError::invalid_params("不正なアーティファクトIDです".to_string(), None));
+        }
+
         let artifacts_dir = self
             .app_handle
             .path()

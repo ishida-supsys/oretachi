@@ -1,7 +1,16 @@
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
 
+/// パスコンポーネントに `..`、絶対パス区切り文字、NULバイトが含まれていないか検証する
+fn validate_path_component(s: &str) -> Result<(), String> {
+    if s.contains("..") || s.contains('/') || s.contains('\\') || s.contains('\0') {
+        return Err(format!("不正なパス文字が含まれています: {}", s));
+    }
+    Ok(())
+}
+
 fn session_path(app_handle: &AppHandle, worktree_id: &str) -> Result<PathBuf, String> {
+    validate_path_component(worktree_id)?;
     Ok(app_handle
         .path()
         .app_data_dir()

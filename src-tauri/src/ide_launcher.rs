@@ -46,6 +46,13 @@ pub fn detect_ides() -> Vec<IdeInfo> {
 }
 
 pub fn open_in_ide(command: &str, path: &str) -> Result<(), String> {
+    // ホワイトリスト: IDE_DEFINITIONS に含まれるコマンド名のみ許可
+    let allowed: Vec<&str> = IDE_DEFINITIONS.iter()
+        .flat_map(|(_, _, candidates)| candidates.iter().copied())
+        .collect();
+    if !allowed.contains(&command) {
+        return Err(format!("許可されていないIDEコマンドです: {}", command));
+    }
     make_command(command)
         .args(["--reuse-window", path])
         .spawn()

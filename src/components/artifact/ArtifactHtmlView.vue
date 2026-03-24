@@ -8,7 +8,7 @@ defineProps<{
   <div class="html-view">
     <iframe
       :srcdoc="content"
-      sandbox="allow-scripts allow-same-origin"
+      sandbox="allow-scripts"
       class="html-iframe"
     />
   </div>

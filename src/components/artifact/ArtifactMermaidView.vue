@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch, onMounted } from "vue";
 import mermaid from "mermaid";
+import DOMPurify from "dompurify";
 
 const props = defineProps<{
   content: string;
@@ -26,7 +27,7 @@ async function render() {
   try {
     const id = `mermaid-${Date.now()}-${idCounter++}`;
     const { svg } = await mermaid.render(id, props.content);
-    svgHtml.value = svg;
+    svgHtml.value = DOMPurify.sanitize(svg, { USE_PROFILES: { svg: true, svgFilters: true } });
   } catch (e) {
     error.value = String(e);
     svgHtml.value = "";

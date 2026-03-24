@@ -458,8 +458,15 @@ pub async fn copy_custom_sound(app_handle: tauri::AppHandle, source_path: String
 #[tauri::command]
 pub async fn read_audio_file(app_handle: tauri::AppHandle, sound: String) -> Result<String, String> {
     let path = if let Some(filename) = sound.strip_prefix("system:") {
-        std::path::PathBuf::from(format!(r"C:\Windows\Media\{}", filename))
+        // ファイル名のみ許可（パストラバーサル防止）
+        if filename.contains("..") || filename.contains('/') || filename.contains('\\') || filename.contains('\0') {
+            return Err("不正なファイル名です".to_string());
+        }
+        std::path::PathBuf::from(r"C:\Windows\Media").join(filename)
     } else if let Some(filename) = sound.strip_prefix("custom:") {
+        if filename.contains("..") || filename.contains('/') || filename.contains('\\') || filename.contains('\0') {
+            return Err("不正なファイル名です".to_string());
+        }
         app_handle
             .path()
             .app_data_dir()
