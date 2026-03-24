@@ -1,23 +1,16 @@
 import { ref, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-
-interface PtyOutputPayload {
-  sessionId: number;
-  data: number[];
-}
-
-interface PtyExitPayload {
-  sessionId: number;
-}
+import {
+  activateSession,
+  registerPtyHandlers,
+  unregisterPtyHandlers,
+  waitForInit,
+} from "./usePtyDispatcher";
 
 export function usePty() {
   const sessionId = ref<number | null>(null);
   const isRunning = ref(false);
   const detached = ref(false);
-
-  let unlistenOutput: UnlistenFn | null = null;
-  let unlistenExit: UnlistenFn | null = null;
 
   async function spawn(
     rows: number,
@@ -30,17 +23,7 @@ export function usePty() {
     // 既存セッションをクリーンアップ
     await cleanup();
 
-    unlistenOutput = await listen<PtyOutputPayload>("pty-output", (event) => {
-      if (event.payload.sessionId !== sessionId.value) return;
-      const data = new Uint8Array(event.payload.data);
-      onOutput(data);
-    });
-
-    unlistenExit = await listen<PtyExitPayload>("pty-exit", (event) => {
-      if (event.payload.sessionId !== sessionId.value) return;
-      isRunning.value = false;
-      onExit();
-    });
+    await waitForInit();
 
     const id = await invoke<number>("pty_spawn", {
       rows,
@@ -51,6 +34,12 @@ export function usePty() {
 
     sessionId.value = id;
     isRunning.value = true;
+
+    // sessionIdを確定してハンドラ登録＆バッファフラッシュ
+    activateSession(id, onOutput, () => {
+      isRunning.value = false;
+      onExit();
+    });
   }
 
   async function write(data: string | Uint8Array): Promise<void> {
@@ -89,53 +78,37 @@ export function usePty() {
     onOutput: (data: Uint8Array) => void,
     onExit: () => void
   ): Promise<void> {
-    if (unlistenOutput) {
-      unlistenOutput();
-      unlistenOutput = null;
-    }
-    if (unlistenExit) {
-      unlistenExit();
-      unlistenExit = null;
+    if (sessionId.value !== null) {
+      unregisterPtyHandlers(sessionId.value);
     }
 
     sessionId.value = id;
     isRunning.value = true;
 
-    unlistenOutput = await listen<PtyOutputPayload>("pty-output", (event) => {
-      if (event.payload.sessionId !== sessionId.value) return;
-      const data = new Uint8Array(event.payload.data);
-      onOutput(data);
-    });
+    await waitForInit();
 
-    unlistenExit = await listen<PtyExitPayload>("pty-exit", (event) => {
-      if (event.payload.sessionId !== sessionId.value) return;
-      isRunning.value = false;
-      onExit();
-    });
+    registerPtyHandlers(
+      id,
+      onOutput,
+      () => {
+        isRunning.value = false;
+        onExit();
+      }
+    );
   }
 
   async function cleanup(): Promise<void> {
-    if (unlistenOutput) {
-      unlistenOutput();
-      unlistenOutput = null;
-    }
-    if (unlistenExit) {
-      unlistenExit();
-      unlistenExit = null;
+    if (sessionId.value !== null) {
+      unregisterPtyHandlers(sessionId.value);
     }
     sessionId.value = null;
     isRunning.value = false;
   }
 
   function detach(): void {
-    // イベントリスナーを解除するが、PTY プロセスは kill しない
-    if (unlistenOutput) {
-      unlistenOutput();
-      unlistenOutput = null;
-    }
-    if (unlistenExit) {
-      unlistenExit();
-      unlistenExit = null;
+    // イベントハンドラを解除するが、PTY プロセスは kill しない
+    if (sessionId.value !== null) {
+      unregisterPtyHandlers(sessionId.value);
     }
     detached.value = true;
   }

@@ -51,7 +51,10 @@ pub async fn generate_commit_message(
         return Err("already in progress".to_string());
     }
 
-    let diff = crate::git_worktree::get_diff_text(&repo_path)?;
+    let rp = repo_path.clone();
+    let diff = tokio::task::spawn_blocking(move || crate::git_worktree::get_diff_text(&rp))
+        .await
+        .map_err(|e| format!("task join error: {}", e))??;
     let diff_content = if diff.trim().is_empty() {
         "(no changes)".to_string()
     } else {
