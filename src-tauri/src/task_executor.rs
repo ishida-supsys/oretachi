@@ -1,9 +1,20 @@
 use crate::ai_provider::{self, AiAgentKind};
 use crate::mcp_server::McpServerManager;
+use crate::process_utils::CancellableManager;
 use crate::settings::SettingsManager;
 use tauri::{AppHandle, State};
 use tokio::io::AsyncWriteExt;
 use tokio::time::{timeout, Duration};
+
+const TASK_GENERATE_KEY: &str = "__task_generate__";
+
+pub struct TaskGenerateManager(CancellableManager);
+
+impl TaskGenerateManager {
+    pub fn new() -> Self {
+        Self(CancellableManager::new())
+    }
+}
 
 const TIMEOUT_SECS: u64 = 120;
 
@@ -117,8 +128,12 @@ pub async fn task_generate(
     _app_handle: AppHandle,
     settings_state: State<'_, SettingsManager>,
     mcp_state: State<'_, McpServerManager>,
+    manager: State<'_, TaskGenerateManager>,
     prompt: String,
 ) -> Result<String, String> {
+    if manager.0.is_in_progress(TASK_GENERATE_KEY)? {
+        return Err("タスク生成が既に実行中です。完了を待つかキャンセルしてください".to_string());
+    }
     let settings = settings_state.get();
     let mcp_status = mcp_state.get_status();
 
@@ -147,7 +162,8 @@ pub async fn task_generate(
     };
 
     // Build command and args
-    let (program, args, stdin_content) = if use_mcp {
+    // mcp_config_temp_path: Some(path) なら処理完了後に削除する
+    let (program, args, stdin_content, mcp_config_temp_path) = if use_mcp {
         let port = mcp_status.port.unwrap();
 
         let mcp_config = serde_json::json!({
@@ -182,7 +198,7 @@ pub async fn task_generate(
             config_path.to_string_lossy().to_string(),
         ]);
 
-        (prog, a, final_prompt)
+        (prog, a, final_prompt, Some(config_path))
     } else {
         let plan = ai_provider::build_execution_plan(
             &agent_kind,
@@ -191,7 +207,7 @@ pub async fn task_generate(
             ai_provider::default_model(&agent_kind),
             false,
         );
-        (plan.program, plan.args, plan.stdin_content)
+        (plan.program, plan.args, plan.stdin_content, None)
     };
 
     let worktree_base_dir = settings.worktree_base_dir.clone();
@@ -225,6 +241,13 @@ pub async fn task_generate(
 
     let pid = child.id();
 
+    // PID を登録してキャンセル可能にする
+    if let Some(pid) = pid {
+        if let Err(e) = manager.0.register(TASK_GENERATE_KEY.to_string(), pid) {
+            log::warn!("[TaskGenerate] Failed to register PID: {}", e);
+        }
+    }
+
     let wait_result = timeout(Duration::from_secs(TIMEOUT_SECS), child.wait_with_output()).await;
 
     // タイムアウト時はプロセスをkill
@@ -232,6 +255,13 @@ pub async fn task_generate(
         if let Some(pid) = pid {
             crate::process_utils::kill_process_tree(pid);
         }
+    }
+
+    let _ = manager.0.remove(TASK_GENERATE_KEY);
+
+    // MCP config 一時ファイルをクリーンアップ
+    if let Some(ref path) = mcp_config_temp_path {
+        let _ = std::fs::remove_file(path);
     }
 
     let output = wait_result
@@ -266,6 +296,11 @@ pub async fn task_generate(
         log::error!("[TaskGenerate] Failed to serialize response: {}", e);
         format!("Failed to serialize response: {}", e)
     })
+}
+
+#[tauri::command]
+pub fn cancel_task_generate(manager: State<'_, TaskGenerateManager>) -> Result<(), String> {
+    manager.0.cancel(TASK_GENERATE_KEY)
 }
 
 #[tauri::command]

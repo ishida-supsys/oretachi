@@ -1,4 +1,5 @@
 use std::{fs, path::PathBuf, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}};
+use tokio::fs as tokio_fs;
 
 use axum::{extract::State, http::StatusCode, routing::post, Json};
 use rmcp::{
@@ -30,6 +31,8 @@ pub struct McpStatus {
 pub struct McpServerManager {
     shutdown_tx: Mutex<Option<watch::Sender<bool>>>,
     status: Arc<Mutex<McpStatus>>,
+    /// restart_mcp_server の同時呼び出しを防ぐ排他ロック
+    restart_lock: tokio::sync::Mutex<()>,
 }
 
 impl McpServerManager {
@@ -37,7 +40,12 @@ impl McpServerManager {
         Self {
             shutdown_tx: Mutex::new(None),
             status: Arc::new(Mutex::new(McpStatus { running: false, port: None })),
+            restart_lock: tokio::sync::Mutex::new(()),
         }
+    }
+
+    pub async fn acquire_restart_lock(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.restart_lock.lock().await
     }
 
     pub fn stop(&self) {
@@ -161,7 +169,7 @@ impl NotifyService {
     }
 
     #[tool(description = "アーティファクトを操作する。create: 新規作成, update: 差分更新(old_str→new_str), rewrite: 全置換, get: 1件取得(全フィールド含む)")]
-    fn artifact(
+    async fn artifact(
         &self,
         Parameters(ArtifactParams {
             command,
@@ -191,7 +199,7 @@ impl NotifyService {
                     None,
                 )
             })?;
-        let worktree_id = &wt.id;
+        let worktree_id = wt.id.clone();
 
         let artifacts_dir = self
             .app_handle
@@ -199,15 +207,13 @@ impl NotifyService {
             .app_data_dir()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?
             .join("artifacts")
-            .join(worktree_id);
+            .join(&worktree_id);
 
         let artifact_path = artifacts_dir.join(format!("{}.json", id));
 
         if command == "get" {
-            let raw = tokio::task::block_in_place(|| {
-                fs::read_to_string(&artifact_path)
-                    .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))
-            })?;
+            let raw = tokio_fs::read_to_string(&artifact_path).await
+                .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))?;
             log::info!("[mcp] artifact command=get id={} worktree_id={}", id, worktree_id);
             return Ok(CallToolResult::success(vec![Content::text(raw)]));
         }
@@ -228,10 +234,8 @@ impl NotifyService {
                 let content = content.ok_or_else(|| {
                     McpError::invalid_params("create には content が必須です".to_string(), None)
                 })?;
-                tokio::task::block_in_place(|| {
-                    fs::create_dir_all(&artifacts_dir)
-                        .map_err(|e| McpError::internal_error(e.to_string(), None))
-                })?;
+                tokio_fs::create_dir_all(&artifacts_dir).await
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
                 ArtifactData { id: id.clone(), content_type, title, content, language, created_at: now, updated_at: now }
             }
             "update" => {
@@ -241,10 +245,8 @@ impl NotifyService {
                 let new_str = new_str.ok_or_else(|| {
                     McpError::invalid_params("update には new_str が必須です".to_string(), None)
                 })?;
-                let raw = tokio::task::block_in_place(|| {
-                    fs::read_to_string(&artifact_path)
-                        .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))
-                })?;
+                let raw = tokio_fs::read_to_string(&artifact_path).await
+                    .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))?;
                 let mut data: ArtifactData = serde_json::from_str(&raw)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
                 let count = data.content.matches(&old_str as &str).count();
@@ -262,10 +264,8 @@ impl NotifyService {
                 let content = content.ok_or_else(|| {
                     McpError::invalid_params("rewrite には content が必須です".to_string(), None)
                 })?;
-                let raw = tokio::task::block_in_place(|| {
-                    fs::read_to_string(&artifact_path)
-                        .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))
-                })?;
+                let raw = tokio_fs::read_to_string(&artifact_path).await
+                    .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))?;
                 let mut data: ArtifactData = serde_json::from_str(&raw)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
                 data.content = content;
@@ -280,10 +280,8 @@ impl NotifyService {
 
         let json = serde_json::to_string_pretty(&data)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        tokio::task::block_in_place(|| {
-            fs::write(&artifact_path, &json)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))
-        })?;
+        tokio_fs::write(&artifact_path, &json).await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         log::info!("[mcp] artifact command={} id={} worktree_id={}", command, id, worktree_id);
         self.app_handle
@@ -344,7 +342,7 @@ impl NotifyService {
     }
 
     #[tool(description = "List all registered repositories with their names and git remote URLs")]
-    fn oretachi_list_repository(
+    async fn oretachi_list_repository(
         &self,
         Parameters(_params): Parameters<ListRepositoryParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -355,7 +353,7 @@ impl NotifyService {
             .iter()
             .map(|repo| (repo.name.clone(), repo.path.clone()))
             .collect();
-        let repos: Vec<serde_json::Value> = tokio::task::block_in_place(|| {
+        let repos: Vec<serde_json::Value> = tokio::task::spawn_blocking(move || {
             paths
                 .iter()
                 .map(|(name, path)| {
@@ -363,7 +361,9 @@ impl NotifyService {
                     serde_json::json!({ "name": name, "remotes": remotes })
                 })
                 .collect()
-        });
+        })
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         let json = serde_json::to_string_pretty(&repos)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         log::info!("[mcp] oretachi_list_repository: {} repos", repos.len());
@@ -371,7 +371,7 @@ impl NotifyService {
     }
 
     #[tool(description = "アーティファクトを検索する。queryを省略すると全件返却。title/content/type/languageを対象に部分一致検索。結果はcontentを除いたメタデータのみ")]
-    fn search_artifact(
+    async fn search_artifact(
         &self,
         Parameters(SearchArtifactParams { repository, branch, query }): Parameters<SearchArtifactParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -390,7 +390,7 @@ impl NotifyService {
                     None,
                 )
             })?;
-        let worktree_id = &wt.id;
+        let worktree_id = wt.id.clone();
 
         let artifacts_dir = self
             .app_handle
@@ -398,12 +398,11 @@ impl NotifyService {
             .app_data_dir()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?
             .join("artifacts")
-            .join(worktree_id);
+            .join(&worktree_id);
 
-        let mut results: Vec<serde_json::Value> = Vec::new();
-
-        if artifacts_dir.exists() {
-            results = tokio::task::block_in_place(|| -> Result<Vec<serde_json::Value>, McpError> {
+        let query_log = query.clone();
+        let results: Vec<serde_json::Value> = if artifacts_dir.exists() {
+            tokio::task::spawn_blocking(move || -> Result<Vec<serde_json::Value>, McpError> {
                 let mut results = Vec::new();
                 let entries = fs::read_dir(&artifacts_dir)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -449,14 +448,18 @@ impl NotifyService {
                     b_time.cmp(&a_time)
                 });
                 Ok(results)
-            })?;
-        }
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))??
+        } else {
+            Vec::new()
+        };
 
         let json = serde_json::to_string_pretty(&results)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         log::info!(
             "[mcp] search_artifact query={:?} worktree_id={} count={}",
-            query, worktree_id, results.len()
+            query_log, worktree_id, results.len()
         );
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }

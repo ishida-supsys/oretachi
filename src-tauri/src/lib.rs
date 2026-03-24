@@ -141,7 +141,11 @@ async fn git_worktree_remove(
     worktree_path: String,
 ) -> Result<(), String> {
     // 削除対象ディレクトリをcwdとして掴んでいる子プロセスを先にkill
-    pty_manager.kill_sessions_in_dir(&worktree_path);
+    let killed = pty_manager.kill_sessions_in_dir(&worktree_path);
+    if killed > 0 {
+        // プロセスが完全に終了してファイルハンドルを解放するまで待機
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
     run_git(move || git_worktree::worktree_remove(&repo_path, &worktree_path)).await
 }
 
@@ -275,18 +279,17 @@ fn get_mcp_status(state: State<mcp_server::McpServerManager>) -> mcp_server::Mcp
 
 #[tauri::command]
 async fn restart_mcp_server(app_handle: tauri::AppHandle) -> Result<mcp_server::McpStatus, String> {
+    let manager = app_handle.state::<mcp_server::McpServerManager>();
+    // 同時に複数の restart が走らないよう排他ロックを取得する
+    let _lock = manager.acquire_restart_lock().await;
     let mcp_port = {
         let settings_manager = app_handle.state::<SettingsManager>();
         settings_manager.get().mcp_port
     };
-    {
-        let manager = app_handle.state::<mcp_server::McpServerManager>();
-        manager.stop();
-    }
+    manager.stop();
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     mcp_server::start_mcp_server(app_handle.clone(), mcp_port);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-    let manager = app_handle.state::<mcp_server::McpServerManager>();
     Ok(manager.get_status())
 }
 
@@ -441,6 +444,7 @@ pub fn run() {
         .manage(mcp_server::McpServerManager::new())
         .manage(ai_judge::ApprovalManager::new())
         .manage(ai_commit_message::CommitMessageManager::new())
+        .manage(task_executor::TaskGenerateManager::new())
         .manage(FsWatcherManager::new())
         .invoke_handler(tauri::generate_handler![
             pty_spawn,
@@ -482,6 +486,7 @@ pub fn run() {
             terminal_session::load_terminal_session,
             terminal_session::delete_terminal_session,
             task_executor::task_generate,
+            task_executor::cancel_task_generate,
             task_executor::write_temp_prompt,
             list_artifacts,
             read_artifact,

@@ -11,7 +11,12 @@ fn run_git_in(repo_path: &str, args: &[&str]) -> Result<String, String> {
         .map_err(|e| format!("git command error: {}", e))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("git {} failed: {}", args.join(" "), stderr));
+        let mut msg = format!("git {} failed: {}", args.join(" "), stderr);
+        // index.lock 競合の場合にリトライを促すヒントを追加
+        if stderr.contains("index.lock") || stderr.contains("Unable to create") {
+            msg.push_str("\n（別の git 操作が進行中の可能性があります。しばらく待ってから再試行してください）");
+        }
+        return Err(msg);
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }

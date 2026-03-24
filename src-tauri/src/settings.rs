@@ -384,8 +384,11 @@ impl SettingsManager {
     }
 
     pub fn save(&self, settings: AppSettings) -> Result<(), String> {
-        let path_guard = self.file_path.lock().unwrap();
-        let path = path_guard.as_ref().ok_or("Settings not initialized")?;
+        // Mutex の外でファイル I/O を行うため、先にパスをクローンしてロックを解放する
+        let path = {
+            let guard = self.file_path.lock().unwrap();
+            guard.as_ref().ok_or("Settings not initialized")?.clone()
+        };
 
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| format!("Dir create error: {}", e))?;
@@ -394,7 +397,7 @@ impl SettingsManager {
         let json =
             serde_json::to_string_pretty(&settings).map_err(|e| format!("JSON error: {}", e))?;
 
-        std::fs::write(path, json).map_err(|e| format!("Write error: {}", e))?;
+        std::fs::write(&path, json).map_err(|e| format!("Write error: {}", e))?;
 
         *self.settings.lock().unwrap() = settings;
         Ok(())

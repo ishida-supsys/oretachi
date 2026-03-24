@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
 const AI_AGENT_NAMES: &[&str] = &["claude", "gemini", "codex", "cline"];
+const MAX_PTY_SESSIONS: usize = 32;
 
 struct PtySession {
     writer: Box<dyn Write + Send>,
@@ -242,6 +243,15 @@ impl PtyManager {
         cwd: Option<String>,
     ) -> Result<u32, String> {
         log::debug!("[Terminal] pty_manager::spawn rows={} cols={} shell={:?} cwd={:?}", rows, cols, shell, cwd);
+        {
+            let sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            if sessions.len() >= MAX_PTY_SESSIONS {
+                return Err(format!(
+                    "PTYセッション数の上限（{}）に達しています。不要なターミナルを閉じてください",
+                    MAX_PTY_SESSIONS
+                ));
+            }
+        }
         let pty_system = native_pty_system();
 
         let size = PtySize {
@@ -503,7 +513,8 @@ impl PtyManager {
 
     /// 指定ディレクトリ以下をcwdとして持つ全PTYセッションをkillする。
     /// ワークツリー削除前にそのディレクトリを掴んでいる子プロセスを解放するために使用。
-    pub fn kill_sessions_in_dir(&self, dir: &str) {
+    /// 返り値: killしたセッション数（> 0 なら呼び出し側でプロセス終了待機が必要）
+    pub fn kill_sessions_in_dir(&self, dir: &str) -> usize {
         let target = std::path::Path::new(dir);
         let ids: Vec<u32> = {
             let sessions = self.sessions.lock().unwrap();
@@ -521,10 +532,7 @@ impl PtyManager {
             log::info!("[Terminal] kill_sessions_in_dir: killing session {} (worktree={})", id, dir);
             let _ = self.kill(*id);
         }
-        if !ids.is_empty() {
-            // プロセスが完全に終了するまで少し待機
-            std::thread::sleep(std::time::Duration::from_millis(200));
-        }
+        ids.len()
     }
 }
 
