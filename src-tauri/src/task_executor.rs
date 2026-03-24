@@ -37,6 +37,16 @@ request and repositories, and perform appropriate worktree operations.
   - The user explicitly refers to a previous task (e.g. "continue the task for X"):
     use the existing worktree only if the repository AND branch/name exactly match.
     Do not reuse a worktree just because the repository is the same.
+- When a specific branch name is provided in the request:
+  1. First check if any existing worktree uses that exact branch. If yes, use that
+     existing worktree (agent_worktree only, no add_worktree).
+  2. If NO existing worktree has that branch, you MUST still create a new worktree
+     with add_worktree + agent_worktree. Use the provided branch name as-is
+     (do not rename to worktree/{name} pattern). The branch may already exist in
+     git history — that is fine; the downstream worktree creation handles it.
+  - NEVER skip worktree creation just because the branch name looks like an existing
+    git branch. The ONLY reason to skip add_worktree is if a worktree with that exact
+    branch is already registered in the existing worktree list.
 
 ## Task Process Code Schema
 {
