@@ -60,7 +60,7 @@ request and repositories, and perform appropriate worktree operations.
 - agent_worktree: Launch an AI agent on the worktree's terminal with the given prompt. The worktree must already exist (either pre-existing or created via add_worktree).
 - When you want to add a NEW worktree and launch an agent, output BOTH add_worktree and agent_worktree as separate entries in the code array, in order.
 - When targeting an EXISTING worktree, output only agent_worktree (no add_worktree needed).
-- Branch names for new worktrees should follow the pattern "worktree/{descriptive-name}".
+- When no specific branch name is provided, branch names for new worktrees should follow the pattern "worktree/{descriptive-name}".
 - Repository names must match exactly what is in the repository list.
 
 ## User Request
