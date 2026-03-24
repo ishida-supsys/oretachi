@@ -372,7 +372,6 @@ onMounted(async () => {
       const ref = terminalRefs.get(id);
       const sid = ref?.sessionId;
       if (sid == null || !isDirty(sid)) continue;
-      clearDirty(sid);
       const terminal = ref?.getTerminal();
       if (terminal) {
         const url = renderToDataUrl(terminal);
@@ -380,6 +379,7 @@ onMounted(async () => {
           lastThumbnailUrls.set(id, url);
           emitTo("main", "sub-thumbnail-update", { terminalId: id, imageUrl: url });
         }
+        clearDirty(sid);
       }
     }
   }, 1000);

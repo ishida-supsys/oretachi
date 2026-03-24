@@ -1091,11 +1091,11 @@ onMounted(async () => {
       for (const [id, ref] of bundle.terminalRefs) {
         const sid = ref.sessionId;
         if (sid == null || !isDirty(sid)) continue;
-        clearDirty(sid);
         const terminal = ref.getTerminal();
         if (terminal) {
           const url = renderToDataUrl(terminal);
           if (url && url !== thumbnailUrls.get(id)) thumbnailUrls.set(id, url);
+          clearDirty(sid);
         }
       }
     }
