@@ -51,12 +51,12 @@ request and repositories, and perform appropriate worktree operations.
 ## Task Process Code Schema
 {
   "code": [
-    { "type": "add_worktree", "repository": "<repo_name>", "branch": "<branch_name>", "source_branch": "<source_branch_optional>" },
+    { "type": "add_worktree", "repository": "<repo_name>", "branch": "<branch_name>" },
     { "type": "agent_worktree", "repository": "<repo_name>", "branch": "<branch_name>", "prompt": "<instruction>" }
   ]
 }
 
-- add_worktree: Add a worktree for the specified repository and branch. Optionally specify source_branch to base the new worktree on a specific branch (e.g. "main", "origin/develop"). If source_branch starts with a remote name (e.g. "origin/..."), a fetch will be performed automatically.
+- add_worktree: Add a worktree for the specified repository and branch. Do NOT specify source_branch unless the user explicitly requests a specific base branch. When source_branch is omitted, git's default behavior (HEAD) is used — this is the desired default. If the user does specify a base branch, set source_branch to that value. If source_branch starts with a remote name (e.g. "origin/..."), a fetch will be performed automatically.
 - agent_worktree: Launch an AI agent on the worktree's terminal with the given prompt. The worktree must already exist (either pre-existing or created via add_worktree).
 - When you want to add a NEW worktree and launch an agent, output BOTH add_worktree and agent_worktree as separate entries in the code array, in order.
 - When targeting an EXISTING worktree, output only agent_worktree (no add_worktree needed).
