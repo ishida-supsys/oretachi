@@ -12,16 +12,10 @@ interface PtyExitPayload {
 type OutputHandler = (data: Uint8Array) => void;
 type ExitHandler = () => void;
 
-interface PendingSession {
-  onOutput: OutputHandler;
-  onExit: ExitHandler;
-  buffer: Uint8Array[];
-}
-
 const outputHandlers = new Map<number, OutputHandler>();
 const exitHandlers = new Map<number, ExitHandler>();
 const dirtySessionIds = new Set<number>();
-let pendingSession: PendingSession | null = null;
+const pendingBuffers = new Map<number, Uint8Array[]>();
 let initialized = false;
 
 async function init() {
@@ -34,8 +28,13 @@ async function init() {
     const handler = outputHandlers.get(sessionId);
     if (handler) {
       handler(new Uint8Array(data));
-    } else if (pendingSession) {
-      pendingSession.buffer.push(new Uint8Array(data));
+    } else {
+      let buf = pendingBuffers.get(sessionId);
+      if (!buf) {
+        buf = [];
+        pendingBuffers.set(sessionId, buf);
+      }
+      buf.push(new Uint8Array(data));
     }
   });
 
@@ -48,20 +47,20 @@ async function init() {
 // 初期化をモジュールロード時に開始
 const initPromise = init();
 
-/** spawn前にハンドラを予約する。sessionId確定前の出力をバッファリングする。 */
-export function reserveSession(onOutput: OutputHandler, onExit: ExitHandler): void {
-  pendingSession = { onOutput, onExit, buffer: [] };
-}
-
-/** sessionIdを確定し、バッファに溜まった出力をフラッシュする。 */
-export function activateSession(sessionId: number): void {
-  if (!pendingSession) return;
-  const { onOutput, onExit, buffer } = pendingSession;
-  pendingSession = null;
+/** sessionIdを確定してハンドラ登録し、バッファに溜まった出力をフラッシュする。 */
+export function activateSession(
+  sessionId: number,
+  onOutput: OutputHandler,
+  onExit: ExitHandler
+): void {
   outputHandlers.set(sessionId, onOutput);
   exitHandlers.set(sessionId, onExit);
-  for (const data of buffer) {
-    onOutput(data);
+  const buf = pendingBuffers.get(sessionId);
+  if (buf) {
+    pendingBuffers.delete(sessionId);
+    for (const data of buf) {
+      onOutput(data);
+    }
   }
 }
 
@@ -78,6 +77,7 @@ export function unregisterPtyHandlers(sessionId: number): void {
   outputHandlers.delete(sessionId);
   exitHandlers.delete(sessionId);
   dirtySessionIds.delete(sessionId);
+  pendingBuffers.delete(sessionId);
 }
 
 export function isDirty(sessionId: number): boolean {

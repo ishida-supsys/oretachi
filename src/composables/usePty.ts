@@ -1,7 +1,6 @@
 import { ref, onUnmounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  reserveSession,
   activateSession,
   registerPtyHandlers,
   unregisterPtyHandlers,
@@ -26,12 +25,6 @@ export function usePty() {
 
     await waitForInit();
 
-    // spawn前にハンドラを予約（spawn完了までの出力をバッファリング）
-    reserveSession(onOutput, () => {
-      isRunning.value = false;
-      onExit();
-    });
-
     const id = await invoke<number>("pty_spawn", {
       rows,
       cols,
@@ -42,8 +35,11 @@ export function usePty() {
     sessionId.value = id;
     isRunning.value = true;
 
-    // sessionIdを確定し、バッファをフラッシュ
-    activateSession(id);
+    // sessionIdを確定してハンドラ登録＆バッファフラッシュ
+    activateSession(id, onOutput, () => {
+      isRunning.value = false;
+      onExit();
+    });
   }
 
   async function write(data: string | Uint8Array): Promise<void> {
