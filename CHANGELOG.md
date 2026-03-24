@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-03-25
+
+### Fixed
+- Implement various security hardening measures
+
 ## [0.12.1] - 2026-03-25
 
 ### Fixed
@@ -26,6 +31,7 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.12.1...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.12.2...HEAD
+[0.12.2]: https://github.com/ishida-supsys/oretachi/compare/0.12.1...0.12.2
 [0.12.1]: https://github.com/ishida-supsys/oretachi/compare/0.12.0...0.12.1
 [0.12.0]: https://github.com/ishida-supsys/oretachi/releases/tag/0.12.0
