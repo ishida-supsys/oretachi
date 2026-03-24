@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, sync::{Arc, Mutex}, time::{SystemTime, UNIX_EPOCH}};
+use std::{fs, path::PathBuf, sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}}, time::{SystemTime, UNIX_EPOCH}};
 use tokio::fs as tokio_fs;
 
 use axum::{extract::State, http::StatusCode, routing::post, Json};
@@ -33,6 +33,9 @@ pub struct McpServerManager {
     status: Arc<Mutex<McpStatus>>,
     /// restart_mcp_server の同時呼び出しを防ぐ排他ロック
     restart_lock: tokio::sync::Mutex<()>,
+    /// サーバー起動のたびにインクリメントされる世代カウンタ
+    /// 旧世代のタスクが status を上書きするのを防ぐ
+    generation: Arc<AtomicU64>,
 }
 
 impl McpServerManager {
@@ -41,6 +44,7 @@ impl McpServerManager {
             shutdown_tx: Mutex::new(None),
             status: Arc::new(Mutex::new(McpStatus { running: false, port: None })),
             restart_lock: tokio::sync::Mutex::new(()),
+            generation: Arc::new(AtomicU64::new(0)),
         }
     }
 
@@ -587,8 +591,12 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
         *tx = Some(shutdown_tx);
     }
 
+    // 世代をインクリメントして旧タスクによる status 上書きを防ぐ
+    let my_generation = manager.generation.fetch_add(1, Ordering::SeqCst) + 1;
+
     // Arc クローンをタスクに渡す
     let status = Arc::clone(&manager.status);
+    let generation = Arc::clone(&manager.generation);
     drop(manager);
 
     tauri::async_runtime::spawn(async move {
@@ -625,10 +633,12 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
         write_port_file(&app_handle, port);
         log::info!("MCP server listening on http://127.0.0.1:{}/mcp", port);
 
-        // ステータス: 起動中
-        if let Ok(mut s) = status.lock() {
-            s.running = true;
-            s.port = Some(port);
+        // ステータス: 起動中（世代が一致する場合のみ更新）
+        if generation.load(Ordering::SeqCst) == my_generation {
+            if let Ok(mut s) = status.lock() {
+                s.running = true;
+                s.port = Some(port);
+            }
         }
 
         let mut rx = shutdown_rx;
@@ -644,10 +654,12 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
 
         log::info!("[mcp] Shutdown signal received, server stopped");
 
-        // ステータス: 停止
-        if let Ok(mut s) = status.lock() {
-            s.running = false;
-            s.port = None;
+        // ステータス: 停止（世代が一致する場合のみ更新 — 新世代が既に起動済みなら上書きしない）
+        if generation.load(Ordering::SeqCst) == my_generation {
+            if let Ok(mut s) = status.lock() {
+                s.running = false;
+                s.port = None;
+            }
         }
     });
 }

@@ -1,18 +1,23 @@
 use crate::ai_provider::{self, AiAgentKind};
 use crate::mcp_server::McpServerManager;
-use crate::process_utils::CancellableManager;
 use crate::settings::SettingsManager;
 use tauri::{AppHandle, State};
 use tokio::io::AsyncWriteExt;
 use tokio::time::{timeout, Duration};
 
-const TASK_GENERATE_KEY: &str = "__task_generate__";
-
-pub struct TaskGenerateManager(CancellableManager);
+pub struct TaskGenerateManager {
+    /// 直列化ロック — 同時呼び出しは前の実行完了まで待機する
+    exec_lock: tokio::sync::Mutex<()>,
+    /// 現在実行中のプロセス PID（キャンセル用）
+    current_pid: std::sync::Mutex<Option<u32>>,
+}
 
 impl TaskGenerateManager {
     pub fn new() -> Self {
-        Self(CancellableManager::new())
+        Self {
+            exec_lock: tokio::sync::Mutex::new(()),
+            current_pid: std::sync::Mutex::new(None),
+        }
     }
 }
 
@@ -131,9 +136,8 @@ pub async fn task_generate(
     manager: State<'_, TaskGenerateManager>,
     prompt: String,
 ) -> Result<String, String> {
-    if manager.0.is_in_progress(TASK_GENERATE_KEY)? {
-        return Err("タスク生成が既に実行中です。完了を待つかキャンセルしてください".to_string());
-    }
+    // 前の実行が完了するまで待機（拒否ではなく直列化）
+    let _exec_guard = manager.exec_lock.lock().await;
     let settings = settings_state.get();
     let mcp_status = mcp_state.get_status();
 
@@ -179,8 +183,12 @@ pub async fn task_generate(
             format!("Failed to serialize MCP config: {}", e)
         })?;
 
-        let config_path =
-            std::env::temp_dir().join(format!("oretachi-task-mcp-{}.json", std::process::id()));
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let config_path = std::env::temp_dir()
+            .join(format!("oretachi-task-mcp-{}-{}.json", std::process::id(), ts));
         std::fs::write(&config_path, &config_str).map_err(|e| {
             log::error!("[TaskGenerate] Failed to write MCP config: {}", e);
             format!("Failed to write MCP config: {}", e)
@@ -242,9 +250,9 @@ pub async fn task_generate(
     let pid = child.id();
 
     // PID を登録してキャンセル可能にする
-    if let Some(pid) = pid {
-        if let Err(e) = manager.0.register(TASK_GENERATE_KEY.to_string(), pid) {
-            log::warn!("[TaskGenerate] Failed to register PID: {}", e);
+    if let Some(p) = pid {
+        if let Ok(mut guard) = manager.current_pid.lock() {
+            *guard = Some(p);
         }
     }
 
@@ -252,12 +260,15 @@ pub async fn task_generate(
 
     // タイムアウト時はプロセスをkill
     if wait_result.is_err() {
-        if let Some(pid) = pid {
-            crate::process_utils::kill_process_tree(pid);
+        if let Some(p) = pid {
+            crate::process_utils::kill_process_tree(p);
         }
     }
 
-    let _ = manager.0.remove(TASK_GENERATE_KEY);
+    // PID クリア（exec_guard は関数末尾で drop され次の呼び出しが解放される）
+    if let Ok(mut guard) = manager.current_pid.lock() {
+        *guard = None;
+    }
 
     // MCP config 一時ファイルをクリーンアップ
     if let Some(ref path) = mcp_config_temp_path {
@@ -300,7 +311,15 @@ pub async fn task_generate(
 
 #[tauri::command]
 pub fn cancel_task_generate(manager: State<'_, TaskGenerateManager>) -> Result<(), String> {
-    manager.0.cancel(TASK_GENERATE_KEY)
+    let pid = manager
+        .current_pid
+        .lock()
+        .map_err(|e| format!("lock error: {}", e))?
+        .take();
+    if let Some(p) = pid {
+        crate::process_utils::kill_process_tree(p);
+    }
+    Ok(())
 }
 
 #[tauri::command]
