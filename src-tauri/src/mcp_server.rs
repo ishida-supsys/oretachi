@@ -204,8 +204,10 @@ impl NotifyService {
         let artifact_path = artifacts_dir.join(format!("{}.json", id));
 
         if command == "get" {
-            let raw = fs::read_to_string(&artifact_path)
-                .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))?;
+            let raw = tokio::task::block_in_place(|| {
+                fs::read_to_string(&artifact_path)
+                    .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))
+            })?;
             log::info!("[mcp] artifact command=get id={} worktree_id={}", id, worktree_id);
             return Ok(CallToolResult::success(vec![Content::text(raw)]));
         }
@@ -226,8 +228,10 @@ impl NotifyService {
                 let content = content.ok_or_else(|| {
                     McpError::invalid_params("create には content が必須です".to_string(), None)
                 })?;
-                fs::create_dir_all(&artifacts_dir)
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                tokio::task::block_in_place(|| {
+                    fs::create_dir_all(&artifacts_dir)
+                        .map_err(|e| McpError::internal_error(e.to_string(), None))
+                })?;
                 ArtifactData { id: id.clone(), content_type, title, content, language, created_at: now, updated_at: now }
             }
             "update" => {
@@ -237,8 +241,10 @@ impl NotifyService {
                 let new_str = new_str.ok_or_else(|| {
                     McpError::invalid_params("update には new_str が必須です".to_string(), None)
                 })?;
-                let raw = fs::read_to_string(&artifact_path)
-                    .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))?;
+                let raw = tokio::task::block_in_place(|| {
+                    fs::read_to_string(&artifact_path)
+                        .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))
+                })?;
                 let mut data: ArtifactData = serde_json::from_str(&raw)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
                 let count = data.content.matches(&old_str as &str).count();
@@ -256,8 +262,10 @@ impl NotifyService {
                 let content = content.ok_or_else(|| {
                     McpError::invalid_params("rewrite には content が必須です".to_string(), None)
                 })?;
-                let raw = fs::read_to_string(&artifact_path)
-                    .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))?;
+                let raw = tokio::task::block_in_place(|| {
+                    fs::read_to_string(&artifact_path)
+                        .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))
+                })?;
                 let mut data: ArtifactData = serde_json::from_str(&raw)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
                 data.content = content;
@@ -272,8 +280,10 @@ impl NotifyService {
 
         let json = serde_json::to_string_pretty(&data)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        fs::write(&artifact_path, &json)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        tokio::task::block_in_place(|| {
+            fs::write(&artifact_path, &json)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))
+        })?;
 
         log::info!("[mcp] artifact command={} id={} worktree_id={}", command, id, worktree_id);
         self.app_handle
@@ -340,14 +350,20 @@ impl NotifyService {
     ) -> Result<CallToolResult, McpError> {
         let settings_manager = self.app_handle.state::<SettingsManager>();
         let settings = settings_manager.get();
-        let repos: Vec<serde_json::Value> = settings
+        let paths: Vec<(String, String)> = settings
             .repositories
             .iter()
-            .map(|repo| {
-                let remotes = get_git_remotes(&repo.path);
-                serde_json::json!({ "name": repo.name, "remotes": remotes })
-            })
+            .map(|repo| (repo.name.clone(), repo.path.clone()))
             .collect();
+        let repos: Vec<serde_json::Value> = tokio::task::block_in_place(|| {
+            paths
+                .iter()
+                .map(|(name, path)| {
+                    let remotes = get_git_remotes(path);
+                    serde_json::json!({ "name": name, "remotes": remotes })
+                })
+                .collect()
+        });
         let json = serde_json::to_string_pretty(&repos)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         log::info!("[mcp] oretachi_list_repository: {} repos", repos.len());
@@ -387,49 +403,53 @@ impl NotifyService {
         let mut results: Vec<serde_json::Value> = Vec::new();
 
         if artifacts_dir.exists() {
-            let entries = fs::read_dir(&artifacts_dir)
-                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-            for entry in entries {
-                let entry = entry.map_err(|e| McpError::internal_error(e.to_string(), None))?;
-                let path = entry.path();
-                if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                    continue;
-                }
-                let raw = match fs::read_to_string(&path) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                let data: ArtifactData = match serde_json::from_str(&raw) {
-                    Ok(d) => d,
-                    Err(_) => continue,
-                };
-                if let Some(ref q) = query {
-                    let q_lower = q.to_lowercase();
-                    let matches = data.title.to_lowercase().contains(&q_lower)
-                        || data.content.to_lowercase().contains(&q_lower)
-                        || data.content_type.to_lowercase().contains(&q_lower)
-                        || data.language.as_deref().unwrap_or("").to_lowercase().contains(&q_lower);
-                    if !matches {
+            results = tokio::task::block_in_place(|| -> Result<Vec<serde_json::Value>, McpError> {
+                let mut results = Vec::new();
+                let entries = fs::read_dir(&artifacts_dir)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                for entry in entries {
+                    let entry = entry.map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                    let path = entry.path();
+                    if path.extension().and_then(|e| e.to_str()) != Some("json") {
                         continue;
                     }
+                    let raw = match fs::read_to_string(&path) {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    let data: ArtifactData = match serde_json::from_str(&raw) {
+                        Ok(d) => d,
+                        Err(_) => continue,
+                    };
+                    if let Some(ref q) = query {
+                        let q_lower = q.to_lowercase();
+                        let matches = data.title.to_lowercase().contains(&q_lower)
+                            || data.content.to_lowercase().contains(&q_lower)
+                            || data.content_type.to_lowercase().contains(&q_lower)
+                            || data.language.as_deref().unwrap_or("").to_lowercase().contains(&q_lower);
+                        if !matches {
+                            continue;
+                        }
+                    }
+                    let mut meta = serde_json::json!({
+                        "id": data.id,
+                        "type": data.content_type,
+                        "title": data.title,
+                        "created_at": data.created_at,
+                        "updated_at": data.updated_at,
+                    });
+                    if let Some(lang) = data.language {
+                        meta["language"] = serde_json::Value::String(lang);
+                    }
+                    results.push(meta);
                 }
-                let mut meta = serde_json::json!({
-                    "id": data.id,
-                    "type": data.content_type,
-                    "title": data.title,
-                    "created_at": data.created_at,
-                    "updated_at": data.updated_at,
+                results.sort_by(|a, b| {
+                    let a_time = a.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let b_time = b.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+                    b_time.cmp(&a_time)
                 });
-                if let Some(lang) = data.language {
-                    meta["language"] = serde_json::Value::String(lang);
-                }
-                results.push(meta);
-            }
-            results.sort_by(|a, b| {
-                let a_time = a.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
-                let b_time = b.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
-                b_time.cmp(&a_time)
-            });
+                Ok(results)
+            })?;
         }
 
         let json = serde_json::to_string_pretty(&results)

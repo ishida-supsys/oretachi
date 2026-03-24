@@ -11,6 +11,7 @@ import { useWorktreeFrame } from "./composables/useWorktreeFrame";
 import { useSettings } from "./composables/useSettings";
 import { useHotkeyListener, useAltCharKeyListener } from "./composables/useHotkeys";
 import { renderToDataUrl } from "./composables/useTerminalThumbnail";
+import { isDirty, clearDirty } from "./composables/usePtyDispatcher";
 import { useWindowFocus } from "./composables/useWindowFocus";
 import { runApprovalLoop } from "./utils/autoApproval";
 import type { TerminalForApproval } from "./utils/autoApproval";
@@ -364,11 +365,14 @@ onMounted(async () => {
     await appWindow.destroy();
   });
 
-  // サムネイル送信ループ（変化があった場合のみ送信）
+  // サムネイル送信ループ（pty出力があった場合のみ送信）
   const lastThumbnailUrls = new Map<number, string>();
   thumbnailInterval = setInterval(() => {
     for (const [id] of terminalEntries) {
       const ref = terminalRefs.get(id);
+      const sid = ref?.sessionId;
+      if (sid == null || !isDirty(sid)) continue;
+      clearDirty(sid);
       const terminal = ref?.getTerminal();
       if (terminal) {
         const url = renderToDataUrl(terminal);

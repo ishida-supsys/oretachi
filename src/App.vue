@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, nextTick, onMounted, computed, watch } from "vue";
 import { renderToDataUrl } from "./composables/useTerminalThumbnail";
+import { isDirty, clearDirty } from "./composables/usePtyDispatcher";
 import { listen, emitTo } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import TerminalView from "./components/TerminalView.vue";
@@ -1083,11 +1084,14 @@ onMounted(async () => {
     }
   }
 
-  // ローカルターミナル用サムネイル生成ループ（変化があった場合のみ更新）
+  // ローカルターミナル用サムネイル生成ループ（pty出力があった場合のみ更新）
   setInterval(() => {
     for (const [wid, bundle] of worktreeFrameBundles) {
       if (isDetached(wid)) continue;
       for (const [id, ref] of bundle.terminalRefs) {
+        const sid = ref.sessionId;
+        if (sid == null || !isDirty(sid)) continue;
+        clearDirty(sid);
         const terminal = ref.getTerminal();
         if (terminal) {
           const url = renderToDataUrl(terminal);
