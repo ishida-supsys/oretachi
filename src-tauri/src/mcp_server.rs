@@ -618,6 +618,12 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
             Ok(l) => l,
             Err(e) => {
                 log::error!("Failed to bind MCP server: {}", e);
+                if generation.load(Ordering::SeqCst) == my_generation {
+                    if let Ok(mut s) = status.lock() {
+                        s.running = false;
+                        s.port = None;
+                    }
+                }
                 return;
             }
         };
@@ -626,6 +632,12 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
             Ok(addr) => addr.port(),
             Err(e) => {
                 log::error!("Failed to get MCP server local addr: {}", e);
+                if generation.load(Ordering::SeqCst) == my_generation {
+                    if let Ok(mut s) = status.lock() {
+                        s.running = false;
+                        s.port = None;
+                    }
+                }
                 return;
             }
         };
