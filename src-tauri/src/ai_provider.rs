@@ -126,13 +126,19 @@ pub struct AiExecutionPlan {
     pub stdin_content: String,
 }
 
-/// Windows では `cmd /c <name>`, それ以外では `<name>` を返す
+/// Windows では短いコマンド名は `cmd /c <name>`、フルパスは直接実行、それ以外では `<name>` を返す。
+/// フルパスの場合は `cmd /c` を介さない（スペースを含むパスでも Rust が正しく処理する）。
 pub fn make_platform_cmd(name: &str) -> (String, Vec<String>) {
     #[cfg(target_os = "windows")]
-    return (
-        "cmd".to_string(),
-        vec!["/c".to_string(), name.to_string()],
-    );
+    {
+        if std::path::Path::new(name).is_absolute() {
+            return (name.to_string(), vec![]);
+        }
+        return (
+            "cmd".to_string(),
+            vec!["/c".to_string(), name.to_string()],
+        );
+    }
     #[cfg(not(target_os = "windows"))]
     return (name.to_string(), vec![]);
 }
@@ -424,10 +430,9 @@ mod tests {
     #[test]
     fn test_build_execution_plan_windows_uses_cmd() {
         let plan = build_execution_plan(&AiAgentKind::ClaudeCode, "p", "{}", "m", false);
-        assert_eq!(plan.program, "cmd");
-        assert!(plan.args.contains(&"/c".to_string()));
-        // resolve_agent_command によりフルパスまたは短い名前が入る
-        assert!(plan.args.iter().any(|a| a.contains("claude")));
+        // resolve_agent_command がフルパスを返した場合は直接実行、短い名前の場合は cmd /c 経由
+        let mut all = std::iter::once(&plan.program).chain(plan.args.iter());
+        assert!(all.any(|a| a.contains("claude")));
     }
 
     #[cfg(not(target_os = "windows"))]
