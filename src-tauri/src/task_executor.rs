@@ -160,7 +160,7 @@ pub async fn task_generate(
             format!("Failed to write MCP config: {}", e)
         })?;
 
-        let (prog, mut a) = ai_provider::make_platform_cmd("claude");
+        let (prog, mut a) = ai_provider::make_platform_cmd(&ai_provider::resolve_agent_command(&AiAgentKind::ClaudeCode));
 
         a.extend([
             "-p".to_string(),
@@ -288,6 +288,7 @@ mod tests {
             branch_name: branch.to_string(),
             hotkey_char: None,
             auto_approval: None,
+            auto_approval_prompt: None,
         }
     }
 

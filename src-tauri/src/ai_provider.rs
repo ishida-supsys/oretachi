@@ -27,6 +27,7 @@ pub struct AiAgentInfo {
     pub kind: AiAgentKind,
     pub name: String,
     pub command: String,
+    pub full_path: Option<String>,
 }
 
 struct AiAgentDef {
@@ -58,27 +59,60 @@ const AI_AGENT_DEFINITIONS: &[AiAgentDef] = &[
     },
 ];
 
+/// コマンド名からフルパスを解決する。見つからなければ None。
+fn resolve_command_path(name: &str) -> Option<String> {
+    #[cfg(target_os = "windows")]
+    let which_cmd = "where";
+    #[cfg(not(target_os = "windows"))]
+    let which_cmd = "which";
+
+    make_command(which_cmd)
+        .arg(name)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .map(|s| s.trim().to_string())
+        })
+        .filter(|s| !s.is_empty())
+}
+
+/// AiAgentKind に対応するコマンドのフルパスを解決する。
+/// Windows では `.cmd` を先に試す。見つからなければ短いコマンド名を返す。
+pub fn resolve_agent_command(kind: &AiAgentKind) -> String {
+    let short_name = match kind {
+        AiAgentKind::ClaudeCode => "claude",
+        AiAgentKind::GeminiCli => "gemini",
+        AiAgentKind::CodexCli => "codex",
+        AiAgentKind::ClineCli => "cline",
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(path) = resolve_command_path(&format!("{}.cmd", short_name)) {
+            return path;
+        }
+    }
+
+    resolve_command_path(short_name).unwrap_or_else(|| short_name.to_string())
+}
+
 pub fn detect_ai_agents() -> Vec<AiAgentInfo> {
     let mut result = Vec::new();
 
     for def in AI_AGENT_DEFINITIONS {
         for &cmd in def.commands {
-            #[cfg(target_os = "windows")]
-            let which_cmd = "where";
-            #[cfg(not(target_os = "windows"))]
-            let which_cmd = "which";
-
-            let output = make_command(which_cmd).arg(cmd).output();
-
-            if let Ok(out) = output {
-                if out.status.success() {
-                    result.push(AiAgentInfo {
-                        kind: def.kind.clone(),
-                        name: def.name.to_string(),
-                        command: cmd.to_string(),
-                    });
-                    break;
-                }
+            if let Some(full_path) = resolve_command_path(cmd) {
+                result.push(AiAgentInfo {
+                    kind: def.kind.clone(),
+                    name: def.name.to_string(),
+                    command: cmd.to_string(),
+                    full_path: Some(full_path),
+                });
+                break;
             }
         }
     }
@@ -117,9 +151,10 @@ pub fn build_execution_plan(
     model: &str,
     disable_mcp: bool,
 ) -> AiExecutionPlan {
+    let resolved = resolve_agent_command(kind);
     match kind {
         AiAgentKind::ClaudeCode => {
-            let (program, mut args) = make_platform_cmd("claude");
+            let (program, mut args) = make_platform_cmd(&resolved);
             args.extend([
                 "--model".to_string(),
                 model.to_string(),
@@ -135,7 +170,7 @@ pub fn build_execution_plan(
             AiExecutionPlan { program, args, stdin_content: prompt.to_string() }
         }
         AiAgentKind::GeminiCli => {
-            let (program, mut args) = make_platform_cmd("gemini");
+            let (program, mut args) = make_platform_cmd(&resolved);
             args.extend(["--model".to_string(), model.to_string()]);
             AiExecutionPlan {
                 program,
@@ -144,7 +179,7 @@ pub fn build_execution_plan(
             }
         }
         AiAgentKind::CodexCli => {
-            let (program, mut args) = make_platform_cmd("codex");
+            let (program, mut args) = make_platform_cmd(&resolved);
             args.extend(["--model".to_string(), model.to_string(), "-q".to_string()]);
             AiExecutionPlan {
                 program,
@@ -153,7 +188,7 @@ pub fn build_execution_plan(
             }
         }
         AiAgentKind::ClineCli => {
-            let (program, mut args) = make_platform_cmd("cline");
+            let (program, mut args) = make_platform_cmd(&resolved);
             args.extend(["--prompt".to_string(), format!("{}{}", prompt, json_schema_prompt_suffix(json_schema))]);
             AiExecutionPlan { program, args, stdin_content: String::new() }
         }
@@ -391,7 +426,8 @@ mod tests {
         let plan = build_execution_plan(&AiAgentKind::ClaudeCode, "p", "{}", "m", false);
         assert_eq!(plan.program, "cmd");
         assert!(plan.args.contains(&"/c".to_string()));
-        assert!(plan.args.contains(&"claude".to_string()));
+        // resolve_agent_command によりフルパスまたは短い名前が入る
+        assert!(plan.args.iter().any(|a| a.contains("claude")));
     }
 
     #[cfg(not(target_os = "windows"))]
