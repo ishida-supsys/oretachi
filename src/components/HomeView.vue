@@ -65,7 +65,7 @@ function registerColumn(el: HTMLElement | null, index: number) {
 
 // 削除アニメーション用
 const hiddenWorktrees = reactive(new Set<string>());
-let pendingFlipPositions: Map<string, DOMRect> | null = null;
+let autoAnimateDisableDepth = 0;
 
 async function fadeOutCard(worktreeId: string): Promise<void> {
   const el = cardElements.get(worktreeId);
@@ -78,19 +78,22 @@ async function fadeOutCard(worktreeId: string): Promise<void> {
   await anim.finished;
 }
 
-function hideCard(worktreeId: string): void {
+function hideCard(worktreeId: string): Map<string, DOMRect> {
   hiddenWorktrees.add(worktreeId);
   // splice 前に残りカードの位置を記録し、autoAnimate を無効化（FLIP に委ねる）
-  pendingFlipPositions = capturePositions();
-  for (const ctrl of columnControllers.values()) ctrl.disable();
+  const positions = capturePositions();
+  if (++autoAnimateDisableDepth === 1) {
+    for (const ctrl of columnControllers.values()) ctrl.disable();
+  }
+  return positions;
 }
 
-function animateAfterRemove(): void {
-  if (pendingFlipPositions) {
-    animateFlip(pendingFlipPositions);
-    pendingFlipPositions = null;
+function animateAfterRemove(positions: Map<string, DOMRect>): void {
+  animateFlip(positions);
+  if (--autoAnimateDisableDepth <= 0) {
+    autoAnimateDisableDepth = 0;
+    for (const ctrl of columnControllers.values()) ctrl.enable();
   }
-  for (const ctrl of columnControllers.values()) ctrl.enable();
 }
 
 function unhideCard(worktreeId: string): void {

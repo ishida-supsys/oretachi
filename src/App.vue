@@ -489,6 +489,7 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
       goHome();
     }
 
+    let savedPositions: Map<string, DOMRect> | undefined;
     try {
       await removeWorktree(
         worktreeId,
@@ -499,13 +500,13 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
         },
         async () => {
           await homeViewRef.value?.fadeOutCard(worktreeId);
-          homeViewRef.value?.hideCard(worktreeId);
+          savedPositions = homeViewRef.value?.hideCard(worktreeId);
         },
       );
       await nextTick();
-      homeViewRef.value?.animateAfterRemove();
+      if (savedPositions) homeViewRef.value?.animateAfterRemove(savedPositions);
     } catch (e) {
-      homeViewRef.value?.animateAfterRemove();
+      if (savedPositions) homeViewRef.value?.animateAfterRemove(savedPositions);
       await message(t("deleteFailed", { error: e }), { kind: "error" });
     } finally {
       homeViewRef.value?.unhideCard(worktreeId);
