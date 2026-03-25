@@ -308,7 +308,7 @@ async fn prepare_for_relaunch(app_handle: tauri::AppHandle) -> Result<(), String
         .stop_and_wait(std::time::Duration::from_secs(3))
         .await;
     if !completed {
-        log::warn!("MCP server did not shut down within timeout before relaunch");
+        return Err("MCP server did not shut down within timeout".into());
     }
     Ok(())
 }
