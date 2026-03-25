@@ -108,6 +108,47 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
   }
 }
 
+/** ワークツリーの順序を変更（fromId を toId の位置に移動）。保存は行わない */
+function reorderWorktree(fromId: string, toId: string): void {
+  if (fromId === toId) return;
+
+  const fromIdx = worktrees.value.findIndex((w) => w.id === fromId);
+  const toIdx = worktrees.value.findIndex((w) => w.id === toId);
+  if (fromIdx === -1 || toIdx === -1) return;
+
+  const [item] = worktrees.value.splice(fromIdx, 1);
+  worktrees.value.splice(toIdx, 0, item);
+
+  const fromSettingsIdx = settings.value.worktrees.findIndex((w) => w.id === fromId);
+  const toSettingsIdx = settings.value.worktrees.findIndex((w) => w.id === toId);
+  if (fromSettingsIdx !== -1 && toSettingsIdx !== -1) {
+    const [settingsItem] = settings.value.worktrees.splice(fromSettingsIdx, 1);
+    settings.value.worktrees.splice(toSettingsIdx, 0, settingsItem);
+  }
+}
+
+/** 現在の worktrees 順序を設定に保存する */
+function saveWorktreeOrder(): void {
+  scheduleSave();
+}
+
+/** ワークツリーの順序を指定された ID 順に復元する。スナップショット外の ID は末尾に追加 */
+function restoreWorktreeOrder(orderIds: string[]): void {
+  const orderSet = new Set(orderIds);
+
+  const sorted = orderIds
+    .map((id) => worktrees.value.find((w) => w.id === id))
+    .filter((w): w is typeof worktrees.value[number] => w !== undefined);
+  const extra = worktrees.value.filter((w) => !orderSet.has(w.id));
+  worktrees.value = [...sorted, ...extra];
+
+  const sortedSettings = orderIds
+    .map((id) => settings.value.worktrees.find((w) => w.id === id))
+    .filter((w): w is typeof settings.value.worktrees[number] => w !== undefined);
+  const extraSettings = settings.value.worktrees.filter((w) => !orderSet.has(w.id));
+  settings.value.worktrees = [...sortedSettings, ...extraSettings];
+}
+
 /** ローカルブランチ一覧を取得 */
 async function listBranches(repositoryId: string): Promise<string[]> {
   const repoEntry = settings.value.repositories.find((r) => r.id === repositoryId);
@@ -182,6 +223,9 @@ export function useWorktrees() {
     commitWorktree,
     rollbackWorktree,
     removeWorktree,
+    reorderWorktree,
+    saveWorktreeOrder,
+    restoreWorktreeOrder,
     listBranches,
     addTerminal,
     removeTerminal,
