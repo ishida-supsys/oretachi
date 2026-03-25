@@ -7,7 +7,7 @@ const { t } = useI18n();
 import WorktreeCard from "./WorktreeCard.vue";
 import TaskCard from "./TaskCard.vue";
 import { useMasonryLayout } from "../composables/useMasonryLayout";
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, reactive, ref, watch } from "vue";
 import autoAnimate from "@formkit/auto-animate";
 import type { AnimationController } from "@formkit/auto-animate";
 
@@ -62,6 +62,30 @@ function registerColumn(el: HTMLElement | null, index: number) {
     columnControllers.set(index, autoAnimate(el, { duration: 250 }));
   }
 }
+
+// 削除アニメーション用
+const hiddenWorktrees = reactive(new Set<string>());
+
+async function fadeOutCard(worktreeId: string): Promise<void> {
+  const el = cardElements.get(worktreeId);
+  if (!el) return;
+  const anim = el.animate([{ opacity: 1 }, { opacity: 0 }], {
+    duration: 250,
+    easing: "ease-out",
+    fill: "forwards",
+  });
+  await anim.finished;
+}
+
+function hideCard(worktreeId: string): void {
+  hiddenWorktrees.add(worktreeId);
+}
+
+function unhideCard(worktreeId: string): void {
+  hiddenWorktrees.delete(worktreeId);
+}
+
+defineExpose({ fadeOutCard, hideCard, unhideCard });
 
 // D&D中はauto-animateを無効化してカスタムFLIPに委ねる
 watch(draggingId, (id) => {
@@ -211,6 +235,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
             v-for="worktree in col"
             :key="worktree.id"
             :ref="(el) => registerCard(worktree.id, el as HTMLElement)"
+            v-show="!hiddenWorktrees.has(worktree.id)"
             class="card-drop-target"
             @dragover="onCardDragOver(worktree.id, $event)"
             @drop="onCardDrop"
