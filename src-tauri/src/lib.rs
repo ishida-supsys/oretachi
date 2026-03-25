@@ -7,6 +7,7 @@ mod ide_launcher;
 pub mod mcp_server;
 mod process_utils;
 mod pty_manager;
+mod report_db;
 mod settings;
 mod task_executor;
 mod terminal_session;
@@ -135,16 +136,23 @@ async fn git_validate_repo(path: String) -> Result<bool, String> {
 
 #[tauri::command]
 async fn git_worktree_add(
+    app_handle: tauri::AppHandle,
     repo_path: String,
     worktree_path: String,
     branch_name: String,
     source_branch: Option<String>,
 ) -> Result<bool, String> {
-    run_git(move || git_worktree::worktree_add(&repo_path, &worktree_path, &branch_name, source_branch.as_deref())).await
+    let bn = branch_name.clone();
+    let result = run_git(move || git_worktree::worktree_add(&repo_path, &worktree_path, &branch_name, source_branch.as_deref())).await?;
+    if let Some(pool) = app_handle.try_state::<report_db::ReportPool>() {
+        let _ = report_db::insert(&pool.0, "worktree_change:add", &bn).await;
+    }
+    Ok(result)
 }
 
 #[tauri::command]
 async fn git_worktree_remove(
+    app_handle: tauri::AppHandle,
     pty_manager: State<'_, PtyManager>,
     repo_path: String,
     worktree_path: String,
@@ -155,7 +163,12 @@ async fn git_worktree_remove(
         // プロセスが完全に終了してファイルハンドルを解放するまで待機
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
-    run_git(move || git_worktree::worktree_remove(&repo_path, &worktree_path)).await
+    let wp = worktree_path.clone();
+    run_git(move || git_worktree::worktree_remove(&repo_path, &worktree_path)).await?;
+    if let Some(pool) = app_handle.try_state::<report_db::ReportPool>() {
+        let _ = report_db::insert(&pool.0, "worktree_change:remove", &wp).await;
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -358,12 +371,28 @@ fn read_artifact(
 }
 
 #[tauri::command]
-fn delete_artifacts(app_handle: tauri::AppHandle, worktree_id: String) -> Result<(), String> {
+async fn delete_artifacts(app_handle: tauri::AppHandle, worktree_id: String) -> Result<(), String> {
     let dir = artifacts_dir(&app_handle, &worktree_id)?;
     if dir.exists() {
         std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+        if let Some(pool) = app_handle.try_state::<report_db::ReportPool>() {
+            let _ = report_db::insert(&pool.0, "artifact_change:delete", &worktree_id).await;
+        }
     }
     Ok(())
+}
+
+// ─── レポートコマンド ─────────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn get_report_summary(
+    app_handle: tauri::AppHandle,
+    date: String,
+) -> Result<report_db::ReportSummary, String> {
+    let pool = app_handle
+        .try_state::<report_db::ReportPool>()
+        .ok_or_else(|| "Report DB not initialized".to_string())?;
+    report_db::summary_for_date(&pool.0, &date).await
 }
 
 // ─── FS ウォッチャーコマンド ──────────────────────────────────────────────────
@@ -468,6 +497,7 @@ pub fn run() {
         .manage(ai_commit_message::CommitMessageManager::new())
         .manage(task_executor::TaskGenerateManager::new())
         .manage(FsWatcherManager::new())
+        // ReportPool は setup() 内で非同期初期化するため、ここでは登録しない
         .invoke_handler(tauri::generate_handler![
             pty_spawn,
             pty_write,
@@ -520,8 +550,25 @@ pub fn run() {
             settings::copy_custom_sound,
             settings::read_audio_file,
             apply_acrylic_effect,
+            get_report_summary,
         ])
         .setup(|app| {
+            // レポート DB を非同期で初期化（失敗してもアプリ起動はブロックしない）
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    match report_db::init_report_db(&handle).await {
+                        Ok(pool) => {
+                            handle.manage(report_db::ReportPool(pool));
+                            log::debug!("[ReportDB] Initialized successfully");
+                        }
+                        Err(e) => {
+                            log::warn!("[ReportDB] Failed to initialize: {}", e);
+                        }
+                    }
+                });
+            }
+
             // .env 読み込み（Vite の .env 規約に準拠）
             let _ = dotenvy::from_filename(".env");
             if cfg!(debug_assertions) {

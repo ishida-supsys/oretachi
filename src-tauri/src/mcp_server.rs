@@ -315,6 +315,11 @@ impl NotifyService {
                 "command": command,
             }))
             .ok();
+        if command == "create" {
+            if let Some(pool) = self.app_handle.try_state::<crate::report_db::ReportPool>() {
+                let _ = crate::report_db::insert(&pool.inner().0, "artifact_change:create", &id).await;
+            }
+        }
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 

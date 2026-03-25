@@ -1,7 +1,7 @@
 use crate::ai_provider::{self, AiAgentKind};
 use crate::process_utils::CancellableManager;
 use crate::settings::SettingsManager;
-use tauri::State;
+use tauri::{Manager, State};
 
 const TIMEOUT_SECS: u64 = 120;
 
@@ -42,6 +42,7 @@ impl std::ops::Deref for CommitMessageManager {
 
 #[tauri::command]
 pub async fn generate_commit_message(
+    app_handle: tauri::AppHandle,
     state: State<'_, CommitMessageManager>,
     settings_state: State<'_, SettingsManager>,
     repo_path: String,
@@ -120,11 +121,15 @@ pub async fn generate_commit_message(
         .trim()
         .to_string();
 
-    if body.is_empty() {
-        Ok(subject)
+    let result = if body.is_empty() {
+        subject.clone()
     } else {
-        Ok(format!("{}\n\n{}", subject, body))
+        format!("{}\n\n{}", subject, body)
+    };
+    if let Some(pool) = app_handle.try_state::<crate::report_db::ReportPool>() {
+        let _ = crate::report_db::insert(&pool.0, "ai_result:commit_message", &subject).await;
     }
+    Ok(result)
 }
 
 #[tauri::command]

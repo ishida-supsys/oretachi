@@ -560,6 +560,21 @@ function getSoundLabel(sound: string | null | undefined): string {
       </div>
     </div>
 
+    <!-- ターミナル猫 -->
+    <div class="field-group">
+      <label class="field-label">{{ t('homeCat.label') }}</label>
+      <div class="row-input row-input--inline">
+        <input
+          id="enableHomeCat"
+          type="checkbox"
+          class="toggle-checkbox"
+          :checked="settings.enableHomeCat !== false"
+          @change="(e) => { settings.enableHomeCat = (e.target as HTMLInputElement).checked; scheduleSave(); }"
+        />
+        <label for="enableHomeCat" class="inline-label toggle-label">{{ t('homeCat.enable') }}</label>
+      </div>
+    </div>
+
     <!-- バージョン情報 -->
     <div class="field-group">
       <label class="field-label">{{ t('about.label') }}</label>
@@ -997,6 +1012,10 @@ function getSoundLabel(sound: string | null | undefined): string {
         "completed": "Completed",
         "general": "General"
       }
+    },
+    "homeCat": {
+      "label": "Terminal Cat",
+      "enable": "Show cat on home screen"
     }
   },
   "ja": {
@@ -1072,6 +1091,10 @@ function getSoundLabel(sound: string | null | undefined): string {
         "general": "汎用"
       }
     },
+    "homeCat": {
+      "label": "ターミナル猫",
+      "enable": "ホーム画面に猫を表示する"
+    }
   }
 }
 </i18n>

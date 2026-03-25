@@ -1,7 +1,7 @@
 use crate::ai_provider::{self, AiAgentKind};
 use crate::mcp_server::McpServerManager;
 use crate::settings::SettingsManager;
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 use tokio::io::AsyncWriteExt;
 use tokio::time::{timeout, Duration};
 
@@ -303,10 +303,17 @@ pub async fn task_generate(
 
     let structured = ai_provider::parse_response(&agent_kind, &stdout)?;
 
-    serde_json::to_string(&structured).map_err(|e| {
+    let json_result = serde_json::to_string(&structured).map_err(|e| {
         log::error!("[TaskGenerate] Failed to serialize response: {}", e);
         format!("Failed to serialize response: {}", e)
-    })
+    })?;
+
+    if let Some(pool) = _app_handle.try_state::<crate::report_db::ReportPool>() {
+        let truncated: String = prompt.chars().take(100).collect();
+        let _ = crate::report_db::insert(&pool.0, "ai_result:task_generate", &truncated).await;
+    }
+
+    Ok(json_result)
 }
 
 #[tauri::command]

@@ -1,7 +1,7 @@
 use crate::ai_provider::{self, AiAgentKind};
 use crate::process_utils::CancellableManager;
 use crate::settings::SettingsManager;
-use tauri::State;
+use tauri::{Manager, State};
 
 const TIMEOUT_SECS: u64 = 120;
 
@@ -58,6 +58,7 @@ impl std::ops::Deref for ApprovalManager {
 
 #[tauri::command]
 pub async fn judge_approval(
+    app_handle: tauri::AppHandle,
     state: State<'_, ApprovalManager>,
     settings_state: State<'_, SettingsManager>,
     worktree_id: String,
@@ -111,10 +112,17 @@ pub async fn judge_approval(
 
     log::debug!("[AutoApproval] command: {:?}", command);
 
-    Ok(JudgeResult {
+    let result = JudgeResult {
         safe: !needs_permission,
-        command,
-    })
+        command: command.clone(),
+    };
+    if result.safe {
+        if let Some(pool) = app_handle.try_state::<crate::report_db::ReportPool>() {
+            let cmd = command.as_deref().unwrap_or("");
+            let _ = crate::report_db::insert(&pool.0, "ai_result:approval", cmd).await;
+        }
+    }
+    Ok(result)
 }
 
 #[tauri::command]

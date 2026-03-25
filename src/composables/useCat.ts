@@ -9,11 +9,12 @@ const BLINK_MIN_MS = 7000;
 const BLINK_MAX_MS = 13000;
 
 // セリフ関連
-const TYPING_INTERVAL_MS = 150;   // 文字送り速度
-const HOLDING_DURATION_MS = 3000; // 全文表示後の保持時間
+const TYPING_INTERVAL_MS = 75;    // 文字送り速度
+const HOLDING_DURATION_MS = 5000; // 全文表示後の保持時間
 const IDLE_RECHECK_MS = 2000;     // トピックなし時の再チェック間隔
 const MAX_QUEUE_SIZE = 20;
-const MAX_SPEECH_WIDTH = 24;      // セリフ枠込みの最大表示列数
+const MAX_SPEECH_WIDTH = 40;      // セリフ1行の最大表示列数
+const MAX_SPEECH_LINES = 3;       // セリフ最大行数
 
 const catFrames = {
   normal: [" ∧_∧", "( o.o )", " じしˍ,)ノ"],
@@ -63,8 +64,9 @@ export function useCat() {
   // セリフ状態
   const topics: Topic[] = [];
   let speechState: SpeechState = "idle";
-  let currentSpeechText = "";
-  let displayedCharCount = 0; // 文字送りで何文字まで表示したか（Unicode文字単位）
+  let currentSpeechText = "";          // 全文字カウント用（折り返し前結合）
+  let currentSpeechLines: string[] = []; // 折り返し済み行配列
+  let displayedCharCount = 0;          // 文字送りで何文字まで表示したか
   let speechTimer: ReturnType<typeof setTimeout> | null = null;
 
   // ----- 座標 -----
@@ -75,7 +77,7 @@ export function useCat() {
     return {
       startRow: rows - 2, // 1-based ANSI; 猫3行 = rows-2, rows-1, rows
       startCol: Math.max(1, cols - CAT_DISPLAY_WIDTH + 1),
-      speechRow: rows - 3, // 猫の1行上
+      speechRow: rows - 3, // セリフ最下行（猫の1行上）
     };
   }
 
@@ -94,42 +96,79 @@ export function useCat() {
     terminal.write(seq);
   }
 
+  // ----- テキスト折り返し -----
+
+  // テキストをUnicode文字単位の配列に分解
+  function splitChars(text: string): string[] {
+    return [...text]; // スプレッド構文でサロゲートペア対応
+  }
+
+  // テキストを MAX_SPEECH_WIDTH 列で折り返し、最大 MAX_SPEECH_LINES 行に分割
+  function wrapText(text: string): string[] {
+    const lines: string[] = [];
+    let line = "";
+    let lineWidth = 0;
+    for (const ch of splitChars(text)) {
+      const chWidth = measureWidth(ch);
+      if (lineWidth + chWidth > MAX_SPEECH_WIDTH && line.length > 0) {
+        lines.push(line);
+        if (lines.length >= MAX_SPEECH_LINES) return lines; // 上限に達したら打ち切り
+        line = ch;
+        lineWidth = chWidth;
+      } else {
+        line += ch;
+        lineWidth += chWidth;
+      }
+    }
+    if (line.length > 0) lines.push(line);
+    return lines;
+  }
+
   // ----- セリフの描画/消去 -----
 
-  function drawSpeechLine(text: string) {
-    if (!terminal) return;
+  // lines の先頭から displayedCount 文字分を複数行に描画する
+  function drawSpeechLines(lines: string[], displayedCount: number) {
+    if (!terminal || lines.length === 0) return;
     const pos = getPos();
     if (!pos) return;
-    if (pos.speechRow < 1) return;
 
-    const framed = `< ${text} >`;
-    const framedWidth = measureWidth(framed);
-    // 右端を猫の右端に揃える
-    const speechCol = Math.max(
-      1,
-      pos.startCol + CAT_DISPLAY_WIDTH - framedWidth,
-    );
-
+    const baseCol = Math.max(1, pos.startCol + CAT_DISPLAY_WIDTH - MAX_SPEECH_WIDTH - 4);
+    const rightEdge = pos.startCol + CAT_DISPLAY_WIDTH - 4; // 右詰め基準列
     let seq = "\x1b7";
-    // 先に最大幅分をスペースで消去してから描画（長さ変化による残骸を防ぐ）
-    const clearWidth = MAX_SPEECH_WIDTH + 2;
-    const clearCol = Math.max(1, pos.startCol + CAT_DISPLAY_WIDTH - clearWidth);
-    seq += `\x1b[${pos.speechRow};${clearCol}H${" ".repeat(clearWidth)}`;
-    seq += `\x1b[${pos.speechRow};${speechCol}H${framed}`;
+    let remaining = displayedCount;
+
+    for (let i = 0; i < lines.length; i++) {
+      const row = pos.speechRow - (lines.length - 1 - i);
+      if (row < 1) continue;
+      const lineChars = splitChars(lines[i]);
+      const charsOnLine = Math.min(remaining, lineChars.length);
+      remaining = Math.max(0, remaining - lineChars.length);
+      const partial = lineChars.slice(0, charsOnLine).join("");
+      // 1行のみの場合は右詰め、複数行は固定左端
+      const col = lines.length === 1
+        ? Math.max(1, rightEdge - measureWidth(partial))
+        : baseCol;
+      // クリア→描画
+      seq += `\x1b[${row};${baseCol}H${" ".repeat(MAX_SPEECH_WIDTH)}`;
+      seq += `\x1b[${row};${col}H${partial}`;
+    }
     seq += "\x1b8";
     terminal.write(seq);
   }
 
-  function clearSpeechLine() {
+  // MAX_SPEECH_LINES 行分をクリア（行数に関わらず常に最大行数分消す）
+  function clearSpeechLines() {
     if (!terminal) return;
     const pos = getPos();
     if (!pos) return;
-    if (pos.speechRow < 1) return;
 
-    const clearWidth = MAX_SPEECH_WIDTH + 2;
-    const clearCol = Math.max(1, pos.startCol + CAT_DISPLAY_WIDTH - clearWidth);
+    const baseCol = Math.max(1, pos.startCol + CAT_DISPLAY_WIDTH - MAX_SPEECH_WIDTH - 4);
     let seq = "\x1b7";
-    seq += `\x1b[${pos.speechRow};${clearCol}H${" ".repeat(clearWidth)}`;
+    for (let i = 0; i < MAX_SPEECH_LINES; i++) {
+      const row = pos.speechRow - (MAX_SPEECH_LINES - 1 - i);
+      if (row < 1) continue;
+      seq += `\x1b[${row};${baseCol}H${" ".repeat(MAX_SPEECH_WIDTH)}`;
+    }
     seq += "\x1b8";
     terminal.write(seq);
   }
@@ -157,11 +196,6 @@ export function useCat() {
     if (speechTimer) { clearTimeout(speechTimer); speechTimer = null; }
   }
 
-  // テキストをUnicode文字単位の配列に分解
-  function splitChars(text: string): string[] {
-    return [...text]; // スプレッド構文でサロゲートペア対応
-  }
-
   function advanceSpeech() {
     clearSpeechTimer();
 
@@ -169,31 +203,24 @@ export function useCat() {
       case "idle": {
         const next = pickNextTopic();
         if (next) {
-          // テキストが長すぎる場合は MAX_SPEECH_WIDTH に収まる範囲で截断
-          let truncated = "";
-          for (const ch of splitChars(next.text)) {
-            const candidate = truncated + ch;
-            if (measureWidth(`< ${candidate} >`) > MAX_SPEECH_WIDTH) break;
-            truncated = candidate;
-          }
-          currentSpeechText = truncated;
+          currentSpeechLines = wrapText(next.text);
+          currentSpeechText = currentSpeechLines.join(""); // 文字カウント用
           displayedCharCount = 0;
           speechState = "typing";
           speechTimer = setTimeout(advanceSpeech, TYPING_INTERVAL_MS);
         } else {
-          clearSpeechLine();
+          clearSpeechLines();
           speechTimer = setTimeout(advanceSpeech, IDLE_RECHECK_MS);
         }
         break;
       }
 
       case "typing": {
-        const chars = splitChars(currentSpeechText);
-        displayedCharCount = Math.min(displayedCharCount + 1, chars.length);
-        const partial = chars.slice(0, displayedCharCount).join("");
-        drawSpeechLine(partial);
+        const totalChars = splitChars(currentSpeechText).length;
+        displayedCharCount = Math.min(displayedCharCount + 1, totalChars);
+        drawSpeechLines(currentSpeechLines, displayedCharCount);
 
-        if (displayedCharCount >= chars.length) {
+        if (displayedCharCount >= totalChars) {
           speechState = "holding";
           speechTimer = setTimeout(advanceSpeech, HOLDING_DURATION_MS);
         } else {
@@ -203,6 +230,8 @@ export function useCat() {
       }
 
       case "holding": {
+        // セリフ表示後はキューをリセット（連続して喋らない）
+        topics.length = 0;
         speechState = "idle";
         speechTimer = setTimeout(advanceSpeech, 0);
         break;
@@ -238,10 +267,7 @@ export function useCat() {
       if (!isBlinking) drawCatFrame(catFrames.normal);
       // セリフ（表示中なら再描画してターミナル出力による上書きから復元）
       if (speechState === "typing" || speechState === "holding") {
-        const partial = splitChars(currentSpeechText)
-          .slice(0, displayedCharCount)
-          .join("");
-        drawSpeechLine(partial);
+        drawSpeechLines(currentSpeechLines, displayedCharCount);
       }
     }, REDRAW_INTERVAL_MS);
   }
@@ -257,10 +283,7 @@ export function useCat() {
   function redraw() {
     if (!isBlinking) drawCatFrame(catFrames.normal);
     if (speechState === "typing" || speechState === "holding") {
-      const partial = splitChars(currentSpeechText)
-        .slice(0, displayedCharCount)
-        .join("");
-      drawSpeechLine(partial);
+      drawSpeechLines(currentSpeechLines, displayedCharCount);
     }
   }
 

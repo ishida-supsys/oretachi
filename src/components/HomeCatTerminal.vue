@@ -3,7 +3,16 @@ import { ref, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { invoke } from "@tauri-apps/api/core";
 import { useCat } from "../composables/useCat";
+
+interface ReportSummary {
+  worktree_added: number;
+  worktree_removed: number;
+  artifact_added: number;
+  artifact_removed: number;
+  ai_result_count: number;
+}
 
 const { t } = useI18n();
 const containerRef = ref<HTMLDivElement | null>(null);
@@ -14,6 +23,7 @@ let terminal: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let meowTimer: ReturnType<typeof setTimeout> | null = null;
+let reportTimer: ReturnType<typeof setInterval> | null = null;
 
 function scheduleMeow() {
   const delay = 15000 + Math.random() * 10000; // 15〜25秒
@@ -22,6 +32,24 @@ function scheduleMeow() {
     topic(choices[Math.floor(Math.random() * choices.length)], 0);
     scheduleMeow();
   }, delay);
+}
+
+async function fetchReport() {
+  try {
+    const today = new Date().toISOString().slice(0, 10);
+    const summary = await invoke<ReportSummary>("get_report_summary", { date: today });
+    if (summary.worktree_added > 0 || summary.worktree_removed > 0) {
+      topic(
+        t("reportWt", {
+          added: summary.worktree_added,
+          removed: summary.worktree_removed,
+        }),
+        0,
+      );
+    }
+  } catch {
+    // レポートDB未初期化などは無視
+  }
 }
 
 onMounted(() => {
@@ -68,6 +96,7 @@ onMounted(() => {
   fitAddon.fit();
   start(terminal);
   scheduleMeow();
+  reportTimer = setInterval(fetchReport, 60000);
 
   resizeObserver = new ResizeObserver(() => {
     if (containerRef.value && containerRef.value.offsetWidth > 0) {
@@ -80,6 +109,7 @@ onMounted(() => {
 
 onUnmounted(() => {
   if (meowTimer) { clearTimeout(meowTimer); meowTimer = null; }
+  if (reportTimer) { clearInterval(reportTimer); reportTimer = null; }
   stop();
   resizeObserver?.disconnect();
   terminal?.dispose();
@@ -99,15 +129,9 @@ defineExpose({ topic });
   height: 100%;
 }
 
-.terminal-container :deep(.xterm) {
-  height: 100%;
-  padding: 4px;
-  background-color: var(--bg-terminal) !important;
-}
-
 .home-cat-terminal :deep(.xterm-viewport) {
   overflow: hidden !important;
-  background-color: var(--bg-terminal) !important;
+  background-color: transparent !important;
 }
 
 .home-cat-terminal :deep(.xterm-helper-textarea) {
@@ -119,11 +143,13 @@ defineExpose({ topic });
 {
   "en": {
     "meow1": "Meow",
-    "meow2": "Mew"
+    "meow2": "Mew",
+    "reportWt": "Today: WT+{added}/-{removed}, Meow"
   },
   "ja": {
     "meow1": "ニャー",
-    "meow2": "ニャン"
+    "meow2": "ニャン",
+    "reportWt": "今日はWT{added}件追加{removed}件削除された、ニャー"
   }
 }
 </i18n>

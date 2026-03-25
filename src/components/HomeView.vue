@@ -8,6 +8,7 @@ import WorktreeCard from "./WorktreeCard.vue";
 import TaskCard from "./TaskCard.vue";
 import HomeCatTerminal from "./HomeCatTerminal.vue";
 import { useMasonryLayout } from "../composables/useMasonryLayout";
+import { useSettings } from "../composables/useSettings";
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import autoAnimate from "@formkit/auto-animate";
 import type { AnimationController } from "@formkit/auto-animate";
@@ -101,6 +102,7 @@ function unhideCard(worktreeId: string): void {
   hiddenWorktrees.delete(worktreeId);
 }
 
+const { settings } = useSettings();
 const catRef = ref<InstanceType<typeof HomeCatTerminal> | null>(null);
 
 function sendCatTopic(text: string, priority: number) {
@@ -218,7 +220,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
 <template>
   <div class="home-view">
     <!-- 背景: ターミナル猫 -->
-    <div class="home-cat-bg">
+    <div v-if="settings.enableHomeCat !== false" class="home-cat-bg">
       <HomeCatTerminal ref="catRef" />
     </div>
 
