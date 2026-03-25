@@ -13,7 +13,7 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::watch;
+use tokio::sync::{oneshot, watch};
 
 use crate::git_worktree::get_git_remotes;
 use crate::settings::SettingsManager;
@@ -30,6 +30,8 @@ pub struct McpStatus {
 
 pub struct McpServerManager {
     shutdown_tx: Mutex<Option<watch::Sender<bool>>>,
+    /// サーバーが実際に停止したときに通知される oneshot receiver
+    shutdown_complete_rx: Mutex<Option<oneshot::Receiver<()>>>,
     status: Arc<Mutex<McpStatus>>,
     /// restart_mcp_server の同時呼び出しを防ぐ排他ロック
     restart_lock: tokio::sync::Mutex<()>,
@@ -42,6 +44,7 @@ impl McpServerManager {
     pub fn new() -> Self {
         Self {
             shutdown_tx: Mutex::new(None),
+            shutdown_complete_rx: Mutex::new(None),
             status: Arc::new(Mutex::new(McpStatus { running: false, port: None })),
             restart_lock: tokio::sync::Mutex::new(()),
             generation: Arc::new(AtomicU64::new(0)),
@@ -57,6 +60,18 @@ impl McpServerManager {
             if let Some(tx) = guard.as_ref() {
                 let _ = tx.send(true);
             }
+        }
+    }
+
+    /// stop() を呼び出してから、サーバーが実際に停止するまで待つ。
+    /// タイムアウト内に停止すれば true を返す。
+    pub async fn stop_and_wait(&self, timeout: std::time::Duration) -> bool {
+        self.stop();
+        let rx = self.shutdown_complete_rx.lock().ok().and_then(|mut g| g.take());
+        if let Some(rx) = rx {
+            tokio::time::timeout(timeout, rx).await.is_ok()
+        } else {
+            true
         }
     }
 
@@ -596,6 +611,12 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
         *tx = Some(shutdown_tx);
     }
 
+    // サーバー停止完了通知用 oneshot チャンネル
+    let (complete_tx, complete_rx) = oneshot::channel::<()>();
+    if let Ok(mut rx_guard) = manager.shutdown_complete_rx.lock() {
+        *rx_guard = Some(complete_rx);
+    }
+
     // 世代をインクリメントして旧タスクによる status 上書きを防ぐ
     let my_generation = manager.generation.fetch_add(1, Ordering::SeqCst) + 1;
 
@@ -619,16 +640,31 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
             .route("/notify", post(notify_handler))
             .with_state(app_handle.clone());
 
-        let listener = match tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await {
-            Ok(l) => l,
-            Err(e) => {
-                log::error!("Failed to bind MCP server: {}", e);
+        // 固定ポートの場合は最大5回リトライ、ポート0はOS割り当てなので1回のみ
+        let max_retries = if port == 0 { 1 } else { 5 };
+        let mut listener_opt = None;
+        for attempt in 0..max_retries {
+            if attempt > 0 {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            match tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await {
+                Ok(l) => { listener_opt = Some(l); break; }
+                Err(e) => {
+                    log::warn!("MCP bind attempt {}/{} failed: {}", attempt + 1, max_retries, e);
+                }
+            }
+        }
+        let listener = match listener_opt {
+            Some(l) => l,
+            None => {
+                log::error!("Failed to bind MCP server on port {} after {} attempts", port, max_retries);
                 if generation.load(Ordering::SeqCst) == my_generation {
                     if let Ok(mut s) = status.lock() {
                         s.running = false;
                         s.port = None;
                     }
                 }
+                let _ = complete_tx.send(());
                 return;
             }
         };
@@ -643,6 +679,7 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
                         s.port = None;
                     }
                 }
+                let _ = complete_tx.send(());
                 return;
             }
         };
@@ -678,6 +715,9 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
                 s.port = None;
             }
         }
+
+        // 停止完了を通知
+        let _ = complete_tx.send(());
     });
 }
 

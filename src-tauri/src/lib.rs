@@ -295,11 +295,22 @@ async fn restart_mcp_server(app_handle: tauri::AppHandle) -> Result<mcp_server::
         let settings_manager = app_handle.state::<SettingsManager>();
         settings_manager.get().mcp_port
     };
-    manager.stop();
-    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    manager.stop_and_wait(std::time::Duration::from_secs(3)).await;
     mcp_server::start_mcp_server(app_handle.clone(), mcp_port);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     Ok(manager.get_status())
+}
+
+#[tauri::command]
+async fn prepare_for_relaunch(app_handle: tauri::AppHandle) -> Result<(), String> {
+    let mcp_manager = app_handle.state::<mcp_server::McpServerManager>();
+    let completed = mcp_manager
+        .stop_and_wait(std::time::Duration::from_secs(3))
+        .await;
+    if !completed {
+        log::warn!("MCP server did not shut down within timeout before relaunch");
+    }
+    Ok(())
 }
 
 // ─── アーティファクトコマンド ─────────────────────────────────────────────────
@@ -488,6 +499,7 @@ pub fn run() {
             open_in_ide,
             get_mcp_status,
             restart_mcp_server,
+            prepare_for_relaunch,
             ai_judge::judge_approval,
             ai_judge::cancel_approval,
             ai_commit_message::generate_commit_message,

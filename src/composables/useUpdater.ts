@@ -2,6 +2,7 @@ import { ref } from "vue";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { error as logError, info } from "@tauri-apps/plugin-log";
+import { invoke } from "@tauri-apps/api/core";
 
 export function useUpdater() {
   const isChecking = ref(false);
@@ -29,6 +30,11 @@ export function useUpdater() {
     isDownloading.value = true;
     try {
       await update.downloadAndInstall();
+      try {
+        await invoke("prepare_for_relaunch");
+      } catch (e) {
+        await logError(`MCP shutdown before relaunch failed: ${e}`);
+      }
       await relaunch();
     } catch (e) {
       await logError(`アップデートインストールエラー: ${e}`);
