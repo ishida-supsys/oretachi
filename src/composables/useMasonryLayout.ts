@@ -33,9 +33,11 @@ export function useMasonryLayout<T>(
   let observer: ResizeObserver | null = null;
 
   function connect(el: HTMLElement) {
-    containerWidth.value = el.clientWidth;
+    const w = el.clientWidth;
+    if (w > 0) containerWidth.value = w;
     observer = new ResizeObserver((entries) => {
-      containerWidth.value = entries[0].contentRect.width;
+      const width = entries[0].contentRect.width;
+      if (width > 0) containerWidth.value = width;
     });
     observer.observe(el);
   }

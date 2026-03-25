@@ -166,6 +166,7 @@ const TASK_CARD_WIDTH = ref(260);
 
 const { containerRef, columns } = useMasonryLayout(worktreesRef, { minColumnWidth: naturalCardWidth, gap: 12 });
 const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayout(tasksRef, { minColumnWidth: TASK_CARD_WIDTH, gap: 12 });
+
 </script>
 
 <template>
