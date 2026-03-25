@@ -7,12 +7,69 @@ const { t } = useI18n();
 import WorktreeCard from "./WorktreeCard.vue";
 import TaskCard from "./TaskCard.vue";
 import { useMasonryLayout } from "../composables/useMasonryLayout";
-import { computed, ref } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
+import autoAnimate from "@formkit/auto-animate";
+import type { AnimationController } from "@formkit/auto-animate";
 
 const draggingId = ref<string | null>(null);
 let swapCooldown = false;
 let originalOrder: string[] = [];
 let dropped = false;
+
+// カスタムFLIPアニメーション
+const cardElements = new Map<string, HTMLElement>();
+
+function registerCard(id: string, el: HTMLElement | null) {
+  if (el) cardElements.set(id, el);
+  else cardElements.delete(id);
+}
+
+function capturePositions(): Map<string, DOMRect> {
+  const positions = new Map<string, DOMRect>();
+  for (const [id, el] of cardElements) {
+    positions.set(id, el.getBoundingClientRect());
+  }
+  return positions;
+}
+
+function animateFlip(oldPositions: Map<string, DOMRect>) {
+  for (const [id, el] of cardElements) {
+    const oldRect = oldPositions.get(id);
+    if (!oldRect) continue;
+    const newRect = el.getBoundingClientRect();
+    const dx = oldRect.left - newRect.left;
+    const dy = oldRect.top - newRect.top;
+    if (dx === 0 && dy === 0) continue;
+
+    el.style.transform = `translate(${dx}px, ${dy}px)`;
+    el.style.transition = '';
+    // Force reflow
+    el.offsetHeight;
+    el.style.transition = 'transform 0.3s ease';
+    el.style.transform = '';
+  }
+}
+
+// auto-animate: 各カラムのコントローラーを管理
+const columnControllers = new Map<number, AnimationController>();
+
+function registerColumn(el: HTMLElement | null, index: number) {
+  if (!el) {
+    columnControllers.delete(index);
+    return;
+  }
+  if (!columnControllers.has(index)) {
+    columnControllers.set(index, autoAnimate(el, { duration: 250 }));
+  }
+}
+
+// D&D中はauto-animateを無効化してカスタムFLIPに委ねる
+watch(draggingId, (id) => {
+  for (const ctrl of columnControllers.values()) {
+    if (id) ctrl.disable();
+    else ctrl.enable();
+  }
+});
 
 function onCardDragStart(worktreeId: string, event: DragEvent) {
   draggingId.value = worktreeId;
@@ -25,7 +82,9 @@ function onCardDragOver(worktreeId: string, event: DragEvent) {
   event.preventDefault();
   if (swapCooldown) return;
   if (draggingId.value && draggingId.value !== worktreeId) {
+    const oldPositions = capturePositions();
     emit("reorderWorktrees", draggingId.value, worktreeId);
+    nextTick(() => animateFlip(oldPositions));
     swapCooldown = true;
     setTimeout(() => { swapCooldown = false; }, 300);
   }
@@ -83,6 +142,7 @@ const emit = defineEmits<{
 type PanelMode = "worktree" | "task";
 const panelMode = ref<PanelMode>("worktree");
 
+const worktreesRef = computed(() => props.worktrees);
 const tasksRef = computed(() => props.tasks);
 
 // 各ワークツリーカードの自然幅（ターミナルサムネイル幅から計算）をもとに列幅を決定する
@@ -104,7 +164,9 @@ const naturalCardWidth = computed(() => {
 
 const TASK_CARD_WIDTH = ref(260);
 
+const { containerRef, columns } = useMasonryLayout(worktreesRef, { minColumnWidth: naturalCardWidth, gap: 12 });
 const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayout(tasksRef, { minColumnWidth: TASK_CARD_WIDTH, gap: 12 });
+
 </script>
 
 <template>
@@ -137,45 +199,49 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
         {{ t('worktreeEmpty') }}
       </div>
 
-      <TransitionGroup
-        name="card"
-        tag="div"
-        class="worktree-grid"
-        :style="{ gridTemplateColumns: `repeat(auto-fill, minmax(${naturalCardWidth}px, 1fr))` }"
-      >
+      <div ref="containerRef" class="worktree-list">
         <div
-          v-for="worktree in worktrees"
-          :key="worktree.id"
-          class="card-drop-target"
-          @dragover="onCardDragOver(worktree.id, $event)"
-          @drop="onCardDrop"
+          v-for="(col, colIndex) in columns"
+          :key="colIndex"
+          :ref="(el) => registerColumn(el as HTMLElement, colIndex)"
+          class="masonry-column"
+          :style="{ maxWidth: naturalCardWidth + 'px' }"
         >
-          <WorktreeCard
-            :worktree="worktree"
-            :thumbnail-urls="thumbnailUrls"
-            :detached="detachedWorktrees.has(worktree.id)"
-            :notification-count="notifications.get(worktree.id) ?? 0"
-            :hotkey-char="hotkeyChars.get(worktree.id)"
-            :loading="loadingWorktrees.has(worktree.id)"
-            :loading-text="loadingWorktrees.get(worktree.id)"
-            :auto-approval="autoApprovals.get(worktree.id) ?? false"
-            :ai-judging="aiJudgingWorktrees.has(worktree.id)"
-            @drag-start="onCardDragStart"
-            @drag-end="onDragEnd"
-            @select-terminal="emit('selectTerminal', $event)"
-            @add-terminal="emit('addTerminal', $event)"
-            @remove-worktree="emit('removeWorktree', $event)"
-            @open-in-ide="emit('openInIde', $event)"
-            @open-artifacts="emit('openArtifacts', $event)"
-            @move-to-sub-window="emit('moveToSubWindow', $event)"
-            @move-to-main-window="emit('moveToMainWindow', $event)"
-            @focus-sub-window="emit('focusSubWindow', $event)"
-            @set-hotkey-char="emit('setHotkeyChar', $event)"
-            @toggle-auto-approval="emit('toggleAutoApproval', $event)"
-            @cancel-ai-judging="emit('cancelAiJudging', $event)"
-          />
+          <div
+            v-for="worktree in col"
+            :key="worktree.id"
+            :ref="(el) => registerCard(worktree.id, el as HTMLElement)"
+            class="card-drop-target"
+            @dragover="onCardDragOver(worktree.id, $event)"
+            @drop="onCardDrop"
+          >
+            <WorktreeCard
+              :worktree="worktree"
+              :thumbnail-urls="thumbnailUrls"
+              :detached="detachedWorktrees.has(worktree.id)"
+              :notification-count="notifications.get(worktree.id) ?? 0"
+              :hotkey-char="hotkeyChars.get(worktree.id)"
+              :loading="loadingWorktrees.has(worktree.id)"
+              :loading-text="loadingWorktrees.get(worktree.id)"
+              :auto-approval="autoApprovals.get(worktree.id) ?? false"
+              :ai-judging="aiJudgingWorktrees.has(worktree.id)"
+              @drag-start="onCardDragStart"
+              @drag-end="onDragEnd"
+              @select-terminal="emit('selectTerminal', $event)"
+              @add-terminal="emit('addTerminal', $event)"
+              @remove-worktree="emit('removeWorktree', $event)"
+              @open-in-ide="emit('openInIde', $event)"
+              @open-artifacts="emit('openArtifacts', $event)"
+              @move-to-sub-window="emit('moveToSubWindow', $event)"
+              @move-to-main-window="emit('moveToMainWindow', $event)"
+              @focus-sub-window="emit('focusSubWindow', $event)"
+              @set-hotkey-char="emit('setHotkeyChar', $event)"
+              @toggle-auto-approval="emit('toggleAutoApproval', $event)"
+              @cancel-ai-judging="emit('cancelAiJudging', $event)"
+            />
+          </div>
         </div>
-      </TransitionGroup>
+      </div>
     </template>
 
     <!-- タスクパネル -->
@@ -271,45 +337,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   background: #313244;
 }
 
-.worktree-grid {
-  display: grid;
-  gap: 12px;
-  align-items: start;
-  position: relative;
-}
-
-/* TransitionGroup: カード移動（FLIP） */
-.card-move {
-  transition: transform 0.3s ease;
-}
-
-/* TransitionGroup: カード削除 */
-.card-leave-active {
-  transition: opacity 0.25s ease, transform 0.25s ease;
-  position: absolute;
-  pointer-events: none;
-}
-
-.card-leave-to {
-  opacity: 0;
-  transform: scale(0.85);
-}
-
-/* TransitionGroup: カード追加 */
-.card-enter-active {
-  transition: opacity 0.25s ease, transform 0.25s ease;
-}
-
-.card-enter-from {
-  opacity: 0;
-  transform: scale(0.85);
-}
-
-.card-drop-target {
-  min-width: 0;
-}
-
-/* タスクパネル（既存のマソンリーレイアウト） */
+/* ワークツリーパネル（マソンリーレイアウト） */
 .worktree-list {
   display: flex;
   flex-wrap: wrap;
@@ -324,6 +352,13 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   flex-direction: column;
   gap: 12px;
 }
+
+.card-drop-target {
+  border-radius: 8px;
+  transition: outline 0.1s;
+}
+
+/* タスクパネル（既存のマソンリーレイアウト） */
 
 .empty-state {
   display: flex;
