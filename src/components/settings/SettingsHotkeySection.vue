@@ -141,3 +141,17 @@ const { settings, scheduleSave } = useSettings();
   }
 }
 </i18n>
+
+<style scoped>
+.toggle-checkbox {
+  width: 16px;
+  height: 16px;
+  accent-color: #cba6f7;
+  cursor: pointer;
+  flex: unset;
+}
+
+.toggle-label {
+  cursor: pointer;
+}
+</style>

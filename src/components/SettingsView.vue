@@ -565,7 +565,7 @@ function getSoundLabel(sound: string | null | undefined): string {
       <label class="field-label">{{ t('about.label') }}</label>
       <div class="row-input">
         <span class="version-text">v{{ appVersion }}</span>
-        <button class="btn btn-sm" :disabled="isChecking" @click="onCheckUpdate">
+        <button class="btn-secondary" :disabled="isChecking" @click="onCheckUpdate">
           {{ isChecking ? t('about.checking') : t('about.checkUpdate') }}
         </button>
       </div>
