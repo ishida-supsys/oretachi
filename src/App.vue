@@ -1105,10 +1105,10 @@ onMounted(async () => {
   await getCurrentWindow().onCloseRequested(async (event) => {
     event.preventDefault();
     if (isWaitingForShutdown.value) return; // 二重クリック防止
+    isWaitingForShutdown.value = true;
 
     // ワークツリー操作/タスク実行中の場合は完了まで待機
     if (isBusyForShutdown.value) {
-      isWaitingForShutdown.value = true;
       await waitForBusyOperations();
     }
 
@@ -1513,7 +1513,7 @@ onMounted(async () => {
     "worktreeCreateFailed": "Failed to create worktree: {error}",
     "copyTargetsFailed": "Some files could not be copied after worktree creation: {error}",
     "claudeHooksFailed": "Failed to write Claude Code notification hooks: {error}",
-    "shuttingDown": "Waiting for operations to finish...",
+    "shuttingDown": "Shutting down...",
     "minimize": "Minimize",
     "maximize": "Maximize",
     "close": "Close"
@@ -1539,7 +1539,7 @@ onMounted(async () => {
     "worktreeCreateFailed": "ワークツリーの作成に失敗しました: {error}",
     "copyTargetsFailed": "ワークツリー追加後のファイルコピーに失敗しました: {error}",
     "claudeHooksFailed": "Claude Code通知フックの書き込みに失敗しました: {error}",
-    "shuttingDown": "処理の完了を待っています...",
+    "shuttingDown": "終了しています...",
     "minimize": "最小化",
     "maximize": "最大化",
     "close": "閉じる"
