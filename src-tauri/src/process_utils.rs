@@ -64,6 +64,33 @@ impl CancellableManager {
     }
 }
 
+/// Windowsレジストリからシステム・ユーザーのPATHを読み取り結合して返す。
+/// アップデート後の再起動でPATHが不完全になる問題の対策。
+#[cfg(target_os = "windows")]
+pub fn refresh_path_from_registry() -> Result<String, String> {
+    use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
+    use winreg::RegKey;
+
+    let system_key = RegKey::predef(HKEY_LOCAL_MACHINE)
+        .open_subkey_with_flags(
+            r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment",
+            KEY_READ,
+        )
+        .map_err(|e| format!("Failed to open HKLM key: {}", e))?;
+    let system_path: String = system_key
+        .get_value("Path")
+        .unwrap_or_default();
+
+    let user_key = RegKey::predef(HKEY_CURRENT_USER)
+        .open_subkey_with_flags(r"Environment", KEY_READ)
+        .map_err(|e| format!("Failed to open HKCU key: {}", e))?;
+    let user_path: String = user_key
+        .get_value("Path")
+        .unwrap_or_default();
+
+    Ok(format!("{};{}", system_path, user_path))
+}
+
 /// プロセスツリーを強制終了する
 pub fn kill_process_tree(pid: u32) {
     #[cfg(target_os = "windows")]

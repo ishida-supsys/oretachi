@@ -515,6 +515,20 @@ pub fn run() {
                 let _ = dotenvy::from_filename_override(".env.development");
             }
 
+            // アップデート後の再起動でPATHが不完全になる問題を修正:
+            // NSISインストーラー経由で再起動した場合、ユーザーの完全なPATHが
+            // 継承されないため、レジストリから最新PATHを取得して上書きする。
+            #[cfg(target_os = "windows")]
+            match crate::process_utils::refresh_path_from_registry() {
+                Ok(path) => {
+                    std::env::set_var("PATH", &path);
+                    log::debug!("PATH refreshed from registry");
+                }
+                Err(e) => {
+                    log::warn!("Failed to refresh PATH from registry: {}", e);
+                }
+            }
+
             if let Ok(log_dir) = app.path().app_log_dir() {
                 log::info!("Application log directory: {:?}", log_dir);
             }

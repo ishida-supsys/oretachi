@@ -33,20 +33,20 @@ export function useIdeSelect() {
 
   async function openInIde(path: string, options: IdeSelectOptions = {}): Promise<void> {
     const ides = await invoke<IdeInfo[]>("detect_ides");
-    const allIdes = [CODE_REVIEWER_IDE, ...ides];
 
-    if (allIdes.length === 1) {
-      // Code Reviewer のみ（他IDEなし）
-      await openCodeReview(
-        options.worktreeId ?? path,
-        options.worktreeName ?? path,
-        path,
-        options.origin,
-      );
+    if (ides.length === 1) {
+      // IDE が1つだけ検出された場合は直接起動
+      try {
+        await invoke("open_in_ide", { command: ides[0].command, path });
+      } catch (e) {
+        await message(`IDE の起動に失敗しました: ${e}`, { kind: "error" });
+      }
       return;
     }
 
-    detectedIdes.value = allIdes;
+    // IDE が0件、または2件以上の場合はダイアログ表示
+    // Code Reviewer は末尾に配置（実IDEを優先）
+    detectedIdes.value = [...ides, CODE_REVIEWER_IDE];
     ideTargetPath.value = path;
     ideTargetOptions.value = options;
     showIdeDialog.value = true;
