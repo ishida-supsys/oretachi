@@ -54,7 +54,7 @@ interface RemoveWorktreeOptions {
 }
 
 /** ワークツリーを削除（git worktree remove + 設定から削除） */
-async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOptions): Promise<void> {
+async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOptions, onBeforeSplice?: () => Promise<void>): Promise<void> {
   const index = worktrees.value.findIndex((w) => w.id === worktreeId);
   if (index === -1) return;
 
@@ -86,6 +86,8 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
       });
     }
   }
+
+  if (onBeforeSplice) await onBeforeSplice();
 
   worktrees.value.splice(index, 1);
   settings.value.worktrees = settings.value.worktrees.filter(

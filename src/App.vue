@@ -70,6 +70,8 @@ const { openArtifactViewer, closeArtifactWindow } = useArtifactWindow();
 const { tryAutoAssignHotkey } = useAutoHotkey();
 const { sortedTasks, removeTask } = useTasks();
 
+const homeViewRef = ref<InstanceType<typeof HomeView> | null>(null);
+
 // HomeView / WorktreeCard 向け: Map<string, number> 形式を維持
 const notificationCounts = computed(() => {
   const map = new Map<string, number>();
@@ -487,14 +489,27 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
       goHome();
     }
 
+    let savedPositions: Map<string, DOMRect> | undefined;
     try {
-      await removeWorktree(worktreeId, {
-        mergeTo: options.mergeTo || undefined,
-        deleteBranch: options.deleteBranch,
-        forceBranch: options.forceBranch,
-      });
+      await removeWorktree(
+        worktreeId,
+        {
+          mergeTo: options.mergeTo || undefined,
+          deleteBranch: options.deleteBranch,
+          forceBranch: options.forceBranch,
+        },
+        async () => {
+          await homeViewRef.value?.fadeOutCard(worktreeId);
+          savedPositions = homeViewRef.value?.hideCard(worktreeId);
+        },
+      );
+      await nextTick();
+      if (savedPositions) homeViewRef.value?.animateAfterRemove(savedPositions);
     } catch (e) {
+      if (savedPositions) homeViewRef.value?.animateAfterRemove(savedPositions);
       await message(t("deleteFailed", { error: e }), { kind: "error" });
+    } finally {
+      homeViewRef.value?.unhideCard(worktreeId);
     }
   } finally {
     loadingWorktrees.delete(worktreeId);
@@ -1293,6 +1308,7 @@ onMounted(async () => {
     <div ref="mainContentAreaRef" class="flex-1 min-h-0 relative">
       <!-- ホームビュー -->
       <HomeView
+        ref="homeViewRef"
         v-show="viewMode === 'home'"
         class="absolute inset-0"
         :worktrees="worktrees"
