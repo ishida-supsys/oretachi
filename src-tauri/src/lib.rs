@@ -304,6 +304,7 @@ async fn restart_mcp_server(app_handle: tauri::AppHandle) -> Result<mcp_server::
 #[tauri::command]
 async fn prepare_for_relaunch(app_handle: tauri::AppHandle) -> Result<(), String> {
     let mcp_manager = app_handle.state::<mcp_server::McpServerManager>();
+    let _lock = mcp_manager.acquire_restart_lock().await;
     let completed = mcp_manager
         .stop_and_wait(std::time::Duration::from_secs(3))
         .await;

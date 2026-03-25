@@ -30,11 +30,7 @@ export function useUpdater() {
     isDownloading.value = true;
     try {
       await update.downloadAndInstall();
-      try {
-        await invoke("prepare_for_relaunch");
-      } catch (e) {
-        await logError(`MCP shutdown before relaunch failed: ${e}`);
-      }
+      await invoke("prepare_for_relaunch");
       await relaunch();
     } catch (e) {
       await logError(`アップデートインストールエラー: ${e}`);
