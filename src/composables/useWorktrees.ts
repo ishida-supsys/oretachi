@@ -108,6 +108,27 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
   }
 }
 
+/** ワークツリーの順序を変更（fromId を toId の位置に移動） */
+function reorderWorktree(fromId: string, toId: string): void {
+  if (fromId === toId) return;
+
+  const fromIdx = worktrees.value.findIndex((w) => w.id === fromId);
+  const toIdx = worktrees.value.findIndex((w) => w.id === toId);
+  if (fromIdx === -1 || toIdx === -1) return;
+
+  const [item] = worktrees.value.splice(fromIdx, 1);
+  worktrees.value.splice(toIdx, 0, item);
+
+  const fromSettingsIdx = settings.value.worktrees.findIndex((w) => w.id === fromId);
+  const toSettingsIdx = settings.value.worktrees.findIndex((w) => w.id === toId);
+  if (fromSettingsIdx !== -1 && toSettingsIdx !== -1) {
+    const [settingsItem] = settings.value.worktrees.splice(fromSettingsIdx, 1);
+    settings.value.worktrees.splice(toSettingsIdx, 0, settingsItem);
+  }
+
+  scheduleSave();
+}
+
 /** ローカルブランチ一覧を取得 */
 async function listBranches(repositoryId: string): Promise<string[]> {
   const repoEntry = settings.value.repositories.find((r) => r.id === repositoryId);
@@ -182,6 +203,7 @@ export function useWorktrees() {
     commitWorktree,
     rollbackWorktree,
     removeWorktree,
+    reorderWorktree,
     listBranches,
     addTerminal,
     removeTerminal,

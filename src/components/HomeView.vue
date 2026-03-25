@@ -9,6 +9,30 @@ import TaskCard from "./TaskCard.vue";
 import { useMasonryLayout } from "../composables/useMasonryLayout";
 import { computed, ref } from "vue";
 
+const dragOverId = ref<string | null>(null);
+
+function onCardDragStart(worktreeId: string, event: DragEvent) {
+  event.dataTransfer?.setData("text/plain", worktreeId);
+}
+
+function onCardDragOver(worktreeId: string, event: DragEvent) {
+  event.preventDefault();
+  dragOverId.value = worktreeId;
+}
+
+function onCardDrop(toId: string, event: DragEvent) {
+  event.preventDefault();
+  const fromId = event.dataTransfer?.getData("text/plain");
+  dragOverId.value = null;
+  if (fromId && fromId !== toId) {
+    emit("reorderWorktrees", fromId, toId);
+  }
+}
+
+function onCardDragLeave() {
+  dragOverId.value = null;
+}
+
 const props = defineProps<{
   worktrees: Worktree[];
   thumbnailUrls: Map<number, string>;
@@ -23,6 +47,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   selectTerminal: [terminalId: number];
+  reorderWorktrees: [fromId: string, toId: string];
   addWorktree: [];
   removeWorktree: [worktreeId: string];
   addTerminal: [worktreeId: string];
@@ -101,30 +126,39 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
 
       <div ref="containerRef" class="worktree-list">
         <div v-for="(col, colIndex) in columns" :key="colIndex" class="masonry-column" :style="{ maxWidth: naturalCardWidth + 'px' }">
-          <WorktreeCard
+          <div
             v-for="worktree in col"
             :key="worktree.id"
-            :worktree="worktree"
-            :thumbnail-urls="thumbnailUrls"
-            :detached="detachedWorktrees.has(worktree.id)"
-            :notification-count="notifications.get(worktree.id) ?? 0"
-            :hotkey-char="hotkeyChars.get(worktree.id)"
-            :loading="loadingWorktrees.has(worktree.id)"
-            :loading-text="loadingWorktrees.get(worktree.id)"
-            :auto-approval="autoApprovals.get(worktree.id) ?? false"
-            :ai-judging="aiJudgingWorktrees.has(worktree.id)"
-            @select-terminal="emit('selectTerminal', $event)"
-            @add-terminal="emit('addTerminal', $event)"
-            @remove-worktree="emit('removeWorktree', $event)"
-            @open-in-ide="emit('openInIde', $event)"
-            @open-artifacts="emit('openArtifacts', $event)"
-            @move-to-sub-window="emit('moveToSubWindow', $event)"
-            @move-to-main-window="emit('moveToMainWindow', $event)"
-            @focus-sub-window="emit('focusSubWindow', $event)"
-            @set-hotkey-char="emit('setHotkeyChar', $event)"
-            @toggle-auto-approval="emit('toggleAutoApproval', $event)"
-            @cancel-ai-judging="emit('cancelAiJudging', $event)"
-          />
+            class="card-drop-target"
+            :class="{ 'card-drop-over': dragOverId === worktree.id }"
+            @dragover="onCardDragOver(worktree.id, $event)"
+            @dragleave="onCardDragLeave"
+            @drop="onCardDrop(worktree.id, $event)"
+          >
+            <WorktreeCard
+              :worktree="worktree"
+              :thumbnail-urls="thumbnailUrls"
+              :detached="detachedWorktrees.has(worktree.id)"
+              :notification-count="notifications.get(worktree.id) ?? 0"
+              :hotkey-char="hotkeyChars.get(worktree.id)"
+              :loading="loadingWorktrees.has(worktree.id)"
+              :loading-text="loadingWorktrees.get(worktree.id)"
+              :auto-approval="autoApprovals.get(worktree.id) ?? false"
+              :ai-judging="aiJudgingWorktrees.has(worktree.id)"
+              @drag-start="onCardDragStart"
+              @select-terminal="emit('selectTerminal', $event)"
+              @add-terminal="emit('addTerminal', $event)"
+              @remove-worktree="emit('removeWorktree', $event)"
+              @open-in-ide="emit('openInIde', $event)"
+              @open-artifacts="emit('openArtifacts', $event)"
+              @move-to-sub-window="emit('moveToSubWindow', $event)"
+              @move-to-main-window="emit('moveToMainWindow', $event)"
+              @focus-sub-window="emit('focusSubWindow', $event)"
+              @set-hotkey-char="emit('setHotkeyChar', $event)"
+              @toggle-auto-approval="emit('toggleAutoApproval', $event)"
+              @cancel-ai-judging="emit('cancelAiJudging', $event)"
+            />
+          </div>
         </div>
       </div>
     </template>
@@ -235,6 +269,16 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   display: flex;
   flex-direction: column;
   gap: 12px;
+}
+
+.card-drop-target {
+  border-radius: 8px;
+  transition: outline 0.1s;
+}
+
+.card-drop-over {
+  outline: 2px solid #cba6f7;
+  outline-offset: 2px;
 }
 
 .empty-state {

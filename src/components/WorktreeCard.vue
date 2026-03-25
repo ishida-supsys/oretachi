@@ -22,6 +22,7 @@ const props = defineProps<{
 
 const emit = defineEmits<{
   selectTerminal: [terminalId: number];
+  dragStart: [worktreeId: string, event: DragEvent];
   addTerminal: [worktreeId: string];
   removeWorktree: [worktreeId: string];
   openInIde: [worktreeId: string];
@@ -87,7 +88,11 @@ const terminalList = computed(() =>
     <div v-if="hotkeyChar" class="hotkey-badge">Alt+{{ hotkeyChar }}</div>
     <div class="card-header">
       <div class="card-info">
-        <span class="card-name">{{ worktree.name }}</span>
+        <span
+          class="card-name"
+          draggable="true"
+          @dragstart.stop="$emit('dragStart', worktree.id, $event)"
+        >{{ worktree.name }}</span>
         <span class="card-branch">{{ worktree.branchName }}</span>
         <span v-if="detached" class="card-detached-badge">{{ t('subWindowBadge') }}</span>
         <button
@@ -238,6 +243,12 @@ const terminalList = computed(() =>
   font-size: 14px;
   font-weight: 600;
   color: #cdd6f4;
+  cursor: grab;
+  user-select: none;
+}
+
+.card-name:active {
+  cursor: grabbing;
 }
 
 .card-branch {
