@@ -6,6 +6,19 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-03-25
+
+### Added
+- ホームビューにマスonry レイアウトとドラッグ&ドロップによるワークツリー並べ替えを実装
+- タスク/ワークツリーパネル切り替え機能を追加
+- `useMasonryLayout` コンポジャブルを追加
+- MCP サーバーのグレースフルシャットダウンと再起動準備を実装
+
+### Fixed
+- アプリ終了処理とシャットダウン UI を改善
+- MCP サーバーシャットダウンタイムアウト時の再起動失敗処理を追加
+- MCP サーバー再起動の安定性を改善
+
 ## [0.13.0] - 2026-03-25
 
 ### Added
@@ -41,7 +54,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.13.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.14.0...HEAD
+[0.14.0]: https://github.com/ishida-supsys/oretachi/compare/0.13.0...0.14.0
 [0.13.0]: https://github.com/ishida-supsys/oretachi/compare/0.12.2...0.13.0
 [0.12.2]: https://github.com/ishida-supsys/oretachi/compare/0.12.1...0.12.2
 [0.12.1]: https://github.com/ishida-supsys/oretachi/compare/0.12.0...0.12.1
