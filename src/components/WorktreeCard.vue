@@ -23,6 +23,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   selectTerminal: [terminalId: number];
   dragStart: [worktreeId: string, event: DragEvent];
+  dragEnd: [];
   addTerminal: [worktreeId: string];
   removeWorktree: [worktreeId: string];
   openInIde: [worktreeId: string];
@@ -92,6 +93,7 @@ const terminalList = computed(() =>
           class="card-name"
           draggable="true"
           @dragstart.stop="$emit('dragStart', worktree.id, $event)"
+          @dragend.stop="$emit('dragEnd')"
         >{{ worktree.name }}</span>
         <span class="card-branch">{{ worktree.branchName }}</span>
         <span v-if="detached" class="card-detached-badge">{{ t('subWindowBadge') }}</span>

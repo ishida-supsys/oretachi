@@ -9,28 +9,41 @@ import TaskCard from "./TaskCard.vue";
 import { useMasonryLayout } from "../composables/useMasonryLayout";
 import { computed, ref } from "vue";
 
-const dragOverId = ref<string | null>(null);
+const draggingId = ref<string | null>(null);
+let swapCooldown = false;
+let originalOrder: string[] = [];
+let dropped = false;
 
 function onCardDragStart(worktreeId: string, event: DragEvent) {
+  draggingId.value = worktreeId;
+  originalOrder = props.worktrees.map((w) => w.id);
+  dropped = false;
   event.dataTransfer?.setData("text/plain", worktreeId);
 }
 
 function onCardDragOver(worktreeId: string, event: DragEvent) {
   event.preventDefault();
-  dragOverId.value = worktreeId;
-}
-
-function onCardDrop(toId: string, event: DragEvent) {
-  event.preventDefault();
-  const fromId = event.dataTransfer?.getData("text/plain");
-  dragOverId.value = null;
-  if (fromId && fromId !== toId) {
-    emit("reorderWorktrees", fromId, toId);
+  if (swapCooldown) return;
+  if (draggingId.value && draggingId.value !== worktreeId) {
+    emit("reorderWorktrees", draggingId.value, worktreeId);
+    swapCooldown = true;
+    setTimeout(() => { swapCooldown = false; }, 300);
   }
 }
 
-function onCardDragLeave() {
-  dragOverId.value = null;
+function onCardDrop(event: DragEvent) {
+  event.preventDefault();
+  dropped = true;
+  draggingId.value = null;
+  emit("commitReorder");
+}
+
+function onDragEnd() {
+  if (!dropped) {
+    emit("cancelReorder", originalOrder);
+  }
+  draggingId.value = null;
+  dropped = false;
 }
 
 const props = defineProps<{
@@ -48,6 +61,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   selectTerminal: [terminalId: number];
   reorderWorktrees: [fromId: string, toId: string];
+  commitReorder: [];
+  cancelReorder: [orderIds: string[]];
   addWorktree: [];
   removeWorktree: [worktreeId: string];
   addTerminal: [worktreeId: string];
@@ -68,7 +83,6 @@ const emit = defineEmits<{
 type PanelMode = "worktree" | "task";
 const panelMode = ref<PanelMode>("worktree");
 
-const worktreesRef = computed(() => props.worktrees);
 const tasksRef = computed(() => props.tasks);
 
 // 各ワークツリーカードの自然幅（ターミナルサムネイル幅から計算）をもとに列幅を決定する
@@ -90,7 +104,6 @@ const naturalCardWidth = computed(() => {
 
 const TASK_CARD_WIDTH = ref(260);
 
-const { containerRef, columns } = useMasonryLayout(worktreesRef, { minColumnWidth: naturalCardWidth, gap: 12 });
 const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayout(tasksRef, { minColumnWidth: TASK_CARD_WIDTH, gap: 12 });
 </script>
 
@@ -124,43 +137,45 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
         {{ t('worktreeEmpty') }}
       </div>
 
-      <div ref="containerRef" class="worktree-list">
-        <div v-for="(col, colIndex) in columns" :key="colIndex" class="masonry-column" :style="{ maxWidth: naturalCardWidth + 'px' }">
-          <div
-            v-for="worktree in col"
-            :key="worktree.id"
-            class="card-drop-target"
-            :class="{ 'card-drop-over': dragOverId === worktree.id }"
-            @dragover="onCardDragOver(worktree.id, $event)"
-            @dragleave="onCardDragLeave"
-            @drop="onCardDrop(worktree.id, $event)"
-          >
-            <WorktreeCard
-              :worktree="worktree"
-              :thumbnail-urls="thumbnailUrls"
-              :detached="detachedWorktrees.has(worktree.id)"
-              :notification-count="notifications.get(worktree.id) ?? 0"
-              :hotkey-char="hotkeyChars.get(worktree.id)"
-              :loading="loadingWorktrees.has(worktree.id)"
-              :loading-text="loadingWorktrees.get(worktree.id)"
-              :auto-approval="autoApprovals.get(worktree.id) ?? false"
-              :ai-judging="aiJudgingWorktrees.has(worktree.id)"
-              @drag-start="onCardDragStart"
-              @select-terminal="emit('selectTerminal', $event)"
-              @add-terminal="emit('addTerminal', $event)"
-              @remove-worktree="emit('removeWorktree', $event)"
-              @open-in-ide="emit('openInIde', $event)"
-              @open-artifacts="emit('openArtifacts', $event)"
-              @move-to-sub-window="emit('moveToSubWindow', $event)"
-              @move-to-main-window="emit('moveToMainWindow', $event)"
-              @focus-sub-window="emit('focusSubWindow', $event)"
-              @set-hotkey-char="emit('setHotkeyChar', $event)"
-              @toggle-auto-approval="emit('toggleAutoApproval', $event)"
-              @cancel-ai-judging="emit('cancelAiJudging', $event)"
-            />
-          </div>
+      <TransitionGroup
+        name="card"
+        tag="div"
+        class="worktree-grid"
+        :style="{ gridTemplateColumns: `repeat(auto-fill, minmax(${naturalCardWidth}px, 1fr))` }"
+      >
+        <div
+          v-for="worktree in worktrees"
+          :key="worktree.id"
+          class="card-drop-target"
+          @dragover="onCardDragOver(worktree.id, $event)"
+          @drop="onCardDrop"
+        >
+          <WorktreeCard
+            :worktree="worktree"
+            :thumbnail-urls="thumbnailUrls"
+            :detached="detachedWorktrees.has(worktree.id)"
+            :notification-count="notifications.get(worktree.id) ?? 0"
+            :hotkey-char="hotkeyChars.get(worktree.id)"
+            :loading="loadingWorktrees.has(worktree.id)"
+            :loading-text="loadingWorktrees.get(worktree.id)"
+            :auto-approval="autoApprovals.get(worktree.id) ?? false"
+            :ai-judging="aiJudgingWorktrees.has(worktree.id)"
+            @drag-start="onCardDragStart"
+            @drag-end="onDragEnd"
+            @select-terminal="emit('selectTerminal', $event)"
+            @add-terminal="emit('addTerminal', $event)"
+            @remove-worktree="emit('removeWorktree', $event)"
+            @open-in-ide="emit('openInIde', $event)"
+            @open-artifacts="emit('openArtifacts', $event)"
+            @move-to-sub-window="emit('moveToSubWindow', $event)"
+            @move-to-main-window="emit('moveToMainWindow', $event)"
+            @focus-sub-window="emit('focusSubWindow', $event)"
+            @set-hotkey-char="emit('setHotkeyChar', $event)"
+            @toggle-auto-approval="emit('toggleAutoApproval', $event)"
+            @cancel-ai-judging="emit('cancelAiJudging', $event)"
+          />
         </div>
-      </div>
+      </TransitionGroup>
     </template>
 
     <!-- タスクパネル -->
@@ -256,6 +271,45 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   background: #313244;
 }
 
+.worktree-grid {
+  display: grid;
+  gap: 12px;
+  align-items: start;
+  position: relative;
+}
+
+/* TransitionGroup: カード移動（FLIP） */
+.card-move {
+  transition: transform 0.3s ease;
+}
+
+/* TransitionGroup: カード削除 */
+.card-leave-active {
+  transition: opacity 0.25s ease, transform 0.25s ease;
+  position: absolute;
+  pointer-events: none;
+}
+
+.card-leave-to {
+  opacity: 0;
+  transform: scale(0.85);
+}
+
+/* TransitionGroup: カード追加 */
+.card-enter-active {
+  transition: opacity 0.25s ease, transform 0.25s ease;
+}
+
+.card-enter-from {
+  opacity: 0;
+  transform: scale(0.85);
+}
+
+.card-drop-target {
+  min-width: 0;
+}
+
+/* タスクパネル（既存のマソンリーレイアウト） */
 .worktree-list {
   display: flex;
   flex-wrap: wrap;
@@ -269,16 +323,6 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-
-.card-drop-target {
-  border-radius: 8px;
-  transition: outline 0.1s;
-}
-
-.card-drop-over {
-  outline: 2px solid #cba6f7;
-  outline-offset: 2px;
 }
 
 .empty-state {

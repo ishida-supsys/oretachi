@@ -108,7 +108,7 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
   }
 }
 
-/** ワークツリーの順序を変更（fromId を toId の位置に移動） */
+/** ワークツリーの順序を変更（fromId を toId の位置に移動）。保存は行わない */
 function reorderWorktree(fromId: string, toId: string): void {
   if (fromId === toId) return;
 
@@ -125,8 +125,24 @@ function reorderWorktree(fromId: string, toId: string): void {
     const [settingsItem] = settings.value.worktrees.splice(fromSettingsIdx, 1);
     settings.value.worktrees.splice(toSettingsIdx, 0, settingsItem);
   }
+}
 
+/** 現在の worktrees 順序を設定に保存する */
+function saveWorktreeOrder(): void {
   scheduleSave();
+}
+
+/** ワークツリーの順序を指定された ID 順に復元する */
+function restoreWorktreeOrder(orderIds: string[]): void {
+  const sorted = orderIds
+    .map((id) => worktrees.value.find((w) => w.id === id))
+    .filter((w): w is typeof worktrees.value[number] => w !== undefined);
+  worktrees.value = sorted;
+
+  const sortedSettings = orderIds
+    .map((id) => settings.value.worktrees.find((w) => w.id === id))
+    .filter((w): w is typeof settings.value.worktrees[number] => w !== undefined);
+  settings.value.worktrees = sortedSettings;
 }
 
 /** ローカルブランチ一覧を取得 */
@@ -204,6 +220,8 @@ export function useWorktrees() {
     rollbackWorktree,
     removeWorktree,
     reorderWorktree,
+    saveWorktreeOrder,
+    restoreWorktreeOrder,
     listBranches,
     addTerminal,
     removeTerminal,

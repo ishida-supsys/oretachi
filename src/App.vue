@@ -60,7 +60,7 @@ const { checkForUpdate, downloadAndInstall } = useUpdater();
 type ViewMode = "home" | "settings" | "terminal";
 
 const { settings, loadSettings, scheduleSave } = useSettings();
-const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, removeWorktree, reorderWorktree, listBranches, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
+const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, removeWorktree, reorderWorktree, saveWorktreeOrder, restoreWorktreeOrder, listBranches, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, registerTerminalSession, closeAllSubWindows } = useSubWindows();
 const { autoApprovalPromptMap, lastJudgedCommandMap, showAutoApprovalPromptDialog, autoApprovalPromptTargetId, restoreFromSettings: restoreAutoApprovalPrompts, onClickAutoApproval, onSaveAutoApprovalPrompt } = useAutoApprovalPrompt(settings, scheduleSave, isDetached);
 const { notifications, initNotificationListener, addNotification, clearNotification, purgeStaleNotifications, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
@@ -1318,6 +1318,8 @@ onMounted(async () => {
         @toggle-auto-approval="onToggleAutoApproval"
         @cancel-ai-judging="onCancelAiJudging"
         @reorder-worktrees="reorderWorktree"
+        @commit-reorder="saveWorktreeOrder"
+        @cancel-reorder="restoreWorktreeOrder"
         @add-task="showAddTaskDialog = true"
         @remove-task="removeTask"
         @rerun-task="rerunTaskId = $event"
