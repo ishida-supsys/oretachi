@@ -64,8 +64,9 @@ impl CancellableManager {
     }
 }
 
-/// Windowsレジストリからシステム・ユーザーのPATHを読み取り結合して返す。
+/// Windowsレジストリからシステム・ユーザーのPATHを読み取り、環境変数展開して結合して返す。
 /// アップデート後の再起動でPATHが不完全になる問題の対策。
+/// REG_EXPAND_SZ の %SystemRoot% 等を ExpandEnvironmentStringsW で展開する。
 #[cfg(target_os = "windows")]
 pub fn refresh_path_from_registry() -> Result<String, String> {
     use winreg::enums::{HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE, KEY_READ};
@@ -77,18 +78,36 @@ pub fn refresh_path_from_registry() -> Result<String, String> {
             KEY_READ,
         )
         .map_err(|e| format!("Failed to open HKLM key: {}", e))?;
-    let system_path: String = system_key
-        .get_value("Path")
-        .unwrap_or_default();
+    let system_path: String = system_key.get_value("Path").unwrap_or_default();
 
     let user_key = RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey_with_flags(r"Environment", KEY_READ)
         .map_err(|e| format!("Failed to open HKCU key: {}", e))?;
-    let user_path: String = user_key
-        .get_value("Path")
-        .unwrap_or_default();
+    let user_path: String = user_key.get_value("Path").unwrap_or_default();
 
-    Ok(format!("{};{}", system_path, user_path))
+    let combined = format!("{};{}", system_path, user_path);
+    Ok(expand_env_vars(&combined))
+}
+
+/// `%VAR%` 形式の環境変数プレースホルダを ExpandEnvironmentStringsW で展開する
+#[cfg(target_os = "windows")]
+fn expand_env_vars(s: &str) -> String {
+    use std::ffi::OsString;
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+    use windows_sys::Win32::System::Environment::ExpandEnvironmentStringsW;
+
+    let wide: Vec<u16> = OsString::from(s).encode_wide().chain(std::iter::once(0)).collect();
+    let needed = unsafe { ExpandEnvironmentStringsW(wide.as_ptr(), std::ptr::null_mut(), 0) };
+    if needed == 0 {
+        return s.to_string();
+    }
+    let mut buf: Vec<u16> = vec![0u16; needed as usize];
+    let written = unsafe { ExpandEnvironmentStringsW(wide.as_ptr(), buf.as_mut_ptr(), needed) };
+    if written == 0 || written > needed {
+        return s.to_string();
+    }
+    // written には終端 NUL を含む文字数が返る
+    OsString::from_wide(&buf[..written as usize - 1]).to_string_lossy().into_owned()
 }
 
 /// プロセスツリーを強制終了する
