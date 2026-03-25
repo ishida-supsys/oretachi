@@ -132,17 +132,21 @@ function saveWorktreeOrder(): void {
   scheduleSave();
 }
 
-/** ワークツリーの順序を指定された ID 順に復元する */
+/** ワークツリーの順序を指定された ID 順に復元する。スナップショット外の ID は末尾に追加 */
 function restoreWorktreeOrder(orderIds: string[]): void {
+  const orderSet = new Set(orderIds);
+
   const sorted = orderIds
     .map((id) => worktrees.value.find((w) => w.id === id))
     .filter((w): w is typeof worktrees.value[number] => w !== undefined);
-  worktrees.value = sorted;
+  const extra = worktrees.value.filter((w) => !orderSet.has(w.id));
+  worktrees.value = [...sorted, ...extra];
 
   const sortedSettings = orderIds
     .map((id) => settings.value.worktrees.find((w) => w.id === id))
     .filter((w): w is typeof settings.value.worktrees[number] => w !== undefined);
-  settings.value.worktrees = sortedSettings;
+  const extraSettings = settings.value.worktrees.filter((w) => !orderSet.has(w.id));
+  settings.value.worktrees = [...sortedSettings, ...extraSettings];
 }
 
 /** ローカルブランチ一覧を取得 */
