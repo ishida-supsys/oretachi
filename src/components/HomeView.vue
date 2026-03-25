@@ -6,6 +6,7 @@ import { useI18n } from "vue-i18n";
 const { t } = useI18n();
 import WorktreeCard from "./WorktreeCard.vue";
 import TaskCard from "./TaskCard.vue";
+import HomeCatTerminal from "./HomeCatTerminal.vue";
 import { useMasonryLayout } from "../composables/useMasonryLayout";
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import autoAnimate from "@formkit/auto-animate";
@@ -100,7 +101,13 @@ function unhideCard(worktreeId: string): void {
   hiddenWorktrees.delete(worktreeId);
 }
 
-defineExpose({ fadeOutCard, hideCard, animateAfterRemove, unhideCard });
+const catRef = ref<InstanceType<typeof HomeCatTerminal> | null>(null);
+
+function sendCatTopic(text: string, priority: number) {
+  catRef.value?.topic(text, priority);
+}
+
+defineExpose({ fadeOutCard, hideCard, animateAfterRemove, unhideCard, sendCatTopic });
 
 // D&D中はauto-animateを無効化してカスタムFLIPに委ねる
 watch(draggingId, (id) => {
@@ -210,6 +217,13 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
 
 <template>
   <div class="home-view">
+    <!-- 背景: ターミナル猫 -->
+    <div class="home-cat-bg">
+      <HomeCatTerminal ref="catRef" />
+    </div>
+
+    <!-- フォアグラウンドコンテンツ -->
+    <div class="home-content">
     <div class="home-header">
       <select v-model="panelMode" class="panel-select">
         <option value="worktree">{{ t('worktreeTitle') }}</option>
@@ -302,6 +316,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
         </div>
       </div>
     </template>
+    </div><!-- /home-content -->
   </div>
 </template>
 
@@ -309,10 +324,26 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
 .home-view {
   width: 100%;
   height: 100%;
+  background: transparent;
+  position: relative;
+}
+
+.home-cat-bg {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.home-content {
+  position: relative;
+  z-index: 1;
+  width: 100%;
+  height: 100%;
   overflow-y: auto;
   padding: 16px;
-  background: transparent;
   box-sizing: border-box;
+  background: transparent;
 }
 
 .home-header {

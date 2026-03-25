@@ -72,6 +72,20 @@ const { sortedTasks, removeTask } = useTasks();
 
 const homeViewRef = ref<InstanceType<typeof HomeView> | null>(null);
 
+// 自動承認コマンドを猫に送る
+watch(
+  () => [...lastJudgedCommandMap.entries()],
+  (newEntries, oldEntries) => {
+    const oldMap = new Map(oldEntries ?? []);
+    for (const [worktreeId, command] of newEntries) {
+      if (oldMap.get(worktreeId) !== command) {
+        homeViewRef.value?.sendCatTopic(command, 1);
+      }
+    }
+  },
+  { deep: true },
+);
+
 // HomeView / WorktreeCard 向け: Map<string, number> 形式を維持
 const notificationCounts = computed(() => {
   const map = new Map<string, number>();
