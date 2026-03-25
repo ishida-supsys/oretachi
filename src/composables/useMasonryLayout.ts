@@ -49,7 +49,8 @@ export function useMasonryLayout<T>(
       // containerWidth が 0→実幅 に変わる2段階レンダリング後に強制 repaint を促す
       nextTick(() => {
         if (containerRef.value) {
-          containerWidth.value = containerRef.value.clientWidth;
+          const w = containerRef.value.clientWidth;
+          if (w > 0) containerWidth.value = w;
         }
       });
     }
