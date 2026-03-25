@@ -6,6 +6,16 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-03-25
+
+### Added
+- ワークツリーカードのドラッグ&ドロップ並べ替え機能
+- ワークツリー管理・ターミナルビュー・設定・タスク実行の初期アプリケーション構造
+
+### Fixed
+- 保存順序にないワークツリーの復元時の保持
+- Windows PATH 環境変数の展開と IDE 選択の改善
+
 ## [0.12.2] - 2026-03-25
 
 ### Fixed
@@ -31,7 +41,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.12.2...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.13.0...HEAD
+[0.13.0]: https://github.com/ishida-supsys/oretachi/compare/0.12.2...0.13.0
 [0.12.2]: https://github.com/ishida-supsys/oretachi/compare/0.12.1...0.12.2
 [0.12.1]: https://github.com/ishida-supsys/oretachi/compare/0.12.0...0.12.1
 [0.12.0]: https://github.com/ishida-supsys/oretachi/releases/tag/0.12.0
