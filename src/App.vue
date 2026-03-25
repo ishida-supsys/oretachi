@@ -502,7 +502,10 @@ async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch:
           homeViewRef.value?.hideCard(worktreeId);
         },
       );
+      await nextTick();
+      homeViewRef.value?.animateAfterRemove();
     } catch (e) {
+      homeViewRef.value?.animateAfterRemove();
       await message(t("deleteFailed", { error: e }), { kind: "error" });
     } finally {
       homeViewRef.value?.unhideCard(worktreeId);

@@ -65,6 +65,7 @@ function registerColumn(el: HTMLElement | null, index: number) {
 
 // 削除アニメーション用
 const hiddenWorktrees = reactive(new Set<string>());
+let pendingFlipPositions: Map<string, DOMRect> | null = null;
 
 async function fadeOutCard(worktreeId: string): Promise<void> {
   const el = cardElements.get(worktreeId);
@@ -79,13 +80,24 @@ async function fadeOutCard(worktreeId: string): Promise<void> {
 
 function hideCard(worktreeId: string): void {
   hiddenWorktrees.add(worktreeId);
+  // splice 前に残りカードの位置を記録し、autoAnimate を無効化（FLIP に委ねる）
+  pendingFlipPositions = capturePositions();
+  for (const ctrl of columnControllers.values()) ctrl.disable();
+}
+
+function animateAfterRemove(): void {
+  if (pendingFlipPositions) {
+    animateFlip(pendingFlipPositions);
+    pendingFlipPositions = null;
+  }
+  for (const ctrl of columnControllers.values()) ctrl.enable();
 }
 
 function unhideCard(worktreeId: string): void {
   hiddenWorktrees.delete(worktreeId);
 }
 
-defineExpose({ fadeOutCard, hideCard, unhideCard });
+defineExpose({ fadeOutCard, hideCard, animateAfterRemove, unhideCard });
 
 // D&D中はauto-animateを無効化してカスタムFLIPに委ねる
 watch(draggingId, (id) => {
