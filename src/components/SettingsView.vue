@@ -1014,7 +1014,7 @@ function getSoundLabel(sound: string | null | undefined): string {
       }
     },
     "homeCat": {
-      "label": "Terminal Cat",
+      "label": "Terminal Cat (Experimental)",
       "enable": "Show cat on home screen"
     }
   },
@@ -1092,7 +1092,7 @@ function getSoundLabel(sound: string | null | undefined): string {
       }
     },
     "homeCat": {
-      "label": "ターミナル猫",
+      "label": "ターミナル猫（試験的）",
       "enable": "ホーム画面に猫を表示する"
     }
   }
