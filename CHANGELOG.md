@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.1] - 2026-03-27
+
+### Fixed
+- Catターミナルの描画安定性を改善
+
 ## [0.15.0] - 2026-03-26
 
 ### Added
@@ -66,7 +71,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.15.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.15.1...HEAD
+[0.15.1]: https://github.com/ishida-supsys/oretachi/compare/0.15.0...0.15.1
 [0.15.0]: https://github.com/ishida-supsys/oretachi/compare/0.14.0...0.15.0
 [0.14.0]: https://github.com/ishida-supsys/oretachi/compare/0.13.0...0.14.0
 [0.13.0]: https://github.com/ishida-supsys/oretachi/compare/0.12.2...0.13.0
