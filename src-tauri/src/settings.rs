@@ -320,6 +320,8 @@ pub struct AppSettings {
     pub notification_sound: Option<NotificationSoundSettings>,
     #[serde(default, rename = "mcpPort")]
     pub mcp_port: u16,
+    #[serde(default, rename = "enableHomeCat")]
+    pub enable_home_cat: bool,
 }
 
 impl Default for AppSettings {
@@ -342,6 +344,7 @@ impl Default for AppSettings {
             appearance: None,
             notification_sound: None,
             mcp_port: 0,
+            enable_home_cat: false,
         }
     }
 }

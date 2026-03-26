@@ -106,4 +106,5 @@ export interface AppSettings {
   appearance?: AppearanceSettings;
   notificationSound?: NotificationSoundSettings;
   mcpPort?: number;
+  enableHomeCat?: boolean;
 }
