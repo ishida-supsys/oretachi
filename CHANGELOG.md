@@ -6,6 +6,18 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-03-26
+
+### Added
+- 設定ビューに言語・MCPサーバー・ウィンドウ・通知音の各オプションを追加
+- アプリケーション設定管理（Rustバックエンド + Vue UIコンポーネント）を実装
+- ターミナルエミュレーション・包括的なGit連携・AIエージェント管理を実装
+- AI駆動タスク生成によるワークツリー管理（MCP連携・構造化出力）を追加
+- ホームビューとCatターミナルコンポーネントによるAIエージェントインタラクションを導入
+
+### Fixed
+- ボタンとホットキートグルのスタイルを改善
+
 ## [0.14.0] - 2026-03-25
 
 ### Added
@@ -54,7 +66,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.14.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.15.0...HEAD
+[0.15.0]: https://github.com/ishida-supsys/oretachi/compare/0.14.0...0.15.0
 [0.14.0]: https://github.com/ishida-supsys/oretachi/compare/0.13.0...0.14.0
 [0.13.0]: https://github.com/ishida-supsys/oretachi/compare/0.12.2...0.13.0
 [0.12.2]: https://github.com/ishida-supsys/oretachi/compare/0.12.1...0.12.2
