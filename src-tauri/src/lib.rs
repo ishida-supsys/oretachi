@@ -388,11 +388,12 @@ async fn delete_artifacts(app_handle: tauri::AppHandle, worktree_id: String) -> 
 async fn get_report_summary(
     app_handle: tauri::AppHandle,
     date: String,
+    tz_offset_min: i64,
 ) -> Result<report_db::ReportSummary, String> {
     let pool = app_handle
         .try_state::<report_db::ReportPool>()
         .ok_or_else(|| "Report DB not initialized".to_string())?;
-    report_db::summary_for_date(&pool.0, &date).await
+    report_db::summary_for_date(&pool.0, &date, tz_offset_min).await
 }
 
 // ─── FS ウォッチャーコマンド ──────────────────────────────────────────────────
@@ -553,10 +554,10 @@ pub fn run() {
             get_report_summary,
         ])
         .setup(|app| {
-            // レポート DB を非同期で初期化（失敗してもアプリ起動はブロックしない）
+            // レポート DB を同期的に初期化（ファイル接続のみで高速、起動前に完了させる）
             {
                 let handle = app.handle().clone();
-                tauri::async_runtime::spawn(async move {
+                tauri::async_runtime::block_on(async move {
                     match report_db::init_report_db(&handle).await {
                         Ok(pool) => {
                             handle.manage(report_db::ReportPool(pool));

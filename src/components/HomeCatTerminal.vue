@@ -36,8 +36,10 @@ function scheduleMeow() {
 
 async function fetchReport() {
   try {
-    const today = new Date().toISOString().slice(0, 10);
-    const summary = await invoke<ReportSummary>("get_report_summary", { date: today });
+    const now = new Date();
+    const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+    const tzOffsetMin = now.getTimezoneOffset();
+    const summary = await invoke<ReportSummary>("get_report_summary", { date: today, tzOffsetMin });
     if (summary.worktree_added > 0 || summary.worktree_removed > 0) {
       topic(
         t("reportWt", {
