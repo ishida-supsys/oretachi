@@ -568,7 +568,7 @@ function getSoundLabel(sound: string | null | undefined): string {
           id="enableHomeCat"
           type="checkbox"
           class="toggle-checkbox"
-          :checked="settings.enableHomeCat !== false"
+          :checked="settings.enableHomeCat === true"
           @change="(e) => { settings.enableHomeCat = (e.target as HTMLInputElement).checked; scheduleSave(); }"
         />
         <label for="enableHomeCat" class="inline-label toggle-label">{{ t('homeCat.enable') }}</label>

@@ -220,7 +220,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
 <template>
   <div class="home-view">
     <!-- 背景: ターミナル猫 -->
-    <div v-if="settings.enableHomeCat !== false" class="home-cat-bg">
+    <div v-if="settings.enableHomeCat === true" class="home-cat-bg">
       <HomeCatTerminal ref="catRef" />
     </div>
 
