@@ -84,7 +84,7 @@ export function useCat() {
   // ----- 猫本体の描画 -----
 
   function drawCatFrame(lines: string[]) {
-    if (!terminal) return;
+    if (!terminal || terminal.rows < 6 || terminal.cols < CAT_DISPLAY_WIDTH) return;
     const pos = getPos();
     if (!pos) return;
     const { startRow, startCol } = pos;
@@ -128,7 +128,7 @@ export function useCat() {
 
   // lines の先頭から displayedCount 文字分を複数行に描画する
   function drawSpeechLines(lines: string[], displayedCount: number) {
-    if (!terminal || lines.length === 0) return;
+    if (!terminal || terminal.rows < 6 || terminal.cols < MAX_SPEECH_WIDTH || lines.length === 0) return;
     const pos = getPos();
     if (!pos) return;
 
@@ -148,8 +148,9 @@ export function useCat() {
       const col = lines.length === 1
         ? Math.max(1, rightEdge - measureWidth(partial))
         : baseCol;
-      // クリア→描画
-      seq += `\x1b[${row};${baseCol}H${" ".repeat(MAX_SPEECH_WIDTH)}`;
+      // クリア→描画 (折り返し防止のため端末幅にクランプ)
+      const clearWidth = Math.min(MAX_SPEECH_WIDTH, terminal.cols - baseCol + 1);
+      seq += `\x1b[${row};${baseCol}H${" ".repeat(clearWidth)}`;
       seq += `\x1b[${row};${col}H${partial}`;
     }
     seq += "\x1b8";
@@ -158,7 +159,7 @@ export function useCat() {
 
   // MAX_SPEECH_LINES 行分をクリア（行数に関わらず常に最大行数分消す）
   function clearSpeechLines() {
-    if (!terminal) return;
+    if (!terminal || terminal.rows < 6 || terminal.cols < MAX_SPEECH_WIDTH) return;
     const pos = getPos();
     if (!pos) return;
 
@@ -167,7 +168,8 @@ export function useCat() {
     for (let i = 0; i < MAX_SPEECH_LINES; i++) {
       const row = pos.speechRow - (MAX_SPEECH_LINES - 1 - i);
       if (row < 1) continue;
-      seq += `\x1b[${row};${baseCol}H${" ".repeat(MAX_SPEECH_WIDTH)}`;
+      const clearWidth = Math.min(MAX_SPEECH_WIDTH, terminal.cols - baseCol + 1);
+      seq += `\x1b[${row};${baseCol}H${" ".repeat(clearWidth)}`;
     }
     seq += "\x1b8";
     terminal.write(seq);

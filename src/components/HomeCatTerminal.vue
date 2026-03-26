@@ -103,6 +103,7 @@ onMounted(() => {
   resizeObserver = new ResizeObserver(() => {
     if (containerRef.value && containerRef.value.offsetWidth > 0) {
       fitAddon?.fit();
+      terminal?.write('\x1b[2J'); // バッファリフローによるアーティファクトをクリア
       redraw();
     }
   });
