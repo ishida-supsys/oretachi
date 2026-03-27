@@ -452,7 +452,14 @@ async fn save_archive(
     let pool = app_handle
         .try_state::<archive_db::ArchivePool>()
         .ok_or_else(|| "Archive DB not initialized".to_string())?;
-    archive_db::save(&pool.0, &archive).await
+    archive_db::save(&pool.0, &archive).await?;
+    // MCPクライアントへアーカイブ通知を発火
+    let _ = app_handle.emit("worktree-archived", serde_json::json!({
+        "id": archive.id,
+        "name": archive.name,
+        "branchName": archive.branch_name,
+    }));
+    Ok(())
 }
 
 #[tauri::command]
@@ -577,6 +584,7 @@ pub fn run() {
         .manage(PtyManager::new())
         .manage(SettingsManager::new())
         .manage(mcp_server::McpServerManager::new())
+        .manage(mcp_server::McpPeerRegistry(std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()))))
         .manage(ai_judge::ApprovalManager::new())
         .manage(ai_commit_message::CommitMessageManager::new())
         .manage(task_executor::TaskGenerateManager::new())

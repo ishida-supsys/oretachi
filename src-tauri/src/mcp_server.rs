@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::HashMap, fs, path::PathBuf, sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}}, time::{SystemTime, UNIX_EPOCH}};
 use tokio::fs as tokio_fs;
 
 use axum::{extract::State, http::StatusCode, routing::post, Json};
@@ -6,19 +6,29 @@ use rmcp::{
     schemars, ErrorData as McpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::*,
+    service::{NotificationContext, Peer, RoleServer},
     tool, tool_handler, tool_router,
     transport::streamable_http_server::{
         session::local::LocalSessionManager, StreamableHttpService,
     },
 };
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Emitter, Manager};
-use tokio::sync::{oneshot, watch};
+use tauri::{AppHandle, Emitter, Listener, Manager};
+use tokio::sync::{oneshot, watch, RwLock};
 
 use crate::git_worktree::get_git_remotes;
 use crate::settings::SettingsManager;
 
 const PORT_FILE: &str = "mcp-port";
+
+// ─── Peer Registry (接続中クライアントの管理) ─────────────────────────────────
+
+pub type PeerMap = Arc<RwLock<HashMap<u64, Peer<RoleServer>>>>;
+
+/// 接続中のMCPクライアントのPeerを保持するTauri managed state
+pub struct McpPeerRegistry(pub PeerMap);
+
+static PEER_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 // ─── MCP Server Manager ───────────────────────────────────────────────────────
 
@@ -38,6 +48,8 @@ pub struct McpServerManager {
     /// サーバー起動のたびにインクリメントされる世代カウンタ
     /// 旧世代のタスクが status を上書きするのを防ぐ
     generation: Arc<AtomicU64>,
+    /// worktree-archived リスナーID（再起動時にアンリジスターするために保持）
+    archive_listener_id: Mutex<Option<tauri::EventId>>,
 }
 
 impl McpServerManager {
@@ -48,6 +60,7 @@ impl McpServerManager {
             status: Arc::new(Mutex::new(McpStatus { running: false, port: None })),
             restart_lock: tokio::sync::Mutex::new(()),
             generation: Arc::new(AtomicU64::new(0)),
+            archive_listener_id: Mutex::new(None),
         }
     }
 
@@ -176,14 +189,16 @@ struct AddTaskEvent {
 pub struct NotifyService {
     app_handle: AppHandle,
     tool_router: ToolRouter<NotifyService>,
+    peer_registry: PeerMap,
 }
 
 #[tool_router]
 impl NotifyService {
-    pub fn new(app_handle: AppHandle) -> Self {
+    pub fn new(app_handle: AppHandle, peer_registry: PeerMap) -> Self {
         Self {
             app_handle,
             tool_router: Self::tool_router(),
+            peer_registry,
         }
     }
 
@@ -522,7 +537,10 @@ impl ServerHandler for NotifyService {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
             protocol_version: ProtocolVersion::LATEST,
-            capabilities: ServerCapabilities::builder().enable_tools().build(),
+            capabilities: ServerCapabilities::builder()
+                .enable_tools()
+                .enable_logging()
+                .build(),
             server_info: Implementation {
                 name: "oretachi".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
@@ -530,6 +548,19 @@ impl ServerHandler for NotifyService {
                 ..Default::default()
             },
             instructions: Some("ワークツリーへの通知を管理します".to_string()),
+        }
+    }
+
+    fn on_initialized(
+        &self,
+        context: NotificationContext<RoleServer>,
+    ) -> impl std::future::Future<Output = ()> + Send + '_ {
+        let peer = context.peer.clone();
+        let registry = self.peer_registry.clone();
+        async move {
+            let id = PEER_ID_COUNTER.fetch_add(1, Ordering::SeqCst);
+            registry.write().await.insert(id, peer);
+            log::info!("[mcp] client connected, peer_id={}", id);
         }
     }
 }
@@ -552,6 +583,42 @@ async fn notify_handler(
         Err(e) => {
             log::error!("Failed to emit notify-worktree: {}", e);
             StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
+// ─── MCP Notification Broadcast ──────────────────────────────────────────────
+
+/// アーカイブされたワークツリーの情報を全接続クライアントに通知する
+async fn broadcast_worktree_archived(peer_registry: &PeerMap, name: &str, id: &str, branch: &str) {
+    let params = LoggingMessageNotificationParam {
+        level: LoggingLevel::Warning,
+        logger: Some("oretachi".to_string()),
+        data: serde_json::json!({
+            "event": "worktree_archived",
+            "worktreeId": id,
+            "worktreeName": name,
+            "branchName": branch,
+        }),
+    };
+
+    // readロックを保持したままawaitしないよう、先にPeerをcloneしてロックを解放する
+    let peer_snapshot: Vec<(u64, Peer<RoleServer>)> = {
+        let peers = peer_registry.read().await;
+        peers.iter().map(|(k, v)| (*k, v.clone())).collect()
+    };
+
+    let mut dead_peers: Vec<u64> = Vec::new();
+    for (peer_id, peer) in &peer_snapshot {
+        if let Err(e) = peer.notify_logging_message(params.clone()).await {
+            log::warn!("[mcp] notify_logging_message failed for peer_id={}: {}", peer_id, e);
+            dead_peers.push(*peer_id);
+        }
+    }
+    if !dead_peers.is_empty() {
+        let mut peers = peer_registry.write().await;
+        for peer_id in dead_peers {
+            peers.remove(&peer_id);
         }
     }
 }
@@ -628,13 +695,46 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
     // Arc クローンをタスクに渡す
     let status = Arc::clone(&manager.status);
     let generation = Arc::clone(&manager.generation);
+
+    // 前回起動時のリスナーがあればアンリジスター（再起動による重複防止）
+    if let Ok(mut guard) = manager.archive_listener_id.lock() {
+        if let Some(old_id) = guard.take() {
+            app_handle.unlisten(old_id);
+        }
+    }
+
+    drop(manager);
+
+    // peer レジストリを取得（managed state から）
+    let peer_map = app_handle.state::<McpPeerRegistry>().0.clone();
+
+    // ワークツリーアーカイブ時に全クライアントへ通知
+    let peer_map_for_listener = peer_map.clone();
+    let listener_id = app_handle.listen("worktree-archived", move |event: tauri::Event| {
+        let registry = peer_map_for_listener.clone();
+        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+            let name = payload["name"].as_str().unwrap_or("unknown").to_string();
+            let id = payload["id"].as_str().unwrap_or("").to_string();
+            let branch = payload["branchName"].as_str().unwrap_or("").to_string();
+            tauri::async_runtime::spawn(async move {
+                broadcast_worktree_archived(&registry, &name, &id, &branch).await;
+            });
+        }
+    });
+
+    // リスナーIDを保存して次回再起動時にアンリジスターできるようにする
+    let manager = app_handle.state::<McpServerManager>();
+    if let Ok(mut guard) = manager.archive_listener_id.lock() {
+        *guard = Some(listener_id);
+    }
     drop(manager);
 
     tauri::async_runtime::spawn(async move {
         let service = StreamableHttpService::new(
             {
                 let ah = app_handle.clone();
-                move || Ok(NotifyService::new(ah.clone()))
+                let peers = peer_map.clone();
+                move || Ok(NotifyService::new(ah.clone(), peers.clone()))
             },
             LocalSessionManager::default().into(),
             Default::default(),
@@ -712,6 +812,9 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
         }
 
         log::info!("[mcp] Shutdown signal received, server stopped");
+
+        // 接続中のpeerをクリア
+        peer_map.write().await.clear();
 
         // ステータス: 停止（世代が一致する場合のみ更新 — 新世代が既に起動済みなら上書きしない）
         if generation.load(Ordering::SeqCst) == my_generation {
