@@ -135,11 +135,10 @@ export function useRemoveWorktreeDialog(options: {
 
       if (activeWorktreeId.value === worktreeId) goHome();
 
-      // git 操作前に事前処理（アーカイブ保存など）を実行
-      if (beforeRemove) await beforeRemove(worktree);
-
       let savedPositions: Map<string, DOMRect> | undefined;
       try {
+        // git 操作前に事前処理（アーカイブ保存など）を実行
+        if (beforeRemove) await beforeRemove(worktree);
         await removeWorktree(
           worktreeId,
           {
