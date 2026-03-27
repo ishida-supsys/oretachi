@@ -62,8 +62,14 @@ const sortedTasks = computed(() => {
 });
 
 // DB からタスクを取得（reset=true で先頭から再ロード）
+// reset 要求がロード中に来た場合はペンディングして完了後に再実行
+let pendingReset = false;
+
 async function loadTasks(reset = false): Promise<void> {
-  if (isLoading.value) return;
+  if (isLoading.value) {
+    if (reset) pendingReset = true;
+    return;
+  }
   if (!reset && !hasMore.value) return;
 
   isLoading.value = true;
@@ -86,6 +92,12 @@ async function loadTasks(reset = false): Promise<void> {
     console.error("Failed to load tasks:", e);
   } finally {
     isLoading.value = false;
+  }
+
+  // ロード中にリセット要求が溜まっていたら再実行
+  if (pendingReset) {
+    pendingReset = false;
+    await loadTasks(true);
   }
 }
 
@@ -148,9 +160,15 @@ async function updateTaskStatus(taskId: string, status: TaskStatus, error?: stri
     const index = activeTasks.value.findIndex((t) => t.id === taskId);
     if (index !== -1) activeTasks.value.splice(index, 1);
 
-    // DB保存の成否に関わらず persistedTasks の先頭に追加して表示を維持
-    persistedTasks.value.unshift({ ...task });
-    currentOffset.value += 1;
+    // 検索中のとき: クエリにマッチする場合のみ先頭に追加
+    // 検索なし: 常に先頭に追加して表示を維持（DB保存失敗時も）
+    const matchesSearch =
+      !searchQuery.value ||
+      task.prompt.toLowerCase().includes(searchQuery.value.toLowerCase());
+    if (matchesSearch) {
+      persistedTasks.value.unshift({ ...task });
+      currentOffset.value += 1;
+    }
   }
 }
 
@@ -160,16 +178,26 @@ async function removeTask(taskId: string) {
   if (activeIdx !== -1) {
     activeTasks.value.splice(activeIdx, 1);
   }
-  // persistedTasks から除去（offset は巻き戻さない: 次の loadMore で重複を防ぐため）
+  // persistedTasks から楽観的に除去（DB削除成功後に offset を巻き戻す）
   const persistedIdx = persistedTasks.value.findIndex((t) => t.id === taskId);
+  let removedTask: TaskItem | undefined;
   if (persistedIdx !== -1) {
+    removedTask = persistedTasks.value[persistedIdx];
     persistedTasks.value.splice(persistedIdx, 1);
   }
   // DB から削除
   try {
     await invoke("delete_task", { id: taskId });
+    // 成功時のみ offset を巻き戻す（DB上レコードが実際に消えた分）
+    if (removedTask !== undefined) {
+      currentOffset.value = Math.max(0, currentOffset.value - 1);
+    }
   } catch (e) {
     console.error("Failed to delete task from DB:", e);
+    // 失敗時は UI を元に戻す
+    if (removedTask !== undefined) {
+      persistedTasks.value.splice(persistedIdx, 0, removedTask);
+    }
   }
 }
 
