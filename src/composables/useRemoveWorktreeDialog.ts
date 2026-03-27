@@ -173,6 +173,13 @@ export function useRemoveWorktreeDialog(options: {
       } finally {
         homeViewRef.value?.unhideCard(worktreeId);
       }
+    } catch (e) {
+      // UI 後処理ステップ（moveToMainWindow・closeArtifactWindow 等）が失敗した場合。
+      // beforeRemove が実行済みであれば副作用をロールバックする。
+      if (onRemoveFailed) {
+        try { await onRemoveFailed(worktree); } catch { /* ロールバック失敗は無視 */ }
+      }
+      await message(t("deleteFailed", { error: e }), { kind: "error" });
     } finally {
       loadingWorktrees.delete(worktreeId);
     }
