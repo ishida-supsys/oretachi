@@ -6,7 +6,15 @@ import { persistedTasks, persistTask, deletePersisted } from "./useTaskPersisten
 
 // サブウィンドウ（ラベルが "sub-" で始まる）では activeTasks を持たないため
 // ブロードキャストとリクエスト受付はメインウィンドウのみ行う
-const isMainWindow = !getCurrentWindow().label.startsWith("sub-");
+// Tauri 環境以外（vite preview 等）では getCurrentWindow() が失敗するため try-catch でガード
+function getIsMainWindow(): boolean {
+  try {
+    return !getCurrentWindow().label.startsWith("sub-");
+  } catch {
+    return false;
+  }
+}
+const isMainWindow = getIsMainWindow();
 
 // メモリ上の実行中タスク（generating / queued / executing）
 const activeTasks = ref<TaskItem[]>([]);

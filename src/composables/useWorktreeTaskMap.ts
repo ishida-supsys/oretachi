@@ -10,19 +10,26 @@ const { tasks: activeTasks } = useTasks();
 // 他ウィンドウ（主にメインウィンドウ）から受信した実行中タスク
 const remoteActiveTasks = ref<TaskItem[]>([]);
 
-// ページング・検索フィルタに影響されない全タスクを初回ロード
-loadAllTasks();
+// Tauri API の初期化（useWorktreeTaskMap() 呼び出し時に一度だけ実行）
+let initialized = false;
+function initTauriListeners() {
+  if (initialized) return;
+  initialized = true;
 
-// メインウィンドウでタスクが永続化/削除されたとき全ウィンドウで再ロード
-listen("task-data-changed", () => { loadAllTasks(); }).catch(() => {});
+  // ページング・検索フィルタに影響されない全タスクを初回ロード
+  loadAllTasks();
 
-// メインウィンドウの activeTasks をリアルタイム同期
-listen<TaskItem[]>("task-active-sync", (e) => {
-  remoteActiveTasks.value = e.payload;
-}).catch(() => {});
+  // メインウィンドウでタスクが永続化/削除されたとき全ウィンドウで再ロード
+  listen("task-data-changed", () => { loadAllTasks(); }).catch(() => {});
 
-// 起動時に現在の activeTasks スナップショットをリクエスト（実行中タスクを即座に取得）
-emit("task-active-sync-request", {}).catch(() => {});
+  // メインウィンドウの activeTasks をリアルタイム同期
+  listen<TaskItem[]>("task-active-sync", (e) => {
+    remoteActiveTasks.value = e.payload;
+  }).catch(() => {});
+
+  // 起動時に現在の activeTasks スナップショットをリクエスト（実行中タスクを即座に取得）
+  emit("task-active-sync-request", {}).catch(() => {});
+}
 
 const worktreeTaskMap = computed(() => {
   // ローカルの activeTasks と他ウィンドウから受信した remoteActiveTasks を結合し、
@@ -52,6 +59,9 @@ const worktreeTaskMap = computed(() => {
 
 export function useWorktreeTaskMap() {
   const { t } = useI18n();
+
+  // Tauri 環境での初回呼び出し時にリスナーを登録
+  initTauriListeners();
 
   function getTasksForWorktree(repositoryName: string, branchName: string): TaskItem[] {
     return worktreeTaskMap.value.get(`${repositoryName}:${branchName}`) ?? [];
