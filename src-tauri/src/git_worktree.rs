@@ -498,6 +498,7 @@ pub fn get_log(repo_path: &str, skip: usize, limit: usize) -> Result<Vec<CommitE
 pub struct CommitFileEntry {
     pub path: String,
     pub status: String,
+    pub old_path: Option<String>,
 }
 
 pub fn get_commit_files(repo_path: &str, hash: &str) -> Result<Vec<CommitFileEntry>, String> {
@@ -522,36 +523,45 @@ pub fn get_commit_files(repo_path: &str, hash: &str) -> Result<Vec<CommitFileEnt
         let status_raw = fields[0].trim();
         let status_char = status_raw.chars().next().unwrap_or('M');
         let status = status_char.to_string();
-        // R / C はフィールドが 3 つ: status, old_path, new_path → new_path を表示パスとして使う
-        let path = if (status_char == 'R' || status_char == 'C') && fields.len() == 3 {
-            fields[2].trim()
+        // R / C はフィールドが 3 つ: status, old_path, new_path
+        if (status_char == 'R' || status_char == 'C') && fields.len() == 3 {
+            let old = fields[1].trim();
+            let new = fields[2].trim();
+            if new.is_empty() {
+                continue;
+            }
+            entries.push(CommitFileEntry {
+                path: new.to_string(),
+                status,
+                old_path: Some(old.to_string()),
+            });
         } else if fields.len() >= 2 {
-            fields[1].trim()
-        } else {
-            continue;
-        };
-        if path.is_empty() {
-            continue;
+            let path = fields[1].trim();
+            if path.is_empty() {
+                continue;
+            }
+            entries.push(CommitFileEntry { path: path.to_string(), status, old_path: None });
         }
-        entries.push(CommitFileEntry { path: path.to_string(), status });
     }
     Ok(entries)
 }
 
-pub fn get_commit_file_diff(repo_path: &str, hash: &str, file_path: &str) -> Result<FileDiff, String> {
+pub fn get_commit_file_diff(repo_path: &str, hash: &str, file_path: &str, old_file_path: Option<&str>) -> Result<FileDiff, String> {
     if hash.starts_with('-') {
         return Err("hash にハイフンで始まる値は使用できません".to_string());
     }
-    let normalized = std::path::Path::new(file_path);
-    for component in normalized.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                return Err("ファイルパスに '..' は使用できません".to_string());
+    for path_to_check in [file_path].iter().chain(old_file_path.iter()) {
+        let normalized = std::path::Path::new(path_to_check);
+        for component in normalized.components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    return Err("ファイルパスに '..' は使用できません".to_string());
+                }
+                std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                    return Err("絶対パスは使用できません".to_string());
+                }
+                _ => {}
             }
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
-                return Err("絶対パスは使用できません".to_string());
-            }
-            _ => {}
         }
     }
 
@@ -568,11 +578,14 @@ pub fn get_commit_file_diff(repo_path: &str, hash: &str, file_path: &str) -> Res
         String::new()
     };
 
+    // リネーム/コピーの場合は parent 側のパス (old_file_path) を使う
+    let parent_path = old_file_path.unwrap_or(file_path);
+
     let old_bytes = if parent_hash.is_empty() {
         // 初回コミット: old は空
         vec![]
     } else {
-        let spec = format!("{}:{}", parent_hash, file_path);
+        let spec = format!("{}:{}", parent_hash, parent_path);
         let output = make_command("git")
             .args(["show", &spec])
             .current_dir(repo_path)

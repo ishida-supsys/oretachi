@@ -280,8 +280,9 @@ async fn git_get_commit_file_diff(
     repo_path: String,
     hash: String,
     file_path: String,
+    old_file_path: Option<String>,
 ) -> Result<git_worktree::FileDiff, String> {
-    run_git(move || git_worktree::get_commit_file_diff(&repo_path, &hash, &file_path)).await
+    run_git(move || git_worktree::get_commit_file_diff(&repo_path, &hash, &file_path, old_file_path.as_deref())).await
 }
 
 #[tauri::command]

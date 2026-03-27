@@ -14,11 +14,13 @@ const emit = defineEmits<{ (e: "chat", payload: ChatPayload): void }>();
 interface CommitFileEntryRaw {
   path: string;
   status: string;
+  old_path: string | null;
 }
 
 const files = ref<ReviewFileEntry[]>([]);
 const loading = ref(false);
 const error = ref("");
+let currentRequestId = 0;
 
 function toggleCollapsed(filePath: string) {
   const f = files.value.find((e) => e.filePath === filePath);
@@ -26,6 +28,7 @@ function toggleCollapsed(filePath: string) {
 }
 
 async function loadDiff(hash: string) {
+  const requestId = ++currentRequestId;
   loading.value = true;
   error.value = "";
   files.value = [];
@@ -34,13 +37,14 @@ async function loadDiff(hash: string) {
       repoPath: props.repoPath,
       hash,
     });
+    if (requestId !== currentRequestId) return;
 
     const loaded: ReviewFileEntry[] = await Promise.all(
       entries.map(async (entry) => {
         try {
           const diff = await invoke<{ old_content: string; new_content: string; is_binary: boolean }>(
             "git_get_commit_file_diff",
-            { repoPath: props.repoPath, hash, filePath: entry.path },
+            { repoPath: props.repoPath, hash, filePath: entry.path, oldFilePath: entry.old_path ?? null },
           );
           return {
             filePath: entry.path,
@@ -64,11 +68,13 @@ async function loadDiff(hash: string) {
         }
       }),
     );
+    if (requestId !== currentRequestId) return;
     files.value = loaded;
   } catch (e) {
+    if (requestId !== currentRequestId) return;
     error.value = String(e);
   } finally {
-    loading.value = false;
+    if (requestId === currentRequestId) loading.value = false;
   }
 }
 
