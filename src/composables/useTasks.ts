@@ -1,5 +1,5 @@
 import { computed, ref } from "vue";
-import { emit } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import type { TaskItem, TaskCode, TaskStatus, TaskStepStatus } from "../types/task";
 import { persistedTasks, persistTask, deletePersisted } from "./useTaskPersistence";
 
@@ -12,6 +12,9 @@ function broadcastActiveTasks() {
   const snapshot = activeTasks.value.map((t) => ({ ...t, steps: [...t.steps.map((s) => ({ ...s, code: { ...s.code } }))] }));
   emit("task-active-sync", snapshot).catch(() => {});
 }
+
+// 他ウィンドウからスナップショットを要求されたら即座に返す（起動タイミングのずれを補完）
+listen("task-active-sync-request", () => { broadcastActiveTasks(); }).catch(() => {});
 
 // 全タスク: アクティブ(新しい順) + 永続化済み（重複排除）
 const sortedTasks = computed(() => {

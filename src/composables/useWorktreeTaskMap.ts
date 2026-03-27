@@ -1,5 +1,5 @@
 import { computed, ref } from "vue";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { useTasks } from "./useTasks";
 import { allPersistedTasks, loadAllTasks } from "./useTaskPersistence";
 import type { TaskItem } from "../types/task";
@@ -28,6 +28,9 @@ listen<TaskItem[]>("task-active-sync", (e) => {
   remoteActiveTasks.value = e.payload;
 }).catch(() => {});
 
+// 起動時に現在の activeTasks スナップショットをリクエスト（実行中タスクを即座に取得）
+emit("task-active-sync-request", {}).catch(() => {});
+
 const worktreeTaskMap = computed(() => {
   // ローカルの activeTasks と他ウィンドウから受信した remoteActiveTasks を結合し、
   // さらに allPersistedTasks（全永続化済み）を加えて重複排除
@@ -42,8 +45,11 @@ const worktreeTaskMap = computed(() => {
 
   const map = new Map<string, TaskItem[]>();
   for (const task of all) {
+    const addedKeys = new Set<string>();
     for (const step of task.steps) {
       const key = `${step.code.repository}:${step.code.branch}`;
+      if (addedKeys.has(key)) continue;
+      addedKeys.add(key);
       if (!map.has(key)) map.set(key, []);
       map.get(key)!.push(task);
     }
