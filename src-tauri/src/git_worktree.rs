@@ -494,6 +494,149 @@ pub fn get_log(repo_path: &str, skip: usize, limit: usize) -> Result<Vec<CommitE
     Ok(entries)
 }
 
+#[derive(Serialize)]
+pub struct CommitFileEntry {
+    pub path: String,
+    pub status: String,
+    pub old_path: Option<String>,
+}
+
+pub fn get_commit_files(repo_path: &str, hash: &str) -> Result<Vec<CommitFileEntry>, String> {
+    if hash.starts_with('-') {
+        return Err("hash にハイフンで始まる値は使用できません".to_string());
+    }
+
+    // first parent hash を取得してマージコミットを正確に処理する
+    let parent_output = make_command("git")
+        .args(["log", "--pretty=%P", "-1", hash])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+    let first_parent = if parent_output.status.success() {
+        let s = String::from_utf8_lossy(&parent_output.stdout);
+        s.split_whitespace().next().unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
+
+    // 初回コミット: diff-tree --root / それ以外: git diff <first-parent> <hash>
+    // (-m を使わないことでマージコミットでも first-parent との差分のみを正確に一覧表示)
+    let stdout = if first_parent.is_empty() {
+        run_git_in(
+            repo_path,
+            &["diff-tree", "--no-commit-id", "-r", "--root", "--name-status", hash],
+        )?
+    } else {
+        run_git_in(
+            repo_path,
+            &["diff", "--name-status", &first_parent, hash],
+        )?
+    };
+    let mut entries = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let fields: Vec<&str> = line.splitn(3, '\t').collect();
+        if fields.is_empty() {
+            continue;
+        }
+        let status_raw = fields[0].trim();
+        let status_char = status_raw.chars().next().unwrap_or('M');
+        let status = status_char.to_string();
+        // R / C はフィールドが 3 つ: status, old_path, new_path
+        if (status_char == 'R' || status_char == 'C') && fields.len() == 3 {
+            let old = fields[1].trim();
+            let new = fields[2].trim();
+            if new.is_empty() {
+                continue;
+            }
+            entries.push(CommitFileEntry {
+                path: new.to_string(),
+                status,
+                old_path: Some(old.to_string()),
+            });
+        } else if fields.len() >= 2 {
+            let path = fields[1].trim();
+            if path.is_empty() {
+                continue;
+            }
+            entries.push(CommitFileEntry { path: path.to_string(), status, old_path: None });
+        }
+    }
+    Ok(entries)
+}
+
+pub fn get_commit_file_diff(repo_path: &str, hash: &str, file_path: &str, old_file_path: Option<&str>) -> Result<FileDiff, String> {
+    if hash.starts_with('-') {
+        return Err("hash にハイフンで始まる値は使用できません".to_string());
+    }
+    for path_to_check in [file_path].iter().chain(old_file_path.iter()) {
+        let normalized = std::path::Path::new(path_to_check);
+        for component in normalized.components() {
+            match component {
+                std::path::Component::ParentDir => {
+                    return Err("ファイルパスに '..' は使用できません".to_string());
+                }
+                std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                    return Err("絶対パスは使用できません".to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // parent hash を取得
+    let parent_output = make_command("git")
+        .args(["log", "--pretty=%P", "-1", hash])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+    let parent_hash = if parent_output.status.success() {
+        let s = String::from_utf8_lossy(&parent_output.stdout);
+        s.split_whitespace().next().unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
+
+    // リネーム/コピーの場合は parent 側のパス (old_file_path) を使う
+    let parent_path = old_file_path.unwrap_or(file_path);
+
+    let old_bytes = if parent_hash.is_empty() {
+        // 初回コミット: old は空
+        vec![]
+    } else {
+        let spec = format!("{}:{}", parent_hash, parent_path);
+        let output = make_command("git")
+            .args(["show", &spec])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| format!("git command error: {}", e))?;
+        if output.status.success() { output.stdout } else { vec![] }
+    };
+
+    let new_spec = format!("{}:{}", hash, file_path);
+    let new_output = make_command("git")
+        .args(["show", &new_spec])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+    let new_bytes = if new_output.status.success() { new_output.stdout } else { vec![] };
+
+    if content_inspector::inspect(&old_bytes).is_binary()
+        || content_inspector::inspect(&new_bytes).is_binary()
+    {
+        return Ok(FileDiff { old_content: String::new(), new_content: String::new(), is_binary: true });
+    }
+
+    Ok(FileDiff {
+        old_content: String::from_utf8_lossy(&old_bytes).into_owned(),
+        new_content: String::from_utf8_lossy(&new_bytes).into_owned(),
+        is_binary: false,
+    })
+}
+
 pub fn get_diff_text(repo_path: &str) -> Result<String, String> {
     // ステージ済み + 未ステージの全差分を取得
     let staged = make_command("git")
