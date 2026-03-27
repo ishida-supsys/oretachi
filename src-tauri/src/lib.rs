@@ -455,6 +455,22 @@ async fn save_archive(
     archive_db::save(&pool.0, &archive).await
 }
 
+/// ワークツリーのアーカイブ（削除）が完了した後にMCPクライアントへ通知する。
+/// git worktree remove の成功確認後にフロントエンドから呼び出す。
+#[tauri::command]
+fn notify_worktree_archived(
+    app_handle: tauri::AppHandle,
+    id: String,
+    name: String,
+    branch_name: String,
+) {
+    let _ = app_handle.emit("worktree-archived", serde_json::json!({
+        "id": id,
+        "name": name,
+        "branchName": branch_name,
+    }));
+}
+
 #[tauri::command]
 async fn list_archives(
     app_handle: tauri::AppHandle,
@@ -577,6 +593,7 @@ pub fn run() {
         .manage(PtyManager::new())
         .manage(SettingsManager::new())
         .manage(mcp_server::McpServerManager::new())
+        .manage(mcp_server::McpPeerRegistry(std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()))))
         .manage(ai_judge::ApprovalManager::new())
         .manage(ai_commit_message::CommitMessageManager::new())
         .manage(task_executor::TaskGenerateManager::new())
@@ -640,6 +657,7 @@ pub fn run() {
             delete_task,
             path_exists,
             save_archive,
+            notify_worktree_archived,
             list_archives,
             delete_archive,
         ])
