@@ -1,5 +1,6 @@
 import { ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { emit } from "@tauri-apps/api/event";
 import type { TaskItem, TaskStatus } from "../types/task";
 
 // Rust の TaskRow に対応する型（snake_case で受け渡し）
@@ -140,6 +141,9 @@ export async function persistTask(task: TaskItem): Promise<void> {
   if (!allPersistedTasks.value.some((t) => t.id === task.id)) {
     allPersistedTasks.value.unshift({ ...task });
   }
+
+  // 他ウィンドウ（サブウィンドウ等）に変更を通知
+  emit("task-data-changed", {}).catch(() => {});
 }
 
 /** persistedTasks からタスクを削除し、DB からも削除する */
@@ -161,6 +165,8 @@ export async function deletePersisted(taskId: string): Promise<void> {
     // allPersistedTasks からも削除
     const allIdx = allPersistedTasks.value.findIndex((t) => t.id === taskId);
     if (allIdx !== -1) allPersistedTasks.value.splice(allIdx, 1);
+    // 他ウィンドウ（サブウィンドウ等）に変更を通知
+    emit("task-data-changed", {}).catch(() => {});
   } catch (e) {
     console.error("Failed to delete task from DB:", e);
     if (removed !== undefined && idx !== -1) {
