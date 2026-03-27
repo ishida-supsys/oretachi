@@ -1,6 +1,5 @@
 <script setup lang="ts">
 import type { Worktree } from "../types/worktree";
-import type { TaskItem } from "../types/task";
 import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
@@ -9,6 +8,9 @@ import TaskCard from "./TaskCard.vue";
 import HomeCatTerminal from "./HomeCatTerminal.vue";
 import { useMasonryLayout } from "../composables/useMasonryLayout";
 import { useSettings } from "../composables/useSettings";
+import { useTasks } from "../composables/useTasks";
+import { useTaskSearch } from "../composables/useTaskSearch";
+import { useInfiniteScroll } from "../composables/useInfiniteScroll";
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import autoAnimate from "@formkit/auto-animate";
 import type { AnimationController } from "@formkit/auto-animate";
@@ -162,7 +164,6 @@ const props = defineProps<{
   loadingWorktrees: Map<string, string>;
   autoApprovals: Map<string, boolean>;
   aiJudgingWorktrees: Set<string>;
-  tasks: TaskItem[];
 }>();
 
 const emit = defineEmits<{
@@ -190,8 +191,28 @@ const emit = defineEmits<{
 type PanelMode = "worktree" | "task";
 const panelMode = ref<PanelMode>("worktree");
 
+const { sortedTasks, hasMore, isLoading, loadTasks, loadMore, search } = useTasks();
+
+const { taskSearchInput, onSearchInput, clearSearch } = useTaskSearch(search);
+
+const scrollSentinelRef = ref<HTMLElement | null>(null);
+const { setup: setupScroll, teardown: teardownScroll } = useInfiniteScroll(
+  scrollSentinelRef,
+  loadMore,
+  { hasMore, isLoading }
+);
+
+watch(panelMode, async (mode) => {
+  if (mode === "task") {
+    await loadTasks(true);
+    nextTick(() => setupScroll());
+  } else {
+    teardownScroll();
+  }
+});
+
 const worktreesRef = computed(() => props.worktrees);
-const tasksRef = computed(() => props.tasks);
+const tasksRef = sortedTasks;
 
 // 各ワークツリーカードの自然幅（ターミナルサムネイル幅から計算）をもとに列幅を決定する
 const naturalCardWidth = computed(() => {
@@ -241,6 +262,19 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
           </button>
         </template>
         <template v-else>
+          <div class="task-search">
+            <i class="pi pi-search search-icon" />
+            <input
+              v-model="taskSearchInput"
+              type="text"
+              class="task-search-input"
+              :placeholder="t('taskSearchPlaceholder')"
+              @input="onSearchInput"
+            />
+            <button v-if="taskSearchInput" class="btn-clear-search" @click="clearSearch">
+              <i class="pi pi-times" />
+            </button>
+          </div>
           <button class="btn-icon-header" :title="t('addTaskButton')" @click="emit('addTask')">
             <i class="pi pi-plus"></i>
           </button>
@@ -302,8 +336,8 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
 
     <!-- タスクパネル -->
     <template v-else>
-      <div v-if="tasks.length === 0" class="empty-state">
-        {{ t('taskEmpty') }}
+      <div v-if="sortedTasks.length === 0 && !isLoading" class="empty-state">
+        {{ taskSearchInput ? t('taskNoResults') : t('taskEmpty') }}
       </div>
 
       <div ref="taskContainerRef" class="worktree-list">
@@ -316,6 +350,11 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
             @rerun="emit('rerunTask', $event)"
           />
         </div>
+      </div>
+
+      <!-- 無限スクロール センチネル -->
+      <div ref="scrollSentinelRef" class="scroll-sentinel">
+        <i v-if="isLoading" class="pi pi-spinner pi-spin loading-spinner" />
       </div>
     </template>
     </div><!-- /home-content -->
@@ -431,7 +470,64 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   transition: outline 0.1s;
 }
 
-/* タスクパネル（既存のマソンリーレイアウト） */
+/* タスク検索バー */
+.task-search {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  background: #1e1e2e;
+  border: 1px solid #313244;
+  border-radius: 6px;
+  padding: 3px 8px;
+  flex: 1;
+  max-width: 280px;
+  margin-right: 4px;
+}
+
+.task-search-input {
+  background: transparent;
+  border: none;
+  outline: none;
+  color: #cdd6f4;
+  font-size: 13px;
+  flex: 1;
+  min-width: 0;
+}
+
+.search-icon {
+  color: #6c7086;
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.btn-clear-search {
+  background: transparent;
+  border: none;
+  color: #6c7086;
+  cursor: pointer;
+  padding: 0;
+  font-size: 11px;
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.btn-clear-search:hover {
+  color: #cdd6f4;
+}
+
+/* 無限スクロール センチネル */
+.scroll-sentinel {
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.loading-spinner {
+  color: #6c7086;
+  font-size: 16px;
+}
 
 .empty-state {
   display: flex;
@@ -452,6 +548,8 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
     "addWorktreeButton": "Add worktree",
     "taskTitle": "Tasks",
     "taskEmpty": "No tasks. Click the + button to add one.",
+    "taskNoResults": "No tasks found.",
+    "taskSearchPlaceholder": "Search tasks...",
     "addTaskButton": "Add task"
   },
   "ja": {
@@ -461,6 +559,8 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
     "addWorktreeButton": "ワークツリー追加",
     "taskTitle": "タスク",
     "taskEmpty": "タスクがありません。+ ボタンで追加してください。",
+    "taskNoResults": "タスクが見つかりません。",
+    "taskSearchPlaceholder": "タスクを検索...",
     "addTaskButton": "タスクを追加"
   }
 }

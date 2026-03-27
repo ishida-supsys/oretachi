@@ -68,7 +68,7 @@ const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktree
 const { closeAllCodeReviewWindows } = useCodeReviewWindow();
 const { openArtifactViewer, closeArtifactWindow } = useArtifactWindow();
 const { tryAutoAssignHotkey } = useAutoHotkey();
-const { sortedTasks, removeTask } = useTasks();
+const { removeTask } = useTasks();
 
 const homeViewRef = ref<InstanceType<typeof HomeView> | null>(null);
 
@@ -1333,7 +1333,6 @@ onMounted(async () => {
         :loading-worktrees="loadingWorktrees"
         :auto-approvals="autoApprovalMap"
         :ai-judging-worktrees="aiJudgingWorktrees"
-        :tasks="sortedTasks"
         @select-terminal="switchToTerminal"
         @add-worktree="showAddDialog = true"
         @remove-worktree="onRemoveWorktree"

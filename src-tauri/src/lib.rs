@@ -9,6 +9,7 @@ mod process_utils;
 mod pty_manager;
 mod report_db;
 mod settings;
+mod task_db;
 mod task_executor;
 mod terminal_session;
 
@@ -396,6 +397,43 @@ async fn get_report_summary(
     report_db::summary_for_date(&pool.0, &date, tz_offset_min).await
 }
 
+// ─── タスク DB コマンド ───────────────────────────────────────────────────────
+
+#[tauri::command]
+async fn save_task(
+    app_handle: tauri::AppHandle,
+    task: task_db::TaskRow,
+) -> Result<(), String> {
+    let pool = app_handle
+        .try_state::<task_db::TaskPool>()
+        .ok_or_else(|| "Task DB not initialized".to_string())?;
+    task_db::save(&pool.0, &task).await
+}
+
+#[tauri::command]
+async fn list_tasks(
+    app_handle: tauri::AppHandle,
+    search: String,
+    offset: i64,
+    limit: i64,
+) -> Result<task_db::TaskListResult, String> {
+    let pool = app_handle
+        .try_state::<task_db::TaskPool>()
+        .ok_or_else(|| "Task DB not initialized".to_string())?;
+    task_db::list(&pool.0, &search, offset, limit).await
+}
+
+#[tauri::command]
+async fn delete_task(
+    app_handle: tauri::AppHandle,
+    id: String,
+) -> Result<(), String> {
+    let pool = app_handle
+        .try_state::<task_db::TaskPool>()
+        .ok_or_else(|| "Task DB not initialized".to_string())?;
+    task_db::delete(&pool.0, &id).await
+}
+
 // ─── FS ウォッチャーコマンド ──────────────────────────────────────────────────
 
 #[tauri::command]
@@ -552,6 +590,9 @@ pub fn run() {
             settings::read_audio_file,
             apply_acrylic_effect,
             get_report_summary,
+            save_task,
+            list_tasks,
+            delete_task,
         ])
         .setup(|app| {
             // レポート DB を同期的に初期化（ファイル接続のみで高速、起動前に完了させる）
@@ -565,6 +606,22 @@ pub fn run() {
                         }
                         Err(e) => {
                             log::warn!("[ReportDB] Failed to initialize: {}", e);
+                        }
+                    }
+                });
+            }
+
+            // タスク DB を同期的に初期化
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::block_on(async move {
+                    match task_db::init_task_db(&handle).await {
+                        Ok(pool) => {
+                            handle.manage(task_db::TaskPool(pool));
+                            log::debug!("[TaskDB] Initialized successfully");
+                        }
+                        Err(e) => {
+                            log::warn!("[TaskDB] Failed to initialize: {}", e);
                         }
                     }
                 });
