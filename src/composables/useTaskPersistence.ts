@@ -58,13 +58,21 @@ const dbBackedIds = new Set<string>();
 export const allPersistedTasks = ref<TaskItem[]>([]);
 
 export async function loadAllTasks(): Promise<void> {
+  const PAGE_SIZE_ALL = 500;
   try {
-    const result = await invoke<TaskListResult>("list_tasks", {
-      search: "",
-      offset: 0,
-      limit: 10000,
-    });
-    allPersistedTasks.value = result.items.map(taskRowToItem);
+    const all: TaskItem[] = [];
+    let offset = 0;
+    while (true) {
+      const result = await invoke<TaskListResult>("list_tasks", {
+        search: "",
+        offset,
+        limit: PAGE_SIZE_ALL,
+      });
+      all.push(...result.items.map(taskRowToItem));
+      if (!result.has_more) break;
+      offset += result.items.length;
+    }
+    allPersistedTasks.value = all;
   } catch (e) {
     console.error("Failed to load all tasks:", e);
   }
