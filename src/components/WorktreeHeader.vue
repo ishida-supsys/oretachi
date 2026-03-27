@@ -12,6 +12,7 @@ const props = defineProps<{
   aiJudging: boolean;
   isWindowFocused: boolean;
   showWindowControls?: boolean;
+  taskTooltip?: string;
 }>();
 
 defineEmits<{
@@ -56,7 +57,11 @@ async function closeWindow() {
       >
         {{ props.worktreeName }}
       </span>
-      <span class="flex items-center gap-1 text-xs font-mono text-[#9399b2]">
+      <span
+        class="flex items-center gap-1 text-xs font-mono text-[#9399b2]"
+        :class="{ 'cursor-help': props.taskTooltip }"
+        :title="props.taskTooltip"
+      >
         <span class="pi pi-code-branch" style="font-size: 10px" />
         {{ props.branchName }}
       </span>

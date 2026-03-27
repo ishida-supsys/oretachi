@@ -24,8 +24,10 @@ import AutoApprovalPromptDialog from "./components/AutoApprovalPromptDialog.vue"
 import type { SubTerminalEntry, WebSessionInfo } from "./types/terminal";
 import type { FrameNode } from "./types/frame";
 import { useI18n } from "vue-i18n";
+import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
 
 const { t } = useI18n();
+const { getTooltipText: getWorktreeTaskTooltip } = useWorktreeTaskMap();
 
 // クエリパラメータ
 const params = new URLSearchParams(window.location.search);
@@ -33,6 +35,7 @@ const worktreeId = params.get("worktreeId") ?? "";
 const worktreeName = params.get("worktreeName") ?? "";
 const worktreePath = params.get("worktreePath") ?? "";
 const branchName = params.get("branchName") ?? "";
+const repositoryName = params.get("repositoryName") ?? "";
 
 // ターミナルエントリ（Map）
 const terminalEntries = reactive(new Map<number, SubTerminalEntry>());
@@ -512,6 +515,7 @@ async function onCancelAiJudging() {
         :ai-judging="aiJudging"
         :is-window-focused="isWindowFocused"
         :show-window-controls="true"
+        :task-tooltip="getWorktreeTaskTooltip(repositoryName, branchName)"
         @open-in-ide="requestOpenInIde"
         @open-artifacts="requestOpenArtifacts"
         @cancel-ai-judging="onCancelAiJudging"

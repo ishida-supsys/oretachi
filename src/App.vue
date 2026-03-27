@@ -33,6 +33,7 @@ import type { TrayWorktreeData, TrayTerminalData } from "./composables/useTrayPo
 import type { WorktreeEntry } from "./types/settings";
 import { useAddTaskDialog } from "./composables/useAddTaskDialog";
 import { useTaskExecution } from "./composables/useTaskExecution";
+import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
 import { useAutoApprovalPrompt } from "./composables/useAutoApprovalPrompt";
 import type { FrameNode } from "./types/frame";
 import { useWorktreeFrameBundles } from "./composables/useWorktreeFrameBundles";
@@ -233,6 +234,7 @@ const { executeAddWorktree, executeAgentWorktree, resolveShell, buildPendingComm
       }
     },
   });
+const { getTooltipText: getWorktreeTaskTooltip } = useWorktreeTaskMap();
 const { showAddTaskDialog, rerunTaskId, rerunPrompt, onAddTaskConfirm, onAddTaskCancel } =
   useAddTaskDialog(async (code) => {
     if (code.type === "add_worktree") {
@@ -676,7 +678,7 @@ async function onMoveToSubWindow(worktreeId: string) {
     goHome();
   }
 
-  await moveToSubWindow(worktreeId, worktree.name, terminals, autoApprovalMap.get(worktreeId) ?? false, false, worktree.path, layout, worktree.branchName, autoApprovalPromptMap.get(worktreeId));
+  await moveToSubWindow(worktreeId, worktree.name, terminals, autoApprovalMap.get(worktreeId) ?? false, false, worktree.path, layout, worktree.branchName, autoApprovalPromptMap.get(worktreeId), worktree.repositoryName);
 
   // バンドルをクリーンアップ
   worktreeFrameBundles.delete(worktreeId);
@@ -986,7 +988,7 @@ onMounted(async () => {
       // セッション読み込み失敗は無視
     }
 
-    await moveToSubWindow(wt.id, wt.name, subTerminals, autoApprovalMap.get(wt.id) ?? false, true, wt.path, undefined, wt.branchName, autoApprovalPromptMap.get(wt.id));
+    await moveToSubWindow(wt.id, wt.name, subTerminals, autoApprovalMap.get(wt.id) ?? false, true, wt.path, undefined, wt.branchName, autoApprovalPromptMap.get(wt.id), wt.repositoryName);
   }
 
   // 通知リスナー初期化 (ワークツリー名 → ID 解決関数と自動承認中は保留するコールバックを渡す)
@@ -1375,6 +1377,7 @@ onMounted(async () => {
             :auto-approval="autoApprovalMap.get(wt.id) ?? false"
             :ai-judging="aiJudgingWorktrees.has(wt.id)"
             :is-window-focused="isWindowFocused"
+            :task-tooltip="getWorktreeTaskTooltip(wt.repositoryName, wt.branchName)"
             @open-in-ide="onOpenInIde(wt.id)"
             @open-artifacts="onOpenArtifacts(wt.id)"
             @cancel-ai-judging="onCancelAiJudging(wt.id)"

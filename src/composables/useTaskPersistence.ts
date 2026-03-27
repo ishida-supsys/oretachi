@@ -53,6 +53,22 @@ const isLoading = ref(false);
 // DB に実際に存在するタスクIDを追跡（offset 管理の整合性のため）
 const dbBackedIds = new Set<string>();
 
+// ツールチップ用: ページング・検索に影響されない全タスク
+export const allPersistedTasks = ref<TaskItem[]>([]);
+
+export async function loadAllTasks(): Promise<void> {
+  try {
+    const result = await invoke<TaskListResult>("list_tasks", {
+      search: "",
+      offset: 0,
+      limit: 10000,
+    });
+    allPersistedTasks.value = result.items.map(taskRowToItem);
+  } catch (e) {
+    console.error("Failed to load all tasks:", e);
+  }
+}
+
 // reset 要求がロード中に来た場合はペンディングして完了後に再実行
 let pendingReset = false;
 
@@ -119,6 +135,11 @@ export async function persistTask(task: TaskItem): Promise<void> {
     persistedTasks.value.unshift({ ...task });
     if (savedToDb) currentOffset.value += 1;
   }
+
+  // allPersistedTasks にも追加（重複しない場合のみ）
+  if (!allPersistedTasks.value.some((t) => t.id === task.id)) {
+    allPersistedTasks.value.unshift({ ...task });
+  }
 }
 
 /** persistedTasks からタスクを削除し、DB からも削除する */
@@ -137,6 +158,9 @@ export async function deletePersisted(taskId: string): Promise<void> {
     if (removed !== undefined && wasDbBacked) {
       currentOffset.value = Math.max(0, currentOffset.value - 1);
     }
+    // allPersistedTasks からも削除
+    const allIdx = allPersistedTasks.value.findIndex((t) => t.id === taskId);
+    if (allIdx !== -1) allPersistedTasks.value.splice(allIdx, 1);
   } catch (e) {
     console.error("Failed to delete task from DB:", e);
     if (removed !== undefined && idx !== -1) {
@@ -148,10 +172,12 @@ export async function deletePersisted(taskId: string): Promise<void> {
 export function useTaskPersistence() {
   return {
     persistedTasks,
+    allPersistedTasks,
     searchQuery,
     hasMore,
     isLoading,
     loadTasks,
+    loadAllTasks,
     loadMore,
     search,
     persistTask,
