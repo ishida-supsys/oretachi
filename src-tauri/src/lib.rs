@@ -452,14 +452,23 @@ async fn save_archive(
     let pool = app_handle
         .try_state::<archive_db::ArchivePool>()
         .ok_or_else(|| "Archive DB not initialized".to_string())?;
-    archive_db::save(&pool.0, &archive).await?;
-    // MCPクライアントへアーカイブ通知を発火
+    archive_db::save(&pool.0, &archive).await
+}
+
+/// ワークツリーのアーカイブ（削除）が完了した後にMCPクライアントへ通知する。
+/// git worktree remove の成功確認後にフロントエンドから呼び出す。
+#[tauri::command]
+fn notify_worktree_archived(
+    app_handle: tauri::AppHandle,
+    id: String,
+    name: String,
+    branch_name: String,
+) {
     let _ = app_handle.emit("worktree-archived", serde_json::json!({
-        "id": archive.id,
-        "name": archive.name,
-        "branchName": archive.branch_name,
+        "id": id,
+        "name": name,
+        "branchName": branch_name,
     }));
-    Ok(())
 }
 
 #[tauri::command]
@@ -648,6 +657,7 @@ pub fn run() {
             delete_task,
             path_exists,
             save_archive,
+            notify_worktree_archived,
             list_archives,
             delete_archive,
         ])

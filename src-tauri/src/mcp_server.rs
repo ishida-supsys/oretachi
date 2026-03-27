@@ -813,8 +813,10 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
 
         log::info!("[mcp] Shutdown signal received, server stopped");
 
-        // 接続中のpeerをクリア
-        peer_map.write().await.clear();
+        // peer_map はクリアしない。
+        // 次世代のサーバーに接続したクライアントが既に登録されている可能性があり、
+        // ここでクリアすると新世代のpeerも失われる（世代間でpeer_mapは共有される）。
+        // 切断済みpeerはbroadcast時にnotify失敗で検知しlazyに除去される。
 
         // ステータス: 停止（世代が一致する場合のみ更新 — 新世代が既に起動済みなら上書きしない）
         if generation.load(Ordering::SeqCst) == my_generation {
