@@ -879,27 +879,34 @@ onMounted(async () => {
     const worktree = worktrees.value.find((w) => w.id === worktree_id);
     if (!worktree) return;
 
-    // アーカイブをDBに保存（git操作前に実行）
-    await saveArchive({
-      id: worktree.id,
-      name: worktree.name,
-      repository_id: worktree.repositoryId,
-      repository_name: worktree.repositoryName,
-      path: worktree.path,
-      branch_name: worktree.branchName,
-      archived_at: Date.now(),
-    });
-
-    // ターミナルを先に停止（git worktree remove前にファイルハンドルを解放するため）
-    const bundle = worktreeFrameBundles.get(worktree_id);
-    for (const terminal of [...worktree.terminals]) {
-      const term = bundle?.terminalRefs.get(terminal.id) ?? getTerminalRef(terminal.id);
-      if (term?.isRunning) await term.kill();
-      terminalWorktreeMap.delete(terminal.id);
-    }
-    worktreeFrameBundles.delete(worktree_id);
-
     try {
+      // アーカイブをDBに保存（git操作前に実行）
+      await saveArchive({
+        id: worktree.id,
+        name: worktree.name,
+        repository_id: worktree.repositoryId,
+        repository_name: worktree.repositoryName,
+        path: worktree.path,
+        branch_name: worktree.branchName,
+        archived_at: Date.now(),
+      });
+
+      // detachedの場合はメインウィンドウに戻してからターミナルを停止する
+      // （サブウィンドウのターミナルrefはメインウィンドウから参照できないため）
+      if (isDetached(worktree_id)) {
+        await moveToMainWindow(worktree_id);
+        subWindowEvents.subWindowFocusMap.delete(worktree_id);
+      }
+
+      // ターミナルを停止（git worktree remove前にファイルハンドルを解放するため）
+      const bundle = worktreeFrameBundles.get(worktree_id);
+      for (const terminal of [...worktree.terminals]) {
+        const term = bundle?.terminalRefs.get(terminal.id) ?? getTerminalRef(terminal.id);
+        if (term?.isRunning) await term.kill();
+        terminalWorktreeMap.delete(terminal.id);
+      }
+      worktreeFrameBundles.delete(worktree_id);
+
       await removeWorktree(worktree_id, {
         mergeTo: merge_to || undefined,
         deleteBranch: delete_branch,
@@ -907,15 +914,11 @@ onMounted(async () => {
       });
 
       // git操作成功後にUIをクリーンアップ
-      if (isDetached(worktree_id)) {
-        await moveToMainWindow(worktree_id);
-        subWindowEvents.subWindowFocusMap.delete(worktree_id);
-      }
       await closeArtifactWindow(worktree_id);
       await cancelApproval(worktree_id);
       if (activeWorktreeId.value === worktree_id) goHome();
     } catch {
-      // git操作失敗時: ワークツリーパスがまだ存在する場合のみアーカイブをロールバック
+      // 失敗時: ワークツリーパスがまだ存在する場合のみアーカイブをロールバック
       const pathStillExists = await invoke<boolean>("path_exists", { path: worktree.path }).catch(() => false);
       if (pathStillExists) {
         await deleteArchive(worktree_id);
