@@ -918,10 +918,16 @@ onMounted(async () => {
       await cancelApproval(worktree_id);
       if (activeWorktreeId.value === worktree_id) goHome();
     } catch {
-      // 失敗時: ワークツリーパスがまだ存在する場合のみアーカイブをロールバック
+      // 失敗時: ワークツリーパスの有無でケースを判定する
       const pathStillExists = await invoke<boolean>("path_exists", { path: worktree.path }).catch(() => false);
       if (pathStillExists) {
+        // git_worktree_remove が失敗（ワークツリーが残っている）→ アーカイブをロールバック
         await deleteArchive(worktree_id);
+      } else {
+        // ワークツリーは削除済み（ブランチ削除のみ失敗）→ UIクリーンアップは実行する
+        await closeArtifactWindow(worktree_id);
+        await cancelApproval(worktree_id);
+        if (activeWorktreeId.value === worktree_id) goHome();
       }
     }
   });
