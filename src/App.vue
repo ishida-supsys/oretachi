@@ -879,6 +879,8 @@ onMounted(async () => {
     const worktree = worktrees.value.find((w) => w.id === worktree_id);
     if (!worktree) return;
 
+    clearNotification(worktree_id);
+    loadingWorktrees.set(worktree_id, t("archivingText"));
     try {
       // アーカイブをDBに保存（git操作前に実行）
       await saveArchive({
@@ -929,6 +931,8 @@ onMounted(async () => {
         await cancelApproval(worktree_id);
         if (activeWorktreeId.value === worktree_id) goHome();
       }
+    } finally {
+      loadingWorktrees.delete(worktree_id);
     }
   });
 
