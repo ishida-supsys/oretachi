@@ -115,6 +115,18 @@ export function useRemoveWorktreeDialog(options: {
     removeBranches.value = [];
     removeDirtyFiles.value = [];
     clearNotification(worktreeId);
+
+    // ダイアログを閉じた後、UI 破壊的操作の前に事前処理（アーカイブ保存など）を実行する。
+    // ここで失敗した場合はワークツリーに何も手を加えずエラーを表示して終了する。
+    if (beforeRemove) {
+      try {
+        await beforeRemove(worktree);
+      } catch (e) {
+        await message(t("deleteFailed", { error: e }), { kind: "error" });
+        return;
+      }
+    }
+
     loadingWorktrees.set(worktreeId, loadingText);
     try {
       if (isDetached(worktreeId)) {
@@ -137,8 +149,6 @@ export function useRemoveWorktreeDialog(options: {
 
       let savedPositions: Map<string, DOMRect> | undefined;
       try {
-        // git 操作前に事前処理（アーカイブ保存など）を実行
-        if (beforeRemove) await beforeRemove(worktree);
         await removeWorktree(
           worktreeId,
           {
