@@ -45,6 +45,8 @@ import { useAppAutoApproval } from "./composables/useAppAutoApproval";
 import { useAppHotkeys } from "./composables/useAppHotkeys";
 import { useSubWindowEvents } from "./composables/useSubWindowEvents";
 import { useShutdownGuard } from "./composables/useShutdownGuard";
+import { saveArchive, deleteArchive } from "./composables/useArchivePersistence";
+import { cancelApproval } from "./utils/autoApproval";
 import { debug } from "@tauri-apps/plugin-log";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useUpdater } from "./composables/useUpdater";
@@ -61,7 +63,7 @@ const { checkForUpdate, downloadAndInstall } = useUpdater();
 type ViewMode = "home" | "settings" | "terminal";
 
 const { settings, loadSettings, scheduleSave } = useSettings();
-const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, reorderWorktree, saveWorktreeOrder, restoreWorktreeOrder, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
+const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, removeWorktree, reorderWorktree, saveWorktreeOrder, restoreWorktreeOrder, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, registerTerminalSession, closeAllSubWindows } = useSubWindows();
 const { autoApprovalPromptMap, lastJudgedCommandMap, showAutoApprovalPromptDialog, autoApprovalPromptTargetId, restoreFromSettings: restoreAutoApprovalPrompts, onClickAutoApproval, onSaveAutoApprovalPrompt } = useAutoApprovalPrompt(settings, scheduleSave, isDetached);
 const { notifications, initNotificationListener, addNotification, clearNotification, purgeStaleNotifications, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
@@ -869,6 +871,56 @@ onMounted(async () => {
   // MCPからのタスク追加
   await listen<{ prompt: string; remote_exec: boolean }>("mcp-add-task", (event) => {
     onAddTaskConfirm(event.payload.prompt, event.payload.remote_exec);
+  });
+
+  // MCPからのワークツリークローズ（アーカイブ）
+  await listen<{ worktree_id: string; worktree_name: string; merge_to: string; delete_branch: boolean; force_branch: boolean }>("mcp-close-worktree", async (event) => {
+    const { worktree_id, merge_to, delete_branch, force_branch } = event.payload;
+    const worktree = worktrees.value.find((w) => w.id === worktree_id);
+    if (!worktree) return;
+
+    // アーカイブをDBに保存（git操作前に実行）
+    await saveArchive({
+      id: worktree.id,
+      name: worktree.name,
+      repository_id: worktree.repositoryId,
+      repository_name: worktree.repositoryName,
+      path: worktree.path,
+      branch_name: worktree.branchName,
+      archived_at: Date.now(),
+    });
+
+    // ターミナルを先に停止（git worktree remove前にファイルハンドルを解放するため）
+    const bundle = worktreeFrameBundles.get(worktree_id);
+    for (const terminal of [...worktree.terminals]) {
+      const term = bundle?.terminalRefs.get(terminal.id) ?? getTerminalRef(terminal.id);
+      if (term?.isRunning) await term.kill();
+      terminalWorktreeMap.delete(terminal.id);
+    }
+    worktreeFrameBundles.delete(worktree_id);
+
+    try {
+      await removeWorktree(worktree_id, {
+        mergeTo: merge_to || undefined,
+        deleteBranch: delete_branch,
+        forceBranch: force_branch,
+      });
+
+      // git操作成功後にUIをクリーンアップ
+      if (isDetached(worktree_id)) {
+        await moveToMainWindow(worktree_id);
+        subWindowEvents.subWindowFocusMap.delete(worktree_id);
+      }
+      await closeArtifactWindow(worktree_id);
+      await cancelApproval(worktree_id);
+      if (activeWorktreeId.value === worktree_id) goHome();
+    } catch {
+      // git操作失敗時: ワークツリーパスがまだ存在する場合のみアーカイブをロールバック
+      const pathStillExists = await invoke<boolean>("path_exists", { path: worktree.path }).catch(() => false);
+      if (pathStillExists) {
+        await deleteArchive(worktree_id);
+      }
+    }
   });
 
   // サブウィンドウ準備完了 → init データをイベントで送信（サブウィンドウ復元より前に登録必須）
