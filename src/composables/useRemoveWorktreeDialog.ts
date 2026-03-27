@@ -91,12 +91,12 @@ export function useRemoveWorktreeDialog(options: {
   }
 
   /** 共通: ダイアログ後処理・ターミナル停止・アニメーション付きワークツリー削除
-   *  beforeRemove: git 操作前に呼ぶ任意の非同期処理（アーカイブ保存など）
+   *  afterRemove: git 操作成功後に呼ぶ任意の非同期処理（アーカイブ保存など）
    */
   async function _confirm(
     removeOptions: RemoveOptions,
     loadingText: string,
-    beforeRemove?: (worktree: Worktree) => Promise<void>,
+    afterRemove?: (worktree: Worktree) => Promise<void>,
   ): Promise<void> {
     if (!removeTargetWorktree.value) return;
     const { id: worktreeId } = removeTargetWorktree.value;
@@ -133,8 +133,6 @@ export function useRemoveWorktreeDialog(options: {
 
       if (activeWorktreeId.value === worktreeId) goHome();
 
-      if (beforeRemove) await beforeRemove(worktree);
-
       let savedPositions: Map<string, DOMRect> | undefined;
       try {
         await removeWorktree(
@@ -149,6 +147,8 @@ export function useRemoveWorktreeDialog(options: {
             savedPositions = homeViewRef.value?.hideCard(worktreeId);
           },
         );
+        // git 操作成功後にアーカイブ保存などを実行
+        if (afterRemove) await afterRemove(worktree);
         await nextTick();
         if (savedPositions) homeViewRef.value?.animateAfterRemove(savedPositions);
       } catch (e) {
