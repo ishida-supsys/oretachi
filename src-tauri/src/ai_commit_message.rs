@@ -3,7 +3,6 @@ use crate::process_utils::CancellableManager;
 use crate::settings::SettingsManager;
 use tauri::{Manager, State};
 
-const TIMEOUT_SECS: u64 = 120;
 
 const PROMPT_TEMPLATE: &str = r#"You are an expert at writing concise git commit messages.
 Analyze the following git diff and generate a commit message.
@@ -102,7 +101,7 @@ pub async fn generate_commit_message(
     let plan = ai_provider::build_execution_plan(&agent_kind, &prompt, JSON_SCHEMA, ai_provider::default_model(&agent_kind), true);
     let worktree_base_dir = settings_state.get().worktree_base_dir.clone();
 
-    let stdout = ai_provider::run_ai_command(&plan, &state, &repo_path, &worktree_base_dir, TIMEOUT_SECS).await?;
+    let stdout = ai_provider::run_ai_command(&plan, &state, &repo_path, &worktree_base_dir, settings_state.get().get_ai_timeout_secs()).await?;
     log::debug!("[CommitMessage] AI agent response: {}", stdout.trim());
 
     let structured = ai_provider::parse_response(&agent_kind, &stdout)?;

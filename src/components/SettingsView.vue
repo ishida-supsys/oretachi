@@ -385,6 +385,21 @@ function getSoundLabel(sound: string | null | undefined): string {
           >{{ AI_AGENT_LABELS[kind] }}{{ !isAgentDetected(kind) ? t('autoApproval.notDetected') : '' }}</option>
         </select>
       </div>
+      <div class="row-input row-input--inline mt-8">
+        <span class="inline-label">{{ t('autoApproval.aiTimeout') }}</span>
+        <input
+          class="text-input number-input"
+          type="number"
+          :value="settings.aiTimeoutSecs ?? 120"
+          min="10"
+          max="600"
+          @change="(e) => {
+            settings.aiTimeoutSecs = Number((e.target as HTMLInputElement).value) || 120;
+            scheduleSave();
+          }"
+        />
+        <span class="unit-label">{{ t('autoApproval.seconds') }}</span>
+      </div>
     </div>
 
     <!-- ターミナル設定 -->
@@ -964,7 +979,9 @@ function getSoundLabel(sound: string | null | undefined): string {
       "approvalAgent": "AI Agent (Auto Approval, Commit Msg, Task Gen)",
       "taskAddAgent": "AI Agent (Task Execution)",
       "notSet": "(Not set)",
-      "notDetected": " (Not detected)"
+      "notDetected": " (Not detected)",
+      "aiTimeout": "AI Timeout",
+      "seconds": "sec"
     },
     "terminal": {
       "label": "Terminal",
@@ -1042,7 +1059,9 @@ function getSoundLabel(sound: string | null | undefined): string {
       "approvalAgent": "自動承認・コミットメッセージ・タスク生成",
       "taskAddAgent": "タスク追加コード実行",
       "notSet": "(未設定)",
-      "notDetected": " (未検出)"
+      "notDetected": " (未検出)",
+      "aiTimeout": "AI タイムアウト",
+      "seconds": "秒"
     },
     "terminal": {
       "label": "ターミナル",

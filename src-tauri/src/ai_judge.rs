@@ -3,7 +3,6 @@ use crate::process_utils::CancellableManager;
 use crate::settings::SettingsManager;
 use tauri::{Manager, State};
 
-const TIMEOUT_SECS: u64 = 120;
 
 const PROMPT_TEMPLATE: &str = r#"You are a safety gate preventing risky auto-approvals of CLI actions.
 Examine the terminal output below and decide if the agent must pause for user permission.
@@ -91,7 +90,7 @@ pub async fn judge_approval(
     let plan = ai_provider::build_execution_plan(&agent_kind, &prompt, JSON_SCHEMA, ai_provider::default_model(&agent_kind), true);
     let worktree_base_dir = settings_state.get().worktree_base_dir.clone();
 
-    let stdout = ai_provider::run_ai_command(&plan, &state, &worktree_id, &worktree_base_dir, TIMEOUT_SECS).await?;
+    let stdout = ai_provider::run_ai_command(&plan, &state, &worktree_id, &worktree_base_dir, settings_state.get().get_ai_timeout_secs()).await?;
     log::debug!("[AutoApproval] AI agent response: {}", stdout.trim());
 
     let structured = ai_provider::parse_response(&agent_kind, &stdout)?;

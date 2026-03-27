@@ -230,6 +230,8 @@ impl Default for AppearanceSettings {
     }
 }
 
+fn default_ai_timeout_secs() -> u64 { 120 }
+
 fn default_notification_volume() -> u32 { 80 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -322,6 +324,15 @@ pub struct AppSettings {
     pub mcp_port: u16,
     #[serde(default, rename = "enableHomeCat")]
     pub enable_home_cat: bool,
+    #[serde(default = "default_ai_timeout_secs", rename = "aiTimeoutSecs")]
+    pub ai_timeout_secs: u64,
+}
+
+impl AppSettings {
+    /// AI タイムアウト秒数を返す。0 の場合はデフォルトの 120 秒にフォールバック。
+    pub fn get_ai_timeout_secs(&self) -> u64 {
+        if self.ai_timeout_secs == 0 { 120 } else { self.ai_timeout_secs }
+    }
 }
 
 impl Default for AppSettings {
@@ -345,6 +356,7 @@ impl Default for AppSettings {
             notification_sound: None,
             mcp_port: 0,
             enable_home_cat: false,
+            ai_timeout_secs: default_ai_timeout_secs(),
         }
     }
 }
@@ -564,5 +576,27 @@ mod tests {
         let json = r#"{"id": "1", "name": "repo", "path": "/path"}"#;
         let repo: Repository = serde_json::from_str(json).unwrap();
         assert!(repo.exec_script.is_none());
+    }
+
+    #[test]
+    fn test_ai_timeout_secs_default() {
+        let json = r#"{"repositories": [], "worktreeBaseDir": "", "worktrees": []}"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.ai_timeout_secs, 120);
+        assert_eq!(settings.get_ai_timeout_secs(), 120);
+    }
+
+    #[test]
+    fn test_ai_timeout_secs_custom() {
+        let json = r#"{"repositories": [], "worktreeBaseDir": "", "worktrees": [], "aiTimeoutSecs": 60}"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.ai_timeout_secs, 60);
+        assert_eq!(settings.get_ai_timeout_secs(), 60);
+    }
+
+    #[test]
+    fn test_ai_timeout_secs_zero_fallback() {
+        let settings = AppSettings { ai_timeout_secs: 0, ..Default::default() };
+        assert_eq!(settings.get_ai_timeout_secs(), 120);
     }
 }

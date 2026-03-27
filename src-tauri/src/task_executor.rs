@@ -21,7 +21,6 @@ impl TaskGenerateManager {
     }
 }
 
-const TIMEOUT_SECS: u64 = 120;
 
 const SYSTEM_PROMPT_TEMPLATE: &str = r#"You are a task planner acting as both the manager of AI agents and the contact point
 for user requests. Follow these steps to understand the relationship between the
@@ -256,7 +255,8 @@ pub async fn task_generate(
         }
     }
 
-    let wait_result = timeout(Duration::from_secs(TIMEOUT_SECS), child.wait_with_output()).await;
+    let ai_timeout = settings.get_ai_timeout_secs();
+    let wait_result = timeout(Duration::from_secs(ai_timeout), child.wait_with_output()).await;
 
     // タイムアウト時はプロセスをkill
     if wait_result.is_err() {
@@ -277,8 +277,8 @@ pub async fn task_generate(
 
     let output = wait_result
         .map_err(|_| {
-            log::error!("[TaskGenerate] AI agent timed out after {}s", TIMEOUT_SECS);
-            format!("AI agent timed out after {}s", TIMEOUT_SECS)
+            log::error!("[TaskGenerate] AI agent timed out after {}s", ai_timeout);
+            format!("AI agent timed out after {}s", ai_timeout)
         })?
         .map_err(|e| {
             log::error!("[TaskGenerate] Failed to wait for AI agent: {}", e);
