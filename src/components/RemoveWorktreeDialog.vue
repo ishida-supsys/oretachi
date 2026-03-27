@@ -22,6 +22,7 @@ const dirtyFilesText = computed(() =>
 
 const emit = defineEmits<{
   confirm: [options: { mergeTo: string; deleteBranch: boolean; forceBranch: boolean }];
+  archive: [options: { mergeTo: string; deleteBranch: boolean; forceBranch: boolean }];
   cancel: [];
 }>();
 
@@ -32,6 +33,14 @@ const forceBranch = computed(() => deleteBranch.value && !mergeTo.value);
 
 function confirm() {
   emit("confirm", {
+    mergeTo: mergeTo.value,
+    deleteBranch: deleteBranch.value,
+    forceBranch: forceBranch.value,
+  });
+}
+
+function archive() {
+  emit("archive", {
     mergeTo: mergeTo.value,
     deleteBranch: deleteBranch.value,
     forceBranch: forceBranch.value,
@@ -77,6 +86,7 @@ function confirm() {
 
       <div class="dialog-actions">
         <button class="btn-cancel" @click="emit('cancel')">{{ t('common.cancel') }}</button>
+        <button class="btn-archive" @click="archive">{{ t('archiveButton') }}</button>
         <button class="btn-danger" @click="confirm">{{ t('common.delete') }}</button>
       </div>
     </div>
@@ -232,6 +242,26 @@ function confirm() {
   cursor: not-allowed;
 }
 
+.btn-archive {
+  background: #313244;
+  color: #89b4fa;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  padding: 7px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.btn-archive:hover:not(:disabled) {
+  background: #45475a;
+}
+
+.btn-archive:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 .btn-danger {
   background: #f38ba8;
   color: #1e1e2e;
@@ -263,7 +293,8 @@ function confirm() {
     "deleteBranch": "Delete branch",
     "removeWarning": "⚠ git worktree remove will be executed",
     "forceDeleteWarning": "⚠ No merge target: git branch -D will force-delete",
-    "dirtyFilesWarning": "⚠ {count} uncommitted file(s) will be lost"
+    "dirtyFilesWarning": "⚠ {count} uncommitted file(s) will be lost",
+    "archiveButton": "Archive"
   },
   "ja": {
     "removeTitle": "ワークツリー「{name}」を削除",
@@ -273,7 +304,8 @@ function confirm() {
     "deleteBranch": "ブランチを削除する",
     "removeWarning": "⚠ git worktree remove が実行されます",
     "forceDeleteWarning": "⚠ マージ先未指定のため git branch -D で強制削除されます",
-    "dirtyFilesWarning": "⚠ {count} 件の未コミットファイルが失われます"
+    "dirtyFilesWarning": "⚠ {count} 件の未コミットファイルが失われます",
+    "archiveButton": "アーカイブ"
   }
 }
 </i18n>

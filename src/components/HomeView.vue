@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 const { t } = useI18n();
 import WorktreeCard from "./WorktreeCard.vue";
 import TaskCard from "./TaskCard.vue";
+import ArchiveTable from "./ArchiveTable.vue";
 import HomeCatTerminal from "./HomeCatTerminal.vue";
 import { useMasonryLayout } from "../composables/useMasonryLayout";
 import { useSettings } from "../composables/useSettings";
@@ -12,6 +13,7 @@ import { useTasks } from "../composables/useTasks";
 import { useTaskPersistence } from "../composables/useTaskPersistence";
 import { useTaskSearch } from "../composables/useTaskSearch";
 import { useInfiniteScroll } from "../composables/useInfiniteScroll";
+import { useArchivePersistence, deleteArchive } from "../composables/useArchivePersistence";
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import autoAnimate from "@formkit/auto-animate";
 import type { AnimationController } from "@formkit/auto-animate";
@@ -189,13 +191,32 @@ const emit = defineEmits<{
   rerunTask: [taskId: string];
 }>();
 
-type PanelMode = "worktree" | "task";
+type PanelMode = "worktree" | "task" | "archive";
 const panelMode = ref<PanelMode>("worktree");
 
 const { sortedTasks } = useTasks();
 const { hasMore, isLoading, loadTasks, loadMore, search } = useTaskPersistence();
+const {
+  archives,
+  hasMore: archiveHasMore,
+  isLoading: archiveIsLoading,
+  loadArchives,
+  loadMore: archiveLoadMore,
+  searchArchives,
+} = useArchivePersistence();
 
 const { taskSearchInput, onSearchInput, clearSearch } = useTaskSearch(search);
+
+const archiveSearchInput = ref("");
+
+async function onArchiveSearchInput() {
+  await searchArchives(archiveSearchInput.value);
+}
+
+function clearArchiveSearch() {
+  archiveSearchInput.value = "";
+  searchArchives("");
+}
 
 const scrollSentinelRef = ref<HTMLElement | null>(null);
 const { setup: setupScroll, teardown: teardownScroll } = useInfiniteScroll(
@@ -204,12 +225,23 @@ const { setup: setupScroll, teardown: teardownScroll } = useInfiniteScroll(
   { hasMore, isLoading }
 );
 
-watch(panelMode, async (mode) => {
+const archiveScrollSentinelRef = ref<HTMLElement | null>(null);
+const { setup: setupArchiveScroll, teardown: teardownArchiveScroll } = useInfiniteScroll(
+  archiveScrollSentinelRef,
+  archiveLoadMore,
+  { hasMore: archiveHasMore, isLoading: archiveIsLoading }
+);
+
+watch(panelMode, async (mode, oldMode) => {
+  if (oldMode === "task") teardownScroll();
+  if (oldMode === "archive") teardownArchiveScroll();
+
   if (mode === "task") {
     await loadTasks(true);
     nextTick(() => setupScroll());
-  } else {
-    teardownScroll();
+  } else if (mode === "archive") {
+    await loadArchives(true);
+    nextTick(() => setupArchiveScroll());
   }
 });
 
@@ -253,6 +285,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
       <select v-model="panelMode" class="panel-select">
         <option value="worktree">{{ t('worktreeTitle') }}</option>
         <option value="task">{{ t('taskTitle') }}</option>
+        <option value="archive">{{ t('archiveTitle') }}</option>
       </select>
       <div class="header-actions">
         <template v-if="panelMode === 'worktree'">
@@ -263,7 +296,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
             <i class="pi pi-plus"></i>
           </button>
         </template>
-        <template v-else>
+        <template v-else-if="panelMode === 'task'">
           <div class="task-search">
             <i class="pi pi-search search-icon" />
             <input
@@ -280,6 +313,21 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
           <button class="btn-icon-header" :title="t('addTaskButton')" @click="emit('addTask')">
             <i class="pi pi-plus"></i>
           </button>
+        </template>
+        <template v-else>
+          <div class="task-search">
+            <i class="pi pi-search search-icon" />
+            <input
+              v-model="archiveSearchInput"
+              type="text"
+              class="task-search-input"
+              :placeholder="t('archiveSearchPlaceholder')"
+              @input="onArchiveSearchInput"
+            />
+            <button v-if="archiveSearchInput" class="btn-clear-search" @click="clearArchiveSearch">
+              <i class="pi pi-times" />
+            </button>
+          </div>
         </template>
       </div>
     </div>
@@ -337,7 +385,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
     </template>
 
     <!-- タスクパネル -->
-    <template v-else>
+    <template v-else-if="panelMode === 'task'">
       <div v-if="sortedTasks.length === 0 && !isLoading" class="empty-state">
         {{ taskSearchInput ? t('taskNoResults') : t('taskEmpty') }}
       </div>
@@ -357,6 +405,20 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
       <!-- 無限スクロール センチネル -->
       <div ref="scrollSentinelRef" class="scroll-sentinel">
         <i v-if="isLoading" class="pi pi-spinner pi-spin loading-spinner" />
+      </div>
+    </template>
+
+    <!-- アーカイブパネル -->
+    <template v-else>
+      <div v-if="archives.length === 0 && !archiveIsLoading" class="empty-state">
+        {{ t('archiveEmpty') }}
+      </div>
+
+      <ArchiveTable :items="archives" @delete="deleteArchive" />
+
+      <!-- 無限スクロール センチネル -->
+      <div ref="archiveScrollSentinelRef" class="scroll-sentinel">
+        <i v-if="archiveIsLoading" class="pi pi-spinner pi-spin loading-spinner" />
       </div>
     </template>
     </div><!-- /home-content -->
@@ -552,7 +614,10 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
     "taskEmpty": "No tasks. Click the + button to add one.",
     "taskNoResults": "No tasks found.",
     "taskSearchPlaceholder": "Search tasks...",
-    "addTaskButton": "Add task"
+    "addTaskButton": "Add task",
+    "archiveTitle": "Archives",
+    "archiveEmpty": "No archives.",
+    "archiveSearchPlaceholder": "Search archives..."
   },
   "ja": {
     "worktreeTitle": "ワークツリー",
@@ -563,7 +628,10 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
     "taskEmpty": "タスクがありません。+ ボタンで追加してください。",
     "taskNoResults": "タスクが見つかりません。",
     "taskSearchPlaceholder": "タスクを検索...",
-    "addTaskButton": "タスクを追加"
+    "addTaskButton": "タスクを追加",
+    "archiveTitle": "アーカイブ",
+    "archiveEmpty": "アーカイブがありません。",
+    "archiveSearchPlaceholder": "アーカイブを検索..."
   }
 }
 </i18n>

@@ -39,7 +39,7 @@ import type { FrameNode } from "./types/frame";
 import { useWorktreeFrameBundles } from "./composables/useWorktreeFrameBundles";
 import { useCodeReviewChatListener } from "./composables/useCodeReviewLineChat";
 import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
-import { cancelApproval } from "./utils/autoApproval";
+import { useRemoveWorktreeDialog } from "./composables/useRemoveWorktreeDialog";
 import { useAutoHotkey } from "./composables/useAutoHotkey";
 import { useAppAutoApproval } from "./composables/useAppAutoApproval";
 import { useAppHotkeys } from "./composables/useAppHotkeys";
@@ -61,7 +61,7 @@ const { checkForUpdate, downloadAndInstall } = useUpdater();
 type ViewMode = "home" | "settings" | "terminal";
 
 const { settings, loadSettings, scheduleSave } = useSettings();
-const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, removeWorktree, reorderWorktree, saveWorktreeOrder, restoreWorktreeOrder, listBranches, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
+const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, reorderWorktree, saveWorktreeOrder, restoreWorktreeOrder, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, registerTerminalSession, closeAllSubWindows } = useSubWindows();
 const { autoApprovalPromptMap, lastJudgedCommandMap, showAutoApprovalPromptDialog, autoApprovalPromptTargetId, restoreFromSettings: restoreAutoApprovalPrompts, onClickAutoApproval, onSaveAutoApprovalPrompt } = useAutoApprovalPrompt(settings, scheduleSave, isDetached);
 const { notifications, initNotificationListener, addNotification, clearNotification, purgeStaleNotifications, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
@@ -244,11 +244,31 @@ const { showAddTaskDialog, rerunTaskId, rerunPrompt, onAddTaskConfirm, onAddTask
     }
   });
 
-// ワークツリー削除ダイアログ
-const showRemoveDialog = ref(false);
-const removeTargetWorktree = ref<{ id: string; name: string; branchName: string } | null>(null);
-const removeBranches = ref<string[]>([]);
-const removeDirtyFiles = ref<{ path: string; status: string; staged: boolean }[]>([]);
+// ワークツリー削除/アーカイブダイアログ
+const {
+  showRemoveDialog,
+  removeTargetWorktree,
+  removeBranches,
+  removeDirtyFiles,
+  onRemoveWorktree,
+  onRemoveWorktreeConfirm,
+  onArchiveWorktreeConfirm,
+  dismissDialog: onRemoveWorktreeDismiss,
+} = useRemoveWorktreeDialog({
+  loadingWorktrees,
+  clearNotification,
+  isDetached,
+  moveToMainWindow,
+  subWindowFocusMap: subWindowEvents.subWindowFocusMap,
+  closeArtifactWindow,
+  worktreeFrameBundles,
+  getTerminalRef,
+  terminalWorktreeMap,
+  activeWorktreeId,
+  goHome,
+  homeViewRef,
+  t,
+});
 
 // IDE 選択
 const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect();
@@ -443,94 +463,6 @@ async function onSessionExit(worktreeId: string, terminalId: number) {
   }
 }
 
-async function onRemoveWorktree(worktreeId: string) {
-  clearNotification(worktreeId);
-  const worktree = worktrees.value.find((w) => w.id === worktreeId);
-  if (!worktree) return;
-
-  // ブランチ一覧 & ステータスを並行取得してダイアログ表示
-  const [branches, dirtyFiles] = await Promise.all([
-    listBranches(worktree.repositoryId).then((all) => all.filter((b) => b !== worktree.branchName)).catch(() => [] as string[]),
-    invoke<{ path: string; status: string; staged: boolean }[]>("git_get_status", { repoPath: worktree.path }).catch(() => [] as { path: string; status: string; staged: boolean }[]),
-  ]);
-
-  removeTargetWorktree.value = { id: worktree.id, name: worktree.name, branchName: worktree.branchName };
-  removeBranches.value = branches;
-  removeDirtyFiles.value = dirtyFiles;
-  showRemoveDialog.value = true;
-}
-
-async function onRemoveWorktreeConfirm(options: { mergeTo: string; deleteBranch: boolean; forceBranch: boolean }) {
-  if (!removeTargetWorktree.value) return;
-  const { id: worktreeId } = removeTargetWorktree.value;
-
-  const worktree = worktrees.value.find((w) => w.id === worktreeId);
-  if (!worktree) {
-    showRemoveDialog.value = false;
-    removeDirtyFiles.value = [];
-    return;
-  }
-
-  showRemoveDialog.value = false;
-  removeTargetWorktree.value = null;
-  removeBranches.value = [];
-  removeDirtyFiles.value = [];
-  clearNotification(worktreeId);
-  loadingWorktrees.set(worktreeId, t("deletingText"));
-  try {
-    // detached の場合はサブウィンドウを閉じる
-    if (isDetached(worktreeId)) {
-      await moveToMainWindow(worktreeId);
-      subWindowEvents.subWindowFocusMap.delete(worktreeId);
-    }
-
-    // アーティファクトウィンドウを閉じる
-    await closeArtifactWindow(worktreeId);
-
-    // AI判定プロセスをキャンセル
-    await cancelApproval(worktreeId);
-
-    // 内部ターミナルを全て kill
-    const bundle = worktreeFrameBundles.get(worktreeId);
-    for (const terminal of [...worktree.terminals]) {
-      const term = bundle?.terminalRefs.get(terminal.id) ?? getTerminalRef(terminal.id);
-      if (term?.isRunning) {
-        await term.kill();
-      }
-      terminalWorktreeMap.delete(terminal.id);
-    }
-    worktreeFrameBundles.delete(worktreeId);
-
-    if (activeWorktreeId.value === worktreeId) {
-      goHome();
-    }
-
-    let savedPositions: Map<string, DOMRect> | undefined;
-    try {
-      await removeWorktree(
-        worktreeId,
-        {
-          mergeTo: options.mergeTo || undefined,
-          deleteBranch: options.deleteBranch,
-          forceBranch: options.forceBranch,
-        },
-        async () => {
-          await homeViewRef.value?.fadeOutCard(worktreeId);
-          savedPositions = homeViewRef.value?.hideCard(worktreeId);
-        },
-      );
-      await nextTick();
-      if (savedPositions) homeViewRef.value?.animateAfterRemove(savedPositions);
-    } catch (e) {
-      if (savedPositions) homeViewRef.value?.animateAfterRemove(savedPositions);
-      await message(t("deleteFailed", { error: e }), { kind: "error" });
-    } finally {
-      homeViewRef.value?.unhideCard(worktreeId);
-    }
-  } finally {
-    loadingWorktrees.delete(worktreeId);
-  }
-}
 
 async function onOpenInIde(worktreeId: string) {
   const worktree = worktrees.value.find((w) => w.id === worktreeId);
@@ -1460,7 +1392,8 @@ onMounted(async () => {
       :branches="removeBranches"
       :dirty-files="removeDirtyFiles"
       @confirm="onRemoveWorktreeConfirm"
-      @cancel="showRemoveDialog = false; removeDirtyFiles = []"
+      @archive="onArchiveWorktreeConfirm"
+      @cancel="onRemoveWorktreeDismiss"
     />
 
     <!-- IDE 選択ダイアログ -->
@@ -1536,6 +1469,7 @@ onMounted(async () => {
     "taskCompletedDetail": "All steps completed",
     "taskFailedSummary": "Task Failed",
     "deletingText": "Deleting...",
+    "archivingText": "Archiving...",
     "creatingText": "Creating...",
     "deleteFailed": "Delete failed: {error}",
     "ideNotInstalled": "None of Cursor, VS Code, Antigravity are installed.",
@@ -1562,6 +1496,7 @@ onMounted(async () => {
     "taskCompletedDetail": "すべてのステップが完了しました",
     "taskFailedSummary": "タスク失敗",
     "deletingText": "削除中...",
+    "archivingText": "アーカイブ中...",
     "creatingText": "作成中...",
     "deleteFailed": "削除に失敗しました: {error}",
     "ideNotInstalled": "Cursor、VS Code、Antigravity のいずれもインストールされていません。",
