@@ -1,20 +1,28 @@
 import { computed, ref } from "vue";
 import { emit, listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import type { TaskItem, TaskCode, TaskStatus, TaskStepStatus } from "../types/task";
 import { persistedTasks, persistTask, deletePersisted } from "./useTaskPersistence";
+
+// サブウィンドウ（ラベルが "sub-" で始まる）では activeTasks を持たないため
+// ブロードキャストとリクエスト受付はメインウィンドウのみ行う
+const isMainWindow = !getCurrentWindow().label.startsWith("sub-");
 
 // メモリ上の実行中タスク（generating / queued / executing）
 const activeTasks = ref<TaskItem[]>([]);
 
-/** activeTasks のスナップショットを全ウィンドウにブロードキャスト */
+/** activeTasks のスナップショットを全ウィンドウにブロードキャスト（メインウィンドウのみ） */
 function broadcastActiveTasks() {
+  if (!isMainWindow) return;
   // structuredClone 相当の深いコピーを送信（reactive proxy を除去）
   const snapshot = activeTasks.value.map((t) => ({ ...t, steps: [...t.steps.map((s) => ({ ...s, code: { ...s.code } }))] }));
   emit("task-active-sync", snapshot).catch(() => {});
 }
 
-// 他ウィンドウからスナップショットを要求されたら即座に返す（起動タイミングのずれを補完）
-listen("task-active-sync-request", () => { broadcastActiveTasks(); }).catch(() => {});
+// 他ウィンドウからスナップショットを要求されたら即座に返す（メインウィンドウのみ応答）
+if (isMainWindow) {
+  listen("task-active-sync-request", () => { broadcastActiveTasks(); }).catch(() => {});
+}
 
 // 全タスク: アクティブ(新しい順) + 永続化済み（重複排除）
 const sortedTasks = computed(() => {
