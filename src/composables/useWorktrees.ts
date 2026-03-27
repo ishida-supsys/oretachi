@@ -78,12 +78,25 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
       worktreePath: worktree.path,
     });
 
+    // git_worktree_remove 成功済み: ブランチ削除の成否にかかわらず
+    // 設定からの削除は必ず実行する（ディレクトリは既に消えているため）
     if (options?.deleteBranch) {
-      await invoke("git_delete_branch", {
-        repoPath: repoEntry.path,
-        branchName: worktree.branchName,
-        force: options.forceBranch ?? false,
-      });
+      try {
+        await invoke("git_delete_branch", {
+          repoPath: repoEntry.path,
+          branchName: worktree.branchName,
+          force: options.forceBranch ?? false,
+        });
+      } catch (e) {
+        // ブランチ削除失敗: onBeforeSplice・splice を先に実行してからエラーを伝播
+        if (onBeforeSplice) await onBeforeSplice();
+        worktrees.value.splice(index, 1);
+        settings.value.worktrees = settings.value.worktrees.filter(
+          (w) => w.id !== worktreeId
+        );
+        scheduleSave();
+        throw e;
+      }
     }
   }
 
