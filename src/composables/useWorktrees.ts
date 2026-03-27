@@ -78,8 +78,9 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
       worktreePath: worktree.path,
     });
 
-    // git_worktree_remove 成功済み: ブランチ削除の成否にかかわらず
-    // 設定からの削除は必ず実行する（ディレクトリは既に消えているため）
+    // git_worktree_remove 成功済み: ブランチ削除の成否にかかわらず設定からの削除・
+    // クリーンアップは必ず実行する（ディレクトリは既に消えているため）
+    let branchDeleteError: unknown = null;
     if (options?.deleteBranch) {
       try {
         await invoke("git_delete_branch", {
@@ -88,16 +89,24 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
           force: options.forceBranch ?? false,
         });
       } catch (e) {
-        // ブランチ削除失敗: onBeforeSplice・splice を先に実行してからエラーを伝播
-        if (onBeforeSplice) await onBeforeSplice();
-        worktrees.value.splice(index, 1);
-        settings.value.worktrees = settings.value.worktrees.filter(
-          (w) => w.id !== worktreeId
-        );
-        scheduleSave();
-        throw e;
+        branchDeleteError = e;
       }
     }
+
+    if (onBeforeSplice) await onBeforeSplice();
+    worktrees.value.splice(index, 1);
+    settings.value.worktrees = settings.value.worktrees.filter(
+      (w) => w.id !== worktreeId
+    );
+    scheduleSave();
+
+    // セッションファイル・アーティファクトのクリーンアップ（ブランチ削除失敗時も実行）
+    try { await invoke("delete_terminal_session", { worktreeId }); } catch { /* 存在しない場合は無視 */ }
+    try { await invoke("delete_artifacts", { worktreeId }); } catch { /* 存在しない場合は無視 */ }
+
+    // クリーンアップ完了後にブランチ削除エラーを伝播
+    if (branchDeleteError) throw branchDeleteError;
+    return;
   }
 
   if (onBeforeSplice) await onBeforeSplice();
