@@ -217,6 +217,14 @@ export function useRemoveWorktreeDialog(options: {
         const pathStillExists = await invoke<boolean>("path_exists", { path: worktree.path }).catch(() => false);
         if (pathStillExists) {
           await deleteArchive(worktree.id);
+        } else {
+          // ワークツリーは削除済み（ブランチ削除失敗などの部分的失敗）→ afterRemove は呼ばれないため
+          // ここでMCPクライアントへ通知する
+          await invoke("notify_worktree_archived", {
+            id: worktree.id,
+            name: worktree.name,
+            branchName: worktree.branchName,
+          }).catch(() => { /* 通知失敗は無視 */ });
         }
       },
       async (worktree) => {
