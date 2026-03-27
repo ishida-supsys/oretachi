@@ -170,6 +170,29 @@ struct AddTaskEvent {
     remote_exec: bool,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CloseWorktreeParams {
+    #[schemars(description = "クローズするワークツリーの名前")]
+    pub worktree_name: String,
+    #[schemars(description = "ワークツリーID（oretachi_get_worktree_statusで取得）。同名ワークツリーが複数ある場合はIDで特定する")]
+    pub worktree_id: Option<String>,
+    #[schemars(description = "削除前にマージするブランチ名（省略時はマージなし）")]
+    pub merge_to: Option<String>,
+    #[schemars(description = "ワークツリー削除後にブランチを削除するか（省略時は false）")]
+    pub delete_branch: Option<bool>,
+    #[schemars(description = "未マージでもブランチを強制削除するか（省略時は false）")]
+    pub force_branch: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct CloseWorktreeEvent {
+    worktree_id: String,
+    worktree_name: String,
+    merge_to: String,
+    delete_branch: bool,
+    force_branch: bool,
+}
+
 // ─── MCP Service ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -513,6 +536,62 @@ impl NotifyService {
         log::info!("[mcp] oretachi_add_task: prompt={} remote_exec={}", prompt, remote);
         Ok(CallToolResult::success(vec![Content::text(
             "タスク追加リクエストを送信しました。タスクの生成・実行は非同期に行われます。",
+        )]))
+    }
+
+    #[tool(description = "ワークツリーをアーカイブ（クローズ）する。アーカイブDBに記録してgitワークツリーを削除する")]
+    fn oretachi_close_worktree(
+        &self,
+        Parameters(CloseWorktreeParams { worktree_name, worktree_id, merge_to, delete_branch, force_branch }): Parameters<CloseWorktreeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let worktree_name = worktree_name.trim().to_string();
+        if worktree_name.is_empty() {
+            return Err(McpError::invalid_params("worktree_name must not be empty", None));
+        }
+
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+
+        let wt = if let Some(id) = worktree_id.as_deref() {
+            // IDが指定されている場合はIDで特定
+            settings.worktrees.iter().find(|w| w.id == id).ok_or_else(|| {
+                McpError::invalid_params(format!("worktree id '{}' not found", id), None)
+            })?
+        } else {
+            // 名前で特定（同名が複数ある場合はエラー）
+            let matches: Vec<_> = settings.worktrees.iter().filter(|w| w.name == worktree_name).collect();
+            match matches.len() {
+                0 => {
+                    let names: Vec<&str> = settings.worktrees.iter().map(|w| w.name.as_str()).collect();
+                    return Err(McpError::invalid_params(
+                        format!("worktree '{}' not found. available: [{}]", worktree_name, names.join(", ")),
+                        None,
+                    ));
+                }
+                1 => matches[0],
+                _ => {
+                    let ids: Vec<&str> = matches.iter().map(|w| w.id.as_str()).collect();
+                    return Err(McpError::invalid_params(
+                        format!("multiple worktrees named '{}'. specify worktree_id to disambiguate: [{}]", worktree_name, ids.join(", ")),
+                        None,
+                    ));
+                }
+            }
+        };
+
+        let event = CloseWorktreeEvent {
+            worktree_id: wt.id.clone(),
+            worktree_name: wt.name.clone(),
+            merge_to: merge_to.unwrap_or_default(),
+            delete_branch: delete_branch.unwrap_or(false),
+            force_branch: force_branch.unwrap_or(false),
+        };
+        self.app_handle
+            .emit("mcp-close-worktree", &event)
+            .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
+        log::info!("[mcp] oretachi_close_worktree: name={}", worktree_name);
+        Ok(CallToolResult::success(vec![Content::text(
+            "ワークツリーのクローズリクエストを送信しました。処理は非同期に行われます。",
         )]))
     }
 }
