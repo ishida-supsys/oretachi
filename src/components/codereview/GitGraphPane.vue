@@ -7,6 +7,9 @@ import { useI18n } from "vue-i18n";
 const { t } = useI18n();
 
 const props = defineProps<{ repoPath: string }>();
+const emit = defineEmits<{
+  (e: "select-commit", payload: { hash: string; shortHash: string; message: string }): void;
+}>();
 
 interface CommitEntry {
   hash: string;
@@ -109,7 +112,8 @@ onUnmounted(() => {
       <div
         v-for="commit in commits"
         :key="commit.hash"
-        class="px-3 py-2 border-b border-surface-700 hover:bg-surface-700 cursor-default"
+        class="px-3 py-2 border-b border-surface-700 hover:bg-surface-700 cursor-pointer"
+        @click="emit('select-commit', { hash: commit.hash, shortHash: commit.short_hash, message: commit.message })"
       >
         <div class="flex items-start gap-2">
           <span class="font-mono text-xs text-primary-400 shrink-0 mt-0.5 w-14">

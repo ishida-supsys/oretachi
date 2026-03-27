@@ -2,7 +2,7 @@ import { ref, reactive, computed } from "vue";
 
 export interface CodeReviewTab {
   id: string;
-  type: "file" | "diff" | "review" | "settings";
+  type: "file" | "diff" | "review" | "settings" | "commit-diff";
   label: string;
   filePath: string;
   content?: string;
@@ -10,6 +10,7 @@ export interface CodeReviewTab {
   newContent?: string;
   language?: string;
   isBinary?: boolean;
+  commitHash?: string;
 }
 
 let tabCounter = 0;
@@ -57,6 +58,19 @@ export function useCodeReviewTabs() {
   function closeReviewTab(): void {
     const tab = tabs.find((t) => t.type === "review");
     if (tab) closeTab(tab.id);
+  }
+
+  function openCommitDiffTab(hash: string, shortHash: string, message: string): void {
+    const existing = tabs.find((t) => t.type === "commit-diff" && t.commitHash === hash);
+    if (existing) {
+      activeTabId.value = existing.id;
+      return;
+    }
+    const id = `tab-${++tabCounter}`;
+    const msgTrunc = message.length > 30 ? message.slice(0, 30) + "…" : message;
+    const label = `${shortHash}: ${msgTrunc}`;
+    tabs.push({ id, type: "commit-diff", label, filePath: hash, commitHash: hash });
+    activeTabId.value = id;
   }
 
   function openSettingsTab(): void {
@@ -116,5 +130,5 @@ export function useCodeReviewTabs() {
       });
   }
 
-  return { tabs, activeTabId, openFileTab, openDiffTab, openReviewTab, closeReviewTab, openSettingsTab, closeTab, switchTab, activeTab, updateFileTab, updateDiffTab, getOpenTabs };
+  return { tabs, activeTabId, openFileTab, openDiffTab, openReviewTab, closeReviewTab, openCommitDiffTab, openSettingsTab, closeTab, switchTab, activeTab, updateFileTab, updateDiffTab, getOpenTabs };
 }

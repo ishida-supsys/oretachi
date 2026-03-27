@@ -494,6 +494,103 @@ pub fn get_log(repo_path: &str, skip: usize, limit: usize) -> Result<Vec<CommitE
     Ok(entries)
 }
 
+#[derive(Serialize)]
+pub struct CommitFileEntry {
+    pub path: String,
+    pub status: String,
+}
+
+pub fn get_commit_files(repo_path: &str, hash: &str) -> Result<Vec<CommitFileEntry>, String> {
+    if hash.starts_with('-') {
+        return Err("hash にハイフンで始まる値は使用できません".to_string());
+    }
+    let stdout = run_git_in(
+        repo_path,
+        &["diff-tree", "--no-commit-id", "-r", "--root", "--name-status", hash],
+    )?;
+    let mut entries = Vec::new();
+    for line in stdout.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let mut parts = line.splitn(2, '\t');
+        let status_raw = parts.next().unwrap_or("").trim();
+        let path = parts.next().unwrap_or("").trim();
+        if path.is_empty() {
+            continue;
+        }
+        // R100 -> R, C100 -> C など数値サフィックスを除去
+        let status = status_raw.chars().next().unwrap_or('M').to_string();
+        entries.push(CommitFileEntry { path: path.to_string(), status });
+    }
+    Ok(entries)
+}
+
+pub fn get_commit_file_diff(repo_path: &str, hash: &str, file_path: &str) -> Result<FileDiff, String> {
+    if hash.starts_with('-') {
+        return Err("hash にハイフンで始まる値は使用できません".to_string());
+    }
+    let normalized = std::path::Path::new(file_path);
+    for component in normalized.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                return Err("ファイルパスに '..' は使用できません".to_string());
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err("絶対パスは使用できません".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    // parent hash を取得
+    let parent_output = make_command("git")
+        .args(["log", "--pretty=%P", "-1", hash])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+    let parent_hash = if parent_output.status.success() {
+        let s = String::from_utf8_lossy(&parent_output.stdout);
+        s.split_whitespace().next().unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
+
+    let old_bytes = if parent_hash.is_empty() {
+        // 初回コミット: old は空
+        vec![]
+    } else {
+        let spec = format!("{}:{}", parent_hash, file_path);
+        let output = make_command("git")
+            .args(["show", &spec])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| format!("git command error: {}", e))?;
+        if output.status.success() { output.stdout } else { vec![] }
+    };
+
+    let new_spec = format!("{}:{}", hash, file_path);
+    let new_output = make_command("git")
+        .args(["show", &new_spec])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+    let new_bytes = if new_output.status.success() { new_output.stdout } else { vec![] };
+
+    if content_inspector::inspect(&old_bytes).is_binary()
+        || content_inspector::inspect(&new_bytes).is_binary()
+    {
+        return Ok(FileDiff { old_content: String::new(), new_content: String::new(), is_binary: true });
+    }
+
+    Ok(FileDiff {
+        old_content: String::from_utf8_lossy(&old_bytes).into_owned(),
+        new_content: String::from_utf8_lossy(&new_bytes).into_owned(),
+        is_binary: false,
+    })
+}
+
 pub fn get_diff_text(repo_path: &str) -> Result<String, String> {
     // ステージ済み + 未ステージの全差分を取得
     let staged = make_command("git")

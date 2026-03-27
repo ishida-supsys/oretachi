@@ -10,6 +10,7 @@ import CodeReviewTabs from "./components/codereview/CodeReviewTabs.vue";
 import MonacoFileViewer from "./components/codereview/MonacoFileViewer.vue";
 import MonacoDiffViewer from "./components/codereview/MonacoDiffViewer.vue";
 import ReviewSessionView from "./components/codereview/ReviewSessionView.vue";
+import CommitDiffView from "./components/codereview/CommitDiffView.vue";
 import CodeReviewSettingsView from "./components/codereview/CodeReviewSettingsView.vue";
 import { useCodeReviewTabs } from "./composables/useCodeReviewTabs";
 import { useReviewSession } from "./composables/useReviewSession";
@@ -35,7 +36,7 @@ const activePanel = ref<Panel>("files");
 const sidebarWidth = ref(250);
 const isResizing = ref(false);
 
-const { tabs, activeTabId, openFileTab, openDiffTab, openReviewTab, closeReviewTab, openSettingsTab, closeTab, switchTab, activeTab, updateFileTab, updateDiffTab, getOpenTabs } =
+const { tabs, activeTabId, openFileTab, openDiffTab, openReviewTab, closeReviewTab, openCommitDiffTab, openSettingsTab, closeTab, switchTab, activeTab, updateFileTab, updateDiffTab, getOpenTabs } =
   useCodeReviewTabs();
 
 const { isReviewMode, startReview, endReview, refreshReviewFiles } = useReviewSession();
@@ -53,6 +54,10 @@ function handleCloseTab(id: string) {
     endReview();
   }
   closeTab(id);
+}
+
+function handleSelectCommit(payload: { hash: string; shortHash: string; message: string }) {
+  openCommitDiffTab(payload.hash, payload.shortHash, payload.message);
 }
 
 function handleReviewClose() {
@@ -258,6 +263,7 @@ const { handleChatWithAgent } = useCodeReviewChat(worktreeId, origin);
           :repo-path="worktreePath"
           @open-diff="handleOpenDiff"
           @start-review="handleStartReview"
+          @select-commit="handleSelectCommit"
         />
       </div>
     </div>
@@ -286,6 +292,12 @@ const { handleChatWithAgent } = useCodeReviewChat(worktreeId, origin);
             v-else-if="activeTab.type === 'review'"
             :repo-path="worktreePath"
             @close="handleReviewClose"
+            @chat="handleChatWithAgent"
+          />
+          <CommitDiffView
+            v-else-if="activeTab.type === 'commit-diff'"
+            :repo-path="worktreePath"
+            :commit-hash="activeTab.commitHash!"
             @chat="handleChatWithAgent"
           />
           <MonacoFileViewer

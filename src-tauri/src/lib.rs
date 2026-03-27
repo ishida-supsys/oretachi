@@ -268,6 +268,23 @@ async fn git_get_log(
 }
 
 #[tauri::command]
+async fn git_get_commit_files(
+    repo_path: String,
+    hash: String,
+) -> Result<Vec<git_worktree::CommitFileEntry>, String> {
+    run_git(move || git_worktree::get_commit_files(&repo_path, &hash)).await
+}
+
+#[tauri::command]
+async fn git_get_commit_file_diff(
+    repo_path: String,
+    hash: String,
+    file_path: String,
+) -> Result<git_worktree::FileDiff, String> {
+    run_git(move || git_worktree::get_commit_file_diff(&repo_path, &hash, &file_path)).await
+}
+
+#[tauri::command]
 async fn git_stage_all(repo_path: String) -> Result<(), String> {
     run_git(move || git_worktree::stage_all(&repo_path)).await
 }
@@ -606,6 +623,8 @@ pub fn run() {
             git_get_merge_message,
             git_get_status,
             git_get_file_diff,
+            git_get_commit_files,
+            git_get_commit_file_diff,
             git_get_log,
             git_stage_all,
             git_commit,

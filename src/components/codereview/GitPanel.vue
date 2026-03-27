@@ -10,6 +10,7 @@ const props = defineProps<{ repoPath: string }>();
 const emit = defineEmits<{
   (e: "open-diff", payload: { filePath: string; staged: boolean }): void;
   (e: "start-review"): void;
+  (e: "select-commit", payload: { hash: string; shortHash: string; message: string }): void;
 }>();
 
 type GitTab = "changes" | "graph";
@@ -50,6 +51,7 @@ const activeTab = ref<GitTab>("changes");
       <GitGraphPane
         v-else
         :repo-path="props.repoPath"
+        @select-commit="emit('select-commit', $event)"
       />
     </div>
   </div>

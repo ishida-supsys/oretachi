@@ -8,7 +8,7 @@ import type { ChatPayload } from "../../composables/useCodeReviewLineChat";
 
 const { t } = useI18n();
 
-const props = defineProps<{ entry: ReviewFileEntry }>();
+const props = defineProps<{ entry: ReviewFileEntry; readonly?: boolean }>();
 const emit = defineEmits<{
   (e: "toggle-reviewed"): void;
   (e: "toggle-collapsed"): void;
@@ -47,7 +47,7 @@ const checked = computed({
 <template>
   <div
     class="border border-surface-700 rounded overflow-hidden mb-2"
-    :class="entry.reviewed ? 'opacity-60' : ''"
+    :class="!readonly && entry.reviewed ? 'opacity-60' : ''"
   >
     <!-- ヘッダー行 -->
     <div
@@ -55,7 +55,7 @@ const checked = computed({
       @click="emit('toggle-collapsed')"
     >
       <!-- チェックボックス (クリックイベントを止める) -->
-      <div @click.stop>
+      <div v-if="!readonly" @click.stop>
         <Checkbox v-model="checked" :binary="true" class="shrink-0" />
       </div>
 
@@ -69,7 +69,7 @@ const checked = computed({
       >{{ entry.status === "??" ? "?" : entry.status }}</span>
 
       <!-- レビュー済みラベル -->
-      <span v-if="entry.reviewed" class="text-xs text-green-400 shrink-0">{{ t("reviewed") }}</span>
+      <span v-if="!readonly && entry.reviewed" class="text-xs text-green-400 shrink-0">{{ t("reviewed") }}</span>
 
       <!-- 折りたたみアイコン -->
       <i
