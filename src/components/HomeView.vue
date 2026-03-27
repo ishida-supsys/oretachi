@@ -9,6 +9,7 @@ import HomeCatTerminal from "./HomeCatTerminal.vue";
 import { useMasonryLayout } from "../composables/useMasonryLayout";
 import { useSettings } from "../composables/useSettings";
 import { useTasks } from "../composables/useTasks";
+import { useTaskPersistence } from "../composables/useTaskPersistence";
 import { useTaskSearch } from "../composables/useTaskSearch";
 import { useInfiniteScroll } from "../composables/useInfiniteScroll";
 import { computed, nextTick, reactive, ref, watch } from "vue";
@@ -191,7 +192,8 @@ const emit = defineEmits<{
 type PanelMode = "worktree" | "task";
 const panelMode = ref<PanelMode>("worktree");
 
-const { sortedTasks, hasMore, isLoading, loadTasks, loadMore, search } = useTasks();
+const { sortedTasks } = useTasks();
+const { hasMore, isLoading, loadTasks, loadMore, search } = useTaskPersistence();
 
 const { taskSearchInput, onSearchInput, clearSearch } = useTaskSearch(search);
 
