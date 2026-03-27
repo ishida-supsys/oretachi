@@ -53,6 +53,9 @@ const currentOffset = ref(0);
 const hasMore = ref(true);
 const isLoading = ref(false);
 
+// DB に実際に存在するタスクIDを追跡（offset 管理の整合性のため）
+const dbBackedIds = new Set<string>();
+
 // 全タスク: アクティブ(新しい順) + 永続化済み（重複排除）
 const sortedTasks = computed(() => {
   const active = [...activeTasks.value].sort((a, b) => b.createdAt - a.createdAt);
@@ -85,6 +88,7 @@ async function loadTasks(reset = false): Promise<void> {
       limit: PAGE_SIZE,
     });
     const newItems = result.items.map(taskRowToItem);
+    for (const item of newItems) dbBackedIds.add(item.id);
     persistedTasks.value.push(...newItems);
     currentOffset.value += newItems.length;
     hasMore.value = result.has_more;
@@ -151,8 +155,11 @@ async function updateTaskStatus(taskId: string, status: TaskStatus, error?: stri
 
   // 完了またはエラー時に DB へ永続化し、activeTasks から persistedTasks へ移動
   if (status === "completed" || status === "error") {
+    let savedToDb = false;
     try {
       await invoke("save_task", { task: taskItemToRow(task) });
+      savedToDb = true;
+      dbBackedIds.add(task.id);
     } catch (e) {
       console.error("Failed to save task to DB:", e);
     }
@@ -167,7 +174,8 @@ async function updateTaskStatus(taskId: string, status: TaskStatus, error?: stri
       task.prompt.toLowerCase().includes(searchQuery.value.toLowerCase());
     if (matchesSearch) {
       persistedTasks.value.unshift({ ...task });
-      currentOffset.value += 1;
+      // DB に実際に保存できた場合のみ offset を増やす
+      if (savedToDb) currentOffset.value += 1;
     }
   }
 }
@@ -186,10 +194,12 @@ async function removeTask(taskId: string) {
     persistedTasks.value.splice(persistedIdx, 1);
   }
   // DB から削除
+  const wasDbBacked = dbBackedIds.has(taskId);
   try {
     await invoke("delete_task", { id: taskId });
-    // 成功時のみ offset を巻き戻す（DB上レコードが実際に消えた分）
-    if (removedTask !== undefined) {
+    dbBackedIds.delete(taskId);
+    // DB に実際に存在していたタスクが消えた分だけ offset を巻き戻す
+    if (removedTask !== undefined && wasDbBacked) {
       currentOffset.value = Math.max(0, currentOffset.value - 1);
     }
   } catch (e) {
