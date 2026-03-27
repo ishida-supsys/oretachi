@@ -4,7 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { message } from "@tauri-apps/plugin-dialog";
 import { useWorktrees } from "./useWorktrees";
 import { cancelApproval } from "../utils/autoApproval";
-import { saveArchive } from "./useArchivePersistence";
+import { saveArchive, deleteArchive } from "./useArchivePersistence";
 import type { Worktree } from "../types/worktree";
 
 interface TerminalRef {
@@ -91,12 +91,14 @@ export function useRemoveWorktreeDialog(options: {
   }
 
   /** 共通: ダイアログ後処理・ターミナル停止・アニメーション付きワークツリー削除
-   *  afterRemove: git 操作成功後に呼ぶ任意の非同期処理（アーカイブ保存など）
+   *  beforeRemove: git 操作前に呼ぶ任意の非同期処理（アーカイブ保存など）
+   *  onRemoveFailed: git 操作失敗時に beforeRemove の副作用をロールバックするコールバック
    */
   async function _confirm(
     removeOptions: RemoveOptions,
     loadingText: string,
-    afterRemove?: (worktree: Worktree) => Promise<void>,
+    beforeRemove?: (worktree: Worktree) => Promise<void>,
+    onRemoveFailed?: (worktree: Worktree) => Promise<void>,
   ): Promise<void> {
     if (!removeTargetWorktree.value) return;
     const { id: worktreeId } = removeTargetWorktree.value;
@@ -133,6 +135,9 @@ export function useRemoveWorktreeDialog(options: {
 
       if (activeWorktreeId.value === worktreeId) goHome();
 
+      // git 操作前に事前処理（アーカイブ保存など）を実行
+      if (beforeRemove) await beforeRemove(worktree);
+
       let savedPositions: Map<string, DOMRect> | undefined;
       try {
         await removeWorktree(
@@ -147,12 +152,14 @@ export function useRemoveWorktreeDialog(options: {
             savedPositions = homeViewRef.value?.hideCard(worktreeId);
           },
         );
-        // git 操作成功後にアーカイブ保存などを実行
-        if (afterRemove) await afterRemove(worktree);
         await nextTick();
         if (savedPositions) homeViewRef.value?.animateAfterRemove(savedPositions);
       } catch (e) {
         if (savedPositions) homeViewRef.value?.animateAfterRemove(savedPositions);
+        // git 操作失敗時: 事前処理の副作用をロールバック
+        if (onRemoveFailed) {
+          try { await onRemoveFailed(worktree); } catch { /* ロールバック失敗は無視 */ }
+        }
         await message(t("deleteFailed", { error: e }), { kind: "error" });
       } finally {
         homeViewRef.value?.unhideCard(worktreeId);
@@ -167,17 +174,25 @@ export function useRemoveWorktreeDialog(options: {
   }
 
   async function onArchiveWorktreeConfirm(removeOptions: RemoveOptions): Promise<void> {
-    await _confirm(removeOptions, t("archivingText"), async (worktree) => {
-      await saveArchive({
-        id: worktree.id,
-        name: worktree.name,
-        repository_id: worktree.repositoryId,
-        repository_name: worktree.repositoryName,
-        path: worktree.path,
-        branch_name: worktree.branchName,
-        archived_at: Date.now(),
-      });
-    });
+    await _confirm(
+      removeOptions,
+      t("archivingText"),
+      async (worktree) => {
+        await saveArchive({
+          id: worktree.id,
+          name: worktree.name,
+          repository_id: worktree.repositoryId,
+          repository_name: worktree.repositoryName,
+          path: worktree.path,
+          branch_name: worktree.branchName,
+          archived_at: Date.now(),
+        });
+      },
+      async (worktree) => {
+        // git 操作失敗時: 保存済みアーカイブをロールバック
+        await deleteArchive(worktree.id);
+      },
+    );
   }
 
   return {
