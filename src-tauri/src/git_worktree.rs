@@ -505,11 +505,33 @@ pub fn get_commit_files(repo_path: &str, hash: &str) -> Result<Vec<CommitFileEnt
     if hash.starts_with('-') {
         return Err("hash にハイフンで始まる値は使用できません".to_string());
     }
-    // --first-parent -m でマージコミットの first-parent 差分も取得
-    let stdout = run_git_in(
-        repo_path,
-        &["diff-tree", "--no-commit-id", "-r", "--root", "--first-parent", "-m", "--name-status", hash],
-    )?;
+
+    // first parent hash を取得してマージコミットを正確に処理する
+    let parent_output = make_command("git")
+        .args(["log", "--pretty=%P", "-1", hash])
+        .current_dir(repo_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+    let first_parent = if parent_output.status.success() {
+        let s = String::from_utf8_lossy(&parent_output.stdout);
+        s.split_whitespace().next().unwrap_or("").to_string()
+    } else {
+        String::new()
+    };
+
+    // 初回コミット: diff-tree --root / それ以外: git diff <first-parent> <hash>
+    // (-m を使わないことでマージコミットでも first-parent との差分のみを正確に一覧表示)
+    let stdout = if first_parent.is_empty() {
+        run_git_in(
+            repo_path,
+            &["diff-tree", "--no-commit-id", "-r", "--root", "--name-status", hash],
+        )?
+    } else {
+        run_git_in(
+            repo_path,
+            &["diff", "--name-status", &first_parent, hash],
+        )?
+    };
     let mut entries = Vec::new();
     for line in stdout.lines() {
         let line = line.trim();
