@@ -504,9 +504,10 @@ pub fn get_commit_files(repo_path: &str, hash: &str) -> Result<Vec<CommitFileEnt
     if hash.starts_with('-') {
         return Err("hash にハイフンで始まる値は使用できません".to_string());
     }
+    // --first-parent -m でマージコミットの first-parent 差分も取得
     let stdout = run_git_in(
         repo_path,
-        &["diff-tree", "--no-commit-id", "-r", "--root", "--name-status", hash],
+        &["diff-tree", "--no-commit-id", "-r", "--root", "--first-parent", "-m", "--name-status", hash],
     )?;
     let mut entries = Vec::new();
     for line in stdout.lines() {
@@ -514,14 +515,24 @@ pub fn get_commit_files(repo_path: &str, hash: &str) -> Result<Vec<CommitFileEnt
         if line.is_empty() {
             continue;
         }
-        let mut parts = line.splitn(2, '\t');
-        let status_raw = parts.next().unwrap_or("").trim();
-        let path = parts.next().unwrap_or("").trim();
+        let fields: Vec<&str> = line.splitn(3, '\t').collect();
+        if fields.is_empty() {
+            continue;
+        }
+        let status_raw = fields[0].trim();
+        let status_char = status_raw.chars().next().unwrap_or('M');
+        let status = status_char.to_string();
+        // R / C はフィールドが 3 つ: status, old_path, new_path → new_path を表示パスとして使う
+        let path = if (status_char == 'R' || status_char == 'C') && fields.len() == 3 {
+            fields[2].trim()
+        } else if fields.len() >= 2 {
+            fields[1].trim()
+        } else {
+            continue;
+        };
         if path.is_empty() {
             continue;
         }
-        // R100 -> R, C100 -> C など数値サフィックスを除去
-        let status = status_raw.chars().next().unwrap_or('M').to_string();
         entries.push(CommitFileEntry { path: path.to_string(), status });
     }
     Ok(entries)

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted } from "vue";
+import { ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { invoke } from "@tauri-apps/api/core";
 import ReviewFilePanel from "./ReviewFilePanel.vue";
@@ -25,13 +25,14 @@ function toggleCollapsed(filePath: string) {
   if (f) f.collapsed = !f.collapsed;
 }
 
-onMounted(async () => {
+async function loadDiff(hash: string) {
   loading.value = true;
   error.value = "";
+  files.value = [];
   try {
     const entries = await invoke<CommitFileEntryRaw[]>("git_get_commit_files", {
       repoPath: props.repoPath,
-      hash: props.commitHash,
+      hash,
     });
 
     const loaded: ReviewFileEntry[] = await Promise.all(
@@ -39,7 +40,7 @@ onMounted(async () => {
         try {
           const diff = await invoke<{ old_content: string; new_content: string; is_binary: boolean }>(
             "git_get_commit_file_diff",
-            { repoPath: props.repoPath, hash: props.commitHash, filePath: entry.path },
+            { repoPath: props.repoPath, hash, filePath: entry.path },
           );
           return {
             filePath: entry.path,
@@ -69,7 +70,9 @@ onMounted(async () => {
   } finally {
     loading.value = false;
   }
-});
+}
+
+watch(() => props.commitHash, loadDiff, { immediate: true });
 </script>
 
 <template>
