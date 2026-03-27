@@ -435,6 +435,13 @@ async fn delete_task(
     task_db::delete(&pool.0, &id).await
 }
 
+// ─── ファイルシステム ユーティリティ ─────────────────────────────────────────
+
+#[tauri::command]
+fn path_exists(path: String) -> bool {
+    std::path::Path::new(&path).exists()
+}
+
 // ─── アーカイブ DB コマンド ───────────────────────────────────────────────────
 
 #[tauri::command]
@@ -631,6 +638,7 @@ pub fn run() {
             save_task,
             list_tasks,
             delete_task,
+            path_exists,
             save_archive,
             list_archives,
             delete_archive,

@@ -188,8 +188,13 @@ export function useRemoveWorktreeDialog(options: {
         });
       },
       async (worktree) => {
-        // git 操作失敗時: 保存済みアーカイブをロールバック
-        await deleteArchive(worktree.id);
+        // git 操作失敗時: ワークツリーパスがまだ存在する場合のみアーカイブをロールバック
+        // (git_worktree_remove 成功後に git_delete_branch が失敗した場合はワークツリーは
+        //  既に消えているためアーカイブを保持する)
+        const pathStillExists = await invoke<boolean>("path_exists", { path: worktree.path }).catch(() => false);
+        if (pathStillExists) {
+          await deleteArchive(worktree.id);
+        }
       },
     );
   }
