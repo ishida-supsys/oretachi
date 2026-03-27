@@ -1,4 +1,12 @@
 export default {
+  taskStatus: {
+    generating: 'Generating',
+    queued: 'Queued',
+    executing: 'Running',
+    completed: 'Done',
+    error: 'Error',
+  },
+  taskTooltipMore: '...and {count} more',
   common: {
     cancel: 'Cancel',
     delete: 'Delete',

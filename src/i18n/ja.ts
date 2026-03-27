@@ -1,4 +1,12 @@
 export default {
+  taskStatus: {
+    generating: '生成中',
+    queued: '待機中',
+    executing: '実行中',
+    completed: '完了',
+    error: 'エラー',
+  },
+  taskTooltipMore: '...他{count}件',
   common: {
     cancel: 'キャンセル',
     delete: '削除',

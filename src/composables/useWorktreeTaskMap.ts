@@ -1,16 +1,9 @@
 import { computed, ref } from "vue";
 import { emit, listen } from "@tauri-apps/api/event";
+import { useI18n } from "vue-i18n";
 import { useTasks } from "./useTasks";
 import { allPersistedTasks, loadAllTasks } from "./useTaskPersistence";
 import type { TaskItem } from "../types/task";
-
-const statusLabel: Record<string, string> = {
-  generating: "生成中",
-  queued: "待機中",
-  executing: "実行中",
-  completed: "完了",
-  error: "エラー",
-};
 
 const { tasks: activeTasks } = useTasks();
 
@@ -58,17 +51,22 @@ const worktreeTaskMap = computed(() => {
 });
 
 export function useWorktreeTaskMap() {
+  const { t } = useI18n();
+
   function getTasksForWorktree(repositoryName: string, branchName: string): TaskItem[] {
     return worktreeTaskMap.value.get(`${repositoryName}:${branchName}`) ?? [];
   }
 
   function getTooltipText(repositoryName: string, branchName: string): string | undefined {
-    const tasks = getTasksForWorktree(repositoryName, branchName);
+    // 最新のタスクを先頭に表示するため createdAt 降順でソート
+    const tasks = getTasksForWorktree(repositoryName, branchName)
+      .slice()
+      .sort((a, b) => b.createdAt - a.createdAt);
     if (tasks.length === 0) return undefined;
 
     const maxShow = 3;
     const lines = tasks.slice(0, maxShow).map((task) => {
-      const status = statusLabel[task.status] ?? task.status;
+      const status = t(`taskStatus.${task.status}`, task.status);
       const prompt =
         task.prompt.length > 30 ? task.prompt.slice(0, 30) + "..." : task.prompt;
       const d = new Date(task.createdAt);
@@ -76,7 +74,7 @@ export function useWorktreeTaskMap() {
       return `[${status}] ${prompt} (${date})`;
     });
     if (tasks.length > maxShow) {
-      lines.push(`...他${tasks.length - maxShow}件`);
+      lines.push(t("taskTooltipMore", { count: tasks.length - maxShow }));
     }
     return lines.join("\n");
   }
