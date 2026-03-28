@@ -803,29 +803,39 @@ fn server_info_file_path(app_handle: &AppHandle) -> Option<PathBuf> {
 }
 
 fn write_server_info_file(app_handle: &AppHandle, port: u16, api_key: &str) {
-    // MCP_PORT_OVERWRITE=false なら既存ファイルを上書きしない
-    let overwrite = std::env::var("MCP_PORT_OVERWRITE")
+    // MCP_PORT_OVERWRITE=false はポートの上書きのみを制限する。
+    // APIキーは再生成後の再起動でも常に最新値が必要なため、常に書き込む。
+    let overwrite_port = std::env::var("MCP_PORT_OVERWRITE")
         .map(|v| v != "false")
         .unwrap_or(true);
 
-    // mcp-server.json を書き込む
+    // mcp-server.json を書き込む（ポート確定値 or キー更新のため常に更新）
     if let Some(path) = server_info_file_path(app_handle) {
-        if overwrite || !path.exists() {
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            let info = serde_json::json!({ "port": port, "apiKey": api_key });
-            if let Err(e) = fs::write(&path, serde_json::to_string_pretty(&info).unwrap_or_default()) {
-                log::warn!("Failed to write server info file: {}", e);
-            }
+        // ポート上書き禁止かつ既存ファイルがある場合: ポートは既存値を使い、APIキーのみ更新
+        let effective_port = if !overwrite_port && path.exists() {
+            // 既存ファイルからポートを読み取る
+            fs::read_to_string(&path)
+                .ok()
+                .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+                .and_then(|v| v["port"].as_u64())
+                .map(|p| p as u16)
+                .unwrap_or(port)
         } else {
-            log::info!("MCP server info file already exists, skipping overwrite (MCP_PORT_OVERWRITE=false)");
+            port
+        };
+        if let Some(parent) = path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        let info = serde_json::json!({ "port": effective_port, "apiKey": api_key });
+        if let Err(e) = fs::write(&path, serde_json::to_string_pretty(&info).unwrap_or_default()) {
+            log::warn!("Failed to write server info file: {}", e);
         }
     }
 
     // 後方互換: 旧 mcp-port テキストファイルも書き込む
+    // 後方互換: 旧 mcp-port テキストファイルも書き込む（ポート上書き制限を適用）
     if let Some(path) = port_file_path(app_handle) {
-        if overwrite || !path.exists() {
+        if overwrite_port || !path.exists() {
             if let Some(parent) = path.parent() {
                 let _ = fs::create_dir_all(parent);
             }
