@@ -867,10 +867,21 @@ pub fn copy_working_changes(source_path: &str, target_path: &str) -> Result<u32,
     staged_files.sort();
     staged_files.dedup();
 
+    /// git status 出力パスに '..' が含まれないことを確認する（パストラバーサル防止）
+    fn validate_path(path: &str) -> Result<(), String> {
+        for component in std::path::Path::new(path).components() {
+            if matches!(component, std::path::Component::ParentDir) {
+                return Err(format!("パストラバーサルを含むパスは使用できません: {}", path));
+            }
+        }
+        Ok(())
+    }
+
     let mut count = 0u32;
 
     // ファイルをコピー
     for file in &files_to_copy {
+        validate_path(file)?;
         let src_file = source.join(file);
         let dst_file = target.join(file);
         if src_file.exists() {
@@ -886,6 +897,7 @@ pub fn copy_working_changes(source_path: &str, target_path: &str) -> Result<u32,
 
     // 削除されたファイル・リネーム旧ファイルをターゲットからも削除
     for file in &files_to_delete {
+        validate_path(file)?;
         let dst_file = target.join(file);
         if dst_file.exists() {
             let _ = std::fs::remove_file(&dst_file);
