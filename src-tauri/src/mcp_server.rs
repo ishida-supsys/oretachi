@@ -688,6 +688,12 @@ async fn api_key_auth(
         .get("authorization")
         .and_then(|v| v.to_str().ok());
 
+    // APIキーが未設定の場合は全リクエストを拒否（空文字による認証バイパスを防ぐ）
+    if expected_key.is_empty() {
+        log::warn!("[mcp] API key not configured, rejecting all requests");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
     let authorized = match auth_header {
         Some(header) if header.starts_with("Bearer ") => {
             let provided = header[7..].as_bytes();
@@ -1085,7 +1091,9 @@ pub fn send_notification_standalone(worktree_name: &str, kind: Option<&str>) -> 
         .map_err(|e| format!("Failed to read response: {}", e))?;
 
     let response_str = String::from_utf8_lossy(&response);
-    if !response_str.contains("200") {
+    // ステータス行 "HTTP/1.x 200 " を確認（単純な contains("200") は誤検知の恐れ）
+    let first_line = response_str.lines().next().unwrap_or("");
+    if !first_line.starts_with("HTTP/") || !first_line.contains(" 200 ") {
         return Err(format!("Server returned unexpected response: {}", response_str));
     }
     Ok(())
