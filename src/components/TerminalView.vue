@@ -78,8 +78,8 @@ function initTerminal() {
   terminal = new Terminal({
     allowProposedApi: true,
     allowTransparency: isTransparent,
-    cols: props.initialCols,
-    rows: props.initialRows,
+    ...(props.initialCols != null && { cols: props.initialCols }),
+    ...(props.initialRows != null && { rows: props.initialRows }),
     fontFamily: '"Cascadia Code", Consolas, Menlo, "SF Mono", Monaco, monospace',
     fontSize: settings.value.terminal.fontSize,
     theme: {
