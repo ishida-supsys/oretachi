@@ -834,14 +834,14 @@ pub fn copy_working_changes(source_path: &str, target_path: &str) -> Result<u32,
         let new_path = token[3..].to_string();
 
         // staged rename/copy の場合、次のトークンが旧パス
-        // 旧パスはターゲットから削除する（リネーム後に旧ファイルが残らないように）
+        // rename(R) のみ旧パスをターゲットから削除する（copy(C) は元ファイルが残存するため削除しない）
         let is_rename_or_copy = x == "R" || x == "C";
         if is_rename_or_copy {
             if i < tokens.len() {
                 let old_path = tokens[i].to_string();
                 i += 1;
-                // 旧パスをターゲットから削除対象に追加
-                if !old_path.is_empty() {
+                // rename のみ旧パスをターゲットから削除対象に追加
+                if x == "R" && !old_path.is_empty() {
                     files_to_delete.push(old_path);
                 }
             }
