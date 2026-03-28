@@ -349,13 +349,13 @@ impl NotifyService {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
         log::info!("[mcp] artifact command={} id={} worktree_id={}", command, id, worktree_id);
-        self.app_handle
-            .emit("artifact-changed", serde_json::json!({
+        if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
                 "worktreeId": worktree_id,
                 "artifactId": id,
                 "command": command,
-            }))
-            .ok();
+            })) {
+            log::warn!("Failed to emit artifact-changed: {}", e);
+        }
         if command == "create" {
             if let Some(pool) = self.app_handle.try_state::<crate::report_db::ReportPool>() {
                 let _ = crate::report_db::insert(&pool.inner().0, "artifact_change:create", &id).await;

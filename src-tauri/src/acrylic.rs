@@ -1,4 +1,5 @@
 use std::ffi::c_void;
+use std::sync::OnceLock;
 use windows_sys::Win32::Foundation::HWND;
 
 #[repr(C)]
@@ -28,8 +29,10 @@ fn is_backdrop_supported() -> bool {
     windows_version::OsVersion::current().build >= 22523
 }
 
+static SWCA_FN: OnceLock<Option<SetWindowCompositionAttributeFn>> = OnceLock::new();
+
 fn get_swca() -> Option<SetWindowCompositionAttributeFn> {
-    unsafe {
+    *SWCA_FN.get_or_init(|| unsafe {
         let module = windows_sys::Win32::System::LibraryLoader::LoadLibraryA(
             b"user32.dll\0".as_ptr(),
         );
@@ -41,13 +44,15 @@ fn get_swca() -> Option<SetWindowCompositionAttributeFn> {
             b"SetWindowCompositionAttribute\0".as_ptr(),
         );
         proc.map(|f| std::mem::transmute(f))
-    }
+    })
 }
 
 type DwmExtendFrameIntoClientAreaFn = unsafe extern "system" fn(HWND, *const i32) -> i32;
 
+static DWM_EXTEND_FN: OnceLock<Option<DwmExtendFrameIntoClientAreaFn>> = OnceLock::new();
+
 fn get_dwm_extend_frame() -> Option<DwmExtendFrameIntoClientAreaFn> {
-    unsafe {
+    *DWM_EXTEND_FN.get_or_init(|| unsafe {
         let module = windows_sys::Win32::System::LibraryLoader::LoadLibraryA(
             b"dwmapi.dll\0".as_ptr(),
         );
@@ -59,7 +64,7 @@ fn get_dwm_extend_frame() -> Option<DwmExtendFrameIntoClientAreaFn> {
             b"DwmExtendFrameIntoClientArea\0".as_ptr(),
         );
         proc.map(|f| std::mem::transmute(f))
-    }
+    })
 }
 
 /// 共通: SetWindowCompositionAttribute で指定の accent_state を適用
