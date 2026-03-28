@@ -790,9 +790,22 @@ pub fn copy_gitignore_targets(
 /// ソースワークツリーの未コミット変更（ステージ済み・未ステージ・untracked）をターゲットへコピーする。
 /// ソースには副作用を与えない（stash不使用）。
 pub fn copy_working_changes(source_path: &str, target_path: &str) -> Result<u32, String> {
-    let stdout = run_git_in(source_path, &["status", "--porcelain=v1", "-uall"])?;
+    // -z: NUL区切り・引用符なし出力（スペースや非ASCII文字を含むパス名に対応）
+    let output = make_command("git")
+        .args(["status", "--porcelain=v1", "-uall", "-z"])
+        .current_dir(source_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
 
-    if stdout.trim().is_empty() {
+    if !output.status.success() {
+        return Err(format!(
+            "git status failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    if raw.trim_matches('\0').is_empty() {
         return Ok(0);
     }
 
@@ -803,37 +816,48 @@ pub fn copy_working_changes(source_path: &str, target_path: &str) -> Result<u32,
     let mut staged_files: Vec<String> = Vec::new();
     let mut files_to_delete: Vec<String> = Vec::new();
 
-    for line in stdout.lines() {
-        if line.len() < 3 {
+    // NUL区切りでトークン列にする
+    // リネーム/コピーエントリのフォーマット: "XY new-path\0old-path\0"
+    // 通常エントリのフォーマット: "XY path\0"
+    let tokens: Vec<&str> = raw.split('\0').collect();
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = tokens[i];
+        i += 1;
+
+        if token.len() < 3 {
             continue;
         }
-        let x = &line[..1]; // index (staged) status
-        let y = &line[1..2]; // worktree (unstaged) status
-        let path_part = &line[3..];
 
-        // リネーム "R old -> new" のパース
-        let file_path = if x == "R" || y == "R" || x == "C" || y == "C" {
-            if let Some(arrow_pos) = path_part.find(" -> ") {
-                path_part[arrow_pos + 4..].to_string()
-            } else {
-                path_part.to_string()
+        let x = &token[..1]; // index (staged) status
+        let y = &token[1..2]; // worktree (unstaged) status
+        let new_path = token[3..].to_string();
+
+        // staged rename/copy の場合、次のトークンが旧パス
+        // 旧パスはターゲットから削除する（リネーム後に旧ファイルが残らないように）
+        let is_rename_or_copy = x == "R" || x == "C";
+        if is_rename_or_copy {
+            if i < tokens.len() {
+                let old_path = tokens[i].to_string();
+                i += 1;
+                // 旧パスをターゲットから削除対象に追加
+                if !old_path.is_empty() {
+                    files_to_delete.push(old_path);
+                }
             }
-        } else {
-            path_part.to_string()
-        };
+        }
 
-        let is_deleted_staged = x == "D";
-        let is_deleted_worktree = y == "D";
+        let is_deleted = x == "D" || y == "D";
 
-        if is_deleted_staged || is_deleted_worktree {
-            files_to_delete.push(file_path.clone());
-        } else {
-            files_to_copy.push(file_path.clone());
+        if is_deleted {
+            files_to_delete.push(new_path.clone());
+        } else if !new_path.is_empty() {
+            files_to_copy.push(new_path.clone());
         }
 
         // ステージ済みファイル（x が空白・?・D 以外）
-        if x != " " && x != "?" && x != "D" {
-            staged_files.push(file_path.clone());
+        if x != " " && x != "?" && x != "D" && !new_path.is_empty() {
+            staged_files.push(new_path.clone());
         }
     }
 
@@ -860,7 +884,7 @@ pub fn copy_working_changes(source_path: &str, target_path: &str) -> Result<u32,
         }
     }
 
-    // 削除されたファイルをターゲットからも削除
+    // 削除されたファイル・リネーム旧ファイルをターゲットからも削除
     for file in &files_to_delete {
         let dst_file = target.join(file);
         if dst_file.exists() {
