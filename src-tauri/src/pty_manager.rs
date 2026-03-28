@@ -66,14 +66,19 @@ fn scan_all_processes() -> Vec<(u32, u32, String)> {
 
         // タイムアウト付きで終了を待機
         let deadline = std::time::Instant::now() + TIMEOUT;
+        let mut kill_failed = false;
         let exited = loop {
             match child.try_wait() {
                 Ok(Some(_)) => break true,
                 Ok(None) => {
                     if std::time::Instant::now() >= deadline {
                         log::warn!("[Terminal] scan_all_processes: process timed out after {:?}", TIMEOUT);
-                        let _ = child.kill();
-                        let _ = child.wait();
+                        if child.kill().is_ok() {
+                            let _ = child.wait();
+                        } else {
+                            // kill 失敗時は wait() を呼ばない（永久ブロック回避）
+                            kill_failed = true;
+                        }
                         break false;
                     }
                     std::thread::sleep(std::time::Duration::from_millis(50));
@@ -81,6 +86,13 @@ fn scan_all_processes() -> Vec<(u32, u32, String)> {
                 Err(_) => break false,
             }
         };
+
+        // kill 失敗時はプロセスが生きており reader スレッドも stdout を待機中のため、
+        // join() せずデタッチしてブロックを回避する
+        if kill_failed {
+            drop(reader_handle);
+            return None;
+        }
 
         // タイムアウト/エラー時もreaderスレッドの終了を待つ（デタッチ防止）
         let result = reader_handle.join().ok().flatten();
