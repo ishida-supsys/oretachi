@@ -815,6 +815,8 @@ pub fn copy_working_changes(source_path: &str, target_path: &str) -> Result<u32,
     let mut files_to_copy: Vec<String> = Vec::new();
     let mut staged_files: Vec<String> = Vec::new();
     let mut files_to_delete: Vec<String> = Vec::new();
+    // index にのみ存在する（ワークツリーからは削除された）ステージ済みファイル（AD 等）
+    let mut files_to_restore_from_index: Vec<String> = Vec::new();
 
     // NUL区切りでトークン列にする
     // リネーム/コピーエントリのフォーマット: "XY new-path\0old-path\0"
@@ -847,16 +849,33 @@ pub fn copy_working_changes(source_path: &str, target_path: &str) -> Result<u32,
             }
         }
 
-        let is_deleted = x == "D" || y == "D";
+        // index側が削除 / worktree側が削除かで分岐
+        let staged_deleted = x == "D";   // index から削除（staged delete）
+        let worktree_deleted = y == "D"; // ワークツリーから削除（unstaged delete）
 
-        if is_deleted {
-            files_to_delete.push(new_path.clone());
+        // index にあるがワークツリーに存在しないファイル（例: AD）は
+        // git show でindex版を取得する必要がある
+        let has_staged_content = x != " " && x != "?" && !staged_deleted;
+        let index_only = has_staged_content && worktree_deleted;
+
+        if staged_deleted {
+            // staged delete: ターゲットからも削除
+            if !new_path.is_empty() {
+                files_to_delete.push(new_path.clone());
+            }
         } else if !new_path.is_empty() {
-            files_to_copy.push(new_path.clone());
+            if index_only {
+                // ワークツリーに存在しないがindexにある（AD 等）: index版コピー対象
+                files_to_restore_from_index.push(new_path.clone());
+            } else if !worktree_deleted {
+                files_to_copy.push(new_path.clone());
+            }
+            // worktree_deleted かつ staged_deleted でない場合は files_to_delete に入れず無視
+            // (ADステータスは files_to_restore_from_index で処理済み)
         }
 
         // ステージ済みファイル（x が空白・?・D 以外）
-        if x != " " && x != "?" && x != "D" && !new_path.is_empty() {
+        if has_staged_content && !new_path.is_empty() && !index_only {
             staged_files.push(new_path.clone());
         }
     }
@@ -864,6 +883,8 @@ pub fn copy_working_changes(source_path: &str, target_path: &str) -> Result<u32,
     // 重複除去
     files_to_copy.sort();
     files_to_copy.dedup();
+    files_to_restore_from_index.sort();
+    files_to_restore_from_index.dedup();
     staged_files.sort();
     staged_files.dedup();
 
@@ -891,6 +912,29 @@ pub fn copy_working_changes(source_path: &str, target_path: &str) -> Result<u32,
             }
             std::fs::copy(&src_file, &dst_file)
                 .map_err(|e| format!("failed to copy {}: {}", file, e))?;
+            count += 1;
+        }
+    }
+
+    // index にのみ存在するファイル（AD 等）を git show でindex版から取得してコピー
+    for file in &files_to_restore_from_index {
+        validate_path(file)?;
+        let spec = format!(":{}", file);
+        let show_output = make_command("git")
+            .args(["show", &spec])
+            .current_dir(source_path)
+            .output()
+            .map_err(|e| format!("git show error for {}: {}", file, e))?;
+        if show_output.status.success() {
+            let dst_file = target.join(file);
+            if let Some(parent) = dst_file.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create dir for {}: {}", file, e))?;
+            }
+            std::fs::write(&dst_file, &show_output.stdout)
+                .map_err(|e| format!("failed to write index content for {}: {}", file, e))?;
+            // git add してステージ済み状態を再現
+            let _ = run_git_in(target_path, &["add", "--", file]);
             count += 1;
         }
     }
