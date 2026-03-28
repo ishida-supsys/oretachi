@@ -611,7 +611,7 @@ async function onDuplicateWorktree(worktreeId: string) {
   const source = worktrees.value.find((w) => w.id === worktreeId);
   if (!source) return;
 
-  const suffix = Math.random().toString(36).slice(2, 6);
+  const suffix = crypto.randomUUID().replace(/-/g, '').slice(0, 8);
   const newName = `${source.name}-copy-${suffix}`;
   const newEntry: WorktreeEntry = {
     id: `${Date.now()}-${suffix}`,

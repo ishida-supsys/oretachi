@@ -894,7 +894,7 @@ pub fn copy_working_changes(source_path: &str, target_path: &str) -> Result<u32,
 
     // ステージ済み状態を復元
     if !staged_files.is_empty() {
-        let mut args: Vec<&str> = vec!["add"];
+        let mut args: Vec<&str> = vec!["add", "--"];
         let refs: Vec<&str> = staged_files.iter().map(|s| s.as_str()).collect();
         args.extend(&refs);
         // エラーは無視（ファイルが存在しない場合など）
