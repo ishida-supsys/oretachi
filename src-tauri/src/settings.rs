@@ -413,8 +413,10 @@ impl SettingsManager {
     pub fn save(&self, settings: AppSettings) -> Result<(), String> {
         // Mutex の外でファイル I/O を行うため、先にパスをクローンしてロックを解放する
         let path = {
-            let guard = self.file_path.lock()
-                .map_err(|e| format!("file_path lock error: {}", e))?;
+            let guard = match self.file_path.lock() {
+                Ok(g) => g,
+                Err(e) => e.into_inner(),
+            };
             guard.as_ref().ok_or("Settings not initialized")?.clone()
         };
 

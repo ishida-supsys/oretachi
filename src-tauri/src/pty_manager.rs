@@ -545,9 +545,13 @@ impl PtyManager {
         // taskkill /F /T は Windows 上で数秒かかることがあり、ロック保持中に実行すると
         // pty_write, pty_resize 等すべてのセッション操作がブロックされる。
         let removed = {
-            let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
             if let Some(session) = sessions.remove(&session_id) {
-                if let Ok(mut alive) = session.alive.lock() { *alive = false; }
+                // poison でも alive=false を確実にセット（ウォッチャースレッドの停止に必要）
+                match session.alive.lock() {
+                    Ok(mut alive) => *alive = false,
+                    Err(e) => *e.into_inner() = false,
+                }
                 // master を取り出して reader に EOF を送る準備
                 let master = session.master.lock().ok().and_then(|mut g| g.take());
                 Some((session.child_pid, session.child_killer, master, session.writer, session.watcher_handle))
