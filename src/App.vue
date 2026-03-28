@@ -549,6 +549,13 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string)
     if (lfsSkipped) {
       await message(t("lfsWarning"), { kind: "warning" });
     }
+
+    // 全後続処理が成功した後にMCPクライアントへ追加完了を通知
+    await invoke("notify_worktree_added", {
+      id: entry.id,
+      name: entry.name,
+      branchName: entry.branchName,
+    });
   } catch (e) {
     rollbackWorktree(entry.id);
     await message(t("worktreeCreateFailed", { error: e }), { kind: "error" });

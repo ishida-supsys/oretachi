@@ -50,6 +50,8 @@ pub struct McpServerManager {
     generation: Arc<AtomicU64>,
     /// worktree-archived リスナーID（再起動時にアンリジスターするために保持）
     archive_listener_id: Mutex<Option<tauri::EventId>>,
+    /// worktree-added リスナーID（再起動時にアンリジスターするために保持）
+    added_listener_id: Mutex<Option<tauri::EventId>>,
 }
 
 impl McpServerManager {
@@ -61,6 +63,7 @@ impl McpServerManager {
             restart_lock: tokio::sync::Mutex::new(()),
             generation: Arc::new(AtomicU64::new(0)),
             archive_listener_id: Mutex::new(None),
+            added_listener_id: Mutex::new(None),
         }
     }
 
@@ -702,6 +705,38 @@ async fn broadcast_worktree_archived(peer_registry: &PeerMap, name: &str, id: &s
     }
 }
 
+async fn broadcast_worktree_added(peer_registry: &PeerMap, name: &str, id: &str, branch: &str) {
+    let params = LoggingMessageNotificationParam {
+        level: LoggingLevel::Info,
+        logger: Some("oretachi".to_string()),
+        data: serde_json::json!({
+            "event": "worktree_added",
+            "worktreeId": id,
+            "worktreeName": name,
+            "branchName": branch,
+        }),
+    };
+
+    let peer_snapshot: Vec<(u64, Peer<RoleServer>)> = {
+        let peers = peer_registry.read().await;
+        peers.iter().map(|(k, v)| (*k, v.clone())).collect()
+    };
+
+    let mut dead_peers: Vec<u64> = Vec::new();
+    for (peer_id, peer) in &peer_snapshot {
+        if let Err(e) = peer.notify_logging_message(params.clone()).await {
+            log::warn!("[mcp] notify_logging_message failed for peer_id={}: {}", peer_id, e);
+            dead_peers.push(*peer_id);
+        }
+    }
+    if !dead_peers.is_empty() {
+        let mut peers = peer_registry.write().await;
+        for peer_id in dead_peers {
+            peers.remove(&peer_id);
+        }
+    }
+}
+
 // ─── Port file management ─────────────────────────────────────────────────────
 
 fn port_file_path(app_handle: &AppHandle) -> Option<PathBuf> {
@@ -781,6 +816,11 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
             app_handle.unlisten(old_id);
         }
     }
+    if let Ok(mut guard) = manager.added_listener_id.lock() {
+        if let Some(old_id) = guard.take() {
+            app_handle.unlisten(old_id);
+        }
+    }
 
     drop(manager);
 
@@ -805,6 +845,26 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
     let manager = app_handle.state::<McpServerManager>();
     if let Ok(mut guard) = manager.archive_listener_id.lock() {
         *guard = Some(listener_id);
+    }
+    drop(manager);
+
+    // ワークツリー追加時に全クライアントへ通知
+    let peer_map_for_added_listener = peer_map.clone();
+    let added_listener_id = app_handle.listen("worktree-added", move |event: tauri::Event| {
+        let registry = peer_map_for_added_listener.clone();
+        if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+            let name = payload["name"].as_str().unwrap_or("unknown").to_string();
+            let id = payload["id"].as_str().unwrap_or("").to_string();
+            let branch = payload["branchName"].as_str().unwrap_or("").to_string();
+            tauri::async_runtime::spawn(async move {
+                broadcast_worktree_added(&registry, &name, &id, &branch).await;
+            });
+        }
+    });
+
+    let manager = app_handle.state::<McpServerManager>();
+    if let Ok(mut guard) = manager.added_listener_id.lock() {
+        *guard = Some(added_listener_id);
     }
     drop(manager);
 

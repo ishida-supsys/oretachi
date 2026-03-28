@@ -489,6 +489,22 @@ fn notify_worktree_archived(
     }));
 }
 
+/// ワークツリーの追加が完了した後にMCPクライアントへ通知する。
+/// git worktree add の成功確認後にフロントエンドから呼び出す。
+#[tauri::command]
+fn notify_worktree_added(
+    app_handle: tauri::AppHandle,
+    id: String,
+    name: String,
+    branch_name: String,
+) {
+    let _ = app_handle.emit("worktree-added", serde_json::json!({
+        "id": id,
+        "name": name,
+        "branchName": branch_name,
+    }));
+}
+
 #[tauri::command]
 async fn list_archives(
     app_handle: tauri::AppHandle,
@@ -678,6 +694,7 @@ pub fn run() {
             path_exists,
             save_archive,
             notify_worktree_archived,
+            notify_worktree_added,
             list_archives,
             delete_archive,
         ])
