@@ -74,12 +74,13 @@ export function useTrayPopup() {
   }
 
   async function closeTrayPopup(skipDestroy = false): Promise<void> {
-    if (trayWindow && !skipDestroy) {
-      await trayWindow.destroy().catch(() => {});
-    }
+    const win = trayWindow;
     trayWindow = null;
     pendingWorktrees = null;
     currentTrayWorktreeId = null;
+    if (win && !skipDestroy) {
+      await win.destroy().catch(() => {});
+    }
   }
 
   function getPendingWorktrees(): TrayWorktreeData[] | null {

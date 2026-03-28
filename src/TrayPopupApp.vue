@@ -205,25 +205,35 @@ async function onNext() {
 async function onDone() {
   if (closing) return;
   closing = true;
-  const wt = currentWorktree.value;
-  if (wt) {
-    await detachCurrentTerminals();
-    await emitTo("main", "tray-clear-notification", { worktreeId: wt.worktreeId });
+  try {
+    const wt = currentWorktree.value;
+    if (wt) {
+      await detachCurrentTerminals();
+      await emitTo("main", "tray-clear-notification", { worktreeId: wt.worktreeId });
+    }
+    await emitTo("main", "tray-closing", {});
+    await getCurrentWindow().destroy();
+  } catch (e) {
+    closing = false;
+    throw e;
   }
-  await emitTo("main", "tray-closing", {});
-  await getCurrentWindow().destroy();
 }
 
 async function onClose() {
   if (closing) return;
   closing = true;
-  const wt = currentWorktree.value;
-  if (wt) {
-    await emitTo("main", "tray-clear-notification", { worktreeId: wt.worktreeId });
+  try {
+    const wt = currentWorktree.value;
+    if (wt) {
+      await emitTo("main", "tray-clear-notification", { worktreeId: wt.worktreeId });
+    }
+    await detachCurrentTerminals();
+    await emitTo("main", "tray-closing", {});
+    await getCurrentWindow().destroy();
+  } catch (e) {
+    closing = false;
+    throw e;
   }
-  await detachCurrentTerminals();
-  await emitTo("main", "tray-closing", {});
-  await getCurrentWindow().destroy();
 }
 
 function onHeaderDrag(e: MouseEvent) {
