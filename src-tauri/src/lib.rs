@@ -25,7 +25,7 @@ use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 /// パスコンポーネントに `..`、絶対パス区切り文字、NULバイトが含まれていないか検証する
 fn validate_path_component(s: &str) -> Result<(), String> {
-    if s.contains("..") || s.contains('/') || s.contains('\\') || s.contains('\0') {
+    if s.contains("..") || s.contains('/') || s.contains('\\') || s.contains('\0') || s.contains(':') {
         return Err(format!("不正なパス文字が含まれています: {}", s));
     }
     Ok(())

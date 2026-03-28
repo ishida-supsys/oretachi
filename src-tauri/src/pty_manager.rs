@@ -45,12 +45,51 @@ pub struct AiAgentChangedPayload {
 
 /// 全プロセス一覧を (pid, parent_pid, name) のリストで返す。
 /// タイムアウト付き: wmic/ps が応答しない場合は空リストを返す。
+///
+/// stdout の読み取りとプロセス終了待ちを別スレッドで並行実行する。
+/// パイプバッファ（Windows: ~4KB）が溢れると子プロセスが書き込みブロックし、
+/// 逐次実行ではデッドロックするため。
 fn scan_all_processes() -> Vec<(u32, u32, String)> {
     const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+    /// 子プロセスを spawn し、stdout 読み取りとタイムアウト付き wait を並行実行する。
+    /// パイプバッファデッドロックを回避するため、stdout は別スレッドで先に読み切る。
+    fn run_with_timeout(mut child: std::process::Child) -> Option<String> {
+        let stdout = child.stdout.take()?;
+        // stdout を別スレッドで読み切る（パイプバッファ満杯によるデッドロック回避）
+        let reader_handle = std::thread::spawn(move || {
+            let mut buf = String::new();
+            std::io::Read::read_to_string(&mut std::io::BufReader::new(stdout), &mut buf).ok()?;
+            Some(buf)
+        });
+
+        // タイムアウト付きで終了を待機
+        let deadline = std::time::Instant::now() + TIMEOUT;
+        let exited = loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break true,
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        log::warn!("[Terminal] scan_all_processes: process timed out after {:?}", TIMEOUT);
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break false;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(_) => break false,
+            }
+        };
+
+        if !exited {
+            return None;
+        }
+        reader_handle.join().ok().flatten()
+    }
+
     #[cfg(target_os = "windows")]
     {
-        let mut child = match crate::process_utils::make_command("wmic")
+        let child = match crate::process_utils::make_command("wmic")
             .args(["process", "get", "Name,ProcessId,ParentProcessId", "/FORMAT:CSV"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -60,34 +99,9 @@ fn scan_all_processes() -> Vec<(u32, u32, String)> {
             Err(_) => return vec![],
         };
 
-        // タイムアウト付きで完了を待機
-        let deadline = std::time::Instant::now() + TIMEOUT;
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => {
-                    if std::time::Instant::now() >= deadline {
-                        log::warn!("[Terminal] scan_all_processes: wmic timed out after {:?}", TIMEOUT);
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return vec![];
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                Err(_) => return vec![],
-            }
-        }
-
-        let stdout = match child.stdout.take() {
-            Some(s) => s,
+        let text = match run_with_timeout(child) {
+            Some(t) => t,
             None => return vec![],
-        };
-        let text = {
-            let mut buf = String::new();
-            if std::io::Read::read_to_string(&mut std::io::BufReader::new(stdout), &mut buf).is_err() {
-                return vec![];
-            }
-            buf
         };
 
         let mut result = Vec::new();
@@ -116,7 +130,7 @@ fn scan_all_processes() -> Vec<(u32, u32, String)> {
 
     #[cfg(not(target_os = "windows"))]
     {
-        let mut child = match std::process::Command::new("ps")
+        let child = match std::process::Command::new("ps")
             .args(["axo", "pid,ppid,comm"])
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -126,33 +140,9 @@ fn scan_all_processes() -> Vec<(u32, u32, String)> {
             Err(_) => return vec![],
         };
 
-        let deadline = std::time::Instant::now() + TIMEOUT;
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) => {
-                    if std::time::Instant::now() >= deadline {
-                        log::warn!("[Terminal] scan_all_processes: ps timed out after {:?}", TIMEOUT);
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        return vec![];
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                Err(_) => return vec![],
-            }
-        }
-
-        let stdout = match child.stdout.take() {
-            Some(s) => s,
+        let text = match run_with_timeout(child) {
+            Some(t) => t,
             None => return vec![],
-        };
-        let text = {
-            let mut buf = String::new();
-            if std::io::Read::read_to_string(&mut std::io::BufReader::new(stdout), &mut buf).is_err() {
-                return vec![];
-            }
-            buf
         };
 
         let mut result = Vec::new();
