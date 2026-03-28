@@ -479,10 +479,11 @@ async function onOpenArtifacts(worktreeId: string) {
 }
 
 async function onShowAddWorktreeDialog() {
-  // アーカイブ未読み込みの場合はダイアログ表示前にロードする
-  if (archives.value.length === 0) {
-    const { loadArchives } = useArchivePersistence();
-    await loadArchives(true);
+  // セッション引継ぎ選択肢にアーカイブを表示するため全ページ読み込む
+  const { loadArchives, hasMore } = useArchivePersistence();
+  await loadArchives(true);
+  while (hasMore.value) {
+    await loadArchives(false);
   }
   showAddDialog.value = true;
 }

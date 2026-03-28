@@ -889,7 +889,7 @@ pub fn write_claude_hooks(
 /// パスを Claude Code のプロジェクトディレクトリ名に変換する
 /// CCManager と同じロジック: `/`, `\`, `.` をすべて `-` に置換
 fn path_to_claude_project_name(path: &str) -> String {
-    path.replace('/', "-").replace('\\', "-").replace('.', "-")
+    path.replace('/', "-").replace('\\', "-").replace('.', "-").replace(':', "-")
 }
 
 /// ソースワークツリーの Claude Code セッションデータをターゲットにコピーする
