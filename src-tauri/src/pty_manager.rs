@@ -57,10 +57,11 @@ fn scan_all_processes() -> Vec<(u32, u32, String)> {
     fn run_with_timeout(mut child: std::process::Child) -> Option<String> {
         let stdout = child.stdout.take()?;
         // stdout を別スレッドで読み切る（パイプバッファ満杯によるデッドロック回避）
+        // read_to_end + from_utf8_lossy を使い、非UTF8プロセス名（日本語Windows等）でも失敗しない
         let reader_handle = std::thread::spawn(move || {
-            let mut buf = String::new();
-            std::io::Read::read_to_string(&mut std::io::BufReader::new(stdout), &mut buf).ok()?;
-            Some(buf)
+            let mut buf = Vec::new();
+            std::io::Read::read_to_end(&mut std::io::BufReader::new(stdout), &mut buf).ok()?;
+            Some(String::from_utf8_lossy(&buf).into_owned())
         });
 
         // タイムアウト付きで終了を待機
@@ -81,10 +82,12 @@ fn scan_all_processes() -> Vec<(u32, u32, String)> {
             }
         };
 
+        // タイムアウト/エラー時もreaderスレッドの終了を待つ（デタッチ防止）
+        let result = reader_handle.join().ok().flatten();
         if !exited {
             return None;
         }
-        reader_handle.join().ok().flatten()
+        result
     }
 
     #[cfg(target_os = "windows")]
