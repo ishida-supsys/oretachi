@@ -45,7 +45,7 @@ import { useAppAutoApproval } from "./composables/useAppAutoApproval";
 import { useAppHotkeys } from "./composables/useAppHotkeys";
 import { useSubWindowEvents } from "./composables/useSubWindowEvents";
 import { useShutdownGuard } from "./composables/useShutdownGuard";
-import { saveArchive, deleteArchive, archives, useArchivePersistence } from "./composables/useArchivePersistence";
+import { saveArchive, deleteArchive, archives, archiveSearchQuery, useArchivePersistence } from "./composables/useArchivePersistence";
 import { cancelApproval } from "./utils/autoApproval";
 import { debug } from "@tauri-apps/plugin-log";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -479,8 +479,14 @@ async function onOpenArtifacts(worktreeId: string) {
 }
 
 async function onShowAddWorktreeDialog() {
-  // セッション引継ぎ選択肢にアーカイブを表示するため全ページ読み込む
-  const { loadArchives, hasMore } = useArchivePersistence();
+  // セッション引継ぎ選択肢にアーカイブを全件表示するため読み込む
+  const { loadArchives, hasMore, isLoading } = useArchivePersistence();
+  // 進行中のロードが完了するまで待機（競合防止）
+  while (isLoading.value) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  // 検索フィルタをクリアして全件取得
+  archiveSearchQuery.value = "";
   await loadArchives(true);
   while (hasMore.value) {
     const countBefore = archives.value.length;
