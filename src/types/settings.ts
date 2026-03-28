@@ -106,6 +106,7 @@ export interface AppSettings {
   appearance?: AppearanceSettings;
   notificationSound?: NotificationSoundSettings;
   mcpPort?: number;
+  mcpApiKey?: string;
   enableHomeCat?: boolean;
   aiTimeoutSecs?: number; // AIタイムアウト秒数 (デフォルト: 120)
 }

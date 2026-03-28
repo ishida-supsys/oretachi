@@ -3650,6 +3650,7 @@ dependencies = [
  "notify",
  "notify-debouncer-mini",
  "portable-pty",
+ "rand 0.8.5",
  "rmcp",
  "serde",
  "serde_json",

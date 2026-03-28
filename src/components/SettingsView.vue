@@ -3,6 +3,7 @@ import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { open, ask, message } from "@tauri-apps/plugin-dialog";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useSettings } from "../composables/useSettings";
 import { useUpdater } from "../composables/useUpdater";
 import ColorPicker from "primevue/colorpicker";
@@ -95,6 +96,29 @@ async function restartMcp() {
     await fetchMcpStatus();
   } finally {
     restarting.value = false;
+  }
+}
+
+const regenerating = ref(false);
+
+async function regenerateApiKey() {
+  const yes = await ask(t('mcp.regenerateConfirm'), { title: t('mcp.label'), kind: 'warning' });
+  if (!yes) return;
+  regenerating.value = true;
+  try {
+    const newKey = await invoke<string>('regenerate_mcp_api_key');
+    settings.value.mcpApiKey = newKey;
+    mcpStatus.value = await invoke<McpStatus>('restart_mcp_server');
+  } catch (e) {
+    console.error('regenerate_mcp_api_key failed:', e);
+  } finally {
+    regenerating.value = false;
+  }
+}
+
+async function copyApiKey() {
+  if (settings.value.mcpApiKey) {
+    await writeText(settings.value.mcpApiKey);
   }
 }
 
@@ -257,6 +281,14 @@ function getSoundLabel(sound: string | null | undefined): string {
           }"
         />
         <span class="unit-label">{{ t('mcp.fixedPortHint') }}</span>
+      </div>
+      <div v-if="settings.mcpApiKey" class="row-input row-input--inline mcp-api-key-row">
+        <label class="inline-label">{{ t('mcp.apiKey') }}</label>
+        <code class="api-key-display">{{ settings.mcpApiKey }}</code>
+        <button class="btn-secondary btn-small" @click="copyApiKey">{{ t('mcp.copy') }}</button>
+        <button class="btn-secondary btn-small" :disabled="regenerating" @click="regenerateApiKey">
+          {{ regenerating ? t('mcp.regenerating') : t('mcp.regenerate') }}
+        </button>
       </div>
     </div>
 
@@ -824,6 +856,33 @@ function getSoundLabel(sound: string | null | undefined): string {
   font-family: monospace;
 }
 
+.mcp-api-key-row {
+  margin-top: 8px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.api-key-display {
+  font-family: monospace;
+  font-size: 11px;
+  background: #1e1e2e;
+  padding: 4px 8px;
+  border-radius: 4px;
+  color: #a6adc8;
+  user-select: all;
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.btn-small {
+  font-size: 12px;
+  padding: 3px 10px;
+}
+
 .hotkey-table {
   border-collapse: collapse;
   width: 100%;
@@ -966,7 +1025,12 @@ function getSoundLabel(sound: string | null | undefined): string {
       "restart": "Restart",
       "restarting": "Restarting...",
       "fixedPort": "Fixed port",
-      "fixedPortHint": "0 = auto assign. Changes take effect after restart."
+      "fixedPortHint": "0 = auto assign. Changes take effect after restart.",
+      "apiKey": "API Key",
+      "copy": "Copy",
+      "regenerate": "Regenerate",
+      "regenerating": "Regenerating...",
+      "regenerateConfirm": "Regenerating the API key will disconnect all MCP clients. Continue?"
     },
     "window": {
       "label": "Window",
@@ -1046,7 +1110,12 @@ function getSoundLabel(sound: string | null | undefined): string {
       "restart": "再起動",
       "restarting": "再起動中...",
       "fixedPort": "固定ポート",
-      "fixedPortHint": "0 = 自動割り当て。変更は再起動後に反映されます。"
+      "fixedPortHint": "0 = 自動割り当て。変更は再起動後に反映されます。",
+      "apiKey": "APIキー",
+      "copy": "コピー",
+      "regenerate": "再生成",
+      "regenerating": "再生成中...",
+      "regenerateConfirm": "APIキーを再生成すると、接続中のMCPクライアントは切断されます。続行しますか？"
     },
     "window": {
       "label": "ウィンドウ",

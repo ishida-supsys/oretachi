@@ -1,7 +1,7 @@
 use std::{collections::HashMap, fs, path::PathBuf, sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}}, time::{SystemTime, UNIX_EPOCH}};
 use tokio::fs as tokio_fs;
 
-use axum::{extract::State, http::StatusCode, routing::post, Json};
+use axum::{extract::{Request, State}, http::StatusCode, middleware::{self, Next}, response::Response, routing::post, Json};
 use rmcp::{
     schemars, ErrorData as McpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -20,6 +20,7 @@ use crate::git_worktree::get_git_remotes;
 use crate::settings::SettingsManager;
 
 const PORT_FILE: &str = "mcp-port";
+const SERVER_INFO_FILE: &str = "mcp-server.json";
 
 // ─── Peer Registry (接続中クライアントの管理) ─────────────────────────────────
 
@@ -669,6 +670,44 @@ async fn notify_handler(
     }
 }
 
+// ─── API Key Authentication Middleware ───────────────────────────────────────
+
+async fn api_key_auth(
+    request: Request,
+    next: Next,
+) -> Result<Response, StatusCode> {
+    // axum の Extensions から API キーを取得
+    let expected_key = request
+        .extensions()
+        .get::<ApiKeyState>()
+        .map(|s| s.0.clone())
+        .unwrap_or_default();
+
+    let auth_header = request
+        .headers()
+        .get("authorization")
+        .and_then(|v| v.to_str().ok());
+
+    match auth_header {
+        Some(header) if header.starts_with("Bearer ") => {
+            let provided = &header[7..];
+            if provided == expected_key {
+                Ok(next.run(request).await)
+            } else {
+                log::warn!("[mcp] unauthorized request: invalid API key");
+                Err(StatusCode::UNAUTHORIZED)
+            }
+        }
+        _ => {
+            log::warn!("[mcp] unauthorized request: missing or invalid Authorization header");
+            Err(StatusCode::UNAUTHORIZED)
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ApiKeyState(String);
+
 // ─── MCP Notification Broadcast ──────────────────────────────────────────────
 
 /// アーカイブされたワークツリーの情報を全接続クライアントに通知する
@@ -747,21 +786,44 @@ fn port_file_path(app_handle: &AppHandle) -> Option<PathBuf> {
         .map(|d| d.join(PORT_FILE))
 }
 
-fn write_port_file(app_handle: &AppHandle, port: u16) {
+fn server_info_file_path(app_handle: &AppHandle) -> Option<PathBuf> {
+    app_handle
+        .path()
+        .app_data_dir()
+        .ok()
+        .map(|d| d.join(SERVER_INFO_FILE))
+}
+
+fn write_server_info_file(app_handle: &AppHandle, port: u16, api_key: &str) {
+    // MCP_PORT_OVERWRITE=false なら既存ファイルを上書きしない
+    let overwrite = std::env::var("MCP_PORT_OVERWRITE")
+        .map(|v| v != "false")
+        .unwrap_or(true);
+
+    // mcp-server.json を書き込む
+    if let Some(path) = server_info_file_path(app_handle) {
+        if overwrite || !path.exists() {
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            let info = serde_json::json!({ "port": port, "apiKey": api_key });
+            if let Err(e) = fs::write(&path, serde_json::to_string_pretty(&info).unwrap_or_default()) {
+                log::warn!("Failed to write server info file: {}", e);
+            }
+        } else {
+            log::info!("MCP server info file already exists, skipping overwrite (MCP_PORT_OVERWRITE=false)");
+        }
+    }
+
+    // 後方互換: 旧 mcp-port テキストファイルも書き込む
     if let Some(path) = port_file_path(app_handle) {
-        // MCP_PORT_OVERWRITE=false なら既存ファイルを上書きしない
-        let overwrite = std::env::var("MCP_PORT_OVERWRITE")
-            .map(|v| v != "false")
-            .unwrap_or(true);
-        if !overwrite && path.exists() {
-            log::info!("MCP port file already exists, skipping overwrite (MCP_PORT_OVERWRITE=false)");
-            return;
-        }
-        if let Some(parent) = path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Err(e) = fs::write(&path, port.to_string()) {
-            log::warn!("Failed to write port file: {}", e);
+        if overwrite || !path.exists() {
+            if let Some(parent) = path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Err(e) = fs::write(&path, port.to_string()) {
+                log::warn!("Failed to write port file: {}", e);
+            }
         }
     }
 }
@@ -779,6 +841,9 @@ pub fn read_port_file(app_handle: &AppHandle) -> Result<u16, String> {
 
 pub fn cleanup_port_file(app_handle: &AppHandle) {
     if let Some(path) = port_file_path(app_handle) {
+        let _ = fs::remove_file(path);
+    }
+    if let Some(path) = server_info_file_path(app_handle) {
         let _ = fs::remove_file(path);
     }
 }
@@ -823,6 +888,12 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
     }
 
     drop(manager);
+
+    // APIキーをsettingsから読み取り
+    let api_key = {
+        let settings_manager = app_handle.state::<SettingsManager>();
+        settings_manager.get().mcp_api_key.clone()
+    };
 
     // peer レジストリを取得（managed state から）
     let peer_map = app_handle.state::<McpPeerRegistry>().0.clone();
@@ -879,10 +950,18 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
             Default::default(),
         );
 
+        let api_key_state = ApiKeyState(api_key.clone());
         let router = axum::Router::new()
             .nest_service("/mcp", service)
             .route("/notify", post(notify_handler))
-            .with_state(app_handle.clone());
+            .with_state(app_handle.clone())
+            .layer(middleware::from_fn(move |mut req: Request, next: Next| {
+                let key = api_key_state.clone();
+                async move {
+                    req.extensions_mut().insert(key);
+                    api_key_auth(req, next).await
+                }
+            }));
 
         // 固定ポートの場合は最大5回リトライ、ポート0はOS割り当てなので1回のみ
         let max_retries = if port == 0 { 1 } else { 5 };
@@ -891,7 +970,7 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
-            match tokio::net::TcpListener::bind(format!("127.0.0.1:{}", port)).await {
+            match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await {
                 Ok(l) => { listener_opt = Some(l); break; }
                 Err(e) => {
                     log::warn!("MCP bind attempt {}/{} failed: {}", attempt + 1, max_retries, e);
@@ -928,8 +1007,8 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
             }
         };
 
-        write_port_file(&app_handle, port);
-        log::info!("MCP server listening on http://127.0.0.1:{}/mcp", port);
+        write_server_info_file(&app_handle, port, &api_key);
+        log::info!("MCP server listening on http://0.0.0.0:{}/mcp", port);
 
         // ステータス: 起動中（世代が一致する場合のみ更新）
         if generation.load(Ordering::SeqCst) == my_generation {
@@ -973,13 +1052,13 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
 // ─── CLI notification sender (standalone, no AppHandle needed) ───────────────
 
 pub fn send_notification_standalone(worktree_name: &str, kind: Option<&str>) -> Result<(), String> {
-    let port = read_port_standalone()?;
+    let (port, api_key) = read_server_info_standalone()?;
     let body = serde_json::json!({
         "worktree": worktree_name,
         "kind": kind.unwrap_or("general"),
     }).to_string();
     let request = format!(
-        "POST /notify HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "POST /notify HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAuthorization: Bearer {api_key}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
 
@@ -1010,28 +1089,46 @@ pub fn send_notification_standalone(worktree_name: &str, kind: Option<&str>) -> 
     Ok(())
 }
 
-fn read_port_standalone() -> Result<u16, String> {
+fn read_server_info_standalone() -> Result<(u16, String), String> {
     #[cfg(target_os = "windows")]
-    let path = {
+    let base = {
         let appdata = std::env::var("APPDATA")
             .map_err(|_| "APPDATA environment variable not set".to_string())?;
-        PathBuf::from(appdata).join("com.ia.oretachi").join(PORT_FILE)
+        PathBuf::from(appdata).join("com.ia.oretachi")
     };
 
     #[cfg(not(target_os = "windows"))]
-    let path = {
+    let base = {
         let home = std::env::var("HOME")
             .map_err(|_| "HOME environment variable not set".to_string())?;
         PathBuf::from(home)
             .join("Library")
             .join("Application Support")
             .join("com.ia.oretachi")
-            .join(PORT_FILE)
     };
-    let content = fs::read_to_string(&path)
+
+    // mcp-server.json を優先して読む
+    let json_path = base.join(SERVER_INFO_FILE);
+    if json_path.exists() {
+        let content = fs::read_to_string(&json_path)
+            .map_err(|e| format!("Cannot read server info file: {}", e))?;
+        let info: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| format!("Invalid server info JSON: {}", e))?;
+        let port = info["port"].as_u64()
+            .ok_or_else(|| "Missing port in server info".to_string())? as u16;
+        let api_key = info["apiKey"].as_str()
+            .ok_or_else(|| "Missing apiKey in server info".to_string())?
+            .to_string();
+        return Ok((port, api_key));
+    }
+
+    // フォールバック: 旧 mcp-port ファイル（APIキーなし）
+    let port_path = base.join(PORT_FILE);
+    let content = fs::read_to_string(&port_path)
         .map_err(|e| format!("Cannot read port file (is oretachi running?): {}", e))?;
-    content
+    let port = content
         .trim()
         .parse::<u16>()
-        .map_err(|e| format!("Invalid port in port file: {}", e))
+        .map_err(|e| format!("Invalid port in port file: {}", e))?;
+    Ok((port, String::new()))
 }

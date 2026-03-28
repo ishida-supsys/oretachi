@@ -334,6 +334,16 @@ fn open_in_ide(command: String, path: String) -> Result<(), String> {
 // ─── MCP コマンド ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
+fn regenerate_mcp_api_key(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let settings_manager = app_handle.state::<SettingsManager>();
+    let mut settings = settings_manager.get();
+    settings.mcp_api_key = settings::generate_api_key();
+    let new_key = settings.mcp_api_key.clone();
+    settings_manager.save(settings)?;
+    Ok(new_key)
+}
+
+#[tauri::command]
 fn get_mcp_status(state: State<mcp_server::McpServerManager>) -> mcp_server::McpStatus {
     state.get_status()
 }
@@ -696,6 +706,7 @@ pub fn run() {
             open_in_ide,
             get_mcp_status,
             restart_mcp_server,
+            regenerate_mcp_api_key,
             prepare_for_relaunch,
             ai_judge::judge_approval,
             ai_judge::cancel_approval,
