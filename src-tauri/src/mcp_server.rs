@@ -688,20 +688,22 @@ async fn api_key_auth(
         .get("authorization")
         .and_then(|v| v.to_str().ok());
 
-    match auth_header {
+    let authorized = match auth_header {
         Some(header) if header.starts_with("Bearer ") => {
-            let provided = &header[7..];
-            if provided == expected_key {
-                Ok(next.run(request).await)
-            } else {
-                log::warn!("[mcp] unauthorized request: invalid API key");
-                Err(StatusCode::UNAUTHORIZED)
-            }
+            let provided = header[7..].as_bytes();
+            let expected = expected_key.as_bytes();
+            // 定数時間比較でタイミング攻撃を防ぐ
+            use subtle::ConstantTimeEq;
+            provided.len() == expected.len() && provided.ct_eq(expected).into()
         }
-        _ => {
-            log::warn!("[mcp] unauthorized request: missing or invalid Authorization header");
-            Err(StatusCode::UNAUTHORIZED)
-        }
+        _ => false,
+    };
+
+    if authorized {
+        Ok(next.run(request).await)
+    } else {
+        log::warn!("[mcp] unauthorized request: missing or invalid API key");
+        Err(StatusCode::UNAUTHORIZED)
     }
 }
 

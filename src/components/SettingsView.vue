@@ -100,6 +100,7 @@ async function restartMcp() {
 }
 
 const regenerating = ref(false);
+const apiKeyVisible = ref(false);
 
 async function regenerateApiKey() {
   const yes = await ask(t('mcp.regenerateConfirm'), { title: t('mcp.label'), kind: 'warning' });
@@ -108,9 +109,16 @@ async function regenerateApiKey() {
   try {
     const newKey = await invoke<string>('regenerate_mcp_api_key');
     settings.value.mcpApiKey = newKey;
-    mcpStatus.value = await invoke<McpStatus>('restart_mcp_server');
+    try {
+      mcpStatus.value = await invoke<McpStatus>('restart_mcp_server');
+    } catch (restartErr) {
+      console.error('restart_mcp_server failed after key regeneration:', restartErr);
+      await message(t('mcp.regenerateRestartFailed'), { title: t('mcp.label'), kind: 'warning' });
+      await fetchMcpStatus();
+    }
   } catch (e) {
     console.error('regenerate_mcp_api_key failed:', e);
+    await message(t('mcp.regenerateFailed'), { title: t('mcp.label'), kind: 'error' });
   } finally {
     regenerating.value = false;
   }
@@ -284,7 +292,10 @@ function getSoundLabel(sound: string | null | undefined): string {
       </div>
       <div v-if="settings.mcpApiKey" class="row-input row-input--inline mcp-api-key-row">
         <label class="inline-label">{{ t('mcp.apiKey') }}</label>
-        <code class="api-key-display">{{ settings.mcpApiKey }}</code>
+        <code class="api-key-display">{{ apiKeyVisible ? settings.mcpApiKey : '••••••••••••••••••••••••••••••••' }}</code>
+        <button class="btn-secondary btn-small" @click="apiKeyVisible = !apiKeyVisible">
+          {{ apiKeyVisible ? t('mcp.hide') : t('mcp.show') }}
+        </button>
         <button class="btn-secondary btn-small" @click="copyApiKey">{{ t('mcp.copy') }}</button>
         <button class="btn-secondary btn-small" :disabled="regenerating" @click="regenerateApiKey">
           {{ regenerating ? t('mcp.regenerating') : t('mcp.regenerate') }}
@@ -1028,9 +1039,13 @@ function getSoundLabel(sound: string | null | undefined): string {
       "fixedPortHint": "0 = auto assign. Changes take effect after restart.",
       "apiKey": "API Key",
       "copy": "Copy",
+      "show": "Show",
+      "hide": "Hide",
       "regenerate": "Regenerate",
       "regenerating": "Regenerating...",
-      "regenerateConfirm": "Regenerating the API key will disconnect all MCP clients. Continue?"
+      "regenerateConfirm": "Regenerating the API key will disconnect all MCP clients. Continue?",
+      "regenerateFailed": "Failed to regenerate API key.",
+      "regenerateRestartFailed": "API key was updated but failed to restart the MCP server. Please restart manually."
     },
     "window": {
       "label": "Window",
@@ -1113,9 +1128,13 @@ function getSoundLabel(sound: string | null | undefined): string {
       "fixedPortHint": "0 = 自動割り当て。変更は再起動後に反映されます。",
       "apiKey": "APIキー",
       "copy": "コピー",
+      "show": "表示",
+      "hide": "隠す",
       "regenerate": "再生成",
       "regenerating": "再生成中...",
-      "regenerateConfirm": "APIキーを再生成すると、接続中のMCPクライアントは切断されます。続行しますか？"
+      "regenerateConfirm": "APIキーを再生成すると、接続中のMCPクライアントは切断されます。続行しますか？",
+      "regenerateFailed": "APIキーの再生成に失敗しました。",
+      "regenerateRestartFailed": "APIキーは更新されましたが、MCPサーバーの再起動に失敗しました。手動で再起動してください。"
     },
     "window": {
       "label": "ウィンドウ",
