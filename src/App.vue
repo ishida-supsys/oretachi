@@ -483,7 +483,10 @@ async function onShowAddWorktreeDialog() {
   const { loadArchives, hasMore } = useArchivePersistence();
   await loadArchives(true);
   while (hasMore.value) {
+    const countBefore = archives.value.length;
     await loadArchives(false);
+    // ロード失敗時は件数が増えないためループを抜ける
+    if (archives.value.length === countBefore) break;
   }
   showAddDialog.value = true;
 }
