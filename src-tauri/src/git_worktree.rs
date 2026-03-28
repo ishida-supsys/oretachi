@@ -885,3 +885,46 @@ pub fn write_claude_hooks(
 
     Ok(())
 }
+
+/// パスを Claude Code のプロジェクトディレクトリ名に変換する
+/// CCManager と同じロジック: `/`, `\`, `.` をすべて `-` に置換
+fn path_to_claude_project_name(path: &str) -> String {
+    path.replace('/', "-").replace('\\', "-").replace('.', "-")
+}
+
+/// ソースワークツリーの Claude Code セッションデータをターゲットにコピーする
+/// `~/.claude/projects/[encoded-source]/` → `~/.claude/projects/[encoded-target]/`
+pub fn copy_claude_session_data(
+    source_worktree_path: &str,
+    target_worktree_path: &str,
+) -> Result<u32, String> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map_err(|_| "Could not determine home directory".to_string())?;
+    let projects_dir = std::path::Path::new(&home).join(".claude").join("projects");
+
+    let source_name = path_to_claude_project_name(source_worktree_path);
+    let target_name = path_to_claude_project_name(target_worktree_path);
+    let source_dir = projects_dir.join(&source_name);
+    let target_dir = projects_dir.join(&target_name);
+
+    if !source_dir.exists() {
+        log::info!("[copy_claude_session] source not found, skipping: {:?}", source_dir);
+        return Ok(0);
+    }
+
+    // ソースとターゲットが同じディレクトリなら自己コピーになるためスキップ
+    if source_name == target_name {
+        log::info!("[copy_claude_session] source and target are identical, skipping");
+        return Ok(0);
+    }
+
+    // ターゲットに古いセッションデータが残っている場合は削除してクリーンなコピーにする
+    if target_dir.exists() {
+        std::fs::remove_dir_all(&target_dir)
+            .map_err(|e| format!("failed to remove existing target session dir: {}", e))?;
+    }
+
+    log::info!("[copy_claude_session] copying {:?} -> {:?}", source_dir, target_dir);
+    copy_dir_recursive(&source_dir, &target_dir)
+}

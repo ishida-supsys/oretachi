@@ -207,6 +207,17 @@ async fn write_claude_hooks(
 }
 
 #[tauri::command]
+async fn copy_claude_session_data(
+    source_worktree_path: String,
+    target_worktree_path: String,
+) -> Result<u32, String> {
+    run_git(move || {
+        git_worktree::copy_claude_session_data(&source_worktree_path, &target_worktree_path)
+    })
+    .await
+}
+
+#[tauri::command]
 async fn git_merge_branch(
     repo_path: String,
     source_branch: String,
@@ -650,6 +661,7 @@ pub fn run() {
             read_gitignore,
             copy_gitignore_targets,
             write_claude_hooks,
+            copy_claude_session_data,
             git_merge_branch,
             git_delete_branch,
             git_list_files,
