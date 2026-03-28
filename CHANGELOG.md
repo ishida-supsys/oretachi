@@ -6,6 +6,16 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.16.1] - 2026-03-28
+
+### Added
+- PTY管理システムにAIエージェントプロセス検出・監視機能を実装
+- Tauriバックエンドのコア設定・PTY管理・ライブラリモジュールを実装
+
+### Fixed
+- xterm.js Terminal初期化時の未定義cols/rowsをスキップ
+- macOSでログインシェルからPATHを補完してAIエージェントを検出
+
 ## [0.16.0] - 2026-03-28
 
 ### Added
@@ -91,7 +101,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.16.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.16.1...HEAD
+[0.16.1]: https://github.com/ishida-supsys/oretachi/compare/0.16.0...0.16.1
 [0.16.0]: https://github.com/ishida-supsys/oretachi/compare/0.15.1...0.16.0
 [0.15.1]: https://github.com/ishida-supsys/oretachi/compare/0.15.0...0.15.1
 [0.15.0]: https://github.com/ishida-supsys/oretachi/compare/0.14.0...0.15.0
