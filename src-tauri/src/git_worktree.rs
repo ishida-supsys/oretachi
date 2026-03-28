@@ -787,6 +787,99 @@ pub fn copy_gitignore_targets(
     Ok(total)
 }
 
+/// ソースワークツリーの未コミット変更（ステージ済み・未ステージ・untracked）をターゲットへコピーする。
+/// ソースには副作用を与えない（stash不使用）。
+pub fn copy_working_changes(source_path: &str, target_path: &str) -> Result<u32, String> {
+    let stdout = run_git_in(source_path, &["status", "--porcelain=v1", "-uall"])?;
+
+    if stdout.trim().is_empty() {
+        return Ok(0);
+    }
+
+    let source = std::path::Path::new(source_path);
+    let target = std::path::Path::new(target_path);
+
+    let mut files_to_copy: Vec<String> = Vec::new();
+    let mut staged_files: Vec<String> = Vec::new();
+    let mut files_to_delete: Vec<String> = Vec::new();
+
+    for line in stdout.lines() {
+        if line.len() < 3 {
+            continue;
+        }
+        let x = &line[..1]; // index (staged) status
+        let y = &line[1..2]; // worktree (unstaged) status
+        let path_part = &line[3..];
+
+        // リネーム "R old -> new" のパース
+        let file_path = if x == "R" || y == "R" || x == "C" || y == "C" {
+            if let Some(arrow_pos) = path_part.find(" -> ") {
+                path_part[arrow_pos + 4..].to_string()
+            } else {
+                path_part.to_string()
+            }
+        } else {
+            path_part.to_string()
+        };
+
+        let is_deleted_staged = x == "D";
+        let is_deleted_worktree = y == "D";
+
+        if is_deleted_staged || is_deleted_worktree {
+            files_to_delete.push(file_path.clone());
+        } else {
+            files_to_copy.push(file_path.clone());
+        }
+
+        // ステージ済みファイル（x が空白・?・D 以外）
+        if x != " " && x != "?" && x != "D" {
+            staged_files.push(file_path.clone());
+        }
+    }
+
+    // 重複除去
+    files_to_copy.sort();
+    files_to_copy.dedup();
+    staged_files.sort();
+    staged_files.dedup();
+
+    let mut count = 0u32;
+
+    // ファイルをコピー
+    for file in &files_to_copy {
+        let src_file = source.join(file);
+        let dst_file = target.join(file);
+        if src_file.exists() {
+            if let Some(parent) = dst_file.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create dir for {}: {}", file, e))?;
+            }
+            std::fs::copy(&src_file, &dst_file)
+                .map_err(|e| format!("failed to copy {}: {}", file, e))?;
+            count += 1;
+        }
+    }
+
+    // 削除されたファイルをターゲットからも削除
+    for file in &files_to_delete {
+        let dst_file = target.join(file);
+        if dst_file.exists() {
+            let _ = std::fs::remove_file(&dst_file);
+        }
+    }
+
+    // ステージ済み状態を復元
+    if !staged_files.is_empty() {
+        let mut args: Vec<&str> = vec!["add"];
+        let refs: Vec<&str> = staged_files.iter().map(|s| s.as_str()).collect();
+        args.extend(&refs);
+        // エラーは無視（ファイルが存在しない場合など）
+        let _ = run_git_in(target_path, &args);
+    }
+
+    Ok(count)
+}
+
 pub fn worktree_remove(repo_path: &str, worktree_path: &str) -> Result<(), String> {
     let output = make_command("git")
         .args(["worktree", "remove", "--force", "--force", worktree_path])

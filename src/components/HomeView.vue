@@ -186,6 +186,7 @@ const emit = defineEmits<{
   setHotkeyChar: [worktreeId: string];
   toggleAutoApproval: [worktreeId: string];
   cancelAiJudging: [worktreeId: string];
+  duplicateWorktree: [worktreeId: string];
   addTask: [];
   removeTask: [taskId: string];
   rerunTask: [taskId: string];
@@ -378,6 +379,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
               @set-hotkey-char="emit('setHotkeyChar', $event)"
               @toggle-auto-approval="emit('toggleAutoApproval', $event)"
               @cancel-ai-judging="emit('cancelAiJudging', $event)"
+              @duplicate-worktree="emit('duplicateWorktree', $event)"
             />
           </div>
         </div>

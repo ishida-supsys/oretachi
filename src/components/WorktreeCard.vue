@@ -34,6 +34,7 @@ const emit = defineEmits<{
   toggleAutoApproval: [worktreeId: string];
   cancelAiJudging: [worktreeId: string];
   openArtifacts: [worktreeId: string];
+  duplicateWorktree: [worktreeId: string];
 }>();
 
 const menuRef = ref<InstanceType<typeof Popover> | null>(null);
@@ -54,6 +55,11 @@ function onMoveWindow() {
 function onOpenArtifacts() {
   menuRef.value?.hide();
   emit("openArtifacts", props.worktree.id);
+}
+
+function onDuplicate() {
+  menuRef.value?.hide();
+  emit("duplicateWorktree", props.worktree.id);
 }
 
 function onDelete() {
@@ -166,6 +172,10 @@ const terminalList = computed(() =>
         <button class="popup-item" :disabled="loading" @click="onMoveWindow">
           <span :class="detached ? 'pi pi-window-maximize' : 'pi pi-external-link'" />
           {{ detached ? t('menu.moveToMainWindow') : t('menu.moveToSubWindow') }}
+        </button>
+        <button class="popup-item" :disabled="loading" @click="onDuplicate">
+          <span class="pi pi-copy" />
+          {{ t('menu.duplicate') }}
         </button>
         <div class="popup-divider" />
         <button class="popup-item popup-item-danger" :disabled="loading" @click="onDelete">
@@ -399,6 +409,7 @@ const terminalList = computed(() =>
       "openArtifacts": "Artifacts",
       "moveToSubWindow": "Move to sub window",
       "moveToMainWindow": "Move to main window",
+      "duplicate": "Duplicate",
       "delete": "Delete"
     }
   },
@@ -417,6 +428,7 @@ const terminalList = computed(() =>
       "openArtifacts": "アーティファクト",
       "moveToSubWindow": "サブウィンドウに移動",
       "moveToMainWindow": "メインウィンドウに戻す",
+      "duplicate": "複製",
       "delete": "削除"
     }
   }
