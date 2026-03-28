@@ -1077,7 +1077,10 @@ pub fn send_notification_standalone(worktree_name: &str, kind: Option<&str>) -> 
         .map_err(|e| format!("Cannot connect to oretachi MCP server: {}", e))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| format!("Failed to set timeout: {}", e))?;
+        .map_err(|e| format!("Failed to set read timeout: {}", e))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("Failed to set write timeout: {}", e))?;
     stream
         .write_all(request.as_bytes())
         .map_err(|e| format!("Failed to send notification: {}", e))?;
@@ -1132,13 +1135,6 @@ fn read_server_info_standalone() -> Result<(u16, String), String> {
         return Ok((port, api_key));
     }
 
-    // フォールバック: 旧 mcp-port ファイル（APIキーなし）
-    let port_path = base.join(PORT_FILE);
-    let content = fs::read_to_string(&port_path)
-        .map_err(|e| format!("Cannot read port file (is oretachi running?): {}", e))?;
-    let port = content
-        .trim()
-        .parse::<u16>()
-        .map_err(|e| format!("Invalid port in port file: {}", e))?;
-    Ok((port, String::new()))
+    // mcp-server.json が存在しない場合、APIキーが取得できないためエラーとする
+    Err("Cannot read API key: mcp-server.json not found. Please restart oretachi to regenerate the server info file.".to_string())
 }
