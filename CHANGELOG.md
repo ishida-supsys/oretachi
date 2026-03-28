@@ -6,6 +6,26 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-03-28
+
+### Added
+- Notify MCP clients when a worktree is added
+- Add commit file and diff viewer for git history
+- Make AI timeout configurable from settings tab
+- Add worktree archive functionality
+- Broadcast active tasks to all windows for real-time tooltip sync
+- Add task tooltips to worktree headers
+- Implement task persistence, search, and infinite scroll
+
+### Fixed
+- Prevent double destroy race and re-entry on tray popup close
+- Synchronize task offset with database persistence
+- Refine task loading, updating, and optimistic removal
+
+### Changed
+- Split task persistence and search into useTaskPersistence composable
+- Add inter-window task data synchronization
+
 ## [0.15.1] - 2026-03-27
 
 ### Fixed
@@ -71,7 +91,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.15.1...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.16.0...HEAD
+[0.16.0]: https://github.com/ishida-supsys/oretachi/compare/0.15.1...0.16.0
 [0.15.1]: https://github.com/ishida-supsys/oretachi/compare/0.15.0...0.15.1
 [0.15.0]: https://github.com/ishida-supsys/oretachi/compare/0.14.0...0.15.0
 [0.14.0]: https://github.com/ishida-supsys/oretachi/compare/0.13.0...0.14.0
