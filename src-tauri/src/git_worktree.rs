@@ -919,12 +919,24 @@ pub fn copy_claude_session_data(
         return Ok(0);
     }
 
-    // ターゲットに古いセッションデータが残っている場合は削除してクリーンなコピーにする
+    log::info!("[copy_claude_session] copying {:?} -> {:?}", source_dir, target_dir);
+
+    // 一時ディレクトリにコピーしてから置換することで、コピー失敗時のデータ損失を防ぐ
+    let tmp_dir = projects_dir.join(format!("{}_tmp_{}", target_name, std::process::id()));
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(&tmp_dir)
+            .map_err(|e| format!("failed to remove stale tmp dir: {}", e))?;
+    }
+
+    let count = copy_dir_recursive(&source_dir, &tmp_dir)?;
+
+    // コピー成功後に既存ターゲットを削除してから一時ディレクトリを移動
     if target_dir.exists() {
         std::fs::remove_dir_all(&target_dir)
             .map_err(|e| format!("failed to remove existing target session dir: {}", e))?;
     }
+    std::fs::rename(&tmp_dir, &target_dir)
+        .map_err(|e| format!("failed to rename tmp dir to target: {}", e))?;
 
-    log::info!("[copy_claude_session] copying {:?} -> {:?}", source_dir, target_dir);
-    copy_dir_recursive(&source_dir, &target_dir)
+    Ok(count)
 }

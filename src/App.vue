@@ -45,7 +45,7 @@ import { useAppAutoApproval } from "./composables/useAppAutoApproval";
 import { useAppHotkeys } from "./composables/useAppHotkeys";
 import { useSubWindowEvents } from "./composables/useSubWindowEvents";
 import { useShutdownGuard } from "./composables/useShutdownGuard";
-import { saveArchive, deleteArchive, archives } from "./composables/useArchivePersistence";
+import { saveArchive, deleteArchive, archives, useArchivePersistence } from "./composables/useArchivePersistence";
 import { cancelApproval } from "./utils/autoApproval";
 import { debug } from "@tauri-apps/plugin-log";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -476,6 +476,15 @@ async function onOpenArtifacts(worktreeId: string) {
   const worktree = worktrees.value.find((w) => w.id === worktreeId);
   if (!worktree) return;
   await openArtifactViewer(worktree.id, worktree.name);
+}
+
+async function onShowAddWorktreeDialog() {
+  // アーカイブ未読み込みの場合はダイアログ表示前にロードする
+  if (archives.value.length === 0) {
+    const { loadArchives } = useArchivePersistence();
+    await loadArchives(true);
+  }
+  showAddDialog.value = true;
 }
 
 async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string, sessionSourcePath?: string) {
@@ -1352,7 +1361,7 @@ onMounted(async () => {
         :auto-approvals="autoApprovalMap"
         :ai-judging-worktrees="aiJudgingWorktrees"
         @select-terminal="switchToTerminal"
-        @add-worktree="showAddDialog = true"
+        @add-worktree="onShowAddWorktreeDialog"
         @remove-worktree="onRemoveWorktree"
         @add-terminal="onAddTerminal"
         @open-in-ide="onOpenInIde"
