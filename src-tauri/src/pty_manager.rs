@@ -43,67 +43,131 @@ pub struct AiAgentChangedPayload {
     pub sessions: HashMap<u32, bool>,
 }
 
-/// 全プロセス一覧を (pid, parent_pid, name) のリストで返す
+/// 全プロセス一覧を (pid, parent_pid, name) のリストで返す。
+/// タイムアウト付き: wmic/ps が応答しない場合は空リストを返す。
 fn scan_all_processes() -> Vec<(u32, u32, String)> {
+    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
     #[cfg(target_os = "windows")]
     {
-        let output = crate::process_utils::make_command("wmic")
+        let mut child = match crate::process_utils::make_command("wmic")
             .args(["process", "get", "Name,ProcessId,ParentProcessId", "/FORMAT:CSV"])
-            .output();
-        match output {
-            Ok(out) => {
-                let text = String::from_utf8_lossy(&out.stdout);
-                let mut result = Vec::new();
-                for line in text.lines() {
-                    let line = line.trim();
-                    // Skip header and empty lines
-                    if line.is_empty() || line.starts_with("Node") {
-                        continue;
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+
+        // タイムアウト付きで完了を待機
+        let deadline = std::time::Instant::now() + TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        log::warn!("[Terminal] scan_all_processes: wmic timed out after {:?}", TIMEOUT);
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return vec![];
                     }
-                    let parts: Vec<&str> = line.split(',').collect();
-                    // wmic CSV columns (alphabetical): Node, Name, ParentProcessId, ProcessId
-                    if parts.len() >= 4 {
-                        let name = parts[1].trim().to_string();
-                        if let (Ok(ppid), Ok(pid)) = (
-                            parts[2].trim().parse::<u32>(),
-                            parts[3].trim().parse::<u32>(),
-                        ) {
-                            if !name.is_empty() {
-                                result.push((pid, ppid, name));
-                            }
-                        }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(_) => return vec![],
+            }
+        }
+
+        let stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => return vec![],
+        };
+        let text = {
+            let mut buf = String::new();
+            if std::io::Read::read_to_string(&mut std::io::BufReader::new(stdout), &mut buf).is_err() {
+                return vec![];
+            }
+            buf
+        };
+
+        let mut result = Vec::new();
+        for line in text.lines() {
+            let line = line.trim();
+            // Skip header and empty lines
+            if line.is_empty() || line.starts_with("Node") {
+                continue;
+            }
+            let parts: Vec<&str> = line.split(',').collect();
+            // wmic CSV columns (alphabetical): Node, Name, ParentProcessId, ProcessId
+            if parts.len() >= 4 {
+                let name = parts[1].trim().to_string();
+                if let (Ok(ppid), Ok(pid)) = (
+                    parts[2].trim().parse::<u32>(),
+                    parts[3].trim().parse::<u32>(),
+                ) {
+                    if !name.is_empty() {
+                        result.push((pid, ppid, name));
                     }
                 }
-                result
             }
-            Err(_) => vec![],
         }
+        result
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        let output = std::process::Command::new("ps")
+        let mut child = match std::process::Command::new("ps")
             .args(["axo", "pid,ppid,comm"])
-            .output();
-        match output {
-            Ok(out) => {
-                let text = String::from_utf8_lossy(&out.stdout);
-                let mut result = Vec::new();
-                for line in text.lines().skip(1) {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if parts.len() >= 3 {
-                        if let (Ok(pid), Ok(ppid)) = (
-                            parts[0].parse::<u32>(),
-                            parts[1].parse::<u32>(),
-                        ) {
-                            result.push((pid, ppid, parts[2].to_string()));
-                        }
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return vec![],
+        };
+
+        let deadline = std::time::Instant::now() + TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        log::warn!("[Terminal] scan_all_processes: ps timed out after {:?}", TIMEOUT);
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        return vec![];
                     }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
                 }
-                result
+                Err(_) => return vec![],
             }
-            Err(_) => vec![],
         }
+
+        let stdout = match child.stdout.take() {
+            Some(s) => s,
+            None => return vec![],
+        };
+        let text = {
+            let mut buf = String::new();
+            if std::io::Read::read_to_string(&mut std::io::BufReader::new(stdout), &mut buf).is_err() {
+                return vec![];
+            }
+            buf
+        };
+
+        let mut result = Vec::new();
+        for line in text.lines().skip(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 {
+                if let (Ok(pid), Ok(ppid)) = (
+                    parts[0].parse::<u32>(),
+                    parts[1].parse::<u32>(),
+                ) {
+                    result.push((pid, ppid, parts[2].to_string()));
+                }
+            }
+        }
+        result
     }
 }
 
@@ -476,28 +540,36 @@ impl PtyManager {
 
     pub fn kill(&self, session_id: u32) -> Result<(), String> {
         log::debug!("[Terminal] pty_manager::kill session_id={}", session_id);
-        let watcher_handle = {
-            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(mut session) = sessions.remove(&session_id) {
+        // sessions ロックのスコープを最小化: remove + alive=false の設定のみ行い、
+        // 重い処理（taskkill, join）はロック外で実行する。
+        // taskkill /F /T は Windows 上で数秒かかることがあり、ロック保持中に実行すると
+        // pty_write, pty_resize 等すべてのセッション操作がブロックされる。
+        let removed = {
+            let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            if let Some(session) = sessions.remove(&session_id) {
                 if let Ok(mut alive) = session.alive.lock() { *alive = false; }
-                // PID ベースで子プロセスツリーを kill
-                if let Some(pid) = session.child_pid {
-                    crate::process_utils::kill_process_tree(pid);
-                }
-                // child_killer でバックアップ kill（child が監視スレッドに渡済みでも動作）
-                let _ = session.child_killer.kill();
-                // master を drop して reader に EOF を送る
-                let _ = session.master.lock().map(|mut g| g.take());
-                drop(session.writer);
-                session.watcher_handle
+                // master を取り出して reader に EOF を送る準備
+                let master = session.master.lock().ok().and_then(|mut g| g.take());
+                Some((session.child_pid, session.child_killer, master, session.writer, session.watcher_handle))
             } else {
                 None
             }
-        };
-        // sessions ロック解放後に watcher スレッドの終了を待つ
-        // watcher は alive=false を検知して必ず終了するため直接 join できる
-        if let Some(handle) = watcher_handle {
-            let _ = handle.join();
+        }; // ← sessions ロック解放
+
+        if let Some((child_pid, mut child_killer, master, writer, watcher_handle)) = removed {
+            // ロック外でプロセスkill（taskkillが遅くても他の操作をブロックしない）
+            if let Some(pid) = child_pid {
+                crate::process_utils::kill_process_tree(pid);
+            }
+            // child_killer でバックアップ kill（child が監視スレッドに渡済みでも動作）
+            let _ = child_killer.kill();
+            // master / writer を drop して reader に EOF を送る
+            drop(master);
+            drop(writer);
+            // watcher スレッドの終了を待つ（alive=false を検知して必ず終了する）
+            if let Some(handle) = watcher_handle {
+                let _ = handle.join();
+            }
         }
         Ok(())
     }
@@ -517,7 +589,10 @@ impl PtyManager {
     pub fn kill_sessions_in_dir(&self, dir: &str) -> usize {
         let target = std::path::Path::new(dir);
         let ids: Vec<u32> = {
-            let sessions = self.sessions.lock().unwrap();
+            let sessions = match self.sessions.lock() {
+                Ok(s) => s,
+                Err(e) => e.into_inner(),
+            };
             sessions
                 .iter()
                 .filter(|(_, s)| {

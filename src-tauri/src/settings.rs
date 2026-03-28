@@ -390,18 +390,31 @@ impl SettingsManager {
             AppSettings::default()
         };
 
-        *self.settings.lock().unwrap() = settings;
-        *self.file_path.lock().unwrap() = Some(path);
+        // ロック順序を save() と統一: file_path → settings
+        match self.file_path.lock() {
+            Ok(mut guard) => *guard = Some(path),
+            Err(e) => *e.into_inner() = Some(path),
+        }
+        match self.settings.lock() {
+            Ok(mut guard) => *guard = settings,
+            Err(e) => *e.into_inner() = settings,
+        }
     }
 
     pub fn get(&self) -> AppSettings {
-        self.settings.lock().unwrap().clone()
+        // poisoned でも中身を取得（他スレッドのパニックで settings アクセス全体が
+        // 使用不能になる連鎖的障害を防止する）
+        match self.settings.lock() {
+            Ok(guard) => guard.clone(),
+            Err(e) => e.into_inner().clone(),
+        }
     }
 
     pub fn save(&self, settings: AppSettings) -> Result<(), String> {
         // Mutex の外でファイル I/O を行うため、先にパスをクローンしてロックを解放する
         let path = {
-            let guard = self.file_path.lock().unwrap();
+            let guard = self.file_path.lock()
+                .map_err(|e| format!("file_path lock error: {}", e))?;
             guard.as_ref().ok_or("Settings not initialized")?.clone()
         };
 
@@ -414,7 +427,10 @@ impl SettingsManager {
 
         std::fs::write(&path, json).map_err(|e| format!("Write error: {}", e))?;
 
-        *self.settings.lock().unwrap() = settings;
+        match self.settings.lock() {
+            Ok(mut guard) => *guard = settings,
+            Err(e) => *e.into_inner() = settings,
+        }
         Ok(())
     }
 }

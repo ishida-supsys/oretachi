@@ -350,36 +350,40 @@ async fn prepare_for_relaunch(app_handle: tauri::AppHandle) -> Result<(), String
 // ─── アーティファクトコマンド ─────────────────────────────────────────────────
 
 #[tauri::command]
-fn list_artifacts(
+async fn list_artifacts(
     app_handle: tauri::AppHandle,
     worktree_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
     let artifacts_dir = artifacts_dir(&app_handle, &worktree_id)?;
-    if !artifacts_dir.exists() {
-        return Ok(vec![]);
-    }
-    let mut artifacts = Vec::new();
-    let entries = std::fs::read_dir(&artifacts_dir).map_err(|e| e.to_string())?;
-    for entry in entries {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("json") {
-            let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-            artifacts.push(val);
+    tokio::task::spawn_blocking(move || {
+        if !artifacts_dir.exists() {
+            return Ok(vec![]);
         }
-    }
-    // updated_at 降順でソート
-    artifacts.sort_by(|a, b| {
-        let a_time = a.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
-        let b_time = b.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
-        b_time.cmp(&a_time)
-    });
-    Ok(artifacts)
+        let mut artifacts = Vec::new();
+        let entries = std::fs::read_dir(&artifacts_dir).map_err(|e| e.to_string())?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) == Some("json") {
+                let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+                let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+                artifacts.push(val);
+            }
+        }
+        // updated_at 降順でソート
+        artifacts.sort_by(|a, b| {
+            let a_time = a.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+            let b_time = b.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+            b_time.cmp(&a_time)
+        });
+        Ok(artifacts)
+    })
+    .await
+    .map_err(|e| format!("task join error: {}", e))?
 }
 
 #[tauri::command]
-fn read_artifact(
+async fn read_artifact(
     app_handle: tauri::AppHandle,
     worktree_id: String,
     artifact_id: String,
@@ -387,7 +391,11 @@ fn read_artifact(
     validate_path_component(&artifact_id)?;
     let artifact_path = artifacts_dir(&app_handle, &worktree_id)?
         .join(format!("{}.json", artifact_id));
-    std::fs::read_to_string(&artifact_path).map_err(|e| e.to_string())
+    tokio::task::spawn_blocking(move || {
+        std::fs::read_to_string(&artifact_path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("task join error: {}", e))?
 }
 
 #[tauri::command]
