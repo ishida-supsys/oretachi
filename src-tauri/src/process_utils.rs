@@ -110,6 +110,74 @@ fn expand_env_vars(s: &str) -> String {
     OsString::from_wide(&buf[..written as usize - 1]).to_string_lossy().into_owned()
 }
 
+/// macOS のログインシェルから PATH を取得して現在の PATH とマージして返す。
+/// GUI アプリは launchd の最小 PATH しか継承しないため、ユーザーの完全な PATH を取得する。
+#[cfg(target_os = "macos")]
+pub fn refresh_path_from_login_shell() -> Result<String, String> {
+    use std::sync::mpsc;
+    use std::thread;
+
+    let current_path = std::env::var("PATH").unwrap_or_default();
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".to_string());
+    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/zsh".to_string());
+
+    // ログインシェルから PATH を取得（2秒タイムアウト）
+    let shell_path_result: Result<String, String> = {
+        let (tx, rx) = mpsc::channel();
+        let shell_clone = shell.clone();
+        thread::spawn(move || {
+            let result = Command::new(&shell_clone)
+                .args(["-l", "-c", "echo $PATH"])
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| {
+                    let stdout = String::from_utf8_lossy(&o.stdout);
+                    // motd/バナー出力を避けるため最後の非空行を取得
+                    stdout.lines().filter(|l| !l.trim().is_empty()).last().map(|s| s.trim().to_string())
+                })
+                .filter(|s| !s.is_empty() && s.contains('/'));
+            let _ = tx.send(result);
+        });
+        match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+            Ok(Some(path)) => Ok(path),
+            Ok(None) => Err("login shell returned empty PATH".to_string()),
+            Err(_) => Err("login shell timed out".to_string()),
+        }
+    };
+
+    let additional = match shell_path_result {
+        Ok(shell_path) => shell_path,
+        Err(e) => {
+            log::warn!("refresh_path_from_login_shell: {}; using well-known fallback paths", e);
+            // フォールバック: 既知の一般的なパス
+            [
+                format!("{}/.local/bin", home),
+                "/usr/local/bin".to_string(),
+                "/opt/homebrew/bin".to_string(),
+                format!("{}/.cargo/bin", home),
+            ]
+            .join(":")
+        }
+    };
+
+    // 現在の PATH と追加パスをマージして重複排除
+    Ok(merge_paths(&current_path, &additional))
+}
+
+#[cfg(target_os = "macos")]
+fn merge_paths(base: &str, additions: &str) -> String {
+    let mut seen = std::collections::HashSet::new();
+    let mut result = Vec::new();
+    for p in base.split(':').chain(additions.split(':')) {
+        let p = p.trim();
+        if !p.is_empty() && seen.insert(p.to_string()) {
+            result.push(p.to_string());
+        }
+    }
+    result.join(":")
+}
+
 /// プロセスツリーを強制終了する
 pub fn kill_process_tree(pid: u32) {
     #[cfg(target_os = "windows")]

@@ -775,6 +775,17 @@ pub fn run() {
                 }
             }
 
+            #[cfg(target_os = "macos")]
+            match crate::process_utils::refresh_path_from_login_shell() {
+                Ok(path) => {
+                    std::env::set_var("PATH", &path);
+                    log::debug!("PATH refreshed from login shell");
+                }
+                Err(e) => {
+                    log::warn!("Failed to refresh PATH from login shell: {}", e);
+                }
+            }
+
             if let Ok(log_dir) = app.path().app_log_dir() {
                 log::info!("Application log directory: {:?}", log_dir);
             }
