@@ -45,7 +45,7 @@ import { useAppAutoApproval } from "./composables/useAppAutoApproval";
 import { useAppHotkeys } from "./composables/useAppHotkeys";
 import { useSubWindowEvents } from "./composables/useSubWindowEvents";
 import { useShutdownGuard } from "./composables/useShutdownGuard";
-import { saveArchive, deleteArchive } from "./composables/useArchivePersistence";
+import { saveArchive, deleteArchive, archives, archiveSearchQuery, useArchivePersistence } from "./composables/useArchivePersistence";
 import { cancelApproval } from "./utils/autoApproval";
 import { debug } from "@tauri-apps/plugin-log";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -478,7 +478,26 @@ async function onOpenArtifacts(worktreeId: string) {
   await openArtifactViewer(worktree.id, worktree.name);
 }
 
-async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string) {
+async function onShowAddWorktreeDialog() {
+  // セッション引継ぎ選択肢にアーカイブを全件表示するため読み込む
+  const { loadArchives, hasMore, isLoading } = useArchivePersistence();
+  // 進行中のロードが完了するまで待機（競合防止）
+  while (isLoading.value) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  // 検索フィルタをクリアして全件取得
+  archiveSearchQuery.value = "";
+  await loadArchives(true);
+  while (hasMore.value) {
+    const countBefore = archives.value.length;
+    await loadArchives(false);
+    // ロード失敗時は件数が増えないためループを抜ける
+    if (archives.value.length === countBefore) break;
+  }
+  showAddDialog.value = true;
+}
+
+async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string, sessionSourcePath?: string) {
   // ダイアログを即閉じ、一覧に仮エントリを表示
   showAddDialog.value = false;
   addWorktreePlaceholder(entry);
@@ -522,6 +541,18 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string)
         });
       } catch (e) {
         await message(t("claudeHooksFailed", { error: e }), { kind: "warning" });
+      }
+    }
+
+    // Claude Code セッションデータの引継ぎ
+    if (sessionSourcePath) {
+      try {
+        await invoke("copy_claude_session_data", {
+          sourceWorktreePath: sessionSourcePath,
+          targetWorktreePath: entry.path,
+        });
+      } catch (e) {
+        await message(t("sessionCopyFailed", { error: e }), { kind: "warning" });
       }
     }
 
@@ -1340,7 +1371,7 @@ onMounted(async () => {
         :auto-approvals="autoApprovalMap"
         :ai-judging-worktrees="aiJudgingWorktrees"
         @select-terminal="switchToTerminal"
-        @add-worktree="showAddDialog = true"
+        @add-worktree="onShowAddWorktreeDialog"
         @remove-worktree="onRemoveWorktree"
         @add-terminal="onAddTerminal"
         @open-in-ide="onOpenInIde"
@@ -1451,8 +1482,10 @@ onMounted(async () => {
       v-if="showAddDialog"
       :repositories="settings.repositories"
       :worktree-base-dir="settings.worktreeBaseDir"
+      :active-worktrees="settings.worktrees"
+      :archived-worktrees="archives"
       :submitting="false"
-      @confirm="(entry, sourceBranch) => onAddWorktreeConfirm(entry, sourceBranch)"
+      @confirm="(entry, sourceBranch, sessionSourcePath) => onAddWorktreeConfirm(entry, sourceBranch, sessionSourcePath)"
       @cancel="showAddDialog = false"
     />
 
@@ -1551,6 +1584,7 @@ onMounted(async () => {
     "worktreeCreateFailed": "Failed to create worktree: {error}",
     "copyTargetsFailed": "Some files could not be copied after worktree creation: {error}",
     "claudeHooksFailed": "Failed to write Claude Code notification hooks: {error}",
+    "sessionCopyFailed": "Failed to copy Claude Code session data: {error}",
     "shuttingDown": "Shutting down...",
     "minimize": "Minimize",
     "maximize": "Maximize",
@@ -1578,6 +1612,7 @@ onMounted(async () => {
     "worktreeCreateFailed": "ワークツリーの作成に失敗しました: {error}",
     "copyTargetsFailed": "ワークツリー追加後のファイルコピーに失敗しました: {error}",
     "claudeHooksFailed": "Claude Code通知フックの書き込みに失敗しました: {error}",
+    "sessionCopyFailed": "Claude Codeセッションデータのコピーに失敗しました: {error}",
     "shuttingDown": "終了しています...",
     "minimize": "最小化",
     "maximize": "最大化",

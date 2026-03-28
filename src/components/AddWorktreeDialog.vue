@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, watch } from "vue";
 import type { Repository, WorktreeEntry } from "../types/settings";
+import type { ArchiveRow } from "../types/archive";
 import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
@@ -9,10 +10,12 @@ const props = defineProps<{
   repositories: Repository[];
   worktreeBaseDir: string;
   submitting?: boolean;
+  activeWorktrees?: WorktreeEntry[];
+  archivedWorktrees?: ArchiveRow[];
 }>();
 
 const emit = defineEmits<{
-  confirm: [entry: WorktreeEntry, sourceBranch: string | undefined];
+  confirm: [entry: WorktreeEntry, sourceBranch: string | undefined, sessionSourcePath: string | undefined];
   cancel: [];
 }>();
 
@@ -21,6 +24,7 @@ const worktreeName = ref("");
 const branchName = ref("");
 const branchManuallyEdited = ref(false);
 const sourceBranch = ref("");
+const selectedSessionSource = ref<string>("");
 
 const selectedRepo = computed(() =>
   props.repositories.find((r) => r.id === selectedRepoId.value) ?? null
@@ -60,7 +64,7 @@ function confirm() {
     branchName: branchName.value,
   };
 
-  emit("confirm", entry, sourceBranch.value.trim() || undefined);
+  emit("confirm", entry, sourceBranch.value.trim() || undefined, selectedSessionSource.value || undefined);
 }
 </script>
 
@@ -121,6 +125,24 @@ function confirm() {
           :placeholder="t('sourceBranchPlaceholder')"
           :disabled="submitting"
         />
+      </div>
+
+      <!-- セッション引継ぎ元（オプション） -->
+      <div class="field">
+        <label class="label">{{ t('sessionSource') }}</label>
+        <select v-model="selectedSessionSource" class="select" :disabled="submitting">
+          <option value="">{{ t('sessionSourceNone') }}</option>
+          <optgroup v-if="activeWorktrees?.length" :label="t('sessionSourceActive')">
+            <option v-for="wt in activeWorktrees" :key="wt.path" :value="wt.path">
+              {{ wt.name }}
+            </option>
+          </optgroup>
+          <optgroup v-if="archivedWorktrees?.length" :label="t('sessionSourceArchived')">
+            <option v-for="ar in archivedWorktrees" :key="ar.path" :value="ar.path">
+              {{ ar.name }}
+            </option>
+          </optgroup>
+        </select>
       </div>
 
       <!-- パス（自動） -->
@@ -268,7 +290,11 @@ function confirm() {
     "sourceBranchPlaceholder": "e.g. main, origin/develop (optional)",
     "creating": "Creating...",
     "create": "Create",
-    "baseDirNotSet": "Set the worktree base directory in settings."
+    "baseDirNotSet": "Set the worktree base directory in settings.",
+    "sessionSource": "Inherit session from",
+    "sessionSourceNone": "None",
+    "sessionSourceActive": "Active worktrees",
+    "sessionSourceArchived": "Archived worktrees"
   },
   "ja": {
     "addTitle": "ワークツリーを追加",
@@ -283,7 +309,11 @@ function confirm() {
     "path": "作成先パス（自動）",
     "creating": "作成中...",
     "create": "作成",
-    "baseDirNotSet": "設定でワークツリー追加先ディレクトリを設定してください。"
+    "baseDirNotSet": "設定でワークツリー追加先ディレクトリを設定してください。",
+    "sessionSource": "セッション引継ぎ元",
+    "sessionSourceNone": "なし",
+    "sessionSourceActive": "アクティブなワークツリー",
+    "sessionSourceArchived": "アーカイブ済みワークツリー"
   }
 }
 </i18n>
