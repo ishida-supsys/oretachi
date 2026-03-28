@@ -73,13 +73,14 @@ export function useTrayPopup() {
     }
   }
 
-  async function closeTrayPopup(): Promise<void> {
-    if (trayWindow) {
-      await trayWindow.destroy().catch(() => {});
-      trayWindow = null;
-    }
+  async function closeTrayPopup(skipDestroy = false): Promise<void> {
+    const win = trayWindow;
+    trayWindow = null;
     pendingWorktrees = null;
     currentTrayWorktreeId = null;
+    if (win && !skipDestroy) {
+      await win.destroy().catch(() => {});
+    }
   }
 
   function getPendingWorktrees(): TrayWorktreeData[] | null {

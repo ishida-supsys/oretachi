@@ -34,6 +34,9 @@ const terminalEntries = reactive(new Map<number, TrayTerminalEntry>());
 // TerminalView ref 管理
 const terminalRefs = reactive(new Map<number, InstanceType<typeof TerminalView>>());
 
+// 閉鎖処理の再入防止フラグ
+let closing = false;
+
 // フレームレイアウト（useWorktreeFrameで共通化）
 const {
   root,
@@ -200,23 +203,37 @@ async function onNext() {
 }
 
 async function onDone() {
-  const wt = currentWorktree.value;
-  if (wt) {
-    await detachCurrentTerminals();
-    await emitTo("main", "tray-clear-notification", { worktreeId: wt.worktreeId });
+  if (closing) return;
+  closing = true;
+  try {
+    const wt = currentWorktree.value;
+    if (wt) {
+      await detachCurrentTerminals();
+      await emitTo("main", "tray-clear-notification", { worktreeId: wt.worktreeId });
+    }
+    await emitTo("main", "tray-closing", {});
+    await getCurrentWindow().destroy();
+  } catch (e) {
+    closing = false;
+    throw e;
   }
-  await emitTo("main", "tray-closing", {});
-  await getCurrentWindow().destroy();
 }
 
 async function onClose() {
-  const wt = currentWorktree.value;
-  if (wt) {
-    await emitTo("main", "tray-clear-notification", { worktreeId: wt.worktreeId });
+  if (closing) return;
+  closing = true;
+  try {
+    const wt = currentWorktree.value;
+    if (wt) {
+      await emitTo("main", "tray-clear-notification", { worktreeId: wt.worktreeId });
+    }
+    await detachCurrentTerminals();
+    await emitTo("main", "tray-closing", {});
+    await getCurrentWindow().destroy();
+  } catch (e) {
+    closing = false;
+    throw e;
   }
-  await detachCurrentTerminals();
-  await emitTo("main", "tray-closing", {});
-  await getCurrentWindow().destroy();
 }
 
 function onHeaderDrag(e: MouseEvent) {
