@@ -86,7 +86,7 @@ export function useWorktreeTaskMap() {
     if (tasks.length > maxShow) {
       lines.push(t("taskTooltipMore", { count: tasks.length - maxShow }));
     }
-    return lines.join("\n");
+    return lines.join("<br>");
   }
 
   return { getTasksForWorktree, getTooltipText };

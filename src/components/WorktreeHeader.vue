@@ -60,7 +60,7 @@ async function closeWindow() {
       <span
         class="flex items-center gap-1 text-xs font-mono text-[#9399b2]"
         :class="{ 'cursor-help': props.taskTooltip }"
-        :title="props.taskTooltip"
+        v-tooltip="props.taskTooltip ? { value: props.taskTooltip, escape: false, showDelay: 300 } : null"
       >
         <span class="pi pi-code-branch" style="font-size: 10px" />
         {{ props.branchName }}
