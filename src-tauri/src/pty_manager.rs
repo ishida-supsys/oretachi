@@ -8,7 +8,7 @@ const AI_AGENT_NAMES: &[&str] = &["claude", "gemini", "codex", "cline"];
 const MAX_PTY_SESSIONS: usize = 32;
 
 struct PtySession {
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Arc<Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>>,
     child_killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     child_pid: Option<u32>,
@@ -444,11 +444,18 @@ impl PtyManager {
         let master_watcher = master_arc.clone();
         let child_watcher = child_arc.clone();
         let watcher_handle = std::thread::spawn(move || {
-            let child_opt = child_watcher.lock().unwrap().take();
+            let child_opt = match child_watcher.lock() {
+                Ok(mut g) => g.take(),
+                Err(e) => e.into_inner().take(),
+            };
             if let Some(mut child) = child_opt {
                 // try_wait() ポーリング: alive=false (kill() 呼び出し済み) なら即座に終了
                 let exited = loop {
-                    if !*alive_watcher.lock().unwrap() {
+                    let alive = match alive_watcher.lock() {
+                        Ok(g) => *g,
+                        Err(e) => *e.into_inner(),
+                    };
+                    if !alive {
                         break false;
                     }
                     match child.try_wait() {
@@ -459,11 +466,20 @@ impl PtyManager {
                 };
                 // 自然終了した場合のみ master を drop して reader に EOF を送る
                 if exited {
-                    let mut alive_guard = alive_watcher.lock().unwrap();
-                    if *alive_guard {
-                        *alive_guard = false;
-                        drop(alive_guard);
-                        let _ = master_watcher.lock().unwrap().take();
+                    let should_drop = match alive_watcher.lock() {
+                        Ok(mut g) => {
+                            if *g { *g = false; true } else { false }
+                        }
+                        Err(e) => {
+                            let mut g = e.into_inner();
+                            if *g { *g = false; true } else { false }
+                        }
+                    };
+                    if should_drop {
+                        match master_watcher.lock() {
+                            Ok(mut g) => { g.take(); }
+                            Err(e) => { e.into_inner().take(); }
+                        }
                     }
                 }
             }
@@ -487,6 +503,8 @@ impl PtyManager {
             let _ = app_handle_reader.emit("pty-exit", PtyExitPayload { session_id });
         });
 
+        let writer = Arc::new(Mutex::new(writer));
+
         let session = PtySession {
             writer,
             master: master_arc,
@@ -505,31 +523,32 @@ impl PtyManager {
     }
 
     pub fn write(&self, session_id: u32, data: Vec<u8>) -> Result<(), String> {
-        let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
-        let session = sessions
-            .get_mut(&session_id)
-            .ok_or_else(|| format!("Session {} not found", session_id))?;
+        // sessions ロックは Arc 取得のみ（瞬時）→ I/O 中は他セッション操作をブロックしない
+        let writer_arc = {
+            let sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            let session = sessions
+                .get(&session_id)
+                .ok_or_else(|| format!("Session {} not found", session_id))?;
+            session.writer.clone()
+        };
 
-        session
-            .writer
-            .write_all(&data)
-            .map_err(|e| format!("Write error: {}", e))?;
-        session
-            .writer
-            .flush()
-            .map_err(|e| format!("Flush error: {}", e))?;
-
+        let mut writer = writer_arc.lock().map_err(|e| format!("writer lock error: {}", e))?;
+        writer.write_all(&data).map_err(|e| format!("Write error: {}", e))?;
+        writer.flush().map_err(|e| format!("Flush error: {}", e))?;
         Ok(())
     }
 
     pub fn resize(&self, session_id: u32, rows: u16, cols: u16) -> Result<(), String> {
         log::debug!("[Terminal] pty_manager::resize session_id={} rows={} cols={}", session_id, rows, cols);
-        let sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
-        let session = sessions
-            .get(&session_id)
-            .ok_or_else(|| format!("Session {} not found", session_id))?;
+        let master_arc = {
+            let sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            let session = sessions
+                .get(&session_id)
+                .ok_or_else(|| format!("Session {} not found", session_id))?;
+            session.master.clone()
+        };
 
-        if let Some(master) = session.master.lock().map_err(|e| format!("lock error: {}", e))?.as_ref() {
+        if let Some(master) = master_arc.lock().map_err(|e| format!("lock error: {}", e))?.as_ref() {
             master
                 .resize(PtySize {
                     rows,
