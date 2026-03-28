@@ -1097,9 +1097,9 @@ onMounted(async () => {
     clearNotification(event.payload.worktreeId);
   });
 
-  // トレイポップアップ閉鎖通知
+  // トレイポップアップ閉鎖通知（tray popup自身がdestroyするのでskip）
   await listen("tray-closing", () => {
-    closeTrayPopup();
+    closeTrayPopup(true);
   });
 
   // Code Review チャットボタン → AIエージェントターミナルへ書き込み

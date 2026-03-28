@@ -73,11 +73,11 @@ export function useTrayPopup() {
     }
   }
 
-  async function closeTrayPopup(): Promise<void> {
-    if (trayWindow) {
+  async function closeTrayPopup(skipDestroy = false): Promise<void> {
+    if (trayWindow && !skipDestroy) {
       await trayWindow.destroy().catch(() => {});
-      trayWindow = null;
     }
+    trayWindow = null;
     pendingWorktrees = null;
     currentTrayWorktreeId = null;
   }

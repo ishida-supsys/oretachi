@@ -34,6 +34,9 @@ const terminalEntries = reactive(new Map<number, TrayTerminalEntry>());
 // TerminalView ref 管理
 const terminalRefs = reactive(new Map<number, InstanceType<typeof TerminalView>>());
 
+// 閉鎖処理の再入防止フラグ
+let closing = false;
+
 // フレームレイアウト（useWorktreeFrameで共通化）
 const {
   root,
@@ -200,6 +203,8 @@ async function onNext() {
 }
 
 async function onDone() {
+  if (closing) return;
+  closing = true;
   const wt = currentWorktree.value;
   if (wt) {
     await detachCurrentTerminals();
@@ -210,6 +215,8 @@ async function onDone() {
 }
 
 async function onClose() {
+  if (closing) return;
+  closing = true;
   const wt = currentWorktree.value;
   if (wt) {
     await emitTo("main", "tray-clear-notification", { worktreeId: wt.worktreeId });
