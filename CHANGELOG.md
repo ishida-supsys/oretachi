@@ -6,6 +6,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.17.1] - 2026-03-29
+
+### Added
+- Improve MCP API key display with PrimeVue Password component
+
+### Fixed
+- Always merge well-known paths regardless of login shell success
+
 ## [0.17.0] - 2026-03-29
 
 ### Added
@@ -115,7 +123,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.17.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.17.1...HEAD
+[0.17.1]: https://github.com/ishida-supsys/oretachi/compare/0.17.0...0.17.1
 [0.17.0]: https://github.com/ishida-supsys/oretachi/compare/0.16.1...0.17.0
 [0.16.1]: https://github.com/ishida-supsys/oretachi/compare/0.16.0...0.16.1
 [0.16.0]: https://github.com/ishida-supsys/oretachi/compare/0.15.1...0.16.0
