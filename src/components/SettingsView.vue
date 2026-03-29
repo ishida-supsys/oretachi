@@ -7,6 +7,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useSettings } from "../composables/useSettings";
 import { useUpdater } from "../composables/useUpdater";
 import ColorPicker from "primevue/colorpicker";
+import Password from "primevue/password";
 import type { AiAgentKind } from "../types/settings";
 import { useI18n } from "vue-i18n";
 import { setLocale } from "../i18n";
@@ -102,7 +103,6 @@ async function restartMcp() {
 }
 
 const regenerating = ref(false);
-const apiKeyVisible = ref(false);
 
 async function regenerateApiKey() {
   const yes = await ask(t('mcp.regenerateConfirm'), { title: t('mcp.label'), kind: 'warning' });
@@ -312,13 +312,18 @@ function getSoundLabel(sound: string | null | undefined): string {
       </div>
       <div v-if="settings.mcpApiKey" class="row-input row-input--inline mcp-api-key-row">
         <label class="inline-label">{{ t('mcp.apiKey') }}</label>
-        <code class="api-key-display">{{ apiKeyVisible ? settings.mcpApiKey : '••••••••••••••••••••••••••••••••' }}</code>
-        <button class="btn-secondary btn-small" @click="apiKeyVisible = !apiKeyVisible">
-          {{ apiKeyVisible ? t('mcp.hide') : t('mcp.show') }}
+        <Password
+          :model-value="settings.mcpApiKey"
+          :feedback="false"
+          toggle-mask
+          readonly
+          class="mcp-api-key-password"
+        />
+        <button class="btn-icon" v-tooltip="t('mcp.copy')" @click="copyApiKey">
+          <i class="pi pi-copy" />
         </button>
-        <button class="btn-secondary btn-small" @click="copyApiKey">{{ t('mcp.copy') }}</button>
-        <button class="btn-secondary btn-small" :disabled="regenerating" @click="regenerateApiKey">
-          {{ regenerating ? t('mcp.regenerating') : t('mcp.regenerate') }}
+        <button class="btn-icon" :disabled="regenerating" v-tooltip="t('mcp.regenerate')" @click="regenerateApiKey">
+          <i :class="regenerating ? 'pi pi-spin pi-spinner' : 'pi pi-refresh'" />
         </button>
       </div>
     </div>
@@ -893,20 +898,45 @@ function getSoundLabel(sound: string | null | undefined): string {
   gap: 8px;
 }
 
-.api-key-display {
+.mcp-api-key-password {
+  flex: 1;
+  min-width: 0;
+}
+
+:deep(.mcp-api-key-password .p-password-input) {
   font-family: monospace;
   font-size: 11px;
   background: #1e1e2e;
+  border-color: #313244;
+  color: #a6adc8;
   padding: 4px 8px;
+  width: 100%;
+}
+
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid #313244;
   border-radius: 4px;
   color: #a6adc8;
-  user-select: all;
-  max-width: 320px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  flex: 1;
-  min-width: 0;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+
+.btn-icon:hover:not(:disabled) {
+  background: #313244;
+  color: #cdd6f4;
+}
+
+.btn-icon:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .btn-small {
@@ -1062,8 +1092,6 @@ function getSoundLabel(sound: string | null | undefined): string {
       "remoteAccess": "Allow remote access. Changes take effect after restart.",
       "apiKey": "API Key",
       "copy": "Copy",
-      "show": "Show",
-      "hide": "Hide",
       "regenerate": "Regenerate",
       "regenerating": "Regenerating...",
       "regenerateConfirm": "Regenerating the API key will disconnect all MCP clients. Continue?",
@@ -1154,8 +1182,6 @@ function getSoundLabel(sound: string | null | undefined): string {
       "remoteAccess": "リモートアクセスを許可する。変更は再起動後に反映されます。",
       "apiKey": "APIキー",
       "copy": "コピー",
-      "show": "表示",
-      "hide": "隠す",
       "regenerate": "再生成",
       "regenerating": "再生成中...",
       "regenerateConfirm": "APIキーを再生成すると、接続中のMCPクライアントは切断されます。続行しますか？",
