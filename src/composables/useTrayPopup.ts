@@ -14,6 +14,7 @@ export interface TrayWorktreeData {
   worktreeId: string;
   worktreeName: string;
   worktreePath: string;
+  repositoryName: string;
   isDetached: boolean;
   layout: FrameNode | null;
   terminals: TrayTerminalData[];

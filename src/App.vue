@@ -762,6 +762,7 @@ async function onTrayButtonClick() {
         worktreeId,
         worktreeName: worktree.name,
         worktreePath: worktree.path,
+        repositoryName: worktree.repositoryName,
         isDetached: true,
         layout: (layoutData?.layout ?? null) as import("./types/frame").FrameNode | null,
         terminals: layoutData?.terminals ?? [],
@@ -821,6 +822,7 @@ async function onTrayButtonClick() {
         worktreeId,
         worktreeName: worktree.name,
         worktreePath: worktree.path,
+        repositoryName: worktree.repositoryName,
         isDetached: sizeFromContainer,  // コンテナサイズの場合はヘッダー加算をスキップ
         layout: mainLayout,
         terminals,
