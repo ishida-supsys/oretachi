@@ -6,6 +6,20 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-03-29
+
+### Added
+- Show worktree task details in tray popup tooltip
+- Add copy feedback for API key field
+- Add remote access toggle for MCP server in settings
+- Implement API key authentication for MCP server
+- Integrate PrimeVue tooltip for worktree task details
+- Add worktree duplicate feature
+- Inherit Claude Code session when creating new worktree
+
+### Fixed
+- Adjust remote access text and toggle label style
+
 ## [0.16.1] - 2026-03-28
 
 ### Added
@@ -101,7 +115,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.16.1...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.17.0...HEAD
+[0.17.0]: https://github.com/ishida-supsys/oretachi/compare/0.16.1...0.17.0
 [0.16.1]: https://github.com/ishida-supsys/oretachi/compare/0.16.0...0.16.1
 [0.16.0]: https://github.com/ishida-supsys/oretachi/compare/0.15.1...0.16.0
 [0.15.1]: https://github.com/ishida-supsys/oretachi/compare/0.15.0...0.15.1
