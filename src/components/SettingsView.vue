@@ -10,12 +10,14 @@ import ColorPicker from "primevue/colorpicker";
 import type { AiAgentKind } from "../types/settings";
 import { useI18n } from "vue-i18n";
 import { setLocale } from "../i18n";
+import { useToast } from "primevue/usetoast";
 import { playNotificationSound } from "../utils/notificationSound";
 import type { NotificationKind } from "../composables/useNotifications";
 import SettingsHotkeySection from "./settings/SettingsHotkeySection.vue";
 import SettingsRepositoriesSection from "./settings/SettingsRepositoriesSection.vue";
 
 const { t } = useI18n();
+const toast = useToast();
 
 const { settings, scheduleSave, flushSave } = useSettings();
 
@@ -126,7 +128,12 @@ async function regenerateApiKey() {
 
 async function copyApiKey() {
   if (settings.value.mcpApiKey) {
-    await writeText(settings.value.mcpApiKey);
+    try {
+      await writeText(settings.value.mcpApiKey);
+      toast.add({ severity: "success", summary: t("mcp.copied"), life: 2000 });
+    } catch (e) {
+      toast.add({ severity: "error", summary: t("mcp.copyFailed"), detail: String(e), life: 5000 });
+    }
   }
 }
 
@@ -1059,7 +1066,9 @@ function getSoundLabel(sound: string | null | undefined): string {
       "regenerating": "Regenerating...",
       "regenerateConfirm": "Regenerating the API key will disconnect all MCP clients. Continue?",
       "regenerateFailed": "Failed to regenerate API key.",
-      "regenerateRestartFailed": "API key was updated but failed to restart the MCP server. Please restart manually."
+      "regenerateRestartFailed": "API key was updated but failed to restart the MCP server. Please restart manually.",
+      "copied": "API key copied to clipboard",
+      "copyFailed": "Failed to copy API key"
     },
     "window": {
       "label": "Window",
@@ -1149,7 +1158,9 @@ function getSoundLabel(sound: string | null | undefined): string {
       "regenerating": "再生成中...",
       "regenerateConfirm": "APIキーを再生成すると、接続中のMCPクライアントは切断されます。続行しますか？",
       "regenerateFailed": "APIキーの再生成に失敗しました。",
-      "regenerateRestartFailed": "APIキーは更新されましたが、MCPサーバーの再起動に失敗しました。手動で再起動してください。"
+      "regenerateRestartFailed": "APIキーは更新されましたが、MCPサーバーの再起動に失敗しました。手動で再起動してください。",
+      "copied": "APIキーをクリップボードにコピーしました",
+      "copyFailed": "APIキーのコピーに失敗しました"
     },
     "window": {
       "label": "ウィンドウ",
