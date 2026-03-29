@@ -290,6 +290,19 @@ function getSoundLabel(sound: string | null | undefined): string {
         />
         <span class="unit-label">{{ t('mcp.fixedPortHint') }}</span>
       </div>
+      <div class="row-input row-input--inline">
+        <input
+          id="mcp-remote-access"
+          type="checkbox"
+          class="toggle-checkbox"
+          :checked="settings.mcpRemoteAccess ?? false"
+          @change="(e) => {
+            settings.mcpRemoteAccess = (e.target as HTMLInputElement).checked;
+            scheduleSave();
+          }"
+        />
+        <label for="mcp-remote-access" class="toggle-label">{{ t('mcp.remoteAccess') }}</label>
+      </div>
       <div v-if="settings.mcpApiKey" class="row-input row-input--inline mcp-api-key-row">
         <label class="inline-label">{{ t('mcp.apiKey') }}</label>
         <code class="api-key-display">{{ apiKeyVisible ? settings.mcpApiKey : '••••••••••••••••••••••••••••••••' }}</code>
@@ -1037,6 +1050,7 @@ function getSoundLabel(sound: string | null | undefined): string {
       "restarting": "Restarting...",
       "fixedPort": "Fixed port",
       "fixedPortHint": "0 = auto assign. Changes take effect after restart.",
+      "remoteAccess": "Allow remote access (bind to 0.0.0.0). Changes take effect after restart.",
       "apiKey": "API Key",
       "copy": "Copy",
       "show": "Show",
@@ -1126,6 +1140,7 @@ function getSoundLabel(sound: string | null | undefined): string {
       "restarting": "再起動中...",
       "fixedPort": "固定ポート",
       "fixedPortHint": "0 = 自動割り当て。変更は再起動後に反映されます。",
+      "remoteAccess": "リモートアクセスを許可する（0.0.0.0 バインド）。変更は再起動後に反映されます。",
       "apiKey": "APIキー",
       "copy": "コピー",
       "show": "表示",

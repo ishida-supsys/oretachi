@@ -353,12 +353,13 @@ async fn restart_mcp_server(app_handle: tauri::AppHandle) -> Result<mcp_server::
     let manager = app_handle.state::<mcp_server::McpServerManager>();
     // 同時に複数の restart が走らないよう排他ロックを取得する
     let _lock = manager.acquire_restart_lock().await;
-    let mcp_port = {
+    let (mcp_port, mcp_remote_access) = {
         let settings_manager = app_handle.state::<SettingsManager>();
-        settings_manager.get().mcp_port
+        let s = settings_manager.get();
+        (s.mcp_port, s.mcp_remote_access)
     };
     manager.stop_and_wait(std::time::Duration::from_secs(3)).await;
-    mcp_server::start_mcp_server(app_handle.clone(), mcp_port);
+    mcp_server::start_mcp_server(app_handle.clone(), mcp_port, mcp_remote_access);
     tokio::time::sleep(std::time::Duration::from_millis(500)).await;
     Ok(manager.get_status())
 }
@@ -829,8 +830,11 @@ pub fn run() {
             pty_manager.start_polling(app.handle().clone());
 
             // 通常モード: MCP サーバー起動 + ウィンドウ表示
-            let mcp_port = settings_manager.get().mcp_port;
-            mcp_server::start_mcp_server(app.handle().clone(), mcp_port);
+            let (mcp_port, mcp_remote_access) = {
+                let s = settings_manager.get();
+                (s.mcp_port, s.mcp_remote_access)
+            };
+            mcp_server::start_mcp_server(app.handle().clone(), mcp_port, mcp_remote_access);
 
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();

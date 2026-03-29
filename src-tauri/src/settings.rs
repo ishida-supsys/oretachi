@@ -324,6 +324,8 @@ pub struct AppSettings {
     pub mcp_port: u16,
     #[serde(default, rename = "mcpApiKey")]
     pub mcp_api_key: String,
+    #[serde(default, rename = "mcpRemoteAccess")]
+    pub mcp_remote_access: bool,
     #[serde(default, rename = "enableHomeCat")]
     pub enable_home_cat: bool,
     #[serde(default = "default_ai_timeout_secs", rename = "aiTimeoutSecs")]
@@ -358,6 +360,7 @@ impl Default for AppSettings {
             notification_sound: None,
             mcp_port: 0,
             mcp_api_key: String::new(),
+            mcp_remote_access: false,
             enable_home_cat: false,
             ai_timeout_secs: default_ai_timeout_secs(),
         }

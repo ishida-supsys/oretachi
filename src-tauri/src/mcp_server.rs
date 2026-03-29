@@ -868,7 +868,7 @@ pub fn cleanup_port_file(app_handle: &AppHandle) {
 
 // ─── Server startup ───────────────────────────────────────────────────────────
 
-pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
+pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
     let manager = app_handle.state::<McpServerManager>();
 
     // 既存サーバーを停止
@@ -982,13 +982,14 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
             }));
 
         // 固定ポートの場合は最大5回リトライ、ポート0はOS割り当てなので1回のみ
+        let bind_addr = if remote_access { "0.0.0.0" } else { "127.0.0.1" };
         let max_retries = if port == 0 { 1 } else { 5 };
         let mut listener_opt = None;
         for attempt in 0..max_retries {
             if attempt > 0 {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
-            match tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port)).await {
+            match tokio::net::TcpListener::bind(format!("{}:{}", bind_addr, port)).await {
                 Ok(l) => { listener_opt = Some(l); break; }
                 Err(e) => {
                     log::warn!("MCP bind attempt {}/{} failed: {}", attempt + 1, max_retries, e);
@@ -1026,7 +1027,7 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16) {
         };
 
         write_server_info_file(&app_handle, port, &api_key);
-        log::info!("MCP server listening on http://0.0.0.0:{}/mcp", port);
+        log::info!("MCP server listening on http://{}:{}/mcp", bind_addr, port);
 
         // ステータス: 起動中（世代が一致する場合のみ更新）
         if generation.load(Ordering::SeqCst) == my_generation {
