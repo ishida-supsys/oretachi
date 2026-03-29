@@ -948,6 +948,8 @@ function getSoundLabel(sound: string | null | undefined): string {
 }
 
 .toggle-label {
+  font-size: 13px;
+  color: #6c7086;
   cursor: pointer;
 }
 
@@ -1057,7 +1059,7 @@ function getSoundLabel(sound: string | null | undefined): string {
       "restarting": "Restarting...",
       "fixedPort": "Fixed port",
       "fixedPortHint": "0 = auto assign. Changes take effect after restart.",
-      "remoteAccess": "Allow remote access (bind to 0.0.0.0). Changes take effect after restart.",
+      "remoteAccess": "Allow remote access. Changes take effect after restart.",
       "apiKey": "API Key",
       "copy": "Copy",
       "show": "Show",
@@ -1149,7 +1151,7 @@ function getSoundLabel(sound: string | null | undefined): string {
       "restarting": "再起動中...",
       "fixedPort": "固定ポート",
       "fixedPortHint": "0 = 自動割り当て。変更は再起動後に反映されます。",
-      "remoteAccess": "リモートアクセスを許可する（0.0.0.0 バインド）。変更は再起動後に反映されます。",
+      "remoteAccess": "リモートアクセスを許可する。変更は再起動後に反映されます。",
       "apiKey": "APIキー",
       "copy": "コピー",
       "show": "表示",
