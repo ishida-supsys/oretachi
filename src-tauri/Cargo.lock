@@ -3655,6 +3655,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "subtle",
  "tauri",
  "tauri-build",
  "tauri-plugin-cli",
