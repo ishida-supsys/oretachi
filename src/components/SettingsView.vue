@@ -3,18 +3,22 @@ import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { open, ask, message } from "@tauri-apps/plugin-dialog";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useSettings } from "../composables/useSettings";
 import { useUpdater } from "../composables/useUpdater";
 import ColorPicker from "primevue/colorpicker";
+import Password from "primevue/password";
 import type { AiAgentKind } from "../types/settings";
 import { useI18n } from "vue-i18n";
 import { setLocale } from "../i18n";
+import { useToast } from "primevue/usetoast";
 import { playNotificationSound } from "../utils/notificationSound";
 import type { NotificationKind } from "../composables/useNotifications";
 import SettingsHotkeySection from "./settings/SettingsHotkeySection.vue";
 import SettingsRepositoriesSection from "./settings/SettingsRepositoriesSection.vue";
 
 const { t } = useI18n();
+const toast = useToast();
 
 const { settings, scheduleSave, flushSave } = useSettings();
 
@@ -95,6 +99,41 @@ async function restartMcp() {
     await fetchMcpStatus();
   } finally {
     restarting.value = false;
+  }
+}
+
+const regenerating = ref(false);
+
+async function regenerateApiKey() {
+  const yes = await ask(t('mcp.regenerateConfirm'), { title: t('mcp.label'), kind: 'warning' });
+  if (!yes) return;
+  regenerating.value = true;
+  try {
+    const newKey = await invoke<string>('regenerate_mcp_api_key');
+    settings.value.mcpApiKey = newKey;
+    try {
+      mcpStatus.value = await invoke<McpStatus>('restart_mcp_server');
+    } catch (restartErr) {
+      console.error('restart_mcp_server failed after key regeneration:', restartErr);
+      await message(t('mcp.regenerateRestartFailed'), { title: t('mcp.label'), kind: 'warning' });
+      await fetchMcpStatus();
+    }
+  } catch (e) {
+    console.error('regenerate_mcp_api_key failed:', e);
+    await message(t('mcp.regenerateFailed'), { title: t('mcp.label'), kind: 'error' });
+  } finally {
+    regenerating.value = false;
+  }
+}
+
+async function copyApiKey() {
+  if (settings.value.mcpApiKey) {
+    try {
+      await writeText(settings.value.mcpApiKey);
+      toast.add({ severity: "success", summary: t("mcp.copied"), life: 2000 });
+    } catch (e) {
+      toast.add({ severity: "error", summary: t("mcp.copyFailed"), detail: String(e), life: 5000 });
+    }
   }
 }
 
@@ -257,6 +296,35 @@ function getSoundLabel(sound: string | null | undefined): string {
           }"
         />
         <span class="unit-label">{{ t('mcp.fixedPortHint') }}</span>
+      </div>
+      <div class="row-input row-input--inline">
+        <input
+          id="mcp-remote-access"
+          type="checkbox"
+          class="toggle-checkbox"
+          :checked="settings.mcpRemoteAccess ?? false"
+          @change="(e) => {
+            settings.mcpRemoteAccess = (e.target as HTMLInputElement).checked;
+            scheduleSave();
+          }"
+        />
+        <label for="mcp-remote-access" class="toggle-label">{{ t('mcp.remoteAccess') }}</label>
+      </div>
+      <div v-if="settings.mcpApiKey" class="row-input row-input--inline mcp-api-key-row">
+        <label class="inline-label">{{ t('mcp.apiKey') }}</label>
+        <Password
+          :model-value="settings.mcpApiKey"
+          :feedback="false"
+          toggle-mask
+          readonly
+          class="mcp-api-key-password"
+        />
+        <button class="btn-icon" v-tooltip="t('mcp.copy')" @click="copyApiKey">
+          <i class="pi pi-copy" />
+        </button>
+        <button class="btn-icon" :disabled="regenerating" v-tooltip="t('mcp.regenerate')" @click="regenerateApiKey">
+          <i :class="regenerating ? 'pi pi-spin pi-spinner' : 'pi pi-refresh'" />
+        </button>
       </div>
     </div>
 
@@ -824,6 +892,58 @@ function getSoundLabel(sound: string | null | undefined): string {
   font-family: monospace;
 }
 
+.mcp-api-key-row {
+  margin-top: 8px;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.mcp-api-key-password {
+  flex: 1;
+  min-width: 0;
+}
+
+:deep(.mcp-api-key-password .p-password-input) {
+  font-family: monospace;
+  font-size: 11px;
+  background: #1e1e2e;
+  border-color: #313244;
+  color: #a6adc8;
+  padding: 4px 8px;
+  width: 100%;
+}
+
+.btn-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: 1px solid #313244;
+  border-radius: 4px;
+  color: #a6adc8;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+
+.btn-icon:hover:not(:disabled) {
+  background: #313244;
+  color: #cdd6f4;
+}
+
+.btn-icon:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-small {
+  font-size: 12px;
+  padding: 3px 10px;
+}
+
 .hotkey-table {
   border-collapse: collapse;
   width: 100%;
@@ -858,6 +978,8 @@ function getSoundLabel(sound: string | null | undefined): string {
 }
 
 .toggle-label {
+  font-size: 13px;
+  color: #6c7086;
   cursor: pointer;
 }
 
@@ -966,7 +1088,17 @@ function getSoundLabel(sound: string | null | undefined): string {
       "restart": "Restart",
       "restarting": "Restarting...",
       "fixedPort": "Fixed port",
-      "fixedPortHint": "0 = auto assign. Changes take effect after restart."
+      "fixedPortHint": "0 = auto assign. Changes take effect after restart.",
+      "remoteAccess": "Allow remote access. Changes take effect after restart.",
+      "apiKey": "API Key",
+      "copy": "Copy",
+      "regenerate": "Regenerate",
+      "regenerating": "Regenerating...",
+      "regenerateConfirm": "Regenerating the API key will disconnect all MCP clients. Continue?",
+      "regenerateFailed": "Failed to regenerate API key.",
+      "regenerateRestartFailed": "API key was updated but failed to restart the MCP server. Please restart manually.",
+      "copied": "API key copied to clipboard",
+      "copyFailed": "Failed to copy API key"
     },
     "window": {
       "label": "Window",
@@ -1046,7 +1178,17 @@ function getSoundLabel(sound: string | null | undefined): string {
       "restart": "再起動",
       "restarting": "再起動中...",
       "fixedPort": "固定ポート",
-      "fixedPortHint": "0 = 自動割り当て。変更は再起動後に反映されます。"
+      "fixedPortHint": "0 = 自動割り当て。変更は再起動後に反映されます。",
+      "remoteAccess": "リモートアクセスを許可する。変更は再起動後に反映されます。",
+      "apiKey": "APIキー",
+      "copy": "コピー",
+      "regenerate": "再生成",
+      "regenerating": "再生成中...",
+      "regenerateConfirm": "APIキーを再生成すると、接続中のMCPクライアントは切断されます。続行しますか？",
+      "regenerateFailed": "APIキーの再生成に失敗しました。",
+      "regenerateRestartFailed": "APIキーは更新されましたが、MCPサーバーの再起動に失敗しました。手動で再起動してください。",
+      "copied": "APIキーをクリップボードにコピーしました",
+      "copyFailed": "APIキーのコピーに失敗しました"
     },
     "window": {
       "label": "ウィンドウ",

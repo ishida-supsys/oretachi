@@ -58,7 +58,7 @@ async function closeWindow() {
         {{ props.worktreeName }}
       </span>
       <span
-        v-tooltip.bottom="props.taskTooltip ? { value: props.taskTooltip, class: 'task-tooltip-sm' } : undefined"
+        v-tooltip.bottom="props.taskTooltip ? { value: props.taskTooltip, escape: false, showDelay: 300, class: 'task-tooltip-sm' } : undefined"
         class="flex items-center gap-1 text-xs font-mono text-[#9399b2]"
         :class="{ 'cursor-help': props.taskTooltip }"
       >

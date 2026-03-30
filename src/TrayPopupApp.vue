@@ -12,10 +12,10 @@ import { useHotkeyListener } from "./composables/useHotkeys";
 import { useIdeSelect } from "./composables/useIdeSelect";
 import { useArtifactWindow } from "./composables/useArtifactWindow";
 import type { TrayWorktreeData } from "./composables/useTrayPopup";
+import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
 import type { FrameNode } from "./types/frame";
 import type { TrayTerminalEntry } from "./types/terminal";
 import { useI18n } from "vue-i18n";
-import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
 
 const { t } = useI18n();
 const { getTooltipText: getWorktreeTaskTooltip } = useWorktreeTaskMap();
@@ -337,9 +337,9 @@ onUnmounted(() => {
         </span>
         <span
           v-if="currentWorktree?.branchName"
-          v-tooltip.bottom="currentWorktree.repositoryName && getWorktreeTaskTooltip(currentWorktree.repositoryName, currentWorktree.branchName) ? { value: getWorktreeTaskTooltip(currentWorktree.repositoryName, currentWorktree.branchName), class: 'task-tooltip-sm' } : undefined"
+          v-tooltip.bottom="getWorktreeTaskTooltip(currentWorktree.repositoryName, currentWorktree.branchName) ? { value: getWorktreeTaskTooltip(currentWorktree.repositoryName, currentWorktree.branchName), escape: false, showDelay: 300, class: 'task-tooltip-sm' } : undefined"
           class="flex items-center gap-1 text-xs font-mono text-[#9399b2]"
-          :class="{ 'cursor-help': currentWorktree.repositoryName && getWorktreeTaskTooltip(currentWorktree.repositoryName, currentWorktree.branchName) }"
+          :class="{ 'cursor-help': getWorktreeTaskTooltip(currentWorktree.repositoryName, currentWorktree.branchName), 'pointer-events-none': !getWorktreeTaskTooltip(currentWorktree.repositoryName, currentWorktree.branchName) }"
         >
           <span class="pi pi-code-branch" style="font-size: 10px" />
           {{ currentWorktree.branchName }}

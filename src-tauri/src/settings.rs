@@ -322,6 +322,10 @@ pub struct AppSettings {
     pub notification_sound: Option<NotificationSoundSettings>,
     #[serde(default, rename = "mcpPort")]
     pub mcp_port: u16,
+    #[serde(default, rename = "mcpApiKey")]
+    pub mcp_api_key: String,
+    #[serde(default, rename = "mcpRemoteAccess")]
+    pub mcp_remote_access: bool,
     #[serde(default, rename = "enableHomeCat")]
     pub enable_home_cat: bool,
     #[serde(default = "default_ai_timeout_secs", rename = "aiTimeoutSecs")]
@@ -355,10 +359,18 @@ impl Default for AppSettings {
             appearance: None,
             notification_sound: None,
             mcp_port: 0,
+            mcp_api_key: String::new(),
+            mcp_remote_access: false,
             enable_home_cat: false,
             ai_timeout_secs: default_ai_timeout_secs(),
         }
     }
+}
+
+pub fn generate_api_key() -> String {
+    use rand::Rng;
+    let bytes: [u8; 32] = rand::thread_rng().gen();
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 pub struct SettingsManager {
@@ -381,7 +393,7 @@ impl SettingsManager {
             .expect("app_data_dir not available")
             .join("settings.json");
 
-        let settings = if path.exists() {
+        let mut settings = if path.exists() {
             match std::fs::read_to_string(&path) {
                 Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
                 Err(_) => AppSettings::default(),
@@ -389,6 +401,17 @@ impl SettingsManager {
         } else {
             AppSettings::default()
         };
+
+        // APIキーが未設定なら自動生成してディスクに保存
+        if settings.mcp_api_key.is_empty() {
+            settings.mcp_api_key = generate_api_key();
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Ok(json) = serde_json::to_string_pretty(&settings) {
+                let _ = std::fs::write(&path, json);
+            }
+        }
 
         // ロック順序を save() と統一: file_path → settings
         match self.file_path.lock() {
@@ -437,7 +460,9 @@ impl SettingsManager {
     }
 }
 
-/// Windowsのシステムサウンドファイル一覧を返す (C:\Windows\Media\*.wav)
+/// システムサウンドファイル一覧を返す
+/// Windows: C:\Windows\Media\*.wav
+/// macOS: /System/Library/Sounds/*.aiff
 #[tauri::command]
 pub fn list_system_sounds() -> Vec<String> {
     #[cfg(target_os = "windows")]
@@ -449,6 +474,25 @@ pub fn list_system_sounds() -> Vec<String> {
                 .filter_map(|e| {
                     let path = e.path();
                     if path.extension().and_then(|x| x.to_str()) == Some("wav") {
+                        path.file_name().and_then(|n| n.to_str()).map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            names.sort();
+            return names;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let sounds_dir = std::path::Path::new("/System/Library/Sounds");
+        if let Ok(entries) = std::fs::read_dir(sounds_dir) {
+            let mut names: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let path = e.path();
+                    if path.extension().and_then(|x| x.to_str()) == Some("aiff") {
                         path.file_name().and_then(|n| n.to_str()).map(|s| s.to_string())
                     } else {
                         None
@@ -495,7 +539,13 @@ pub async fn read_audio_file(app_handle: tauri::AppHandle, sound: String) -> Res
         if filename.contains("..") || filename.contains('/') || filename.contains('\\') || filename.contains('\0') {
             return Err("不正なファイル名です".to_string());
         }
-        std::path::PathBuf::from(r"C:\Windows\Media").join(filename)
+        #[cfg(target_os = "windows")]
+        let system_sounds_dir = std::path::PathBuf::from(r"C:\Windows\Media");
+        #[cfg(target_os = "macos")]
+        let system_sounds_dir = std::path::PathBuf::from("/System/Library/Sounds");
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let system_sounds_dir = std::path::PathBuf::from("/usr/share/sounds");
+        system_sounds_dir.join(filename)
     } else if let Some(filename) = sound.strip_prefix("custom:") {
         if filename.contains("..") || filename.contains('/') || filename.contains('\\') || filename.contains('\0') {
             return Err("不正なファイル名です".to_string());

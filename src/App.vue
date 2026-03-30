@@ -45,7 +45,7 @@ import { useAppAutoApproval } from "./composables/useAppAutoApproval";
 import { useAppHotkeys } from "./composables/useAppHotkeys";
 import { useSubWindowEvents } from "./composables/useSubWindowEvents";
 import { useShutdownGuard } from "./composables/useShutdownGuard";
-import { saveArchive, deleteArchive } from "./composables/useArchivePersistence";
+import { saveArchive, deleteArchive, archives, archiveSearchQuery, useArchivePersistence } from "./composables/useArchivePersistence";
 import { cancelApproval } from "./utils/autoApproval";
 import { debug } from "@tauri-apps/plugin-log";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -478,11 +478,30 @@ async function onOpenArtifacts(worktreeId: string) {
   await openArtifactViewer(worktree.id, worktree.name);
 }
 
-async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string) {
+async function onShowAddWorktreeDialog() {
+  // セッション引継ぎ選択肢にアーカイブを全件表示するため読み込む
+  const { loadArchives, hasMore, isLoading } = useArchivePersistence();
+  // 進行中のロードが完了するまで待機（競合防止）
+  while (isLoading.value) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  // 検索フィルタをクリアして全件取得
+  archiveSearchQuery.value = "";
+  await loadArchives(true);
+  while (hasMore.value) {
+    const countBefore = archives.value.length;
+    await loadArchives(false);
+    // ロード失敗時は件数が増えないためループを抜ける
+    if (archives.value.length === countBefore) break;
+  }
+  showAddDialog.value = true;
+}
+
+async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string, sessionSourcePath?: string, copyWorkingChangesFrom?: string) {
   // ダイアログを即閉じ、一覧に仮エントリを表示
   showAddDialog.value = false;
   addWorktreePlaceholder(entry);
-  loadingWorktrees.set(entry.id, t("creatingText"));
+  loadingWorktrees.set(entry.id, copyWorkingChangesFrom ? t("duplicatingText") : t("creatingText"));
 
   try {
     const lfsSkipped = await invokeWorktreeAdd(entry, sourceBranch);
@@ -496,6 +515,18 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string)
       autoApprovalMap.set(entry.id, true);
       const wtEntry = settings.value.worktrees.find((w) => w.id === entry.id);
       if (wtEntry) wtEntry.autoApproval = true;
+    }
+
+    // 複製時: 未コミット変更をコピー
+    if (copyWorkingChangesFrom) {
+      try {
+        await invoke("copy_working_changes", {
+          sourcePath: copyWorkingChangesFrom,
+          targetPath: entry.path,
+        });
+      } catch (e) {
+        await message(t("copyWorkingChangesFailed", { error: e }), { kind: "warning" });
+      }
     }
 
     // gitignoreコピー対象があればコピー実行（スクリプト実行前）
@@ -522,6 +553,18 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string)
         });
       } catch (e) {
         await message(t("claudeHooksFailed", { error: e }), { kind: "warning" });
+      }
+    }
+
+    // Claude Code セッションデータの引継ぎ
+    if (sessionSourcePath) {
+      try {
+        await invoke("copy_claude_session_data", {
+          sourceWorktreePath: sessionSourcePath,
+          targetWorktreePath: entry.path,
+        });
+      } catch (e) {
+        await message(t("sessionCopyFailed", { error: e }), { kind: "warning" });
       }
     }
 
@@ -562,6 +605,24 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string)
   } finally {
     loadingWorktrees.delete(entry.id);
   }
+}
+
+async function onDuplicateWorktree(worktreeId: string) {
+  const source = worktrees.value.find((w) => w.id === worktreeId);
+  if (!source) return;
+
+  const suffix = crypto.randomUUID().replace(/-/g, '').slice(0, 8);
+  const newName = `${source.name}-copy-${suffix}`;
+  const newEntry: WorktreeEntry = {
+    id: `${Date.now()}-${suffix}`,
+    name: newName,
+    repositoryId: source.repositoryId,
+    repositoryName: source.repositoryName,
+    path: `${settings.value.worktreeBaseDir}/${newName}`,
+    branchName: `worktree/${newName}`,
+  };
+
+  await onAddWorktreeConfirm(newEntry, source.branchName, source.path, source.path);
 }
 
 // ─── ────────────────────────────────────────────────────────────────────────
@@ -701,12 +762,12 @@ async function onTrayButtonClick() {
         worktreeId,
         worktreeName: worktree.name,
         worktreePath: worktree.path,
+        repositoryName: worktree.repositoryName,
         isDetached: true,
         layout: (layoutData?.layout ?? null) as import("./types/frame").FrameNode | null,
         terminals: layoutData?.terminals ?? [],
         windowSize: layoutData?.windowSize,
         branchName: worktree.branchName,
-        repositoryName: worktree.repositoryName,
         hotkeyChar: hotkeyChars.value.get(worktreeId),
         autoApproval: autoApprovalMap.get(worktreeId) ?? false,
         aiJudging: aiJudgingWorktrees.has(worktreeId),
@@ -761,12 +822,12 @@ async function onTrayButtonClick() {
         worktreeId,
         worktreeName: worktree.name,
         worktreePath: worktree.path,
+        repositoryName: worktree.repositoryName,
         isDetached: sizeFromContainer,  // コンテナサイズの場合はヘッダー加算をスキップ
         layout: mainLayout,
         terminals,
         windowSize: mainWindowSize,
         branchName: worktree.branchName,
-        repositoryName: worktree.repositoryName,
         hotkeyChar: hotkeyChars.value.get(worktreeId),
         autoApproval: autoApprovalMap.get(worktreeId) ?? false,
         aiJudging: aiJudgingWorktrees.has(worktreeId),
@@ -1342,7 +1403,7 @@ onMounted(async () => {
         :auto-approvals="autoApprovalMap"
         :ai-judging-worktrees="aiJudgingWorktrees"
         @select-terminal="switchToTerminal"
-        @add-worktree="showAddDialog = true"
+        @add-worktree="onShowAddWorktreeDialog"
         @remove-worktree="onRemoveWorktree"
         @add-terminal="onAddTerminal"
         @open-in-ide="onOpenInIde"
@@ -1354,6 +1415,7 @@ onMounted(async () => {
         @set-hotkey-char="onSetHotkeyChar"
         @toggle-auto-approval="onToggleAutoApproval"
         @cancel-ai-judging="onCancelAiJudging"
+        @duplicate-worktree="onDuplicateWorktree"
         @reorder-worktrees="reorderWorktree"
         @commit-reorder="saveWorktreeOrder"
         @cancel-reorder="restoreWorktreeOrder"
@@ -1453,8 +1515,10 @@ onMounted(async () => {
       v-if="showAddDialog"
       :repositories="settings.repositories"
       :worktree-base-dir="settings.worktreeBaseDir"
+      :active-worktrees="settings.worktrees"
+      :archived-worktrees="archives"
       :submitting="false"
-      @confirm="(entry, sourceBranch) => onAddWorktreeConfirm(entry, sourceBranch)"
+      @confirm="(entry, sourceBranch, sessionSourcePath) => onAddWorktreeConfirm(entry, sourceBranch, sessionSourcePath)"
       @cancel="showAddDialog = false"
     />
 
@@ -1545,6 +1609,8 @@ onMounted(async () => {
     "deletingText": "Deleting...",
     "archivingText": "Archiving...",
     "creatingText": "Creating...",
+    "duplicatingText": "Duplicating...",
+    "copyWorkingChangesFailed": "Failed to copy working changes: {error}",
     "deleteFailed": "Delete failed: {error}",
     "ideNotInstalled": "None of Cursor, VS Code, Antigravity are installed.",
     "ideNotInstalledTitle": "IDE not found",
@@ -1553,6 +1619,7 @@ onMounted(async () => {
     "worktreeCreateFailed": "Failed to create worktree: {error}",
     "copyTargetsFailed": "Some files could not be copied after worktree creation: {error}",
     "claudeHooksFailed": "Failed to write Claude Code notification hooks: {error}",
+    "sessionCopyFailed": "Failed to copy Claude Code session data: {error}",
     "shuttingDown": "Shutting down...",
     "minimize": "Minimize",
     "maximize": "Maximize",
@@ -1572,6 +1639,8 @@ onMounted(async () => {
     "deletingText": "削除中...",
     "archivingText": "アーカイブ中...",
     "creatingText": "作成中...",
+    "duplicatingText": "複製中...",
+    "copyWorkingChangesFailed": "作業中変更のコピーに失敗しました: {error}",
     "deleteFailed": "削除に失敗しました: {error}",
     "ideNotInstalled": "Cursor、VS Code、Antigravity のいずれもインストールされていません。",
     "ideNotInstalledTitle": "IDE が見つかりません",
@@ -1580,6 +1649,7 @@ onMounted(async () => {
     "worktreeCreateFailed": "ワークツリーの作成に失敗しました: {error}",
     "copyTargetsFailed": "ワークツリー追加後のファイルコピーに失敗しました: {error}",
     "claudeHooksFailed": "Claude Code通知フックの書き込みに失敗しました: {error}",
+    "sessionCopyFailed": "Claude Codeセッションデータのコピーに失敗しました: {error}",
     "shuttingDown": "終了しています...",
     "minimize": "最小化",
     "maximize": "最大化",

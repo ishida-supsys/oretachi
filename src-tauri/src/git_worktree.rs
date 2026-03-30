@@ -787,6 +787,179 @@ pub fn copy_gitignore_targets(
     Ok(total)
 }
 
+/// ソースワークツリーの未コミット変更（ステージ済み・未ステージ・untracked）をターゲットへコピーする。
+/// ソースには副作用を与えない（stash不使用）。
+pub fn copy_working_changes(source_path: &str, target_path: &str) -> Result<u32, String> {
+    // -z: NUL区切り・引用符なし出力（スペースや非ASCII文字を含むパス名に対応）
+    let output = make_command("git")
+        .args(["status", "--porcelain=v1", "-uall", "-z"])
+        .current_dir(source_path)
+        .output()
+        .map_err(|e| format!("git command error: {}", e))?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "git status failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        ));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    if raw.trim_matches('\0').is_empty() {
+        return Ok(0);
+    }
+
+    let source = std::path::Path::new(source_path);
+    let target = std::path::Path::new(target_path);
+
+    let mut files_to_copy: Vec<String> = Vec::new();
+    let mut staged_files: Vec<String> = Vec::new();
+    let mut files_to_delete: Vec<String> = Vec::new();
+    // index にのみ存在する（ワークツリーからは削除された）ステージ済みファイル（AD 等）
+    let mut files_to_restore_from_index: Vec<String> = Vec::new();
+
+    // NUL区切りでトークン列にする
+    // リネーム/コピーエントリのフォーマット: "XY new-path\0old-path\0"
+    // 通常エントリのフォーマット: "XY path\0"
+    let tokens: Vec<&str> = raw.split('\0').collect();
+    let mut i = 0;
+    while i < tokens.len() {
+        let token = tokens[i];
+        i += 1;
+
+        if token.len() < 3 {
+            continue;
+        }
+
+        let x = &token[..1]; // index (staged) status
+        let y = &token[1..2]; // worktree (unstaged) status
+        let new_path = token[3..].to_string();
+
+        // staged rename/copy の場合、次のトークンが旧パス
+        // rename(R) のみ旧パスをターゲットから削除する（copy(C) は元ファイルが残存するため削除しない）
+        let is_rename_or_copy = x == "R" || x == "C";
+        if is_rename_or_copy {
+            if i < tokens.len() {
+                let old_path = tokens[i].to_string();
+                i += 1;
+                // rename のみ旧パスをターゲットから削除対象に追加
+                if x == "R" && !old_path.is_empty() {
+                    files_to_delete.push(old_path);
+                }
+            }
+        }
+
+        // index側が削除 / worktree側が削除かで分岐
+        let staged_deleted = x == "D";   // index から削除（staged delete）
+        let worktree_deleted = y == "D"; // ワークツリーから削除（unstaged delete）
+
+        // index にあるがワークツリーに存在しないファイル（例: AD）は
+        // git show でindex版を取得する必要がある
+        let has_staged_content = x != " " && x != "?" && !staged_deleted;
+        let index_only = has_staged_content && worktree_deleted;
+
+        if staged_deleted {
+            // staged delete: ターゲットからも削除
+            if !new_path.is_empty() {
+                files_to_delete.push(new_path.clone());
+            }
+        } else if !new_path.is_empty() {
+            if index_only {
+                // ワークツリーに存在しないがindexにある（AD 等）: index版コピー対象
+                files_to_restore_from_index.push(new_path.clone());
+            } else if !worktree_deleted {
+                files_to_copy.push(new_path.clone());
+            }
+            // worktree_deleted かつ staged_deleted でない場合は files_to_delete に入れず無視
+            // (ADステータスは files_to_restore_from_index で処理済み)
+        }
+
+        // ステージ済みファイル（x が空白・?・D 以外）
+        if has_staged_content && !new_path.is_empty() && !index_only {
+            staged_files.push(new_path.clone());
+        }
+    }
+
+    // 重複除去
+    files_to_copy.sort();
+    files_to_copy.dedup();
+    files_to_restore_from_index.sort();
+    files_to_restore_from_index.dedup();
+    staged_files.sort();
+    staged_files.dedup();
+
+    /// git status 出力パスに '..' が含まれないことを確認する（パストラバーサル防止）
+    fn validate_path(path: &str) -> Result<(), String> {
+        for component in std::path::Path::new(path).components() {
+            if matches!(component, std::path::Component::ParentDir) {
+                return Err(format!("パストラバーサルを含むパスは使用できません: {}", path));
+            }
+        }
+        Ok(())
+    }
+
+    let mut count = 0u32;
+
+    // ファイルをコピー
+    for file in &files_to_copy {
+        validate_path(file)?;
+        let src_file = source.join(file);
+        let dst_file = target.join(file);
+        if src_file.exists() {
+            if let Some(parent) = dst_file.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create dir for {}: {}", file, e))?;
+            }
+            std::fs::copy(&src_file, &dst_file)
+                .map_err(|e| format!("failed to copy {}: {}", file, e))?;
+            count += 1;
+        }
+    }
+
+    // index にのみ存在するファイル（AD 等）を git show でindex版から取得してコピー
+    for file in &files_to_restore_from_index {
+        validate_path(file)?;
+        let spec = format!(":{}", file);
+        let show_output = make_command("git")
+            .args(["show", &spec])
+            .current_dir(source_path)
+            .output()
+            .map_err(|e| format!("git show error for {}: {}", file, e))?;
+        if show_output.status.success() {
+            let dst_file = target.join(file);
+            if let Some(parent) = dst_file.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create dir for {}: {}", file, e))?;
+            }
+            std::fs::write(&dst_file, &show_output.stdout)
+                .map_err(|e| format!("failed to write index content for {}: {}", file, e))?;
+            // git add してステージ済み状態を再現
+            let _ = run_git_in(target_path, &["add", "--", file]);
+            count += 1;
+        }
+    }
+
+    // 削除されたファイル・リネーム旧ファイルをターゲットからも削除
+    for file in &files_to_delete {
+        validate_path(file)?;
+        let dst_file = target.join(file);
+        if dst_file.exists() {
+            let _ = std::fs::remove_file(&dst_file);
+        }
+    }
+
+    // ステージ済み状態を復元
+    if !staged_files.is_empty() {
+        let mut args: Vec<&str> = vec!["add", "--"];
+        let refs: Vec<&str> = staged_files.iter().map(|s| s.as_str()).collect();
+        args.extend(&refs);
+        // エラーは無視（ファイルが存在しない場合など）
+        let _ = run_git_in(target_path, &args);
+    }
+
+    Ok(count)
+}
+
 pub fn worktree_remove(repo_path: &str, worktree_path: &str) -> Result<(), String> {
     let output = make_command("git")
         .args(["worktree", "remove", "--force", "--force", worktree_path])
@@ -884,4 +1057,59 @@ pub fn write_claude_hooks(
         .map_err(|e| format!("Failed to write settings.local.json: {}", e))?;
 
     Ok(())
+}
+
+/// パスを Claude Code のプロジェクトディレクトリ名に変換する
+/// CCManager と同じロジック: `/`, `\`, `.` をすべて `-` に置換
+fn path_to_claude_project_name(path: &str) -> String {
+    path.replace('/', "-").replace('\\', "-").replace('.', "-").replace(':', "-")
+}
+
+/// ソースワークツリーの Claude Code セッションデータをターゲットにコピーする
+/// `~/.claude/projects/[encoded-source]/` → `~/.claude/projects/[encoded-target]/`
+pub fn copy_claude_session_data(
+    source_worktree_path: &str,
+    target_worktree_path: &str,
+) -> Result<u32, String> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .map_err(|_| "Could not determine home directory".to_string())?;
+    let projects_dir = std::path::Path::new(&home).join(".claude").join("projects");
+
+    let source_name = path_to_claude_project_name(source_worktree_path);
+    let target_name = path_to_claude_project_name(target_worktree_path);
+    let source_dir = projects_dir.join(&source_name);
+    let target_dir = projects_dir.join(&target_name);
+
+    if !source_dir.exists() {
+        log::info!("[copy_claude_session] source not found, skipping: {:?}", source_dir);
+        return Ok(0);
+    }
+
+    // ソースとターゲットが同じディレクトリなら自己コピーになるためスキップ
+    if source_name == target_name {
+        log::info!("[copy_claude_session] source and target are identical, skipping");
+        return Ok(0);
+    }
+
+    log::info!("[copy_claude_session] copying {:?} -> {:?}", source_dir, target_dir);
+
+    // 一時ディレクトリにコピーしてから置換することで、コピー失敗時のデータ損失を防ぐ
+    let tmp_dir = projects_dir.join(format!("{}_tmp_{}", target_name, std::process::id()));
+    if tmp_dir.exists() {
+        std::fs::remove_dir_all(&tmp_dir)
+            .map_err(|e| format!("failed to remove stale tmp dir: {}", e))?;
+    }
+
+    let count = copy_dir_recursive(&source_dir, &tmp_dir)?;
+
+    // コピー成功後に既存ターゲットを削除してから一時ディレクトリを移動
+    if target_dir.exists() {
+        std::fs::remove_dir_all(&target_dir)
+            .map_err(|e| format!("failed to remove existing target session dir: {}", e))?;
+    }
+    std::fs::rename(&tmp_dir, &target_dir)
+        .map_err(|e| format!("failed to rename tmp dir to target: {}", e))?;
+
+    Ok(count)
 }

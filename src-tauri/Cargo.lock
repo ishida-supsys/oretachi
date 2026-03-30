@@ -3638,7 +3638,7 @@ dependencies = [
 
 [[package]]
 name = "oretachi"
-version = "0.16.1"
+version = "0.17.1"
 dependencies = [
  "axum",
  "base64 0.22.1",
@@ -3650,10 +3650,12 @@ dependencies = [
  "notify",
  "notify-debouncer-mini",
  "portable-pty",
+ "rand 0.8.5",
  "rmcp",
  "serde",
  "serde_json",
  "sqlx",
+ "subtle",
  "tauri",
  "tauri-build",
  "tauri-plugin-cli",

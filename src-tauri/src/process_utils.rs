@@ -146,18 +146,21 @@ pub fn refresh_path_from_login_shell() -> Result<String, String> {
         }
     };
 
+    // $SHELL と実際の設定ファイルが異なる場合（例: $SHELL=zsh だが設定は ~/.bashrc）に
+    // ログインシェルが成功しても必要なパスが含まれないことがある。
+    // そのため well-known paths は常にマージ対象に含める。
+    let well_known = [
+        format!("{}/.local/bin", home),
+        "/usr/local/bin".to_string(),
+        "/opt/homebrew/bin".to_string(),
+        format!("{}/.cargo/bin", home),
+    ];
+
     let additional = match shell_path_result {
-        Ok(shell_path) => shell_path,
+        Ok(shell_path) => format!("{}:{}", shell_path, well_known.join(":")),
         Err(e) => {
             log::warn!("refresh_path_from_login_shell: {}; using well-known fallback paths", e);
-            // フォールバック: 既知の一般的なパス
-            [
-                format!("{}/.local/bin", home),
-                "/usr/local/bin".to_string(),
-                "/opt/homebrew/bin".to_string(),
-                format!("{}/.cargo/bin", home),
-            ]
-            .join(":")
+            well_known.join(":")
         }
     };
 
