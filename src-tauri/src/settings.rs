@@ -437,7 +437,9 @@ impl SettingsManager {
     }
 }
 
-/// Windowsのシステムサウンドファイル一覧を返す (C:\Windows\Media\*.wav)
+/// システムサウンドファイル一覧を返す
+/// Windows: C:\Windows\Media\*.wav
+/// macOS: /System/Library/Sounds/*.aiff
 #[tauri::command]
 pub fn list_system_sounds() -> Vec<String> {
     #[cfg(target_os = "windows")]
@@ -449,6 +451,25 @@ pub fn list_system_sounds() -> Vec<String> {
                 .filter_map(|e| {
                     let path = e.path();
                     if path.extension().and_then(|x| x.to_str()) == Some("wav") {
+                        path.file_name().and_then(|n| n.to_str()).map(|s| s.to_string())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            names.sort();
+            return names;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let sounds_dir = std::path::Path::new("/System/Library/Sounds");
+        if let Ok(entries) = std::fs::read_dir(sounds_dir) {
+            let mut names: Vec<String> = entries
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let path = e.path();
+                    if path.extension().and_then(|x| x.to_str()) == Some("aiff") {
                         path.file_name().and_then(|n| n.to_str()).map(|s| s.to_string())
                     } else {
                         None
@@ -495,7 +516,13 @@ pub async fn read_audio_file(app_handle: tauri::AppHandle, sound: String) -> Res
         if filename.contains("..") || filename.contains('/') || filename.contains('\\') || filename.contains('\0') {
             return Err("不正なファイル名です".to_string());
         }
-        std::path::PathBuf::from(r"C:\Windows\Media").join(filename)
+        #[cfg(target_os = "windows")]
+        let system_sounds_dir = std::path::PathBuf::from(r"C:\Windows\Media");
+        #[cfg(target_os = "macos")]
+        let system_sounds_dir = std::path::PathBuf::from("/System/Library/Sounds");
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        let system_sounds_dir = std::path::PathBuf::from("/usr/share/sounds");
+        system_sounds_dir.join(filename)
     } else if let Some(filename) = sound.strip_prefix("custom:") {
         if filename.contains("..") || filename.contains('/') || filename.contains('\\') || filename.contains('\0') {
             return Err("不正なファイル名です".to_string());
