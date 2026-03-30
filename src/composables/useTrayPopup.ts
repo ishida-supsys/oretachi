@@ -19,6 +19,7 @@ export interface TrayWorktreeData {
   terminals: TrayTerminalData[];
   windowSize?: { width: number; height: number };
   branchName: string;
+  repositoryName: string;
   hotkeyChar?: string;
   autoApproval: boolean;
   aiJudging: boolean;

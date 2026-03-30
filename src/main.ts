@@ -2,6 +2,7 @@ import { createApp } from "vue";
 import "./styles.css";
 import PrimeVue from "primevue/config";
 import ToastService from "primevue/toastservice";
+import Tooltip from "primevue/tooltip";
 import Aura from "@primeuix/themes/aura";
 import { attachConsole } from "@tauri-apps/plugin-log";
 import { invoke } from "@tauri-apps/api/core";
@@ -58,6 +59,7 @@ async function mountApp() {
     })
     .use(ToastService)
     .use(i18n)
+    .directive("tooltip", Tooltip)
     .mount("#app");
 }
 
