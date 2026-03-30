@@ -960,6 +960,12 @@ pub fn copy_working_changes(source_path: &str, target_path: &str) -> Result<u32,
     Ok(count)
 }
 
+/// 既存ブランチのワークツリーを再作成する（ブランチ削除失敗時のロールバック用）
+pub fn worktree_restore(repo_path: &str, worktree_path: &str, branch_name: &str) -> Result<(), String> {
+    run_git_in(repo_path, &["worktree", "add", worktree_path, branch_name])?;
+    Ok(())
+}
+
 pub fn worktree_remove(repo_path: &str, worktree_path: &str) -> Result<(), String> {
     let output = make_command("git")
         .args(["worktree", "remove", "--force", "--force", worktree_path])
