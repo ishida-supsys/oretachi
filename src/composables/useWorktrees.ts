@@ -78,8 +78,9 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
       worktreePath: worktree.path,
     });
 
-    // git_worktree_remove 成功済み: ブランチ削除の成否にかかわらず設定からの削除・
-    // クリーンアップは必ず実行する（ディレクトリは既に消えているため）
+    // git_worktree_remove 成功済み: ブランチ削除を試みる。
+    // 失敗した場合はワークツリーを復元してエラーを即座に伝播し、UI から消さない。
+    // 復元自体も失敗した場合のみ、ディレクトリが既に消えているため従来通りクリーンアップを続行する。
     let branchDeleteError: unknown = null;
     if (options?.deleteBranch) {
       try {
@@ -89,6 +90,22 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
           force: options.forceBranch ?? false,
         });
       } catch (e) {
+        // ワークツリーを復元して、削除前の状態に戻す
+        let restored = false;
+        try {
+          await invoke("git_worktree_restore", {
+            repoPath: repoEntry.path,
+            worktreePath: worktree.path,
+            branchName: worktree.branchName,
+          });
+          restored = true;
+        } catch {
+          // 復元失敗: ディレクトリは既に消えているため従来通りクリーンアップして続行
+        }
+        if (restored) {
+          // 復元成功: ワークツリーは元に戻ったのでエラーをそのまま throw（UI から消さない）
+          throw e;
+        }
         branchDeleteError = e;
       }
     }

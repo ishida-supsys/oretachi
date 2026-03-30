@@ -239,6 +239,11 @@ async fn git_delete_branch(repo_path: String, branch_name: String, force: bool) 
     run_git(move || git_worktree::delete_branch(&repo_path, &branch_name, force)).await
 }
 
+#[tauri::command]
+async fn git_worktree_restore(repo_path: String, worktree_path: String, branch_name: String) -> Result<(), String> {
+    run_git(move || git_worktree::worktree_restore(&repo_path, &worktree_path, &branch_name)).await
+}
+
 // ─── コードレビュー用 Git コマンド ────────────────────────────────────────────
 
 #[tauri::command]
@@ -683,6 +688,7 @@ pub fn run() {
             git_validate_repo,
             git_worktree_add,
             git_worktree_remove,
+            git_worktree_restore,
             git_list_branches,
             detect_package_manager,
             read_gitignore,
