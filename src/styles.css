@@ -176,3 +176,8 @@ body {
     #00ff00, #32cd32, #90ee90, #228b22, #32cd32, #006400, #00ff00
   );
 }
+
+.task-tooltip-sm.p-tooltip .p-tooltip-text {
+  font-size: 11px;
+  white-space: pre-line;
+}

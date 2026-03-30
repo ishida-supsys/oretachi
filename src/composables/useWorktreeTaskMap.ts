@@ -77,8 +77,7 @@ export function useWorktreeTaskMap() {
     const maxShow = 3;
     const lines = tasks.slice(0, maxShow).map((task) => {
       const status = t(`taskStatus.${task.status}`, task.status);
-      const prompt =
-        task.prompt.length > 30 ? task.prompt.slice(0, 30) + "..." : task.prompt;
+      const prompt = task.prompt;
       const d = new Date(task.createdAt);
       const date = `${String(d.getMonth() + 1).padStart(2, "0")}/${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
       return `[${status}] ${prompt} (${date})`;

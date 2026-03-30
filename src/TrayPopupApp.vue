@@ -337,9 +337,9 @@ onUnmounted(() => {
         </span>
         <span
           v-if="currentWorktree?.branchName"
+          v-tooltip.bottom="getWorktreeTaskTooltip(currentWorktree.repositoryName, currentWorktree.branchName) ? { value: getWorktreeTaskTooltip(currentWorktree.repositoryName, currentWorktree.branchName), escape: false, showDelay: 300, class: 'task-tooltip-sm' } : undefined"
           class="flex items-center gap-1 text-xs font-mono text-[#9399b2]"
           :class="{ 'cursor-help': getWorktreeTaskTooltip(currentWorktree.repositoryName, currentWorktree.branchName), 'pointer-events-none': !getWorktreeTaskTooltip(currentWorktree.repositoryName, currentWorktree.branchName) }"
-          v-tooltip="getWorktreeTaskTooltip(currentWorktree.repositoryName, currentWorktree.branchName) ? { value: getWorktreeTaskTooltip(currentWorktree.repositoryName, currentWorktree.branchName), escape: false, showDelay: 300 } : null"
         >
           <span class="pi pi-code-branch" style="font-size: 10px" />
           {{ currentWorktree.branchName }}

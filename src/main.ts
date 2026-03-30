@@ -58,8 +58,8 @@ async function mountApp() {
       },
     })
     .use(ToastService)
-    .directive("tooltip", Tooltip)
     .use(i18n)
+    .directive("tooltip", Tooltip)
     .mount("#app");
 }
 
