@@ -145,6 +145,7 @@ export function useRemoveWorktreeDialog(options: {
         if (term?.isRunning) await term.kill();
         terminalWorktreeMap.delete(terminal.id);
       }
+      worktree.terminals.splice(0);
       worktreeFrameBundles.delete(worktreeId);
 
       if (activeWorktreeId.value === worktreeId) goHome();
