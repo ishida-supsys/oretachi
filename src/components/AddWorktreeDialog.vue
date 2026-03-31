@@ -145,7 +145,7 @@ function confirm() {
           v-model="sourceBranch"
           class="input"
           :placeholder="t('sourceBranchPlaceholder')"
-          :disabled="submitting"
+          :disabled="submitting || !!duplicateSource"
         />
       </div>
 
