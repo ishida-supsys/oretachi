@@ -45,7 +45,8 @@ import { useAppAutoApproval } from "./composables/useAppAutoApproval";
 import { useAppHotkeys } from "./composables/useAppHotkeys";
 import { useSubWindowEvents } from "./composables/useSubWindowEvents";
 import { useShutdownGuard } from "./composables/useShutdownGuard";
-import { saveArchive, deleteArchive, archives, archiveSearchQuery, useArchivePersistence } from "./composables/useArchivePersistence";
+import { saveArchive, deleteArchive } from "./composables/useArchivePersistence";
+import type { ArchiveRow } from "./types/archive";
 import { cancelApproval } from "./utils/autoApproval";
 import { debug } from "@tauri-apps/plugin-log";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -165,6 +166,13 @@ const pendingSessionAttach = new Map<number, { sessionId: number; snapshot: stri
 
 // ワークツリー追加ダイアログ
 const showAddDialog = ref(false);
+const duplicateSourceData = ref<{
+  repositoryId: string;
+  worktreeName: string;
+  sourceBranch: string;
+  sessionSourcePath: string;
+  archivedWorktrees?: ArchiveRow[];
+} | null>(null);
 
 
 // 削除中のワークツリー ID セット
@@ -479,27 +487,14 @@ async function onOpenArtifacts(worktreeId: string) {
 }
 
 async function onShowAddWorktreeDialog() {
-  // セッション引継ぎ選択肢にアーカイブを全件表示するため読み込む
-  const { loadArchives, hasMore, isLoading } = useArchivePersistence();
-  // 進行中のロードが完了するまで待機（競合防止）
-  while (isLoading.value) {
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  // 検索フィルタをクリアして全件取得
-  archiveSearchQuery.value = "";
-  await loadArchives(true);
-  while (hasMore.value) {
-    const countBefore = archives.value.length;
-    await loadArchives(false);
-    // ロード失敗時は件数が増えないためループを抜ける
-    if (archives.value.length === countBefore) break;
-  }
+  duplicateSourceData.value = null;
   showAddDialog.value = true;
 }
 
 async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string, sessionSourcePath?: string, copyWorkingChangesFrom?: string) {
   // ダイアログを即閉じ、一覧に仮エントリを表示
   showAddDialog.value = false;
+  duplicateSourceData.value = null;
   addWorktreePlaceholder(entry);
   loadingWorktrees.set(entry.id, copyWorkingChangesFrom ? t("duplicatingText") : t("creatingText"));
 
@@ -559,10 +554,13 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string,
     // Claude Code セッションデータの引継ぎ
     if (sessionSourcePath) {
       try {
-        await invoke("copy_claude_session_data", {
+        const count = await invoke<number>("copy_claude_session_data", {
           sourceWorktreePath: sessionSourcePath,
           targetWorktreePath: entry.path,
         });
+        if (count === 0) {
+          console.warn("[copy_claude_session] source session not found, skipped:", sessionSourcePath);
+        }
       } catch (e) {
         await message(t("sessionCopyFailed", { error: e }), { kind: "warning" });
       }
@@ -612,17 +610,14 @@ async function onDuplicateWorktree(worktreeId: string) {
   if (!source) return;
 
   const suffix = crypto.randomUUID().replace(/-/g, '').slice(0, 8);
-  const newName = `${source.name}-copy-${suffix}`;
-  const newEntry: WorktreeEntry = {
-    id: `${Date.now()}-${suffix}`,
-    name: newName,
+  duplicateSourceData.value = {
     repositoryId: source.repositoryId,
-    repositoryName: source.repositoryName,
-    path: `${settings.value.worktreeBaseDir}/${newName}`,
-    branchName: `worktree/${newName}`,
+    worktreeName: `${source.name}-copy-${suffix}`,
+    sourceBranch: source.branchName,
+    sessionSourcePath: source.path,
   };
 
-  await onAddWorktreeConfirm(newEntry, source.branchName, source.path, source.path);
+  showAddDialog.value = true;
 }
 
 // ─── ────────────────────────────────────────────────────────────────────────
@@ -1516,10 +1511,11 @@ onMounted(async () => {
       :repositories="settings.repositories"
       :worktree-base-dir="settings.worktreeBaseDir"
       :active-worktrees="settings.worktrees"
-      :archived-worktrees="archives"
+      :archived-worktrees="duplicateSourceData?.archivedWorktrees ?? []"
       :submitting="false"
-      @confirm="(entry, sourceBranch, sessionSourcePath) => onAddWorktreeConfirm(entry, sourceBranch, sessionSourcePath)"
-      @cancel="showAddDialog = false"
+      :duplicate-source="duplicateSourceData"
+      @confirm="(entry, sb, ssp, cwcf) => onAddWorktreeConfirm(entry, sb, ssp, cwcf)"
+      @cancel="showAddDialog = false; duplicateSourceData = null"
     />
 
     <!-- ワークツリー削除ダイアログ -->

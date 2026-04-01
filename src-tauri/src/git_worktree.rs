@@ -966,33 +966,86 @@ pub fn worktree_restore(repo_path: &str, worktree_path: &str, branch_name: &str)
     Ok(())
 }
 
+fn is_lock_error(stderr: &str) -> bool {
+    // Windows でプロセス終了直後にファイルハンドルが残留している場合に git や OS が返すエラー文言
+    let lower = stderr.to_lowercase();
+    lower.contains("permission denied")
+        || lower.contains("being used by another process")
+        || lower.contains("access is denied")
+        || lower.contains("cannot remove")
+        || lower.contains("failed to remove")
+}
+
 pub fn worktree_remove(repo_path: &str, worktree_path: &str) -> Result<(), String> {
-    let output = make_command("git")
-        .args(["worktree", "remove", "--force", "--force", worktree_path])
-        .current_dir(repo_path)
-        .output()
-        .map_err(|e| format!("git command error: {}", e))?;
+    // Windows では PTY プロセス終了直後にファイルハンドルが残留することがあるため、
+    // ロック起因のエラーに対してはバックオフ付きリトライを行う（最大5回）。
+    // 遅延: 0, 100, 200, 400, 800ms（合計最大 1.5 秒）
+    const MAX_ATTEMPTS: u32 = 5;
+    let mut last_dir_error = String::new();
 
-    if output.status.success() {
-        return Ok(());
+    for attempt in 0..MAX_ATTEMPTS {
+        if attempt > 0 {
+            let delay_ms = 100u64 * (1 << (attempt - 1)); // 100, 200, 400, 800
+            std::thread::sleep(std::time::Duration::from_millis(delay_ms));
+        }
+
+        let output = make_command("git")
+            .args(["worktree", "remove", "--force", "--force", worktree_path])
+            .current_dir(repo_path)
+            .output()
+            .map_err(|e| format!("git command error: {}", e))?;
+
+        if output.status.success() {
+            return Ok(());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // ロック起因のエラーで試行回数が残っている場合はリトライ
+        if attempt < MAX_ATTEMPTS - 1 && is_lock_error(&stderr) {
+            log::info!(
+                "git worktree remove attempt {}/{} failed due to file lock, retrying: {}",
+                attempt + 1, MAX_ATTEMPTS, stderr.trim()
+            );
+            continue;
+        }
+
+        // 最終試行またはロック以外のエラー: ディレクトリ直接削除にフォールバック
+        log::warn!("git worktree remove failed (falling back to directory removal): {}", stderr);
+
+        let path = std::path::Path::new(worktree_path);
+        if !path.exists() {
+            // ディレクトリが既に存在しない場合はメタデータ掃除のみ
+            let _ = make_command("git")
+                .args(["worktree", "prune"])
+                .current_dir(repo_path)
+                .output();
+            return Ok(());
+        }
+
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => {
+                // メタデータ掃除
+                let _ = make_command("git")
+                    .args(["worktree", "prune"])
+                    .current_dir(repo_path)
+                    .output();
+                return Ok(());
+            }
+            Err(e) => {
+                last_dir_error = format!("failed to remove worktree directory: {}", e);
+                if attempt < MAX_ATTEMPTS - 1 {
+                    log::info!(
+                        "remove_dir_all attempt {}/{} failed, retrying: {}",
+                        attempt + 1, MAX_ATTEMPTS, last_dir_error
+                    );
+                    // continue でループの先頭に戻り、次の遅延後に git worktree remove を再試行
+                }
+            }
+        }
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    log::warn!("git worktree remove failed (falling back to directory removal): {}", stderr);
-
-    let path = std::path::Path::new(worktree_path);
-    if path.exists() {
-        std::fs::remove_dir_all(path)
-            .map_err(|e| format!("failed to remove worktree directory: {}", e))?;
-    }
-
-    // メタデータ掃除
-    let _ = make_command("git")
-        .args(["worktree", "prune"])
-        .current_dir(repo_path)
-        .output();
-
-    Ok(())
+    Err(last_dir_error)
 }
 
 /// ワークツリーの `.claude/settings.local.json` に Claude Code 通知フックを書き込む
