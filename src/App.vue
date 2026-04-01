@@ -52,6 +52,8 @@ import { debug } from "@tauri-apps/plugin-log";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useUpdater } from "./composables/useUpdater";
 import Toast from "primevue/toast";
+import MacTrafficLights from "./components/MacTrafficLights.vue";
+import { isMac } from "./composables/usePlatform";
 
 const { t } = useI18n();
 
@@ -1304,6 +1306,15 @@ onMounted(async () => {
       :class="isWindowFocused ? 'border-[#cba6f7]/50' : 'opacity-90 border-[#313244]'"
       @mousedown.left="onTabBarDrag"
     >
+      <!-- Mac: トラフィックライト -->
+      <MacTrafficLights
+        v-if="isMac"
+        :is-window-focused="isWindowFocused"
+        @close="closeWindow"
+        @minimize="minimizeWindow"
+        @maximize="toggleMaximizeWindow"
+      />
+
       <!-- ホームボタン -->
       <button
         class="px-4 text-sm font-semibold tracking-wide shrink-0 py-2 transition-colors"
@@ -1353,8 +1364,8 @@ onMounted(async () => {
         </button>
       </div>
 
-      <!-- ウィンドウコントロール -->
-      <div class="flex shrink-0 items-stretch">
+      <!-- Windows: ウィンドウコントロール -->
+      <div v-if="!isMac" class="flex shrink-0 items-stretch">
         <button
           class="flex items-center justify-center h-8 hover:bg-[#313244] text-[#6c7086] hover:text-[#cdd6f4] transition-colors"
           style="width: 42px;"

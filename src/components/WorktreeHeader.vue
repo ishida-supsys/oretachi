@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import MacTrafficLights from "./MacTrafficLights.vue";
+import { isMac } from "../composables/usePlatform";
 
 const { t } = useI18n();
 
@@ -42,15 +44,22 @@ async function closeWindow() {
 
 <template>
   <div
-    class="flex items-center justify-between border-b shrink-0 pl-4 pr-[2px] py-1 transition-colors duration-200"
-    :class="
-      props.isWindowFocused
-        ? 'border-[#cba6f7]/50'
-        : 'opacity-80 border-[#313244]'
-    "
+    class="flex items-center justify-between border-b shrink-0 pr-[2px] py-1 transition-colors duration-200"
+    :class="[
+      props.isWindowFocused ? 'border-[#cba6f7]/50' : 'opacity-80 border-[#313244]',
+      isMac && props.showWindowControls ? '' : 'pl-4'
+    ]"
     @mousedown.left="props.showWindowControls ? onHeaderDrag($event) : undefined"
   >
     <div class="flex items-center gap-2">
+      <!-- Mac: トラフィックライト -->
+      <MacTrafficLights
+        v-if="isMac && props.showWindowControls"
+        :is-window-focused="props.isWindowFocused"
+        @close="closeWindow"
+        @minimize="minimize"
+        @maximize="toggleMaximize"
+      />
       <span
         class="text-sm font-semibold transition-colors duration-200"
         :class="props.isWindowFocused ? 'text-[#cba6f7]' : 'text-[#6c7086]'"
@@ -97,13 +106,13 @@ async function closeWindow() {
       </button>
       <button
         class="flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
-        :class="props.showWindowControls ? 'mr-4' : ''"
+        :class="props.showWindowControls && !isMac ? 'mr-4' : ''"
         :title="t('openArtifacts')"
         @click="$emit('open-artifacts')"
       >
         <span class="pi pi-box text-sm" />
       </button>
-      <template v-if="props.showWindowControls">
+      <template v-if="props.showWindowControls && !isMac">
         <button
           class="flex items-center justify-center h-8 hover:bg-[#313244] text-[#6c7086] hover:text-[#cdd6f4] transition-colors"
           style="width: 42px; margin: 0 1px;"
