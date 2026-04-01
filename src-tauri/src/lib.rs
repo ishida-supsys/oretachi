@@ -836,11 +836,16 @@ pub fn run() {
             pty_manager.start_polling(app.handle().clone());
 
             // 通常モード: MCP サーバー起動 + ウィンドウ表示
-            let (mcp_port, mcp_remote_access) = {
-                let s = settings_manager.get();
-                (s.mcp_port, s.mcp_remote_access)
-            };
-            mcp_server::start_mcp_server(app.handle().clone(), mcp_port, mcp_remote_access);
+            let mcp_enabled = std::env::var("MCP_SERVER_ENABLED")
+                .map(|v| v != "false")
+                .unwrap_or(true);
+            if mcp_enabled {
+                let (mcp_port, mcp_remote_access) = {
+                    let s = settings_manager.get();
+                    (s.mcp_port, s.mcp_remote_access)
+                };
+                mcp_server::start_mcp_server(app.handle().clone(), mcp_port, mcp_remote_access);
+            }
 
             if let Some(window) = app.get_webview_window("main") {
                 let _ = window.show();

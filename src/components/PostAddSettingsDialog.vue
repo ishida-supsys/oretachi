@@ -35,7 +35,7 @@ const hookState = ref<Map<string, { enabled: boolean; kind: string }>>(new Map()
 
 // 初期化: 既存設定またはデフォルト推奨設定
 {
-  const DEFAULTS: Record<string, string> = { Stop: "completed", Notification: "approval", PermissionRequest: "approval" };
+  const DEFAULTS: Record<string, string> = { Stop: "completed", PermissionRequest: "approval" };
   for (const ev of HOOK_EVENTS) {
     const existing = props.currentNotificationHooks?.find((h) => h.event === ev);
     if (existing) {
