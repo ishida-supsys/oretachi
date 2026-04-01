@@ -14,6 +14,8 @@ const params = new URLSearchParams(window.location.search);
 const mode = params.get("mode");
 
 async function mountApp() {
+  document.addEventListener("contextmenu", (e) => e.preventDefault());
+
   await attachConsole();
 
   // ロケール先読み
