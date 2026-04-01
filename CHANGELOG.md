@@ -6,6 +6,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.17.3] - 2026-04-01
+
+### Added
+- Add macOS-style traffic light window controls
+
+### Fixed
+- Fix project list settings being empty
+
 ## [0.17.2] - 2026-03-31
 
 ### Added
@@ -132,7 +140,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.17.2...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.17.3...HEAD
+[0.17.3]: https://github.com/ishida-supsys/oretachi/compare/0.17.2...0.17.3
 [0.17.2]: https://github.com/ishida-supsys/oretachi/compare/0.17.1...0.17.2
 [0.17.1]: https://github.com/ishida-supsys/oretachi/compare/0.17.0...0.17.1
 [0.17.0]: https://github.com/ishida-supsys/oretachi/compare/0.16.1...0.17.0
