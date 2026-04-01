@@ -16,6 +16,8 @@ import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
 import type { FrameNode } from "./types/frame";
 import type { TrayTerminalEntry } from "./types/terminal";
 import { useI18n } from "vue-i18n";
+import MacTrafficLights from "./components/MacTrafficLights.vue";
+import { isMac } from "./composables/usePlatform";
 
 const { t } = useI18n();
 const { getTooltipText: getWorktreeTaskTooltip } = useWorktreeTaskMap();
@@ -325,6 +327,14 @@ onUnmounted(() => {
       @mousedown.left="onHeaderDrag"
     >
       <div class="flex items-center gap-2">
+        <!-- Mac: トラフィックライト (閉じるのみ) -->
+        <MacTrafficLights
+          v-if="isMac"
+          :is-window-focused="true"
+          :show-minimize="false"
+          :show-maximize="false"
+          @close="onClose"
+        />
         <span class="pi pi-bell text-[#cba6f7] pointer-events-none" />
         <span class="text-sm font-semibold text-[#cba6f7] pointer-events-none">
           {{ currentWorktree?.worktreeName ?? t('notification') }}
@@ -384,6 +394,7 @@ onUnmounted(() => {
           <span class="pi pi-box text-xs" />
         </button>
         <button
+          v-if="!isMac"
           class="pointer-events-auto w-6 h-6 flex items-center justify-center rounded hover:bg-[#313244] text-[#6c7086] hover:text-[#f38ba8] transition-colors"
           :title="t('close')"
           @click="onClose"
