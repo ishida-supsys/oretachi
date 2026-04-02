@@ -657,7 +657,12 @@ pub fn run() {
         .plugin(tauri_plugin_os::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init());
+        .plugin(tauri_plugin_process::init())
+        .plugin(
+            tauri_plugin_prevent_default::Builder::new()
+                .with_flags(tauri_plugin_prevent_default::Flags::CONTEXT_MENU)
+                .build(),
+        );
 
     #[cfg(debug_assertions)]
     {

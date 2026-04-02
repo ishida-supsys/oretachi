@@ -1,6 +1,6 @@
 [package]
 name = "oretachi"
-version = "0.17.2"
+version = "0.17.3"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -47,6 +47,7 @@ base64 = "0.22"
 rand = "0.8"
 subtle = "2"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+tauri-plugin-prevent-default = "4"
 tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp" }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
