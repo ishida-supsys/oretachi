@@ -747,12 +747,13 @@ async fn broadcast_worktree_archived(peer_registry: &PeerMap, name: &str, id: &s
         {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
+                // 明示的な送信エラーのみ dead と判定して削除する
                 log::warn!("[mcp] notify_logging_message failed for peer_id={}: {}", peer_id, e);
                 dead_peers.push(*peer_id);
             }
             Err(_) => {
+                // 一時的な遅延の可能性があるためタイムアウトは警告のみにする
                 log::warn!("[mcp] notify_logging_message timed out for peer_id={}", peer_id);
-                dead_peers.push(*peer_id);
             }
         }
     }
@@ -791,12 +792,13 @@ async fn broadcast_worktree_added(peer_registry: &PeerMap, name: &str, id: &str,
         {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
+                // 明示的な送信エラーのみ dead と判定して削除する
                 log::warn!("[mcp] notify_logging_message failed for peer_id={}: {}", peer_id, e);
                 dead_peers.push(*peer_id);
             }
             Err(_) => {
+                // 一時的な遅延の可能性があるためタイムアウトは警告のみにする
                 log::warn!("[mcp] notify_logging_message timed out for peer_id={}", peer_id);
-                dead_peers.push(*peer_id);
             }
         }
     }
