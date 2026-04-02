@@ -9,6 +9,7 @@ import { usePtyWriteBatcher } from "../composables/usePtyWriteBatcher";
 import { useSettings } from "../composables/useSettings";
 import { matchesHotkey } from "../composables/useHotkeys";
 import { useTerminalSearch } from "../composables/useTerminalSearch";
+import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import { useI18n } from "vue-i18n";
 import { debug } from "@tauri-apps/plugin-log";
 
@@ -54,6 +55,22 @@ let resizeDebounce: ReturnType<typeof setTimeout> | null = null;
 const { sessionId, spawn, attachToSession, write, resize, kill, isRunning, detach } = usePty();
 const batcher = usePtyWriteBatcher(() => terminal);
 const { settings } = useSettings();
+
+async function handlePaste() {
+  try {
+    const text = await readText();
+    if (text && terminal) {
+      const normalized = text.replace(/\r?\n/g, '\r');
+      if (terminal.modes.bracketedPasteMode) {
+        write(`\x1b[200~${normalized}\x1b[201~`);
+      } else {
+        write(normalized);
+      }
+    }
+  } catch (err) {
+    console.error("クリップボード読み取りに失敗:", err);
+  }
+}
 
 function initTerminal() {
   if (!xtermRef.value) return;
@@ -143,6 +160,11 @@ function initTerminal() {
   terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
     if (event.type !== "keydown") return true;
     if (event.isComposing || event.keyCode === 229) return true;
+    if ((event.ctrlKey || event.metaKey) && event.key === "v") {
+      event.preventDefault();
+      handlePaste();
+      return false;
+    }
     if ((event.ctrlKey || event.metaKey) && event.key === "f") {
       event.preventDefault();
       search.toggleSearchBar();
