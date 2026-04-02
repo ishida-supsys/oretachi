@@ -66,9 +66,14 @@ async function handlePaste() {
       } else {
         write(normalized);
       }
+    } else {
+      // テキストなし（画像のみ等）→ 生のCtrl+VをPTYに透過
+      // Claude Code等のTUIアプリが自身でクリップボードを読み取れるようにする
+      write('\x16');
     }
-  } catch (err) {
-    console.error("クリップボード読み取りに失敗:", err);
+  } catch {
+    // クリップボード読み取り失敗時もフォールバック
+    write('\x16');
   }
 }
 
@@ -178,6 +183,8 @@ function initTerminal() {
       if (matchesHotkey(event, hk.terminalClose)) return false;
       if (matchesHotkey(event, hk.trayNext)) return false;
     }
+    // Alt+V → PTYに透過（Claude Code画像ペースト: Windows keybinding）
+    if (event.altKey && !event.ctrlKey && !event.shiftKey && event.key === "v") return true;
     // Alt+英数字1文字 → ワークツリーフォーカス
     if (event.altKey && !event.ctrlKey && !event.shiftKey && event.key.length === 1) return false;
     return true;
