@@ -750,9 +750,8 @@ async fn broadcast_worktree_archived(peer_registry: &PeerMap, timeout_counts: &P
         {
             Ok(Ok(())) => {
                 // 成功したらタイムアウトカウンタをリセット
-                if let Ok(mut counts) = timeout_counts.lock() {
-                    counts.remove(peer_id);
-                }
+                let mut counts = timeout_counts.lock().unwrap_or_else(|e| e.into_inner());
+                counts.remove(peer_id);
             }
             Ok(Err(e)) => {
                 // 明示的な送信エラーは即 dead と判定して削除する
@@ -761,12 +760,11 @@ async fn broadcast_worktree_archived(peer_registry: &PeerMap, timeout_counts: &P
             }
             Err(_) => {
                 // 連続タイムアウトが閾値を超えたら dead と判定する
-                let count = if let Ok(mut counts) = timeout_counts.lock() {
+                let count = {
+                    let mut counts = timeout_counts.lock().unwrap_or_else(|e| e.into_inner());
                     let c = counts.entry(*peer_id).or_insert(0);
                     *c += 1;
                     *c
-                } else {
-                    1
                 };
                 log::warn!("[mcp] notify_logging_message timed out for peer_id={} (count={})", peer_id, count);
                 if count >= PEER_TIMEOUT_THRESHOLD {
@@ -781,10 +779,9 @@ async fn broadcast_worktree_archived(peer_registry: &PeerMap, timeout_counts: &P
         for peer_id in &dead_peers {
             peers.remove(peer_id);
         }
-        if let Ok(mut counts) = timeout_counts.lock() {
-            for peer_id in dead_peers {
-                counts.remove(&peer_id);
-            }
+        let mut counts = timeout_counts.lock().unwrap_or_else(|e| e.into_inner());
+        for peer_id in dead_peers {
+            counts.remove(&peer_id);
         }
     }
 }
@@ -816,9 +813,8 @@ async fn broadcast_worktree_added(peer_registry: &PeerMap, timeout_counts: &Peer
         {
             Ok(Ok(())) => {
                 // 成功したらタイムアウトカウンタをリセット
-                if let Ok(mut counts) = timeout_counts.lock() {
-                    counts.remove(peer_id);
-                }
+                let mut counts = timeout_counts.lock().unwrap_or_else(|e| e.into_inner());
+                counts.remove(peer_id);
             }
             Ok(Err(e)) => {
                 // 明示的な送信エラーは即 dead と判定して削除する
@@ -827,12 +823,11 @@ async fn broadcast_worktree_added(peer_registry: &PeerMap, timeout_counts: &Peer
             }
             Err(_) => {
                 // 連続タイムアウトが閾値を超えたら dead と判定する
-                let count = if let Ok(mut counts) = timeout_counts.lock() {
+                let count = {
+                    let mut counts = timeout_counts.lock().unwrap_or_else(|e| e.into_inner());
                     let c = counts.entry(*peer_id).or_insert(0);
                     *c += 1;
                     *c
-                } else {
-                    1
                 };
                 log::warn!("[mcp] notify_logging_message timed out for peer_id={} (count={})", peer_id, count);
                 if count >= PEER_TIMEOUT_THRESHOLD {
@@ -847,10 +842,9 @@ async fn broadcast_worktree_added(peer_registry: &PeerMap, timeout_counts: &Peer
         for peer_id in &dead_peers {
             peers.remove(peer_id);
         }
-        if let Ok(mut counts) = timeout_counts.lock() {
-            for peer_id in dead_peers {
-                counts.remove(&peer_id);
-            }
+        let mut counts = timeout_counts.lock().unwrap_or_else(|e| e.into_inner());
+        for peer_id in dead_peers {
+            counts.remove(&peer_id);
         }
     }
 }

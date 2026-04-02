@@ -509,10 +509,18 @@ pub fn list_system_sounds() -> Vec<String> {
 /// カスタム通知音ファイルをアプリデータディレクトリにコピーし、コピー後のファイル名を返す
 #[tauri::command]
 pub async fn copy_custom_sound(app_handle: tauri::AppHandle, source_path: String) -> Result<String, String> {
-    // パストラバーサル防止: null バイト・相対パス要素を拒否
+    // パストラバーサル防止: null バイト・相対パス要素を拒否し、
+    // canonicalize で実ファイルパスを解決して存在確認する
     if source_path.contains('\0') || source_path.contains("..") {
         return Err("不正なファイルパスです".to_string());
     }
+    let source_path_buf = std::path::Path::new(&source_path)
+        .canonicalize()
+        .map_err(|_| "ファイルが見つかりません".to_string())?;
+    if !source_path_buf.is_file() {
+        return Err("指定されたパスはファイルではありません".to_string());
+    }
+    let source_path = source_path_buf.to_string_lossy().into_owned();
     let dest_dir = app_handle
         .path()
         .app_data_dir()
