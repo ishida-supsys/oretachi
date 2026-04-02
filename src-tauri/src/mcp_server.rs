@@ -25,6 +25,9 @@ const SERVER_INFO_FILE: &str = "mcp-server.json";
 // ─── Peer Registry (接続中クライアントの管理) ─────────────────────────────────
 
 pub type PeerMap = Arc<RwLock<HashMap<u64, Peer<RoleServer>>>>;
+/// ピアごとの連続タイムアウト回数を記録する。3回連続でタイムアウトしたピアを dead と判定する。
+pub type PeerTimeoutCounts = Arc<Mutex<HashMap<u64, u32>>>;
+const PEER_TIMEOUT_THRESHOLD: u32 = 3;
 
 /// 接続中のMCPクライアントのPeerを保持するTauri managed state
 pub struct McpPeerRegistry(pub PeerMap);
@@ -719,7 +722,7 @@ struct ApiKeyState(String);
 // ─── MCP Notification Broadcast ──────────────────────────────────────────────
 
 /// アーカイブされたワークツリーの情報を全接続クライアントに通知する
-async fn broadcast_worktree_archived(peer_registry: &PeerMap, name: &str, id: &str, branch: &str) {
+async fn broadcast_worktree_archived(peer_registry: &PeerMap, timeout_counts: &PeerTimeoutCounts, name: &str, id: &str, branch: &str) {
     let params = LoggingMessageNotificationParam {
         level: LoggingLevel::Warning,
         logger: Some("oretachi".to_string()),
@@ -745,27 +748,48 @@ async fn broadcast_worktree_archived(peer_registry: &PeerMap, name: &str, id: &s
         )
         .await
         {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                // 成功したらタイムアウトカウンタをリセット
+                if let Ok(mut counts) = timeout_counts.lock() {
+                    counts.remove(peer_id);
+                }
+            }
             Ok(Err(e)) => {
-                // 明示的な送信エラーのみ dead と判定して削除する
+                // 明示的な送信エラーは即 dead と判定して削除する
                 log::warn!("[mcp] notify_logging_message failed for peer_id={}: {}", peer_id, e);
                 dead_peers.push(*peer_id);
             }
             Err(_) => {
-                // 一時的な遅延の可能性があるためタイムアウトは警告のみにする
-                log::warn!("[mcp] notify_logging_message timed out for peer_id={}", peer_id);
+                // 連続タイムアウトが閾値を超えたら dead と判定する
+                let count = if let Ok(mut counts) = timeout_counts.lock() {
+                    let c = counts.entry(*peer_id).or_insert(0);
+                    *c += 1;
+                    *c
+                } else {
+                    1
+                };
+                log::warn!("[mcp] notify_logging_message timed out for peer_id={} (count={})", peer_id, count);
+                if count >= PEER_TIMEOUT_THRESHOLD {
+                    log::warn!("[mcp] removing peer_id={} after {} consecutive timeouts", peer_id, count);
+                    dead_peers.push(*peer_id);
+                }
             }
         }
     }
     if !dead_peers.is_empty() {
         let mut peers = peer_registry.write().await;
-        for peer_id in dead_peers {
-            peers.remove(&peer_id);
+        for peer_id in &dead_peers {
+            peers.remove(peer_id);
+        }
+        if let Ok(mut counts) = timeout_counts.lock() {
+            for peer_id in dead_peers {
+                counts.remove(&peer_id);
+            }
         }
     }
 }
 
-async fn broadcast_worktree_added(peer_registry: &PeerMap, name: &str, id: &str, branch: &str) {
+async fn broadcast_worktree_added(peer_registry: &PeerMap, timeout_counts: &PeerTimeoutCounts, name: &str, id: &str, branch: &str) {
     let params = LoggingMessageNotificationParam {
         level: LoggingLevel::Info,
         logger: Some("oretachi".to_string()),
@@ -790,22 +814,43 @@ async fn broadcast_worktree_added(peer_registry: &PeerMap, name: &str, id: &str,
         )
         .await
         {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                // 成功したらタイムアウトカウンタをリセット
+                if let Ok(mut counts) = timeout_counts.lock() {
+                    counts.remove(peer_id);
+                }
+            }
             Ok(Err(e)) => {
-                // 明示的な送信エラーのみ dead と判定して削除する
+                // 明示的な送信エラーは即 dead と判定して削除する
                 log::warn!("[mcp] notify_logging_message failed for peer_id={}: {}", peer_id, e);
                 dead_peers.push(*peer_id);
             }
             Err(_) => {
-                // 一時的な遅延の可能性があるためタイムアウトは警告のみにする
-                log::warn!("[mcp] notify_logging_message timed out for peer_id={}", peer_id);
+                // 連続タイムアウトが閾値を超えたら dead と判定する
+                let count = if let Ok(mut counts) = timeout_counts.lock() {
+                    let c = counts.entry(*peer_id).or_insert(0);
+                    *c += 1;
+                    *c
+                } else {
+                    1
+                };
+                log::warn!("[mcp] notify_logging_message timed out for peer_id={} (count={})", peer_id, count);
+                if count >= PEER_TIMEOUT_THRESHOLD {
+                    log::warn!("[mcp] removing peer_id={} after {} consecutive timeouts", peer_id, count);
+                    dead_peers.push(*peer_id);
+                }
             }
         }
     }
     if !dead_peers.is_empty() {
         let mut peers = peer_registry.write().await;
-        for peer_id in dead_peers {
-            peers.remove(&peer_id);
+        for peer_id in &dead_peers {
+            peers.remove(peer_id);
+        }
+        if let Ok(mut counts) = timeout_counts.lock() {
+            for peer_id in dead_peers {
+                counts.remove(&peer_id);
+            }
         }
     }
 }
@@ -941,17 +986,21 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
 
     // peer レジストリを取得（managed state から）
     let peer_map = app_handle.state::<McpPeerRegistry>().0.clone();
+    // ピアごとの連続タイムアウトカウンタ（両リスナー間で共有）
+    let timeout_counts: PeerTimeoutCounts = Arc::new(Mutex::new(HashMap::new()));
 
     // ワークツリーアーカイブ時に全クライアントへ通知
     let peer_map_for_listener = peer_map.clone();
+    let timeout_counts_for_listener = timeout_counts.clone();
     let listener_id = app_handle.listen("worktree-archived", move |event: tauri::Event| {
         let registry = peer_map_for_listener.clone();
+        let tc = timeout_counts_for_listener.clone();
         if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
             let name = payload["name"].as_str().unwrap_or("unknown").to_string();
             let id = payload["id"].as_str().unwrap_or("").to_string();
             let branch = payload["branchName"].as_str().unwrap_or("").to_string();
             tauri::async_runtime::spawn(async move {
-                broadcast_worktree_archived(&registry, &name, &id, &branch).await;
+                broadcast_worktree_archived(&registry, &tc, &name, &id, &branch).await;
             });
         }
     });
@@ -965,14 +1014,16 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
 
     // ワークツリー追加時に全クライアントへ通知
     let peer_map_for_added_listener = peer_map.clone();
+    let timeout_counts_for_added_listener = timeout_counts.clone();
     let added_listener_id = app_handle.listen("worktree-added", move |event: tauri::Event| {
         let registry = peer_map_for_added_listener.clone();
+        let tc = timeout_counts_for_added_listener.clone();
         if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
             let name = payload["name"].as_str().unwrap_or("unknown").to_string();
             let id = payload["id"].as_str().unwrap_or("").to_string();
             let branch = payload["branchName"].as_str().unwrap_or("").to_string();
             tauri::async_runtime::spawn(async move {
-                broadcast_worktree_added(&registry, &name, &id, &branch).await;
+                broadcast_worktree_added(&registry, &tc, &name, &id, &branch).await;
             });
         }
     });
