@@ -739,9 +739,21 @@ async fn broadcast_worktree_archived(peer_registry: &PeerMap, name: &str, id: &s
 
     let mut dead_peers: Vec<u64> = Vec::new();
     for (peer_id, peer) in &peer_snapshot {
-        if let Err(e) = peer.notify_logging_message(params.clone()).await {
-            log::warn!("[mcp] notify_logging_message failed for peer_id={}: {}", peer_id, e);
-            dead_peers.push(*peer_id);
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            peer.notify_logging_message(params.clone()),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                log::warn!("[mcp] notify_logging_message failed for peer_id={}: {}", peer_id, e);
+                dead_peers.push(*peer_id);
+            }
+            Err(_) => {
+                log::warn!("[mcp] notify_logging_message timed out for peer_id={}", peer_id);
+                dead_peers.push(*peer_id);
+            }
         }
     }
     if !dead_peers.is_empty() {
@@ -771,9 +783,21 @@ async fn broadcast_worktree_added(peer_registry: &PeerMap, name: &str, id: &str,
 
     let mut dead_peers: Vec<u64> = Vec::new();
     for (peer_id, peer) in &peer_snapshot {
-        if let Err(e) = peer.notify_logging_message(params.clone()).await {
-            log::warn!("[mcp] notify_logging_message failed for peer_id={}: {}", peer_id, e);
-            dead_peers.push(*peer_id);
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            peer.notify_logging_message(params.clone()),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                log::warn!("[mcp] notify_logging_message failed for peer_id={}: {}", peer_id, e);
+                dead_peers.push(*peer_id);
+            }
+            Err(_) => {
+                log::warn!("[mcp] notify_logging_message timed out for peer_id={}", peer_id);
+                dead_peers.push(*peer_id);
+            }
         }
     }
     if !dead_peers.is_empty() {
@@ -1084,7 +1108,10 @@ pub fn send_notification_standalone(worktree_name: &str, kind: Option<&str>) -> 
     use std::io::{Read, Write};
     use std::time::Duration;
 
-    let mut stream = std::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port)
+        .parse()
+        .map_err(|e| format!("Invalid address: {}", e))?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(3))
         .map_err(|e| format!("Cannot connect to oretachi MCP server: {}", e))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))

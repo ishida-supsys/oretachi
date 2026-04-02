@@ -357,7 +357,12 @@ fn get_mcp_status(state: State<mcp_server::McpServerManager>) -> mcp_server::Mcp
 async fn restart_mcp_server(app_handle: tauri::AppHandle) -> Result<mcp_server::McpStatus, String> {
     let manager = app_handle.state::<mcp_server::McpServerManager>();
     // 同時に複数の restart が走らないよう排他ロックを取得する
-    let _lock = manager.acquire_restart_lock().await;
+    let _lock = tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        manager.acquire_restart_lock(),
+    )
+    .await
+    .map_err(|_| "restart lock acquisition timed out".to_string())?;
     let (mcp_port, mcp_remote_access) = {
         let settings_manager = app_handle.state::<SettingsManager>();
         let s = settings_manager.get();
@@ -436,11 +441,16 @@ async fn read_artifact(
 #[tauri::command]
 async fn delete_artifacts(app_handle: tauri::AppHandle, worktree_id: String) -> Result<(), String> {
     let dir = artifacts_dir(&app_handle, &worktree_id)?;
-    if dir.exists() {
-        std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
-        if let Some(pool) = app_handle.try_state::<report_db::ReportPool>() {
-            let _ = report_db::insert(&pool.0, "artifact_change:delete", &worktree_id).await;
+    tokio::task::spawn_blocking(move || {
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
         }
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| format!("task join error: {}", e))??;
+    if let Some(pool) = app_handle.try_state::<report_db::ReportPool>() {
+        let _ = report_db::insert(&pool.0, "artifact_change:delete", &worktree_id).await;
     }
     Ok(())
 }
