@@ -6,6 +6,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.17.4] - 2026-04-02
+
+### Added
+- Disable right-click context menu on all windows
+
+### Changed
+- Remove manual Ctrl+V paste handler in terminal
+
 ## [0.17.3] - 2026-04-01
 
 ### Added
@@ -140,7 +148,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.17.3...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.17.4...HEAD
+[0.17.4]: https://github.com/ishida-supsys/oretachi/compare/0.17.3...0.17.4
 [0.17.3]: https://github.com/ishida-supsys/oretachi/compare/0.17.2...0.17.3
 [0.17.2]: https://github.com/ishida-supsys/oretachi/compare/0.17.1...0.17.2
 [0.17.1]: https://github.com/ishida-supsys/oretachi/compare/0.17.0...0.17.1
