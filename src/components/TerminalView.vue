@@ -9,6 +9,7 @@ import { usePtyWriteBatcher } from "../composables/usePtyWriteBatcher";
 import { useSettings } from "../composables/useSettings";
 import { matchesHotkey } from "../composables/useHotkeys";
 import { useTerminalSearch } from "../composables/useTerminalSearch";
+import { readText } from "@tauri-apps/plugin-clipboard-manager";
 import { useI18n } from "vue-i18n";
 import { debug } from "@tauri-apps/plugin-log";
 
@@ -54,6 +55,27 @@ let resizeDebounce: ReturnType<typeof setTimeout> | null = null;
 const { sessionId, spawn, attachToSession, write, resize, kill, isRunning, detach } = usePty();
 const batcher = usePtyWriteBatcher(() => terminal);
 const { settings } = useSettings();
+
+async function handlePaste() {
+  try {
+    const text = await readText();
+    if (text && terminal) {
+      const normalized = text.replace(/\r?\n/g, '\r');
+      if (terminal.modes.bracketedPasteMode) {
+        write(`\x1b[200~${normalized}\x1b[201~`);
+      } else {
+        write(normalized);
+      }
+    } else {
+      // テキストなし（画像のみ等）→ 生のCtrl+VをPTYに透過
+      // Claude Code等のTUIアプリが自身でクリップボードを読み取れるようにする
+      write('\x16');
+    }
+  } catch {
+    // クリップボード読み取り失敗時もフォールバック
+    write('\x16');
+  }
+}
 
 function initTerminal() {
   if (!xtermRef.value) return;
@@ -143,6 +165,11 @@ function initTerminal() {
   terminal.attachCustomKeyEventHandler((event: KeyboardEvent) => {
     if (event.type !== "keydown") return true;
     if (event.isComposing || event.keyCode === 229) return true;
+    if ((event.ctrlKey || event.metaKey) && event.key === "v") {
+      event.preventDefault();
+      handlePaste();
+      return false;
+    }
     if ((event.ctrlKey || event.metaKey) && event.key === "f") {
       event.preventDefault();
       search.toggleSearchBar();
@@ -156,6 +183,8 @@ function initTerminal() {
       if (matchesHotkey(event, hk.terminalClose)) return false;
       if (matchesHotkey(event, hk.trayNext)) return false;
     }
+    // Alt+V → PTYに透過（Claude Code画像ペースト: Windows keybinding）
+    if (event.altKey && !event.ctrlKey && !event.shiftKey && event.key === "v") return true;
     // Alt+英数字1文字 → ワークツリーフォーカス
     if (event.altKey && !event.ctrlKey && !event.shiftKey && event.key.length === 1) return false;
     return true;
