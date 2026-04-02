@@ -441,16 +441,20 @@ async fn read_artifact(
 #[tauri::command]
 async fn delete_artifacts(app_handle: tauri::AppHandle, worktree_id: String) -> Result<(), String> {
     let dir = artifacts_dir(&app_handle, &worktree_id)?;
-    tokio::task::spawn_blocking(move || {
+    let deleted = tokio::task::spawn_blocking(move || {
         if dir.exists() {
             std::fs::remove_dir_all(&dir).map_err(|e| e.to_string())?;
+            Ok::<bool, String>(true)
+        } else {
+            Ok(false)
         }
-        Ok::<(), String>(())
     })
     .await
     .map_err(|e| format!("task join error: {}", e))??;
-    if let Some(pool) = app_handle.try_state::<report_db::ReportPool>() {
-        let _ = report_db::insert(&pool.0, "artifact_change:delete", &worktree_id).await;
+    if deleted {
+        if let Some(pool) = app_handle.try_state::<report_db::ReportPool>() {
+            let _ = report_db::insert(&pool.0, "artifact_change:delete", &worktree_id).await;
+        }
     }
     Ok(())
 }

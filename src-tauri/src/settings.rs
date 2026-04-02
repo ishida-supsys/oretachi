@@ -520,8 +520,12 @@ pub async fn copy_custom_sound(app_handle: tauri::AppHandle, source_path: String
         let ext = std::path::Path::new(&source_path)
             .extension()
             .and_then(|e| e.to_str())
-            .unwrap_or("wav")
-            .to_string();
+            .unwrap_or("")
+            .to_lowercase();
+        const ALLOWED_EXTENSIONS: &[&str] = &["wav", "mp3", "ogg", "flac", "aiff", "aif", "m4a"];
+        if !ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
+            return Err(format!("Unsupported audio file extension: .{}", ext));
+        }
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
