@@ -28,6 +28,7 @@ pub type PeerMap = Arc<RwLock<HashMap<u64, Peer<RoleServer>>>>;
 /// ピアごとの連続タイムアウト回数を記録する。3回連続でタイムアウトしたピアを dead と判定する。
 pub type PeerTimeoutCounts = Arc<Mutex<HashMap<u64, u32>>>;
 const PEER_TIMEOUT_THRESHOLD: u32 = 3;
+const PEER_NOTIFY_TIMEOUT_SECS: u64 = 5;
 
 /// 接続中のMCPクライアントのPeerを保持するTauri managed state
 pub struct McpPeerRegistry(pub PeerMap);
@@ -721,19 +722,9 @@ struct ApiKeyState(String);
 
 // ─── MCP Notification Broadcast ──────────────────────────────────────────────
 
-/// アーカイブされたワークツリーの情報を全接続クライアントに通知する
-async fn broadcast_worktree_archived(peer_registry: &PeerMap, timeout_counts: &PeerTimeoutCounts, name: &str, id: &str, branch: &str) {
-    let params = LoggingMessageNotificationParam {
-        level: LoggingLevel::Warning,
-        logger: Some("oretachi".to_string()),
-        data: serde_json::json!({
-            "event": "worktree_archived",
-            "worktreeId": id,
-            "worktreeName": name,
-            "branchName": branch,
-        }),
-    };
-
+/// 全接続クライアントに通知を送信する共通ヘルパー。
+/// タイムアウトと明示的エラーで dead peer を管理する。
+async fn broadcast_notification(peer_registry: &PeerMap, timeout_counts: &PeerTimeoutCounts, params: LoggingMessageNotificationParam) {
     // readロックを保持したままawaitしないよう、先にPeerをcloneしてロックを解放する
     let peer_snapshot: Vec<(u64, Peer<RoleServer>)> = {
         let peers = peer_registry.read().await;
@@ -743,7 +734,7 @@ async fn broadcast_worktree_archived(peer_registry: &PeerMap, timeout_counts: &P
     let mut dead_peers: Vec<u64> = Vec::new();
     for (peer_id, peer) in &peer_snapshot {
         match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(PEER_NOTIFY_TIMEOUT_SECS),
             peer.notify_logging_message(params.clone()),
         )
         .await
@@ -786,6 +777,21 @@ async fn broadcast_worktree_archived(peer_registry: &PeerMap, timeout_counts: &P
     }
 }
 
+/// アーカイブされたワークツリーの情報を全接続クライアントに通知する
+async fn broadcast_worktree_archived(peer_registry: &PeerMap, timeout_counts: &PeerTimeoutCounts, name: &str, id: &str, branch: &str) {
+    let params = LoggingMessageNotificationParam {
+        level: LoggingLevel::Warning,
+        logger: Some("oretachi".to_string()),
+        data: serde_json::json!({
+            "event": "worktree_archived",
+            "worktreeId": id,
+            "worktreeName": name,
+            "branchName": branch,
+        }),
+    };
+    broadcast_notification(peer_registry, timeout_counts, params).await;
+}
+
 async fn broadcast_worktree_added(peer_registry: &PeerMap, timeout_counts: &PeerTimeoutCounts, name: &str, id: &str, branch: &str) {
     let params = LoggingMessageNotificationParam {
         level: LoggingLevel::Info,
@@ -797,56 +803,7 @@ async fn broadcast_worktree_added(peer_registry: &PeerMap, timeout_counts: &Peer
             "branchName": branch,
         }),
     };
-
-    let peer_snapshot: Vec<(u64, Peer<RoleServer>)> = {
-        let peers = peer_registry.read().await;
-        peers.iter().map(|(k, v)| (*k, v.clone())).collect()
-    };
-
-    let mut dead_peers: Vec<u64> = Vec::new();
-    for (peer_id, peer) in &peer_snapshot {
-        match tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            peer.notify_logging_message(params.clone()),
-        )
-        .await
-        {
-            Ok(Ok(())) => {
-                // 成功したらタイムアウトカウンタをリセット
-                let mut counts = timeout_counts.lock().unwrap_or_else(|e| e.into_inner());
-                counts.remove(peer_id);
-            }
-            Ok(Err(e)) => {
-                // 明示的な送信エラーは即 dead と判定して削除する
-                log::warn!("[mcp] notify_logging_message failed for peer_id={}: {}", peer_id, e);
-                dead_peers.push(*peer_id);
-            }
-            Err(_) => {
-                // 連続タイムアウトが閾値を超えたら dead と判定する
-                let count = {
-                    let mut counts = timeout_counts.lock().unwrap_or_else(|e| e.into_inner());
-                    let c = counts.entry(*peer_id).or_insert(0);
-                    *c += 1;
-                    *c
-                };
-                log::warn!("[mcp] notify_logging_message timed out for peer_id={} (count={})", peer_id, count);
-                if count >= PEER_TIMEOUT_THRESHOLD {
-                    log::warn!("[mcp] removing peer_id={} after {} consecutive timeouts", peer_id, count);
-                    dead_peers.push(*peer_id);
-                }
-            }
-        }
-    }
-    if !dead_peers.is_empty() {
-        let mut peers = peer_registry.write().await;
-        for peer_id in &dead_peers {
-            peers.remove(peer_id);
-        }
-        let mut counts = timeout_counts.lock().unwrap_or_else(|e| e.into_inner());
-        for peer_id in dead_peers {
-            counts.remove(&peer_id);
-        }
-    }
+    broadcast_notification(peer_registry, timeout_counts, params).await;
 }
 
 // ─── Port file management ─────────────────────────────────────────────────────
