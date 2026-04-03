@@ -25,6 +25,10 @@ const SERVER_INFO_FILE: &str = "mcp-server.json";
 // ─── Peer Registry (接続中クライアントの管理) ─────────────────────────────────
 
 pub type PeerMap = Arc<RwLock<HashMap<u64, Peer<RoleServer>>>>;
+/// ピアごとの連続タイムアウト回数を記録する。3回連続でタイムアウトしたピアを dead と判定する。
+pub type PeerTimeoutCounts = Arc<Mutex<HashMap<u64, u32>>>;
+const PEER_TIMEOUT_THRESHOLD: u32 = 3;
+const PEER_NOTIFY_TIMEOUT_SECS: u64 = 5;
 
 /// 接続中のMCPクライアントのPeerを保持するTauri managed state
 pub struct McpPeerRegistry(pub PeerMap);
@@ -718,8 +722,63 @@ struct ApiKeyState(String);
 
 // ─── MCP Notification Broadcast ──────────────────────────────────────────────
 
+/// 全接続クライアントに通知を送信する共通ヘルパー。
+/// タイムアウトと明示的エラーで dead peer を管理する。
+async fn broadcast_notification(peer_registry: &PeerMap, timeout_counts: &PeerTimeoutCounts, params: LoggingMessageNotificationParam) {
+    // readロックを保持したままawaitしないよう、先にPeerをcloneしてロックを解放する
+    let peer_snapshot: Vec<(u64, Peer<RoleServer>)> = {
+        let peers = peer_registry.read().await;
+        peers.iter().map(|(k, v)| (*k, v.clone())).collect()
+    };
+
+    let mut dead_peers: Vec<u64> = Vec::new();
+    for (peer_id, peer) in &peer_snapshot {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(PEER_NOTIFY_TIMEOUT_SECS),
+            peer.notify_logging_message(params.clone()),
+        )
+        .await
+        {
+            Ok(Ok(())) => {
+                // 成功したらタイムアウトカウンタをリセット
+                let mut counts = timeout_counts.lock().unwrap_or_else(|e| e.into_inner());
+                counts.remove(peer_id);
+            }
+            Ok(Err(e)) => {
+                // 明示的な送信エラーは即 dead と判定して削除する
+                log::warn!("[mcp] notify_logging_message failed for peer_id={}: {}", peer_id, e);
+                dead_peers.push(*peer_id);
+            }
+            Err(_) => {
+                // 連続タイムアウトが閾値を超えたら dead と判定する
+                let count = {
+                    let mut counts = timeout_counts.lock().unwrap_or_else(|e| e.into_inner());
+                    let c = counts.entry(*peer_id).or_insert(0);
+                    *c += 1;
+                    *c
+                };
+                log::warn!("[mcp] notify_logging_message timed out for peer_id={} (count={})", peer_id, count);
+                if count >= PEER_TIMEOUT_THRESHOLD {
+                    log::warn!("[mcp] removing peer_id={} after {} consecutive timeouts", peer_id, count);
+                    dead_peers.push(*peer_id);
+                }
+            }
+        }
+    }
+    if !dead_peers.is_empty() {
+        let mut peers = peer_registry.write().await;
+        for peer_id in &dead_peers {
+            peers.remove(peer_id);
+        }
+        let mut counts = timeout_counts.lock().unwrap_or_else(|e| e.into_inner());
+        for peer_id in dead_peers {
+            counts.remove(&peer_id);
+        }
+    }
+}
+
 /// アーカイブされたワークツリーの情報を全接続クライアントに通知する
-async fn broadcast_worktree_archived(peer_registry: &PeerMap, name: &str, id: &str, branch: &str) {
+async fn broadcast_worktree_archived(peer_registry: &PeerMap, timeout_counts: &PeerTimeoutCounts, name: &str, id: &str, branch: &str) {
     let params = LoggingMessageNotificationParam {
         level: LoggingLevel::Warning,
         logger: Some("oretachi".to_string()),
@@ -730,29 +789,10 @@ async fn broadcast_worktree_archived(peer_registry: &PeerMap, name: &str, id: &s
             "branchName": branch,
         }),
     };
-
-    // readロックを保持したままawaitしないよう、先にPeerをcloneしてロックを解放する
-    let peer_snapshot: Vec<(u64, Peer<RoleServer>)> = {
-        let peers = peer_registry.read().await;
-        peers.iter().map(|(k, v)| (*k, v.clone())).collect()
-    };
-
-    let mut dead_peers: Vec<u64> = Vec::new();
-    for (peer_id, peer) in &peer_snapshot {
-        if let Err(e) = peer.notify_logging_message(params.clone()).await {
-            log::warn!("[mcp] notify_logging_message failed for peer_id={}: {}", peer_id, e);
-            dead_peers.push(*peer_id);
-        }
-    }
-    if !dead_peers.is_empty() {
-        let mut peers = peer_registry.write().await;
-        for peer_id in dead_peers {
-            peers.remove(&peer_id);
-        }
-    }
+    broadcast_notification(peer_registry, timeout_counts, params).await;
 }
 
-async fn broadcast_worktree_added(peer_registry: &PeerMap, name: &str, id: &str, branch: &str) {
+async fn broadcast_worktree_added(peer_registry: &PeerMap, timeout_counts: &PeerTimeoutCounts, name: &str, id: &str, branch: &str) {
     let params = LoggingMessageNotificationParam {
         level: LoggingLevel::Info,
         logger: Some("oretachi".to_string()),
@@ -763,25 +803,7 @@ async fn broadcast_worktree_added(peer_registry: &PeerMap, name: &str, id: &str,
             "branchName": branch,
         }),
     };
-
-    let peer_snapshot: Vec<(u64, Peer<RoleServer>)> = {
-        let peers = peer_registry.read().await;
-        peers.iter().map(|(k, v)| (*k, v.clone())).collect()
-    };
-
-    let mut dead_peers: Vec<u64> = Vec::new();
-    for (peer_id, peer) in &peer_snapshot {
-        if let Err(e) = peer.notify_logging_message(params.clone()).await {
-            log::warn!("[mcp] notify_logging_message failed for peer_id={}: {}", peer_id, e);
-            dead_peers.push(*peer_id);
-        }
-    }
-    if !dead_peers.is_empty() {
-        let mut peers = peer_registry.write().await;
-        for peer_id in dead_peers {
-            peers.remove(&peer_id);
-        }
-    }
+    broadcast_notification(peer_registry, timeout_counts, params).await;
 }
 
 // ─── Port file management ─────────────────────────────────────────────────────
@@ -915,17 +937,21 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
 
     // peer レジストリを取得（managed state から）
     let peer_map = app_handle.state::<McpPeerRegistry>().0.clone();
+    // ピアごとの連続タイムアウトカウンタ（両リスナー間で共有）
+    let timeout_counts: PeerTimeoutCounts = Arc::new(Mutex::new(HashMap::new()));
 
     // ワークツリーアーカイブ時に全クライアントへ通知
     let peer_map_for_listener = peer_map.clone();
+    let timeout_counts_for_listener = timeout_counts.clone();
     let listener_id = app_handle.listen("worktree-archived", move |event: tauri::Event| {
         let registry = peer_map_for_listener.clone();
+        let tc = timeout_counts_for_listener.clone();
         if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
             let name = payload["name"].as_str().unwrap_or("unknown").to_string();
             let id = payload["id"].as_str().unwrap_or("").to_string();
             let branch = payload["branchName"].as_str().unwrap_or("").to_string();
             tauri::async_runtime::spawn(async move {
-                broadcast_worktree_archived(&registry, &name, &id, &branch).await;
+                broadcast_worktree_archived(&registry, &tc, &name, &id, &branch).await;
             });
         }
     });
@@ -939,14 +965,16 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
 
     // ワークツリー追加時に全クライアントへ通知
     let peer_map_for_added_listener = peer_map.clone();
+    let timeout_counts_for_added_listener = timeout_counts.clone();
     let added_listener_id = app_handle.listen("worktree-added", move |event: tauri::Event| {
         let registry = peer_map_for_added_listener.clone();
+        let tc = timeout_counts_for_added_listener.clone();
         if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
             let name = payload["name"].as_str().unwrap_or("unknown").to_string();
             let id = payload["id"].as_str().unwrap_or("").to_string();
             let branch = payload["branchName"].as_str().unwrap_or("").to_string();
             tauri::async_runtime::spawn(async move {
-                broadcast_worktree_added(&registry, &name, &id, &branch).await;
+                broadcast_worktree_added(&registry, &tc, &name, &id, &branch).await;
             });
         }
     });
@@ -1084,7 +1112,10 @@ pub fn send_notification_standalone(worktree_name: &str, kind: Option<&str>) -> 
     use std::io::{Read, Write};
     use std::time::Duration;
 
-    let mut stream = std::net::TcpStream::connect(format!("127.0.0.1:{}", port))
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port)
+        .parse()
+        .map_err(|e| format!("Invalid address: {}", e))?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(3))
         .map_err(|e| format!("Cannot connect to oretachi MCP server: {}", e))?;
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))

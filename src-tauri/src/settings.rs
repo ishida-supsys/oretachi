@@ -509,26 +509,46 @@ pub fn list_system_sounds() -> Vec<String> {
 /// カスタム通知音ファイルをアプリデータディレクトリにコピーし、コピー後のファイル名を返す
 #[tauri::command]
 pub async fn copy_custom_sound(app_handle: tauri::AppHandle, source_path: String) -> Result<String, String> {
+    // パストラバーサル防止: null バイト・相対パス要素を拒否し、
+    // canonicalize で実ファイルパスを解決して存在確認する
+    if source_path.contains('\0') || source_path.contains("..") {
+        return Err("不正なファイルパスです".to_string());
+    }
+    let source_path_buf = std::path::Path::new(&source_path)
+        .canonicalize()
+        .map_err(|_| "ファイルが見つかりません".to_string())?;
+    if !source_path_buf.is_file() {
+        return Err("指定されたパスはファイルではありません".to_string());
+    }
+    let source_path = source_path_buf.to_string_lossy().into_owned();
     let dest_dir = app_handle
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())?
         .join("notification-sounds");
-    std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
 
-    let ext = std::path::Path::new(&source_path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("wav")
-        .to_string();
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis();
-    let filename = format!("{}.{}", ts, ext);
-    let dest = dest_dir.join(&filename);
-    std::fs::copy(&source_path, &dest).map_err(|e| e.to_string())?;
-    Ok(filename)
+    tokio::task::spawn_blocking(move || {
+        std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+        let ext = std::path::Path::new(&source_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+        const ALLOWED_EXTENSIONS: &[&str] = &["wav", "mp3", "ogg", "flac", "aiff", "aif", "m4a"];
+        if !ALLOWED_EXTENSIONS.contains(&ext.as_str()) {
+            return Err(format!("Unsupported audio file extension: .{}", ext));
+        }
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let filename = format!("{}.{}", ts, ext);
+        let dest = dest_dir.join(&filename);
+        std::fs::copy(&source_path, &dest).map_err(|e| e.to_string())?;
+        Ok(filename)
+    })
+    .await
+    .map_err(|e| format!("task join error: {}", e))?
 }
 
 /// 音声ファイルをバイト列として読み込み、base64エンコードして返す
@@ -560,7 +580,11 @@ pub async fn read_audio_file(app_handle: tauri::AppHandle, sound: String) -> Res
         return Err("Invalid sound prefix".to_string());
     };
 
-    let bytes = std::fs::read(&path).map_err(|e| e.to_string())?;
+    let bytes = tokio::task::spawn_blocking(move || {
+        std::fs::read(&path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("task join error: {}", e))??;
     use base64::Engine;
     Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }
