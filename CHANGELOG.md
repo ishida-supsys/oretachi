@@ -6,6 +6,16 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.17.5] - 2026-04-03
+
+### Fixed
+- Support image paste in Claude Code terminal
+- Restore Ctrl+V paste handler with double-paste prevention
+- Improve async stability by moving blocking I/O to spawn_blocking and adding timeouts for network/lock operations
+- Use consecutive timeout counter to detect dead TCP half-open connections in MCP broadcast
+- Recover from poisoned mutex in MCP server to keep timeout counts working
+- Validate audio file extension and reject path traversal in copy_custom_sound
+
 ## [0.17.4] - 2026-04-02
 
 ### Added
@@ -148,7 +158,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.17.4...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.17.5...HEAD
+[0.17.5]: https://github.com/ishida-supsys/oretachi/compare/0.17.4...0.17.5
 [0.17.4]: https://github.com/ishida-supsys/oretachi/compare/0.17.3...0.17.4
 [0.17.3]: https://github.com/ishida-supsys/oretachi/compare/0.17.2...0.17.3
 [0.17.2]: https://github.com/ishida-supsys/oretachi/compare/0.17.1...0.17.2
