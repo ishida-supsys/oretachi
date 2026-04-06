@@ -65,6 +65,16 @@ const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect()
 
 // アーティファクト
 const { openArtifactViewer } = useArtifactWindow();
+const artifactCount = ref(0);
+
+async function refreshArtifactCount() {
+  try {
+    const list = await invoke<unknown[]>("list_artifacts", { worktreeId });
+    artifactCount.value = list.length;
+  } catch {
+    artifactCount.value = 0;
+  }
+}
 
 async function requestOpenArtifacts() {
   await openArtifactViewer(worktreeId, worktreeName);
@@ -205,9 +215,18 @@ let closingByMain = false;
 
 onMounted(async () => {
   await loadSettings();
+  // アーティファクト数の初期取得
+  refreshArtifactCount();
 
   collect(await listen("settings-changed", async () => {
     await loadSettings();
+  }));
+
+  // アーティファクト変更時にカウントを更新
+  collect(await listen<{ worktreeId: string; artifactId: string; command: string }>("artifact-changed", (event) => {
+    if (event.payload.worktreeId === worktreeId) {
+      refreshArtifactCount();
+    }
   }));
 
   // AIエージェントインジケーター: sessionId → terminalId に変換して terminalAgentStatus を更新
@@ -511,6 +530,7 @@ async function onCancelAiJudging() {
         :worktree-name="worktreeName"
         :branch-name="branchName"
         :hotkey-char="hotkeyChar"
+        :artifact-count="artifactCount"
         :auto-approval="autoApproval"
         :ai-judging="aiJudging"
         :is-window-focused="isWindowFocused"

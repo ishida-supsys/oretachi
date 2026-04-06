@@ -99,6 +99,18 @@ const notificationCounts = computed(() => {
   return map;
 });
 
+// ワークツリーごとのアーティファクト数
+const artifactCounts = reactive(new Map<string, number>());
+
+async function refreshArtifactCount(worktreeId: string) {
+  try {
+    const list = await invoke<unknown[]>("list_artifacts", { worktreeId });
+    artifactCounts.set(worktreeId, list.length);
+  } catch {
+    artifactCounts.set(worktreeId, 0);
+  }
+}
+
 const viewMode = ref<ViewMode>("home");
 const mainContentAreaRef = ref<HTMLDivElement | null>(null);
 
@@ -940,6 +952,8 @@ onMounted(async () => {
     }
     // ターミナル追加後にバンドルを作成
     ensureWorktreeFrame(wt.id);
+    // アーティファクト数の初期取得
+    refreshArtifactCount(wt.id);
   }
 
   // サブウィンドウからのホームタブ要求
@@ -1112,9 +1126,12 @@ onMounted(async () => {
     await handleSubAddTerminalRequest(event.payload.worktreeId);
   });
 
-  // アーティファクト追加時に自動でビューアを開く
+  // アーティファクト変更時の処理
   await listen<{ worktreeId: string; artifactId: string; command: string }>("artifact-changed", async (event) => {
     const { worktreeId: wid, command } = event.payload;
+    // アーティファクト数を更新
+    refreshArtifactCount(wid);
+    // 追加時に自動でビューアを開く
     if (command !== "create") return;
     if (settings.value.worktreeDefaults?.autoOpenArtifact === false) return;
     const wt = worktrees.value.find((w) => w.id === wid);
@@ -1417,6 +1434,7 @@ onMounted(async () => {
         :detached-worktrees="detachedWorktrees"
         :notifications="notificationCounts"
         :hotkey-chars="hotkeyChars"
+        :artifact-counts="artifactCounts"
         :loading-worktrees="loadingWorktrees"
         :auto-approvals="autoApprovalMap"
         :ai-judging-worktrees="aiJudgingWorktrees"
@@ -1459,6 +1477,7 @@ onMounted(async () => {
             :worktree-name="wt.name"
             :branch-name="wt.branchName"
             :hotkey-char="hotkeyChars.get(wt.id)"
+            :artifact-count="artifactCounts.get(wt.id) ?? 0"
             :auto-approval="autoApprovalMap.get(wt.id) ?? false"
             :ai-judging="aiJudgingWorktrees.has(wt.id)"
             :is-window-focused="isWindowFocused"
