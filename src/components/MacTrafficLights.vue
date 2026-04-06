@@ -1,11 +1,14 @@
 <script setup lang="ts">
 import { useI18n } from "vue-i18n";
 
-defineProps<{
+const props = withDefaults(defineProps<{
   isWindowFocused: boolean;
   showMinimize?: boolean;
   showMaximize?: boolean;
-}>();
+}>(), {
+  showMinimize: true,
+  showMaximize: true,
+});
 
 defineEmits<{
   close: [];
@@ -21,7 +24,7 @@ const { t } = useI18n({ useScope: "global" });
     <!-- 閉じる (赤) -->
     <button
       class="traffic-light"
-      :class="isWindowFocused ? 'traffic-light-close' : 'traffic-light-inactive'"
+      :class="props.isWindowFocused ? 'traffic-light-close' : 'traffic-light-inactive'"
       :title="t('close')"
       @click="$emit('close')"
     >
@@ -32,9 +35,9 @@ const { t } = useI18n({ useScope: "global" });
 
     <!-- 最小化 (黄) -->
     <button
-      v-if="showMinimize !== false"
+      v-if="props.showMinimize"
       class="traffic-light"
-      :class="isWindowFocused ? 'traffic-light-minimize' : 'traffic-light-inactive'"
+      :class="props.isWindowFocused ? 'traffic-light-minimize' : 'traffic-light-inactive'"
       :title="t('minimize')"
       @click="$emit('minimize')"
     >
@@ -45,9 +48,9 @@ const { t } = useI18n({ useScope: "global" });
 
     <!-- 最大化 (緑) -->
     <button
-      v-if="showMaximize !== false"
+      v-if="props.showMaximize"
       class="traffic-light"
-      :class="isWindowFocused ? 'traffic-light-maximize' : 'traffic-light-inactive'"
+      :class="props.isWindowFocused ? 'traffic-light-maximize' : 'traffic-light-inactive'"
       :title="t('maximize')"
       @click="$emit('maximize')"
     >
