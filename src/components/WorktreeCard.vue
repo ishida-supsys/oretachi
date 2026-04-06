@@ -14,6 +14,7 @@ const props = defineProps<{
   detached?: boolean;
   notificationCount?: number;
   hotkeyChar?: string;
+  artifactCount?: number;
   loading?: boolean;
   loadingText?: string;
   autoApproval?: boolean;
@@ -92,7 +93,13 @@ const terminalList = computed(() =>
 <template>
   <div class="worktree-card" :class="{ 'card-detached': detached, 'card-notified': notificationCount && notificationCount > 0 }">
     <Badge v-if="notificationCount && notificationCount > 0" :value="notificationCount" severity="danger" class="notification-badge" />
-    <div v-if="hotkeyChar" class="hotkey-badge">Alt+{{ hotkeyChar }}</div>
+    <div v-if="hotkeyChar || (artifactCount && artifactCount > 0)" class="top-left-badges">
+      <div v-if="hotkeyChar" class="hotkey-badge">Alt+{{ hotkeyChar }}</div>
+      <div v-if="artifactCount && artifactCount > 0" class="artifact-count-badge">
+        <span class="pi pi-box" style="font-size: 9px" />
+        {{ artifactCount }}
+      </div>
+    </div>
     <div class="card-header">
       <div class="card-info">
         <span
@@ -208,10 +215,16 @@ const terminalList = computed(() =>
   right: -8px;
 }
 
-.hotkey-badge {
+.top-left-badges {
   position: absolute;
   top: -8px;
   left: -8px;
+  display: flex;
+  gap: 4px;
+  align-items: center;
+}
+
+.hotkey-badge {
   background: rgba(203, 166, 247, 0.2);
   border: 1px solid rgba(203, 166, 247, 0.5);
   border-radius: 4px;
@@ -219,6 +232,19 @@ const terminalList = computed(() =>
   font-size: 10px;
   font-family: monospace;
   color: #cba6f7;
+  white-space: nowrap;
+}
+
+.artifact-count-badge {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  background: rgba(137, 180, 250, 0.15);
+  border: 1px solid rgba(137, 180, 250, 0.4);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 10px;
+  color: #89b4fa;
   white-space: nowrap;
 }
 

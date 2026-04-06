@@ -10,6 +10,7 @@ const props = defineProps<{
   worktreeName: string;
   branchName: string;
   hotkeyChar?: string;
+  artifactCount?: number;
   autoApproval: boolean;
   aiJudging: boolean;
   isWindowFocused: boolean;
@@ -105,12 +106,17 @@ async function closeWindow() {
         <span class="pi pi-code text-sm" />
       </button>
       <button
-        class="flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
+        class="relative flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
         :class="props.showWindowControls && !isMac ? 'mr-4' : ''"
         :title="t('openArtifacts')"
         @click="$emit('open-artifacts')"
       >
         <span class="pi pi-box text-sm" />
+        <span
+          v-if="props.artifactCount && props.artifactCount > 0"
+          class="absolute -bottom-1 -right-1 flex items-center justify-center min-w-[14px] h-[14px] rounded-full text-[9px] font-bold leading-none px-[3px]"
+          style="background: #89b4fa; color: #1e1e2e;"
+        >{{ props.artifactCount }}</span>
       </button>
       <template v-if="props.showWindowControls && !isMac">
         <button

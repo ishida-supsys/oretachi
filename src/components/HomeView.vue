@@ -164,6 +164,7 @@ const props = defineProps<{
   detachedWorktrees: Set<string>;
   notifications: Map<string, number>;
   hotkeyChars: Map<string, string>;
+  artifactCounts: Map<string, number>;
   loadingWorktrees: Map<string, string>;
   autoApprovals: Map<string, boolean>;
   aiJudgingWorktrees: Set<string>;
@@ -362,6 +363,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
               :detached="detachedWorktrees.has(worktree.id)"
               :notification-count="notifications.get(worktree.id) ?? 0"
               :hotkey-char="hotkeyChars.get(worktree.id)"
+              :artifact-count="artifactCounts.get(worktree.id) ?? 0"
               :loading="loadingWorktrees.has(worktree.id)"
               :loading-text="loadingWorktrees.get(worktree.id)"
               :auto-approval="autoApprovals.get(worktree.id) ?? false"
