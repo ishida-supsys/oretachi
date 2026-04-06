@@ -186,7 +186,7 @@ pub fn build_execution_plan(
         }
         AiAgentKind::CodexCli => {
             let (program, mut args) = make_platform_cmd(&resolved);
-            args.extend(["--model".to_string(), model.to_string(), "-q".to_string()]);
+            args.extend(["exec".to_string(), "--model".to_string(), model.to_string()]);
             AiExecutionPlan {
                 program,
                 args,
@@ -415,7 +415,8 @@ mod tests {
     #[test]
     fn test_build_execution_plan_codex() {
         let plan = build_execution_plan(&AiAgentKind::CodexCli, "my prompt", "{}", "model-x", false);
-        assert!(plan.args.contains(&"-q".to_string()));
+        assert!(plan.args.contains(&"exec".to_string()));
+        assert!(!plan.args.contains(&"-q".to_string()));
         assert!(plan.stdin_content.contains("my prompt"));
     }
 
