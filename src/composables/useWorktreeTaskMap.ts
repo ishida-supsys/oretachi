@@ -8,7 +8,7 @@ import type { TaskItem } from "../types/task";
 
 function isMainWindow(): boolean {
   try {
-    return !getCurrentWindow().label.startsWith("sub-");
+    return getCurrentWindow().label === "main";
   } catch {
     return false;
   }
