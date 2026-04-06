@@ -358,6 +358,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  debug(`[TerminalView] onUnmounted sessionId=${sessionId.value} cwd=${props.cwd}`);
   if (resizeDebounce) clearTimeout(resizeDebounce);
   resizeObserver?.disconnect();
   batcher.dispose();

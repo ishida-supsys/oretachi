@@ -1,9 +1,18 @@
 import { computed, ref } from "vue";
 import { emit, listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { useI18n } from "vue-i18n";
 import { useTasks } from "./useTasks";
 import { allPersistedTasks, loadAllTasks } from "./useTaskPersistence";
 import type { TaskItem } from "../types/task";
+
+function isMainWindow(): boolean {
+  try {
+    return getCurrentWindow().label === "main";
+  } catch {
+    return false;
+  }
+}
 
 const { tasks: activeTasks } = useTasks();
 
@@ -12,6 +21,7 @@ const remoteActiveTasks = ref<TaskItem[]>([]);
 
 // Tauri API の初期化（useWorktreeTaskMap() 呼び出し時に一度だけ実行）
 let initialized = false;
+let loadDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 function initTauriListeners() {
   if (initialized) return;
   initialized = true;
@@ -20,12 +30,20 @@ function initTauriListeners() {
   loadAllTasks();
 
   // メインウィンドウでタスクが永続化/削除されたとき全ウィンドウで再ロード
-  listen("task-data-changed", () => { loadAllTasks(); }).catch(() => {});
-
-  // メインウィンドウの activeTasks をリアルタイム同期
-  listen<TaskItem[]>("task-active-sync", (e) => {
-    remoteActiveTasks.value = e.payload;
+  // デバウンスで連続イベントをまとめる（複数ワークツリー並行完了時の連打を抑制）
+  listen("task-data-changed", () => {
+    if (loadDebounceTimer) clearTimeout(loadDebounceTimer);
+    loadDebounceTimer = setTimeout(() => { loadAllTasks(); }, 500);
   }).catch(() => {});
+
+  // task-active-sync はサブウィンドウのみ受信。
+  // メインウィンドウは activeTasks を直接参照するため受信不要。
+  // 自己受信するとworktreeTaskMap computedが不必要に再計算されるため除外する。
+  if (!isMainWindow()) {
+    listen<TaskItem[]>("task-active-sync", (e) => {
+      remoteActiveTasks.value = e.payload;
+    }).catch(() => {});
+  }
 
   // 起動時に現在の activeTasks スナップショットをリクエスト（実行中タスクを即座に取得）
   emit("task-active-sync-request", {}).catch(() => {});

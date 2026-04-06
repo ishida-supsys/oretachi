@@ -247,6 +247,18 @@ const { executeAddWorktree, executeAgentWorktree, resolveShell, buildPendingComm
     },
   });
 const { getTooltipText: getWorktreeTaskTooltip } = useWorktreeTaskMap();
+
+// ツールチップをcomputedでキャッシュ（v-forループ内インライン呼び出しの再計算負荷を削減）
+const worktreeTaskTooltips = computed(() => {
+  const map = new Map<string, string | undefined>();
+  for (const wt of worktrees.value) {
+    map.set(wt.id, getWorktreeTaskTooltip(wt.repositoryName, wt.branchName));
+  }
+  return map;
+});
+
+// サイドバー・メインエリア共通: detachedでないワークツリーのみ（毎レンダリングでのfilter()生成を回避）
+const attachedWorktrees = computed(() => worktrees.value.filter(w => !isDetached(w.id)));
 const { showAddTaskDialog, rerunTaskId, rerunPrompt, onAddTaskConfirm, onAddTaskCancel } =
   useAddTaskDialog(async (code) => {
     if (code.type === "add_worktree") {
@@ -1340,7 +1352,7 @@ onMounted(async () => {
       <!-- ワークツリー単位のタブ -->
       <div class="flex overflow-x-auto min-w-0 flex-1">
         <button
-          v-for="wt in worktrees.filter(w => !isDetached(w.id))"
+          v-for="wt in attachedWorktrees"
           :key="wt.id"
           class="flex items-center gap-1.5 px-3 py-2 text-xs shrink-0 border-r border-[#313244] transition-colors"
           :class="
@@ -1437,9 +1449,8 @@ onMounted(async () => {
       />
 
       <!-- ワークツリーごとのフレームレイアウト (detached は除外) -->
-      <template v-for="wt in worktrees" :key="wt.id">
+      <template v-for="wt in attachedWorktrees" :key="wt.id">
         <div
-          v-if="!isDetached(wt.id)"
           v-show="viewMode === 'terminal' && wt.id === activeWorktreeId"
           class="absolute inset-0 flex flex-col"
         >
@@ -1451,7 +1462,7 @@ onMounted(async () => {
             :auto-approval="autoApprovalMap.get(wt.id) ?? false"
             :ai-judging="aiJudgingWorktrees.has(wt.id)"
             :is-window-focused="isWindowFocused"
-            :task-tooltip="getWorktreeTaskTooltip(wt.repositoryName, wt.branchName)"
+            :task-tooltip="worktreeTaskTooltips.get(wt.id)"
             @open-in-ide="onOpenInIde(wt.id)"
             @open-artifacts="onOpenArtifacts(wt.id)"
             @cancel-ai-judging="onCancelAiJudging(wt.id)"
