@@ -139,6 +139,7 @@ function initTerminal() {
   terminal.open(xtermRef.value);
 
   // 左クリック: 選択テキストがあればコピー＆選択解除
+  // capture フェーズで登録し、xterm.js が選択をクリアする前にテキストを取得する
   xtermRef.value.addEventListener("mousedown", async (e: MouseEvent) => {
     if (e.button !== 0) return;
     if (!terminal) return;
@@ -151,7 +152,7 @@ function initTerminal() {
         // クリップボード書き込み失敗時は選択を維持する
       }
     }
-  });
+  }, { capture: true });
 
   // 右クリック: 常にペースト
   xtermRef.value.addEventListener("contextmenu", async (e: MouseEvent) => {
