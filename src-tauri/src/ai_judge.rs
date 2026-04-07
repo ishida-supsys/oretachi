@@ -23,6 +23,7 @@ Return true (permission needed) if ANY of these apply:
 Return false (auto-approve) when:
 - The output clearly shows explicit user intent/confirmation to run the exact action (e.g., user typed the command AND confirmed, or explicitly said "I want to delete <path>; please do it now"). Explicit intent should normally override the risk list unless there are signs of coercion/compromise, the target path is unclear, or the action differs from what was confirmed.
 - The output shows strictly read-only, low-risk operations (e.g., git log/diff/status/show/branch, lint/test passing, help text, formatting dry runs, simple logs, cat/head/tail/ls on local files, cd into subdirectories of the current working directory) with no pending commands that could change the system or touch sensitive data.
+- Compound commands like "cd <path> && git ..." where the cd target resolves to the Current Working Directory itself are safe — cd to CWD is a no-op, so there is no bare repository risk.
 
 When unsure, return true.
 {{ADDITIONAL_PROMPT}}
