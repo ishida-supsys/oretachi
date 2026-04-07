@@ -96,6 +96,16 @@ async function closeWindow() {
         <span class="pi pi-spin pi-spinner" style="font-size: 9px" />
         {{ t('aiJudgingBadge') }}
       </button>
+      <button
+        v-if="props.artifactCount && props.artifactCount > 0"
+        class="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium cursor-pointer border-none"
+        style="background: rgba(137, 180, 250, 0.15); color: #89b4fa; border: 1px solid rgba(137, 180, 250, 0.3)"
+        :title="t('openArtifacts')"
+        @click="$emit('open-artifacts')"
+      >
+        <span class="pi pi-box" style="font-size: 9px" />
+        {{ props.artifactCount }}
+      </button>
     </div>
     <div class="flex items-center">
       <button
@@ -106,17 +116,12 @@ async function closeWindow() {
         <span class="pi pi-code text-sm" />
       </button>
       <button
-        class="relative flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
+        class="flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
         :class="props.showWindowControls && !isMac ? 'mr-4' : ''"
         :title="t('openArtifacts')"
         @click="$emit('open-artifacts')"
       >
         <span class="pi pi-box text-sm" />
-        <span
-          v-if="props.artifactCount && props.artifactCount > 0"
-          class="absolute -bottom-1 -right-1 flex items-center justify-center min-w-[14px] h-[14px] rounded-full text-[9px] font-bold leading-none px-[3px]"
-          style="background: #89b4fa; color: #1e1e2e;"
-        >{{ props.artifactCount }}</span>
       </button>
       <template v-if="props.showWindowControls && !isMac">
         <button
