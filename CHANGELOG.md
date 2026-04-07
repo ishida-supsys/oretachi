@@ -6,6 +6,16 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.17.8] - 2026-04-08
+
+### Added
+- Move artifact count from button badge to inline indicator in header
+
+### Fixed
+- Split bare-repo-risk note into its own bullet in ai_judge prompt
+- Allow cd-to-CWD compound git commands in auto-approval
+- Change Codex CLI default model to gpt-5.4-mini for ChatGPT account compatibility
+
 ## [0.17.7] - 2026-04-07
 
 ### Added
@@ -178,7 +188,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.17.7...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.17.8...HEAD
+[0.17.8]: https://github.com/ishida-supsys/oretachi/compare/0.17.7...0.17.8
 [0.17.7]: https://github.com/ishida-supsys/oretachi/compare/0.17.6...0.17.7
 [0.17.6]: https://github.com/ishida-supsys/oretachi/compare/0.17.5...0.17.6
 [0.17.5]: https://github.com/ishida-supsys/oretachi/compare/0.17.4...0.17.5
