@@ -9,7 +9,7 @@ import { usePtyWriteBatcher } from "../composables/usePtyWriteBatcher";
 import { useSettings } from "../composables/useSettings";
 import { matchesHotkey } from "../composables/useHotkeys";
 import { useTerminalSearch } from "../composables/useTerminalSearch";
-import { readText } from "@tauri-apps/plugin-clipboard-manager";
+import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useI18n } from "vue-i18n";
 import { debug } from "@tauri-apps/plugin-log";
 
@@ -137,6 +137,30 @@ function initTerminal() {
   }
 
   terminal.open(xtermRef.value);
+
+  // 左クリック: 選択テキストがあればコピー＆選択解除
+  // capture フェーズで登録し、xterm.js が選択をクリアする前にテキストを取得する
+  xtermRef.value.addEventListener("mousedown", async (e: MouseEvent) => {
+    if (e.button !== 0) return;
+    if (!terminal) return;
+    const selection = terminal.getSelection();
+    if (selection) {
+      try {
+        await writeText(selection);
+        terminal.clearSelection();
+      } catch {
+        // クリップボード書き込み失敗時は選択を維持する
+      }
+    }
+  }, { capture: true });
+
+  // 右クリック: 常にペースト
+  xtermRef.value.addEventListener("contextmenu", async (e: MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (!terminal) return;
+    await handlePaste();
+  });
 
   if (!props.noResize) {
     const isOffscreen = !!xtermRef.value?.closest('[data-offscreen]');
