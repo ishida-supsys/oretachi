@@ -146,10 +146,10 @@ function initTerminal() {
     if (selection) {
       try {
         await writeText(selection);
+        terminal.clearSelection();
       } catch {
-        // クリップボード書き込み失敗時は何もしない
+        // クリップボード書き込み失敗時は選択を維持する
       }
-      terminal.clearSelection();
     }
   });
 
