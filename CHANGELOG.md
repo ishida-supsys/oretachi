@@ -6,6 +6,15 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.17.7] - 2026-04-07
+
+### Added
+- Enable copy/paste via mouse in terminal
+
+### Fixed
+- Add --skip-git-repo-check to Codex CLI invocation
+- Use capture phase for mousedown to get selection before xterm.js clears it
+
 ## [0.17.6] - 2026-04-07
 
 ### Added
@@ -169,7 +178,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.17.6...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.17.7...HEAD
+[0.17.7]: https://github.com/ishida-supsys/oretachi/compare/0.17.6...0.17.7
 [0.17.6]: https://github.com/ishida-supsys/oretachi/compare/0.17.5...0.17.6
 [0.17.5]: https://github.com/ishida-supsys/oretachi/compare/0.17.4...0.17.5
 [0.17.4]: https://github.com/ishida-supsys/oretachi/compare/0.17.3...0.17.4
