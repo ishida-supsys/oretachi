@@ -6,6 +6,17 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.17.6] - 2026-04-07
+
+### Added
+- Display artifact count indicators on worktree card and header
+- Optimize worktree rendering and task synchronization
+
+### Fixed
+- Prevent app freeze when close button is clicked on Mac
+- Update CodexCli invocation to use exec subcommand
+- Use withDefaults to correct boolean prop casting for traffic light buttons
+
 ## [0.17.5] - 2026-04-03
 
 ### Fixed
@@ -158,7 +169,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.17.5...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.17.6...HEAD
+[0.17.6]: https://github.com/ishida-supsys/oretachi/compare/0.17.5...0.17.6
 [0.17.5]: https://github.com/ishida-supsys/oretachi/compare/0.17.4...0.17.5
 [0.17.4]: https://github.com/ishida-supsys/oretachi/compare/0.17.3...0.17.4
 [0.17.3]: https://github.com/ishida-supsys/oretachi/compare/0.17.2...0.17.3
