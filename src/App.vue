@@ -1231,78 +1231,83 @@ onMounted(async () => {
     if (isWaitingForShutdown.value) return; // 二重クリック防止
     isWaitingForShutdown.value = true;
 
-    // ワークツリー操作/タスク実行中の場合は完了まで待機
-    if (isBusyForShutdown.value) {
-      await waitForBusyOperations();
-    }
+    try {
+      // ワークツリー操作/タスク実行中の場合は完了まで待機
+      if (isBusyForShutdown.value) {
+        await waitForBusyOperations();
+      }
 
-    // 1. 全ウィンドウの位置・サイズをプラグインで保存
-    await saveWindowState(StateFlags.ALL);
+      // 1. 全ウィンドウの位置・サイズをプラグインで保存
+      await saveWindowState(StateFlags.ALL);
 
-    // 2. サブウィンドウ化しているワークツリーIDを設定に保存
-    settings.value.detachedWorktreeIds = Array.from(detachedWorktrees);
-    await invoke("save_settings", { settings: settings.value });
+      // 2. サブウィンドウ化しているワークツリーIDを設定に保存
+      settings.value.detachedWorktreeIds = Array.from(detachedWorktrees);
+      await invoke("save_settings", { settings: settings.value });
 
-    // 3. サブウィンドウのターミナルセッションを保存（closeAllSubWindows より前）
-    for (const wt of worktrees.value) {
-      if (!isDetached(wt.id)) continue;
-      try {
-        const response = await new Promise<{ terminals: { title: string; buffer: string }[] } | null>((resolve) => {
-          const timeout = setTimeout(() => { unlisten(); resolve(null); }, 3000);
-          let unlisten = () => {};
-          listen<{ worktreeId: string; terminals: { title: string; buffer: string }[] }>(
-            "sub-session-save-response",
-            (event) => {
-              if (event.payload.worktreeId === wt.id) {
-                clearTimeout(timeout);
-                unlisten();
-                resolve({ terminals: event.payload.terminals });
+      // 3. サブウィンドウのターミナルセッションを保存（closeAllSubWindows より前）
+      for (const wt of worktrees.value) {
+        if (!isDetached(wt.id)) continue;
+        try {
+          const response = await new Promise<{ terminals: { title: string; buffer: string }[] } | null>((resolve) => {
+            const timeout = setTimeout(() => { unlisten(); resolve(null); }, 3000);
+            let unlisten = () => {};
+            listen<{ worktreeId: string; terminals: { title: string; buffer: string }[] }>(
+              "sub-session-save-response",
+              (event) => {
+                if (event.payload.worktreeId === wt.id) {
+                  clearTimeout(timeout);
+                  unlisten();
+                  resolve({ terminals: event.payload.terminals });
+                }
               }
-            }
-          ).then((fn) => { unlisten = fn; });
-          emitTo(`sub-${wt.id}`, "sub-session-save-request", {}).catch(() => {
-            clearTimeout(timeout);
-            unlisten();
-            resolve(null);
+            ).then((fn) => { unlisten = fn; });
+            emitTo(`sub-${wt.id}`, "sub-session-save-request", {}).catch(() => {
+              clearTimeout(timeout);
+              unlisten();
+              resolve(null);
+            });
           });
-        });
-        if (response && response.terminals.length > 0) {
-          await saveTerminalSession(wt.id, response.terminals);
+          if (response && response.terminals.length > 0) {
+            await saveTerminalSession(wt.id, response.terminals);
+          }
+        } catch {
+          // セッション保存失敗は無視
         }
-      } catch {
-        // セッション保存失敗は無視
       }
-    }
 
-    // 4. メインウィンドウのターミナルセッションを保存
-    for (const wt of worktrees.value) {
-      if (isDetached(wt.id)) continue;
-      try {
-        const bundle = worktreeFrameBundles.get(wt.id);
-        const terminals = wt.terminals.map((t) => {
-          const termRef = bundle?.terminalRefs.get(t.id) ?? getTerminalRef(t.id);
-          return { title: t.title, buffer: termRef?.serializeBuffer() ?? "" };
-        }).filter((t) => t.buffer !== "");
-        if (terminals.length > 0) {
-          await saveTerminalSession(wt.id, terminals);
+      // 4. メインウィンドウのターミナルセッションを保存
+      for (const wt of worktrees.value) {
+        if (isDetached(wt.id)) continue;
+        try {
+          const bundle = worktreeFrameBundles.get(wt.id);
+          const terminals = wt.terminals.map((t) => {
+            const termRef = bundle?.terminalRefs.get(t.id) ?? getTerminalRef(t.id);
+            return { title: t.title, buffer: termRef?.serializeBuffer() ?? "" };
+          }).filter((t) => t.buffer !== "");
+          if (terminals.length > 0) {
+            await saveTerminalSession(wt.id, terminals);
+          }
+        } catch {
+          // セッション保存失敗は無視
         }
-      } catch {
-        // セッション保存失敗は無視
       }
-    }
 
-    // 5. 既存のシャットダウン処理
-    await Promise.all([
-      closeTrayPopup(),
-      closeAllCodeReviewWindows(),
-      closeAllSubWindows(),
-    ]);
-    await Promise.all(
-      [...worktreeFrameBundles.values()].flatMap((bundle) =>
-        [...bundle.terminalRefs.values()].filter((term) => term?.isRunning).map((term) => term!.kill()),
-      ),
-    );
-    await getCurrentWindow().destroy();
+      // 5. 既存のシャットダウン処理
+      await Promise.all([
+        closeTrayPopup(),
+        closeAllCodeReviewWindows(),
+        closeAllSubWindows(),
+      ]);
+      await Promise.all(
+        [...worktreeFrameBundles.values()].flatMap((bundle) =>
+          [...bundle.terminalRefs.values()].filter((term) => term?.isRunning).map((term) => term!.kill()),
+        ),
+      );
+    } catch (e) {
+      console.error("[shutdown] error during shutdown sequence:", e);
+    } finally {
+      await getCurrentWindow().destroy();
+    }
   });
 
   // 起動後にアップデートを確認

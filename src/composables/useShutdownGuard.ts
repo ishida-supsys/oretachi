@@ -14,11 +14,13 @@ export function useShutdownGuard(loadingWorktrees: Reactive<Map<string, string>>
     );
   });
 
-  function waitForBusyOperations(): Promise<void> {
+  function waitForBusyOperations(timeoutMs = 20000): Promise<void> {
     return new Promise((resolve) => {
       if (!isBusyForShutdown.value) { resolve(); return; }
-      const stop = watch(isBusyForShutdown, (busy) => {
-        if (!busy) { stop(); resolve(); }
+      let stop: () => void;
+      const timer = setTimeout(() => { stop(); resolve(); }, timeoutMs);
+      stop = watch(isBusyForShutdown, (busy) => {
+        if (!busy) { clearTimeout(timer); stop(); resolve(); }
       });
     });
   }
