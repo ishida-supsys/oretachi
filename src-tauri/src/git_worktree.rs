@@ -48,17 +48,30 @@ pub fn get_git_remotes(repo_path: &str) -> Vec<serde_json::Value> {
 
 pub fn git_pull(repo_path: &str) -> Result<(), String> {
     // fast-forward pull でローカルブランチを更新する。
-    // upstream が無い・detached HEAD 等で失敗した場合は fetch にフォールバック。
-    let pull_ok = make_command("git")
+    let output = make_command("git")
         .args(["pull", "--ff-only"])
         .current_dir(repo_path)
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-    if pull_ok {
+        .map_err(|e| format!("git command error: {}", e))?;
+
+    if output.status.success() {
         return Ok(());
     }
-    run_git_in(repo_path, &["fetch"]).map(|_| ())
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    // upstream が未設定または detached HEAD の場合のみ fetch にフォールバック。
+    // dirty branch や diverged branch はエラーをそのまま返す。
+    let is_no_upstream = stderr.contains("no tracking information")
+        || stderr.contains("There is no tracking information")
+        || stderr.contains("no upstream configured")
+        || stderr.contains("HEAD detached");
+
+    if is_no_upstream {
+        run_git_in(repo_path, &["fetch"]).map(|_| ())
+    } else {
+        Err(format!("git pull --ff-only failed: {}", stderr))
+    }
 }
 
 pub fn validate_repo(path: &str) -> Result<bool, String> {
