@@ -234,6 +234,10 @@ export function useTaskExecution(deps: {
     loadingWorktrees.set(entry.id, t("creatingText"));
 
     try {
+      if (repo.pullBeforeAdd) {
+        await invoke("git_pull", { repoPath: repo.path });
+      }
+
       await invokeWorktreeAdd(entry, code.source_branch);
       commitWorktree(entry);
       tryAutoAssignHotkey(entry.id);

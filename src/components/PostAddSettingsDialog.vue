@@ -10,10 +10,11 @@ const props = defineProps<{
   currentPackageManager?: string;
   currentPackageManagerArgs?: string;
   currentNotificationHooks?: NotificationHookEntry[];
+  currentPullBeforeAdd?: boolean;
 }>();
 
 const emit = defineEmits<{
-  confirm: [targets: string[], packageManager: string | undefined, packageManagerArgs: string | undefined, notificationHooks: NotificationHookEntry[]];
+  confirm: [targets: string[], packageManager: string | undefined, packageManagerArgs: string | undefined, notificationHooks: NotificationHookEntry[], pullBeforeAdd: boolean];
   cancel: [];
 }>();
 
@@ -25,6 +26,7 @@ const loading = ref(true);
 const detectedPMs = ref<string[]>([]);
 const selectedPM = ref<string | undefined>(props.currentPackageManager);
 const pmArgs = ref<string>(props.currentPackageManagerArgs ?? "");
+const pullBeforeAdd = ref<boolean>(props.currentPullBeforeAdd ?? false);
 
 const ALL_PMS = ["npm", "pnpm", "yarn", "bun"];
 
@@ -89,7 +91,7 @@ function onConfirm() {
       hooks.push({ event: ev as NotificationHookEntry["event"], kind: state.kind as NotificationHookEntry["kind"] });
     }
   }
-  emit("confirm", Array.from(selected.value), selectedPM.value || undefined, pmArgs.value.trim() || undefined, hooks);
+  emit("confirm", Array.from(selected.value), selectedPM.value || undefined, pmArgs.value.trim() || undefined, hooks, pullBeforeAdd.value);
 }
 </script>
 
@@ -97,6 +99,15 @@ function onConfirm() {
   <div class="dialog-overlay" @click.self="emit('cancel')">
     <div class="dialog">
       <h3 class="dialog-title">{{ t("title") }}</h3>
+
+      <!-- ワークツリー追加オプションセクション -->
+      <div class="section">
+        <div class="section-header">{{ t("addOptions.sectionLabel") }}</div>
+        <label class="checkbox-label">
+          <input type="checkbox" v-model="pullBeforeAdd" />
+          <span class="entry-text">{{ t("addOptions.pullBeforeAdd") }}</span>
+        </label>
+      </div>
 
       <!-- パッケージマネージャーセクション -->
       <div class="section">
@@ -459,7 +470,11 @@ function onConfirm() {
 <i18n lang="json">
 {
   "en": {
-    "title": "Post-add settings",
+    "title": "Worktree settings",
+    "addOptions": {
+      "sectionLabel": "Add options",
+      "pullBeforeAdd": "Run git pull before adding worktree"
+    },
     "pkgManager": {
       "sectionLabel": "Package install",
       "detected": "Detected: {pms}",
@@ -484,7 +499,11 @@ function onConfirm() {
     "cancel": "Cancel"
   },
   "ja": {
-    "title": "追加後設定",
+    "title": "追加設定",
+    "addOptions": {
+      "sectionLabel": "追加オプション",
+      "pullBeforeAdd": "ワークツリー追加前に git pull を実行する"
+    },
     "pkgManager": {
       "sectionLabel": "パッケージインストール",
       "detected": "検出: {pms}",

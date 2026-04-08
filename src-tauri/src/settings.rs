@@ -25,6 +25,8 @@ pub struct Repository {
     pub package_manager_args: Option<String>,
     #[serde(default, rename = "notificationHooks")]
     pub notification_hooks: Option<Vec<NotificationHookEntry>>,
+    #[serde(default, rename = "pullBeforeAdd")]
+    pub pull_before_add: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

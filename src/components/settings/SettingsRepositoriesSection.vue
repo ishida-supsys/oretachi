@@ -15,6 +15,7 @@ const {
   copyDialogCurrentPM,
   copyDialogCurrentPMArgs,
   copyDialogCurrentHooks,
+  copyDialogCurrentPullBeforeAdd,
   openCopyDialog,
   onDialogConfirm,
 } = usePostAddSettings();
@@ -164,6 +165,7 @@ function clearExecScript(repoId: string) {
     :current-package-manager="copyDialogCurrentPM"
     :current-package-manager-args="copyDialogCurrentPMArgs"
     :current-notification-hooks="copyDialogCurrentHooks"
+    :current-pull-before-add="copyDialogCurrentPullBeforeAdd"
     @confirm="onDialogConfirm"
     @cancel="showCopyDialog = false"
   />
@@ -338,7 +340,7 @@ function clearExecScript(repoId: string) {
       "execScript": "Exec script"
     },
     "postAdd": {
-      "label": "Post-add",
+      "label": "Settings",
       "configure": "Configure",
       "itemsSelected": "{count} selected",
       "hooksCount": "{count} hooks",
@@ -365,7 +367,7 @@ function clearExecScript(repoId: string) {
       "execScript": "実行スクリプト"
     },
     "postAdd": {
-      "label": "追加後設定",
+      "label": "追加設定",
       "configure": "設定",
       "itemsSelected": "{count}件選択中",
       "hooksCount": "{count}件フック",
