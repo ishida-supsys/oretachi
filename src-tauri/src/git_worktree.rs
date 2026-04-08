@@ -47,7 +47,7 @@ pub fn get_git_remotes(repo_path: &str) -> Vec<serde_json::Value> {
 }
 
 pub fn git_pull(repo_path: &str) -> Result<(), String> {
-    run_git_in(repo_path, &["pull"]).map(|_| ())
+    run_git_in(repo_path, &["fetch", "--all"]).map(|_| ())
 }
 
 pub fn validate_repo(path: &str) -> Result<bool, String> {

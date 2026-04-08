@@ -473,7 +473,7 @@ function onConfirm() {
     "title": "Worktree settings",
     "addOptions": {
       "sectionLabel": "Add options",
-      "pullBeforeAdd": "Run git pull before adding worktree"
+      "pullBeforeAdd": "Run git fetch --all before adding worktree"
     },
     "pkgManager": {
       "sectionLabel": "Package install",
@@ -502,7 +502,7 @@ function onConfirm() {
     "title": "追加設定",
     "addOptions": {
       "sectionLabel": "追加オプション",
-      "pullBeforeAdd": "ワークツリー追加前に git pull を実行する"
+      "pullBeforeAdd": "ワークツリー追加前に git fetch --all を実行する"
     },
     "pkgManager": {
       "sectionLabel": "パッケージインストール",
