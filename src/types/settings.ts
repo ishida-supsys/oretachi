@@ -12,6 +12,7 @@ export interface Repository {
   packageManager?: string; // "npm" | "pnpm" | "yarn" | "bun" | undefined
   packageManagerArgs?: string; // install コマンドに追加する引数 (例: --config.node-linker=hoisted)
   notificationHooks?: NotificationHookEntry[]; // Claude Code通知フック設定
+  pullBeforeAdd?: boolean; // ワークツリー追加前に git pull を実行するか
 }
 
 export interface WorktreeEntry {

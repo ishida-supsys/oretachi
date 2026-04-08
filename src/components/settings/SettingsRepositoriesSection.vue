@@ -15,6 +15,7 @@ const {
   copyDialogCurrentPM,
   copyDialogCurrentPMArgs,
   copyDialogCurrentHooks,
+  copyDialogCurrentPullBeforeAdd,
   openCopyDialog,
   onDialogConfirm,
 } = usePostAddSettings();
@@ -127,7 +128,8 @@ function clearExecScript(repoId: string) {
               <template v-if="repo.packageManager && repo.copyTargets?.length"> | </template>
               <template v-if="repo.copyTargets?.length">{{ t("postAdd.itemsSelected", { count: repo.copyTargets.length }) }}</template>
               <template v-if="repo.notificationHooks?.length"> | {{ t("postAdd.hooksCount", { count: repo.notificationHooks.length }) }}</template>
-              <template v-if="!repo.packageManager && !repo.copyTargets?.length && !repo.notificationHooks?.length">{{ t("postAdd.notConfigured") }}</template>
+              <template v-if="repo.pullBeforeAdd"> | {{ t("postAdd.pullBeforeAdd") }}</template>
+              <template v-if="!repo.packageManager && !repo.copyTargets?.length && !repo.notificationHooks?.length && !repo.pullBeforeAdd">{{ t("postAdd.notConfigured") }}</template>
             </span>
             <button class="btn-secondary" @click="openCopyDialog(repo.id)">
               {{ t("postAdd.configure") }}
@@ -164,6 +166,7 @@ function clearExecScript(repoId: string) {
     :current-package-manager="copyDialogCurrentPM"
     :current-package-manager-args="copyDialogCurrentPMArgs"
     :current-notification-hooks="copyDialogCurrentHooks"
+    :current-pull-before-add="copyDialogCurrentPullBeforeAdd"
     @confirm="onDialogConfirm"
     @cancel="showCopyDialog = false"
   />
@@ -338,10 +341,11 @@ function clearExecScript(repoId: string) {
       "execScript": "Exec script"
     },
     "postAdd": {
-      "label": "Post-add",
+      "label": "Settings",
       "configure": "Configure",
       "itemsSelected": "{count} selected",
       "hooksCount": "{count} hooks",
+      "pullBeforeAdd": "fetch",
       "notConfigured": "Not configured"
     },
     "error": {
@@ -365,10 +369,11 @@ function clearExecScript(repoId: string) {
       "execScript": "実行スクリプト"
     },
     "postAdd": {
-      "label": "追加後設定",
+      "label": "追加設定",
       "configure": "設定",
       "itemsSelected": "{count}件選択中",
       "hooksCount": "{count}件フック",
+      "pullBeforeAdd": "fetch",
       "notConfigured": "未設定"
     },
     "error": {

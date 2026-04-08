@@ -12,6 +12,7 @@ export function usePostAddSettings() {
   const copyDialogCurrentPM = ref<string | undefined>(undefined);
   const copyDialogCurrentPMArgs = ref<string | undefined>(undefined);
   const copyDialogCurrentHooks = ref<NotificationHookEntry[]>([]);
+  const copyDialogCurrentPullBeforeAdd = ref<boolean>(false);
 
   function openCopyDialog(repoId: string) {
     const repo = settings.value.repositories.find((r) => r.id === repoId);
@@ -22,6 +23,7 @@ export function usePostAddSettings() {
     copyDialogCurrentPM.value = repo.packageManager;
     copyDialogCurrentPMArgs.value = repo.packageManagerArgs;
     copyDialogCurrentHooks.value = repo.notificationHooks ?? [];
+    copyDialogCurrentPullBeforeAdd.value = repo.pullBeforeAdd ?? false;
     showCopyDialog.value = true;
   }
 
@@ -30,6 +32,7 @@ export function usePostAddSettings() {
     packageManager: string | undefined,
     packageManagerArgs: string | undefined,
     notificationHooks: NotificationHookEntry[],
+    pullBeforeAdd: boolean,
   ) {
     const repo = settings.value.repositories.find((r) => r.id === copyDialogRepoId.value);
     if (!repo) return;
@@ -37,6 +40,7 @@ export function usePostAddSettings() {
     repo.packageManager = packageManager;
     repo.packageManagerArgs = packageManagerArgs || undefined;
     repo.notificationHooks = notificationHooks.length > 0 ? notificationHooks : undefined;
+    repo.pullBeforeAdd = pullBeforeAdd || undefined;
     scheduleSave();
     showCopyDialog.value = false;
   }
@@ -55,6 +59,7 @@ export function usePostAddSettings() {
     copyDialogCurrentPM,
     copyDialogCurrentPMArgs,
     copyDialogCurrentHooks,
+    copyDialogCurrentPullBeforeAdd,
     openCopyDialog,
     onDialogConfirm,
     clearCopyTargets,

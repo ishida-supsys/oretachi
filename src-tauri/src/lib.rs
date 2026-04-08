@@ -137,6 +137,11 @@ async fn git_validate_repo(path: String) -> Result<bool, String> {
 }
 
 #[tauri::command]
+async fn git_pull(repo_path: String) -> Result<(), String> {
+    run_git(move || git_worktree::git_pull(&repo_path)).await
+}
+
+#[tauri::command]
 async fn git_worktree_add(
     app_handle: tauri::AppHandle,
     repo_path: String,
@@ -705,6 +710,7 @@ pub fn run() {
             get_settings,
             save_settings,
             git_validate_repo,
+            git_pull,
             git_worktree_add,
             git_worktree_remove,
             git_worktree_restore,

@@ -525,6 +525,11 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string,
   loadingWorktrees.set(entry.id, copyWorkingChangesFrom ? t("duplicatingText") : t("creatingText"));
 
   try {
+    const repo = settings.value.repositories.find((r) => r.id === entry.repositoryId);
+    if (repo?.pullBeforeAdd) {
+      await invoke("git_pull", { repoPath: repo.path });
+    }
+
     const lfsSkipped = await invokeWorktreeAdd(entry, sourceBranch);
 
     // 成功時: 設定に永続化
@@ -551,7 +556,6 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string,
     }
 
     // gitignoreコピー対象があればコピー実行（スクリプト実行前）
-    const repo = settings.value.repositories.find((r) => r.id === entry.repositoryId);
     if (repo?.copyTargets?.length) {
       try {
         await invoke("copy_gitignore_targets", {
