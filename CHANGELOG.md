@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.17.9] - 2026-04-09
+
+### Added
+- Add option to pull from remote before adding a worktree
+
 ## [0.17.8] - 2026-04-08
 
 ### Added
@@ -188,7 +193,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.17.8...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.17.9...HEAD
+[0.17.9]: https://github.com/ishida-supsys/oretachi/compare/0.17.8...0.17.9
 [0.17.8]: https://github.com/ishida-supsys/oretachi/compare/0.17.7...0.17.8
 [0.17.7]: https://github.com/ishida-supsys/oretachi/compare/0.17.6...0.17.7
 [0.17.6]: https://github.com/ishida-supsys/oretachi/compare/0.17.5...0.17.6
