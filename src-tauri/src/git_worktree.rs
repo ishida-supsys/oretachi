@@ -65,7 +65,8 @@ pub fn git_pull(repo_path: &str) -> Result<(), String> {
     let is_no_upstream = stderr.contains("no tracking information")
         || stderr.contains("There is no tracking information")
         || stderr.contains("no upstream configured")
-        || stderr.contains("HEAD detached");
+        || stderr.contains("HEAD detached")
+        || stderr.contains("You are not currently on a branch");
 
     if is_no_upstream {
         run_git_in(repo_path, &["fetch"]).map(|_| ())
