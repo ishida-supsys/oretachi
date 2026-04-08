@@ -47,6 +47,17 @@ pub fn get_git_remotes(repo_path: &str) -> Vec<serde_json::Value> {
 }
 
 pub fn git_pull(repo_path: &str) -> Result<(), String> {
+    // fast-forward pull でローカルブランチを更新する。
+    // upstream が無い・detached HEAD 等で失敗した場合は fetch にフォールバック。
+    let pull_ok = make_command("git")
+        .args(["pull", "--ff-only"])
+        .current_dir(repo_path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if pull_ok {
+        return Ok(());
+    }
     run_git_in(repo_path, &["fetch"]).map(|_| ())
 }
 
