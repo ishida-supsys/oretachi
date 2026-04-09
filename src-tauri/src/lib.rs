@@ -609,10 +609,9 @@ fn stop_fs_watch(state: State<FsWatcherManager>, worktree_id: String) -> Result<
 }
 
 fn is_mcp_enabled() -> bool {
-    match std::env::var("MCP_SERVER_ENABLED") {
-        Ok(v) => !matches!(v.to_lowercase().as_str(), "false" | "0" | "no" | ""),
-        Err(_) => true,
-    }
+    std::env::var("MCP_SERVER_ENABLED")
+        .map(|v| v != "false")
+        .unwrap_or(true)
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
