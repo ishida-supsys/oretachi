@@ -286,9 +286,11 @@ const {
   removeTargetWorktree,
   removeBranches,
   removeDirtyFiles,
+  cancellableWorktrees,
   onRemoveWorktree,
   onRemoveWorktreeConfirm,
   onArchiveWorktreeConfirm,
+  cancelWorktreeRemove,
   dismissDialog: onRemoveWorktreeDismiss,
 } = useRemoveWorktreeDialog({
   loadingWorktrees,
@@ -1445,6 +1447,7 @@ onMounted(async () => {
         :hotkey-chars="hotkeyChars"
         :artifact-counts="artifactCounts"
         :loading-worktrees="loadingWorktrees"
+        :cancellable-worktrees="cancellableWorktrees"
         :auto-approvals="autoApprovalMap"
         :ai-judging-worktrees="aiJudgingWorktrees"
         @select-terminal="switchToTerminal"
@@ -1460,6 +1463,7 @@ onMounted(async () => {
         @set-hotkey-char="onSetHotkeyChar"
         @toggle-auto-approval="onToggleAutoApproval"
         @cancel-ai-judging="onCancelAiJudging"
+        @cancel-remove="cancelWorktreeRemove"
         @duplicate-worktree="onDuplicateWorktree"
         @reorder-worktrees="reorderWorktree"
         @commit-reorder="saveWorktreeOrder"
@@ -1653,6 +1657,7 @@ onMounted(async () => {
     "taskCompletedDetail": "All steps completed",
     "taskFailedSummary": "Task Failed",
     "deletingText": "Deleting...",
+    "retryingDeleteText": "Retrying deletion...",
     "archivingText": "Archiving...",
     "creatingText": "Creating...",
     "duplicatingText": "Duplicating...",
@@ -1683,6 +1688,7 @@ onMounted(async () => {
     "taskCompletedDetail": "すべてのステップが完了しました",
     "taskFailedSummary": "タスク失敗",
     "deletingText": "削除中...",
+    "retryingDeleteText": "削除をリトライ中...",
     "archivingText": "アーカイブ中...",
     "creatingText": "作成中...",
     "duplicatingText": "複製中...",

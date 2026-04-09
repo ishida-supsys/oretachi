@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::process::Command;
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 #[cfg(target_os = "windows")]
 use std::os::windows::process::CommandExt;
@@ -204,5 +205,281 @@ pub fn kill_process_tree(pid: u32) {
             libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
             libc::kill(pid as libc::pid_t, libc::SIGKILL);
         }
+    }
+}
+
+// ============================================================
+// Windows: NtAPI (PEB経由CWD読取) によるプロセス検索・kill
+// CreateToolhelp32Snapshot + NtQueryInformationProcess + ReadProcessMemory
+// ============================================================
+
+/// 指定ディレクトリ以下をカレントディレクトリとして持つ外部プロセスを検索してkillする。
+/// PTYManagerが管理しないプロセス（IDE、シェルがcd済みのもの等）も対象にする。
+/// 返り値: killしたプロセス数
+#[cfg(target_os = "windows")]
+pub fn kill_external_processes_in_dir(dir: &str) -> usize {
+    let pids = find_processes_by_cwd(dir);
+    let count = pids.len();
+    for pid in pids {
+        kill_process_tree(pid);
+    }
+    count
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn kill_external_processes_in_dir(_dir: &str) -> usize {
+    0
+}
+
+/// 指定ディレクトリ以下をcwdとして持つプロセスのPIDリストを返す（Windows専用）。
+/// 自プロセスは除外する。
+#[cfg(target_os = "windows")]
+fn find_processes_by_cwd(dir: &str) -> Vec<u32> {
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+        TH32CS_SNAPPROCESS,
+    };
+    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+
+    let our_pid = std::process::id();
+    // パスを正規化: 末尾スラッシュを除去してから小文字化
+    let target = normalize_path_for_cmp(dir);
+
+    let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if snapshot == INVALID_HANDLE_VALUE {
+        log::warn!("find_processes_by_cwd: CreateToolhelp32Snapshot failed");
+        return vec![];
+    }
+
+    let mut results = Vec::new();
+    let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+    entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+    if unsafe { Process32FirstW(snapshot, &mut entry) } != 0 {
+        loop {
+            let pid = entry.th32ProcessID;
+            if pid != our_pid && pid != 0 {
+                if let Some(cwd) = get_process_cwd(pid) {
+                    let cwd_norm = normalize_path_for_cmp(&cwd);
+                    if cwd_norm.starts_with(&target) {
+                        // target がパスの途中に一致しないよう境界チェック
+                        let rest = &cwd_norm[target.len()..];
+                        if rest.is_empty() || rest.starts_with('\\') || rest.starts_with('/') {
+                            log::info!(
+                                "find_processes_by_cwd: pid={} cwd={} matches target={}",
+                                pid, cwd, dir
+                            );
+                            results.push(pid);
+                        }
+                    }
+                }
+            }
+            if unsafe { Process32NextW(snapshot, &mut entry) } == 0 {
+                break;
+            }
+        }
+    }
+
+    unsafe { windows_sys::Win32::Foundation::CloseHandle(snapshot) };
+    results
+}
+
+/// パスを比較用に正規化: バックスラッシュをフォワードスラッシュに統一、末尾スラッシュ除去、小文字化
+#[cfg(target_os = "windows")]
+fn normalize_path_for_cmp(path: &str) -> String {
+    path.replace('\\', "/")
+        .trim_end_matches('/')
+        .to_lowercase()
+}
+
+/// NtQueryInformationProcess + ReadProcessMemory で PEB から CWD を読み取る（Windows専用）。
+/// アクセス不可・失敗時は None を返す。
+#[cfg(target_os = "windows")]
+fn get_process_cwd(pid: u32) -> Option<String> {
+    use windows_sys::Win32::System::Threading::{
+        OpenProcess, PROCESS_QUERY_INFORMATION, PROCESS_VM_READ,
+    };
+    use windows_sys::Win32::Foundation::CloseHandle;
+
+    // ntdll の NtQueryInformationProcess を動的に取得
+    // HANDLE は windows-sys 0.59 では *mut c_void
+    type NtQueryFn = unsafe extern "system" fn(
+        *mut std::ffi::c_void,  // ProcessHandle
+        u32,                    // ProcessInformationClass
+        *mut u8,                // ProcessInformation
+        u32,                    // ProcessInformationLength
+        *mut u32,               // ReturnLength
+    ) -> i32;
+
+    let ntdll = unsafe {
+        windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(
+            windows_sys::core::w!("ntdll.dll")
+        )
+    };
+    if ntdll.is_null() {
+        return None;
+    }
+
+    let fn_name = b"NtQueryInformationProcess\0";
+    let nt_query: NtQueryFn = unsafe {
+        let addr = windows_sys::Win32::System::LibraryLoader::GetProcAddress(ntdll, fn_name.as_ptr());
+        std::mem::transmute(addr?)
+    };
+
+    let handle = unsafe {
+        OpenProcess(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ, 0, pid)
+    };
+    if handle.is_null() {
+        return None;
+    }
+
+    let result = read_cwd_from_process(handle, nt_query);
+    unsafe { CloseHandle(handle) };
+    result
+}
+
+/// プロセスハンドルから PEB → ProcessParameters → CurrentDirectory を読み取る。
+#[cfg(target_os = "windows")]
+fn read_cwd_from_process(
+    handle: *mut std::ffi::c_void,
+    nt_query: unsafe extern "system" fn(*mut std::ffi::c_void, u32, *mut u8, u32, *mut u32) -> i32,
+) -> Option<String> {
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+
+    // PROCESS_BASIC_INFORMATION: 6 × pointer-sized fields
+    // PebBaseAddress は offset 1 (index 1)
+    const PBI_SIZE: usize = 6 * 8; // 64bit 固定
+    let mut pbi = [0u8; PBI_SIZE];
+    let mut ret_len: u32 = 0;
+    let status = unsafe {
+        nt_query(handle, 0 /*ProcessBasicInformation*/, pbi.as_mut_ptr(), PBI_SIZE as u32, &mut ret_len)
+    };
+    if status != 0 {
+        return None;
+    }
+
+    // PebBaseAddress: offset 8 (2nd pointer, 8 bytes each on x64)
+    let peb_addr = i64::from_ne_bytes(pbi[8..16].try_into().ok()?) as usize;
+    if peb_addr == 0 {
+        return None;
+    }
+
+    // PEB を読む (最低 0x28 バイト必要)
+    let mut peb_buf = [0u8; 0x28];
+    let mut bytes_read: usize = 0;
+    let ok = unsafe {
+        ReadProcessMemory(
+            handle,
+            peb_addr as *const _,
+            peb_buf.as_mut_ptr() as *mut _,
+            peb_buf.len(),
+            &mut bytes_read,
+        )
+    };
+    if ok == 0 || bytes_read < 0x28 {
+        return None;
+    }
+
+    // ProcessParameters アドレス: PEB+0x20 (x64)
+    let proc_params_addr = usize::from_ne_bytes(peb_buf[0x20..0x28].try_into().ok()?);
+    if proc_params_addr == 0 {
+        return None;
+    }
+
+    // RTL_USER_PROCESS_PARAMETERS を読む (CurrentDirectory は offset 0x38 から)
+    // UNICODE_STRING: Length(u16) + MaximumLength(u16) + [padding 4 bytes] + Buffer(*u16)
+    // offset 0x38: Length (u16)
+    // offset 0x3A: MaximumLength (u16)
+    // offset 0x40: Buffer (u64 on x64)
+    let read_size = 0x48usize;
+    let mut pp_buf = vec![0u8; read_size];
+    let mut bytes_read: usize = 0;
+    let ok = unsafe {
+        ReadProcessMemory(
+            handle,
+            proc_params_addr as *const _,
+            pp_buf.as_mut_ptr() as *mut _,
+            read_size,
+            &mut bytes_read,
+        )
+    };
+    if ok == 0 || bytes_read < read_size {
+        return None;
+    }
+
+    let cwd_len = u16::from_ne_bytes(pp_buf[0x38..0x3A].try_into().ok()?) as usize;
+    let cwd_buf_addr = usize::from_ne_bytes(pp_buf[0x40..0x48].try_into().ok()?);
+    if cwd_len == 0 || cwd_buf_addr == 0 || cwd_len > 0x800 {
+        return None;
+    }
+
+    // CWD 文字列（UTF-16LE）を読む
+    let mut str_buf = vec![0u8; cwd_len];
+    let mut bytes_read: usize = 0;
+    let ok = unsafe {
+        ReadProcessMemory(
+            handle,
+            cwd_buf_addr as *const _,
+            str_buf.as_mut_ptr() as *mut _,
+            cwd_len,
+            &mut bytes_read,
+        )
+    };
+    if ok == 0 || bytes_read < cwd_len {
+        return None;
+    }
+
+    // UTF-16LE → String
+    let u16_slice: Vec<u16> = str_buf
+        .chunks_exact(2)
+        .map(|b| u16::from_ne_bytes([b[0], b[1]]))
+        .collect();
+    // 末尾の NUL および末尾スラッシュを除去
+    let s = String::from_utf16_lossy(&u16_slice);
+    let s = s.trim_end_matches('\0').trim_end_matches(['\\', '/']).to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+// ============================================================
+// WorktreeRemoveManager: ワークツリー削除のキャンセルフラグ管理
+// ============================================================
+
+/// ワークツリー削除の永続リトライをキャンセルするためのフラグ管理。
+/// キーは worktree_path（バックエンドコマンドが受け取るパスと一致させる）。
+pub struct WorktreeRemoveManager {
+    cancel_flags: Mutex<HashMap<String, Arc<AtomicBool>>>,
+}
+
+impl WorktreeRemoveManager {
+    pub fn new() -> Self {
+        Self {
+            cancel_flags: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// キャンセルフラグを作成して返す（削除開始時に呼ぶ）
+    pub fn create_cancel_flag(&self, key: &str) -> Arc<AtomicBool> {
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut map = self.cancel_flags.lock().unwrap_or_else(|e| e.into_inner());
+        map.insert(key.to_string(), flag.clone());
+        flag
+    }
+
+    /// キャンセルフラグをセットする（キャンセル要求時に呼ぶ）。
+    /// フラグが存在した場合 true を返す。
+    pub fn cancel(&self, key: &str) -> bool {
+        let map = self.cancel_flags.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(flag) = map.get(key) {
+            flag.store(true, Ordering::Relaxed);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// フラグを削除する（削除完了/キャンセル完了時に呼ぶ）
+    pub fn remove(&self, key: &str) {
+        let mut map = self.cancel_flags.lock().unwrap_or_else(|e| e.into_inner());
+        map.remove(key);
     }
 }

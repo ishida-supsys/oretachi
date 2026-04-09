@@ -1,6 +1,7 @@
-import { ref, nextTick } from "vue";
+import { ref, reactive, nextTick } from "vue";
 import type { Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { message } from "@tauri-apps/plugin-dialog";
 import { useWorktrees } from "./useWorktrees";
 import { cancelApproval } from "../utils/autoApproval";
@@ -57,6 +58,31 @@ export function useRemoveWorktreeDialog(options: {
   } = options;
 
   const { worktrees, removeWorktree, listBranches } = useWorktrees();
+
+  // 永続リトライ中のワークツリーID（キャンセルボタン表示用）
+  const cancellableWorktrees = reactive(new Set<string>());
+
+  // バックエンドから永続リトライ開始イベントを受信したらキャンセル可能状態に移行
+  listen<{ worktreePath: string }>("worktree-remove-retrying", (event) => {
+    const worktree = worktrees.value.find(
+      (w) => w.path === event.payload.worktreePath
+    );
+    if (worktree) {
+      cancellableWorktrees.add(worktree.id);
+      loadingWorktrees.set(worktree.id, t("retryingDeleteText"));
+    }
+  });
+
+  /** 永続リトライ中の削除をキャンセルする */
+  async function cancelWorktreeRemove(worktreeId: string): Promise<void> {
+    const worktree = worktrees.value.find((w) => w.id === worktreeId);
+    if (!worktree) return;
+    try {
+      await invoke("cancel_worktree_remove", { worktreePath: worktree.path });
+    } catch {
+      // すでに完了している場合は無視
+    }
+  }
 
   // ダイアログ state
   const showRemoveDialog = ref(false);
@@ -176,9 +202,13 @@ export function useRemoveWorktreeDialog(options: {
         if (onRemoveFailed) {
           try { await onRemoveFailed(worktree); } catch { /* ロールバック失敗は無視 */ }
         }
-        await message(t("deleteFailed", { error: e }), { kind: "error" });
+        // "cancelled" はユーザー操作によるキャンセルなのでエラーダイアログを出さない
+        if (String(e) !== "cancelled") {
+          await message(t("deleteFailed", { error: e }), { kind: "error" });
+        }
       } finally {
         homeViewRef.value?.unhideCard(worktreeId);
+        cancellableWorktrees.delete(worktreeId);
       }
     } catch (e) {
       // UI 後処理ステップ（moveToMainWindow・closeArtifactWindow 等）が失敗した場合。
@@ -186,9 +216,12 @@ export function useRemoveWorktreeDialog(options: {
       if (onRemoveFailed) {
         try { await onRemoveFailed(worktree); } catch { /* ロールバック失敗は無視 */ }
       }
-      await message(t("deleteFailed", { error: e }), { kind: "error" });
+      if (String(e) !== "cancelled") {
+        await message(t("deleteFailed", { error: e }), { kind: "error" });
+      }
     } finally {
       loadingWorktrees.delete(worktreeId);
+      cancellableWorktrees.delete(worktreeId);
     }
   }
 
@@ -244,9 +277,11 @@ export function useRemoveWorktreeDialog(options: {
     removeTargetWorktree,
     removeBranches,
     removeDirtyFiles,
+    cancellableWorktrees,
     onRemoveWorktree,
     onRemoveWorktreeConfirm,
     onArchiveWorktreeConfirm,
+    cancelWorktreeRemove,
     dismissDialog,
   };
 }
