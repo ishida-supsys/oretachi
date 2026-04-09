@@ -173,16 +173,9 @@ async fn git_worktree_remove(
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
 
-    // NtAPIでPTY管理外のプロセス（IDE、cd済みシェル等）もkill
-    let wp_for_kill = worktree_path.clone();
-    let external_killed = tokio::task::spawn_blocking(move || {
-        process_utils::kill_external_processes_in_dir(&wp_for_kill)
-    })
-    .await
-    .unwrap_or(0);
-    if external_killed > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    }
+    // NtAPI による外部プロセスkillは worktree_remove_persistent の Phase 2 ループ内で実行する。
+    // ここで呼ぶと git がパスを正規のワークツリーと確認する前にプロセスをkillしてしまい、
+    // 不正なパスを渡された場合に無関係なプロセスを終了するリスクがある。
 
     let cancel_flag = remove_manager.create_cancel_flag(&worktree_path);
     let wp = worktree_path.clone();
