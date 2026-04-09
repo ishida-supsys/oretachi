@@ -3,6 +3,9 @@ import { ref, computed, onMounted } from "vue";
 import ArtifactCodeView from "./ArtifactCodeView.vue";
 import { buildReactSrcdoc } from "../../utils/reactArtifactSrcdoc";
 
+// モジュールスコープキャッシュ: コンポーネントの再マウント時に再フェッチしない
+let _vendorCache: { react: string; reactDom: string; babel: string } | null = null;
+
 const props = defineProps<{
   content: string;
 }>();
@@ -18,12 +21,15 @@ const vendorScripts = ref<{
 const vendorLoading = ref(true);
 
 onMounted(async () => {
-  const [react, reactDom, babel] = await Promise.all([
-    fetch("/vendor/react.production.min.js").then((r) => r.text()),
-    fetch("/vendor/react-dom.production.min.js").then((r) => r.text()),
-    import("@babel/standalone/babel.min.js?raw").then((m) => m.default),
-  ]);
-  vendorScripts.value = { react, reactDom, babel };
+  if (!_vendorCache) {
+    const [react, reactDom, babel] = await Promise.all([
+      fetch("/vendor/react.production.min.js").then((r) => r.text()),
+      fetch("/vendor/react-dom.production.min.js").then((r) => r.text()),
+      import("@babel/standalone/babel.min.js?raw").then((m) => m.default),
+    ]);
+    _vendorCache = { react, reactDom, babel };
+  }
+  vendorScripts.value = _vendorCache;
   vendorLoading.value = false;
 });
 

@@ -34,13 +34,6 @@ export function buildReactSrcdoc(
     }
   `;
 
-  const tailwindLoader =
-    "(function(){" +
-    "var s=document.createElement('script');" +
-    "s.src='https://cdn.tailwindcss.com/3.4.17';" +
-    "s.onerror=function(){};" +
-    "document.head.appendChild(s);" +
-    "})();";
 
   const runtimeJs =
     "(function(){" +
@@ -89,8 +82,9 @@ export function buildReactSrcdoc(
     "<!DOCTYPE html>\n<html>\n<head>\n" +
     '<meta charset="utf-8" />\n' +
     '<meta name="viewport" content="width=device-width, initial-scale=1" />\n' +
+    // connect-src 'none' で fetch/XHR/WebSocket による外部通信をブロック
+    '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\' \'unsafe-eval\'; style-src \'unsafe-inline\';" />\n' +
     "<style>" + styles + "</style>\n" +
-    openTag(tailwindLoader) + "\n" +
     openTag(react) + "\n" +
     openTag(reactDom) + "\n" +
     openTag(babel) + "\n" +
