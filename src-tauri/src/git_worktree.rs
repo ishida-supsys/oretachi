@@ -1094,17 +1094,23 @@ pub fn worktree_remove_persistent(
     on_enter_persistent: Option<&dyn Fn()>,
 ) -> Result<(), String> {
     // Phase 1: 通常の5回リトライ
-    match worktree_remove(repo_path, worktree_path) {
+    let phase1_err = match worktree_remove(repo_path, worktree_path) {
         Ok(()) => return Ok(()),
-        Err(e) => {
-            log::warn!(
-                "worktree_remove failed, entering persistent retry: {}",
-                e
-            );
-        }
+        Err(e) => e,
+    };
+
+    // ロック起因エラーの場合のみ永続リトライへ移行する。
+    // メタデータ破損・リポジトリパス不正など回復不能なエラーは即座に返す。
+    if !is_lock_error(&phase1_err) {
+        return Err(phase1_err);
     }
 
-    // Phase 2: 永続リトライ
+    log::warn!(
+        "worktree_remove failed with lock error, entering persistent retry: {}",
+        phase1_err
+    );
+
+    // Phase 2: 永続リトライ（ロックエラー専用）
     if let Some(cb) = on_enter_persistent {
         cb();
     }

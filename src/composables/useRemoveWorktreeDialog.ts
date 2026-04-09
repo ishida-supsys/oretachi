@@ -165,14 +165,15 @@ export function useRemoveWorktreeDialog(options: {
       await closeArtifactWindow(worktreeId);
       await cancelApproval(worktreeId);
 
+      // ターミナルプロセスをkillする（ディレクトリのファイルハンドル解放が目的）。
+      // ただし UI 状態のクリア（terminals.splice / frameBundles.delete）は削除成功後に行う。
+      // キャンセル時にワークツリーが UI に残った際、空ターミナルではなく停止済み状態で表示できるようにする。
       const bundle = worktreeFrameBundles.get(worktreeId);
-      for (const terminal of [...worktree.terminals]) {
+      const terminalsSnapshot = [...worktree.terminals];
+      for (const terminal of terminalsSnapshot) {
         const term = bundle?.terminalRefs.get(terminal.id) ?? getTerminalRef(terminal.id);
         if (term?.isRunning) await term.kill();
-        terminalWorktreeMap.delete(terminal.id);
       }
-      worktree.terminals.splice(0);
-      worktreeFrameBundles.delete(worktreeId);
 
       if (activeWorktreeId.value === worktreeId) goHome();
 
@@ -190,6 +191,12 @@ export function useRemoveWorktreeDialog(options: {
             savedPositions = homeViewRef.value?.hideCard(worktreeId);
           },
         );
+        // 削除成功後に UI 状態をクリア
+        for (const terminal of terminalsSnapshot) {
+          terminalWorktreeMap.delete(terminal.id);
+        }
+        worktree.terminals.splice(0);
+        worktreeFrameBundles.delete(worktreeId);
         // git 操作成功後の後処理（MCP通知など）
         if (afterRemove) {
           try { await afterRemove(worktree); } catch { /* 通知失敗はワークツリー削除の成否に影響しない */ }
