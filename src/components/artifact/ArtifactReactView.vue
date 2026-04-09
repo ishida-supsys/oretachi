@@ -20,14 +20,25 @@ const vendorScripts = ref<{
 } | null>(null);
 const vendorLoading = ref(true);
 
+const vendorError = ref<string | null>(null);
+
 onMounted(async () => {
   if (!_vendorCache) {
-    const [react, reactDom, babel] = await Promise.all([
-      fetch("/vendor/react.production.min.js").then((r) => r.text()),
-      fetch("/vendor/react-dom.production.min.js").then((r) => r.text()),
-      import("@babel/standalone/babel.min.js?raw").then((m) => m.default),
-    ]);
-    _vendorCache = { react, reactDom, babel };
+    try {
+      const fetchText = async (url: string) => {
+        const r = await fetch(url);
+        if (!r.ok) throw new Error(`Failed to load ${url}: ${r.status} ${r.statusText}`);
+        return r.text();
+      };
+      const [react, reactDom, babel] = await Promise.all([
+        fetchText("/vendor/react.production.min.js"),
+        fetchText("/vendor/react-dom.production.min.js"),
+        import("@babel/standalone/babel.min.js?raw").then((m) => m.default),
+      ]);
+      _vendorCache = { react, reactDom, babel };
+    } catch (e) {
+      vendorError.value = e instanceof Error ? e.message : String(e);
+    }
   }
   vendorScripts.value = _vendorCache;
   vendorLoading.value = false;
@@ -62,6 +73,10 @@ const srcdocHtml = computed(() => {
     <div v-if="mode === 'preview'" class="preview-area">
       <div v-if="vendorLoading" class="vendor-loading">
         <span class="pi pi-spin pi-spinner" />
+      </div>
+      <div v-else-if="vendorError" class="vendor-error">
+        <span class="pi pi-exclamation-triangle" />
+        {{ vendorError }}
       </div>
       <iframe
         v-else
@@ -138,6 +153,19 @@ const srcdocHtml = computed(() => {
   justify-content: center;
   color: #6c7086;
   font-size: 18px;
+}
+
+.vendor-error {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: #f38ba8;
+  font-size: 13px;
+  font-family: monospace;
+  padding: 16px;
+  text-align: center;
 }
 
 .react-iframe {
