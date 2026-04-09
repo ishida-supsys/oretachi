@@ -887,7 +887,12 @@ pub fn run() {
             pty_manager.kill_all();
             let mcp_manager = app_handle.state::<mcp_server::McpServerManager>();
             mcp_manager.stop();
-            mcp_server::cleanup_port_file(app_handle);
+            let mcp_enabled = std::env::var("MCP_SERVER_ENABLED")
+                .map(|v| v != "false")
+                .unwrap_or(true);
+            if mcp_enabled {
+                mcp_server::cleanup_port_file(app_handle);
+            }
             let fs_watcher = app_handle.state::<FsWatcherManager>();
             fs_watcher.stop_all();
         }
