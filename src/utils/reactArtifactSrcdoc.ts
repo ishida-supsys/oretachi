@@ -90,7 +90,7 @@ export function buildVendorHead(react: string, reactDom: string, babel: string):
     // unsafe-eval は Babel.transform() と new Function() に必要な設計上の要件。
     // sandbox="allow-scripts" のみ（allow-same-origin なし）により、
     // 親ウィンドウ・Cookie・localStorage へのアクセスは遮断されている。
-    '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\' \'unsafe-eval\'; style-src \'unsafe-inline\';" />\n' +
+    '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\' \'unsafe-eval\'; style-src \'unsafe-inline\'; img-src data: blob:;" />\n' +
     "<style>" + STYLES + "</style>\n" +
     openTag(react) + "\n" +
     openTag(reactDom) + "\n" +

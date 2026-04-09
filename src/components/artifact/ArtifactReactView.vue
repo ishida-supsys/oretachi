@@ -3,8 +3,30 @@ import { ref, computed, onMounted } from "vue";
 import ArtifactCodeView from "./ArtifactCodeView.vue";
 import { buildVendorHead, buildReactSrcdoc } from "../../utils/reactArtifactSrcdoc";
 
-// モジュールスコープキャッシュ: コンポーネントの再マウント時に再フェッチしない
-let _vendorCache: { react: string; reactDom: string; babel: string } | null = null;
+type VendorScripts = { react: string; reactDom: string; babel: string };
+
+// Promise キャッシュ: 同時マウント時も重複フェッチしない。失敗時は null にリセットしてリトライ可能にする。
+let _vendorPromise: Promise<VendorScripts> | null = null;
+
+function loadVendors(): Promise<VendorScripts> {
+  if (!_vendorPromise) {
+    const fetchText = async (url: string) => {
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`Failed to load ${url}: ${r.status} ${r.statusText}`);
+      return r.text();
+    };
+    _vendorPromise = Promise.all([
+      fetchText("/vendor/react.production.min.js"),
+      fetchText("/vendor/react-dom.production.min.js"),
+      import("@babel/standalone/babel.min.js?raw").then((m) => m.default),
+    ]).then(([react, reactDom, babel]) => ({ react, reactDom, babel }))
+      .catch((e) => {
+        _vendorPromise = null; // 失敗時はリトライ可能にする
+        throw e;
+      });
+  }
+  return _vendorPromise;
+}
 
 const props = defineProps<{
   content: string;
@@ -13,35 +35,18 @@ const props = defineProps<{
 type Mode = "preview" | "code";
 const mode = ref<Mode>("preview");
 
-const vendorScripts = ref<{
-  react: string;
-  reactDom: string;
-  babel: string;
-} | null>(null);
+const vendorScripts = ref<VendorScripts | null>(null);
 const vendorLoading = ref(true);
-
 const vendorError = ref<string | null>(null);
 
 onMounted(async () => {
-  if (!_vendorCache) {
-    try {
-      const fetchText = async (url: string) => {
-        const r = await fetch(url);
-        if (!r.ok) throw new Error(`Failed to load ${url}: ${r.status} ${r.statusText}`);
-        return r.text();
-      };
-      const [react, reactDom, babel] = await Promise.all([
-        fetchText("/vendor/react.production.min.js"),
-        fetchText("/vendor/react-dom.production.min.js"),
-        import("@babel/standalone/babel.min.js?raw").then((m) => m.default),
-      ]);
-      _vendorCache = { react, reactDom, babel };
-    } catch (e) {
-      vendorError.value = e instanceof Error ? e.message : String(e);
-    }
+  try {
+    vendorScripts.value = await loadVendors();
+  } catch (e) {
+    vendorError.value = e instanceof Error ? e.message : String(e);
+  } finally {
+    vendorLoading.value = false;
   }
-  vendorScripts.value = _vendorCache;
-  vendorLoading.value = false;
 });
 
 // ベンダーヘッド（~2MB）は vendorScripts が変化したときのみ再計算する
