@@ -7,7 +7,6 @@ const { t } = useI18n();
 
 const props = defineProps<{
   visible: boolean;
-  repoPath: string;
   files: string[];
   isLoading: boolean;
 }>();

@@ -6,17 +6,22 @@ export function useQuickOpen(repoPath: string) {
   const isOpen = ref(false);
   const fileCache = ref<string[] | null>(null);
   const isLoading = ref(false);
+  let loadingPromise: Promise<string[]> | null = null;
 
   async function loadFiles(): Promise<string[]> {
     if (fileCache.value !== null) return fileCache.value;
+    if (loadingPromise !== null) return loadingPromise;
     isLoading.value = true;
-    try {
-      const files = await invoke<string[]>("git_list_files", { repoPath });
-      fileCache.value = files;
-      return files;
-    } finally {
-      isLoading.value = false;
-    }
+    loadingPromise = invoke<string[]>("git_list_files", { repoPath })
+      .then((files) => {
+        fileCache.value = files;
+        return files;
+      })
+      .finally(() => {
+        isLoading.value = false;
+        loadingPromise = null;
+      });
+    return loadingPromise;
   }
 
   function invalidateCache() {

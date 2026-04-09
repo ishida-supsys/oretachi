@@ -53,7 +53,7 @@ export function fuzzyScore(pattern: string, candidate: string): number | null {
 
 /**
  * ファイルパスのリストをファジーフィルタリングし、スコア順で上位 limit 件を返す。
- * pattern が空の場合はファイル名アルファベット順で全件返す。
+ * pattern が空の場合は先頭 limit 件をそのまま返す。
  */
 export function fuzzyFilter(pattern: string, files: string[], limit: number): FuzzyResult[] {
   if (pattern.length === 0) {

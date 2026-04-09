@@ -54,7 +54,9 @@ useHotkeyListener(() => [
     handler: () => {
       toggleQuickOpen();
       if (quickOpenVisible.value) {
-        loadQuickOpenFiles().catch(() => {});
+        loadQuickOpenFiles().catch((e) => {
+          toast.add({ severity: "error", summary: t("error.fileListLoad"), detail: String(e), life: 4000 });
+        });
       }
     },
   },
@@ -233,7 +235,6 @@ const { handleChatWithAgent } = useCodeReviewChat(worktreeId, origin);
   <Toast />
   <QuickOpenPalette
     :visible="quickOpenVisible"
-    :repo-path="worktreePath"
     :files="quickOpenFiles ?? []"
     :is-loading="quickOpenLoading"
     @close="quickOpenVisible = false"
@@ -362,13 +363,13 @@ const { handleChatWithAgent } = useCodeReviewChat(worktreeId, origin);
   "en": {
     "panel": { "files": "Files", "git": "Git", "settings": "Settings" },
     "editor": { "noFileOpen": "Select a file to view", "binaryFile": "Binary file (diff not shown)" },
-    "error": { "fileOpen": "Failed to open file", "diffOpen": "Failed to open diff" },
+    "error": { "fileOpen": "Failed to open file", "diffOpen": "Failed to open diff", "fileListLoad": "Failed to load file list" },
     "quickOpen": { "placeholder": "Search files by name...", "noResults": "No matching files" }
   },
   "ja": {
     "panel": { "files": "ファイル", "git": "Git", "settings": "設定" },
     "editor": { "noFileOpen": "ファイルを選択してください", "binaryFile": "バイナリファイル（差分を表示できません）" },
-    "error": { "fileOpen": "ファイルを開けませんでした", "diffOpen": "Diffを開けませんでした" },
+    "error": { "fileOpen": "ファイルを開けませんでした", "diffOpen": "Diffを開けませんでした", "fileListLoad": "ファイル一覧の取得に失敗しました" },
     "quickOpen": { "placeholder": "ファイル名で検索...", "noResults": "一致するファイルがありません" }
   }
 }
