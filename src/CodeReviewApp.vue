@@ -12,10 +12,13 @@ import MonacoDiffViewer from "./components/codereview/MonacoDiffViewer.vue";
 import ReviewSessionView from "./components/codereview/ReviewSessionView.vue";
 import CommitDiffView from "./components/codereview/CommitDiffView.vue";
 import CodeReviewSettingsView from "./components/codereview/CodeReviewSettingsView.vue";
+import QuickOpenPalette from "./components/codereview/QuickOpenPalette.vue";
 import { useCodeReviewTabs } from "./composables/useCodeReviewTabs";
 import { useReviewSession } from "./composables/useReviewSession";
 import { useSettings } from "./composables/useSettings";
 import { useCodeReviewSettings } from "./composables/useCodeReviewSettings";
+import { useQuickOpen } from "./composables/useQuickOpen";
+import { useHotkeyListener } from "./composables/useHotkeys";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -42,6 +45,20 @@ const { tabs, activeTabId, openFileTab, openDiffTab, openReviewTab, closeReviewT
 const { isReviewMode, startReview, endReview, refreshReviewFiles } = useReviewSession();
 const { loadSettings } = useSettings();
 const { resolved: crSettings } = useCodeReviewSettings();
+
+const { isOpen: quickOpenVisible, fileCache: quickOpenFiles, isLoading: quickOpenLoading, loadFiles: loadQuickOpenFiles, toggle: toggleQuickOpen } = useQuickOpen(worktreePath);
+
+useHotkeyListener(() => [
+  {
+    binding: { ctrl: true, key: "p" },
+    handler: () => {
+      toggleQuickOpen();
+      if (quickOpenVisible.value) {
+        loadQuickOpenFiles().catch(() => {});
+      }
+    },
+  },
+]);
 
 function handleStartReview() {
   startReview(worktreePath);
@@ -214,6 +231,14 @@ const { handleChatWithAgent } = useCodeReviewChat(worktreeId, origin);
 
 <template>
   <Toast />
+  <QuickOpenPalette
+    :visible="quickOpenVisible"
+    :repo-path="worktreePath"
+    :files="quickOpenFiles ?? []"
+    :is-loading="quickOpenLoading"
+    @close="quickOpenVisible = false"
+    @select-file="(path) => { quickOpenVisible = false; handleOpenFile(path); }"
+  />
   <div class="flex h-screen w-screen overflow-hidden bg-surface-900 text-surface-100">
     <!-- アイコンメニューバー -->
     <div class="flex flex-col items-center gap-3 w-12 bg-surface-950 py-3 shrink-0">
@@ -337,12 +362,14 @@ const { handleChatWithAgent } = useCodeReviewChat(worktreeId, origin);
   "en": {
     "panel": { "files": "Files", "git": "Git", "settings": "Settings" },
     "editor": { "noFileOpen": "Select a file to view", "binaryFile": "Binary file (diff not shown)" },
-    "error": { "fileOpen": "Failed to open file", "diffOpen": "Failed to open diff" }
+    "error": { "fileOpen": "Failed to open file", "diffOpen": "Failed to open diff" },
+    "quickOpen": { "placeholder": "Search files by name...", "noResults": "No matching files" }
   },
   "ja": {
     "panel": { "files": "ファイル", "git": "Git", "settings": "設定" },
     "editor": { "noFileOpen": "ファイルを選択してください", "binaryFile": "バイナリファイル（差分を表示できません）" },
-    "error": { "fileOpen": "ファイルを開けませんでした", "diffOpen": "Diffを開けませんでした" }
+    "error": { "fileOpen": "ファイルを開けませんでした", "diffOpen": "Diffを開けませんでした" },
+    "quickOpen": { "placeholder": "ファイル名で検索...", "noResults": "一致するファイルがありません" }
   }
 }
 </i18n>
