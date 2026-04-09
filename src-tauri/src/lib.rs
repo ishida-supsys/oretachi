@@ -632,6 +632,10 @@ pub fn run() {
     #[cfg(not(target_os = "windows"))]
     let acrylic_enabled = true;
 
+    // MCP の有効/無効をプロセス起動時に一度だけ評価し、セットアップと終了ハンドラで共有する。
+    // 実行中に環境変数が変更された場合でも起動時の判断と終了時の判断が一致する。
+    let mcp_enabled = is_mcp_enabled();
+
     let mut builder = tauri::Builder::default();
     if acrylic_enabled {
         builder = builder.plugin(tauri_plugin_liquid_glass::init());
@@ -776,7 +780,7 @@ pub fn run() {
             list_archives,
             delete_archive,
         ])
-        .setup(|app| {
+        .setup(move |app| {
             // レポート DB を同期的に初期化（ファイル接続のみで高速、起動前に完了させる）
             {
                 let handle = app.handle().clone();
@@ -867,7 +871,7 @@ pub fn run() {
             pty_manager.start_polling(app.handle().clone());
 
             // 通常モード: MCP サーバー起動 + ウィンドウ表示
-            if is_mcp_enabled() {
+            if mcp_enabled {
                 let (mcp_port, mcp_remote_access) = {
                     let s = settings_manager.get();
                     (s.mcp_port, s.mcp_remote_access)
@@ -884,13 +888,13 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    app.run(|app_handle, event| {
+    app.run(move |app_handle, event| {
         if let tauri::RunEvent::Exit = event {
             let pty_manager = app_handle.state::<PtyManager>();
             pty_manager.kill_all();
             let mcp_manager = app_handle.state::<mcp_server::McpServerManager>();
             mcp_manager.stop();
-            if is_mcp_enabled() {
+            if mcp_enabled {
                 mcp_server::cleanup_port_file(app_handle);
             }
             let fs_watcher = app_handle.state::<FsWatcherManager>();
