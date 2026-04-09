@@ -24,6 +24,7 @@ dist-ssr
 *.sln
 *.sw?
 
+public/vendor/
 .claude/CLAUDE.md
 .claude/settings.local.json
 .gemini/settings.json

@@ -4,6 +4,7 @@
   "version": "0.17.9",
   "type": "module",
   "scripts": {
+    "prepare": "node scripts/copy-vendor.mjs",
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "type-check": "vue-tsc --noEmit",
@@ -15,6 +16,7 @@
     "test:all": "pnpm test && pnpm test:rust"
   },
   "dependencies": {
+    "@babel/standalone": "^7.29.2",
     "@formkit/auto-animate": "^0.9.0",
     "@guolao/vue-monaco-editor": "^1.6.0",
     "@primeuix/themes": "^2.0.3",
@@ -40,6 +42,8 @@
     "monaco-editor": "^0.55.1",
     "primeicons": "^7.0.0",
     "primevue": "^4.5.4",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "tauri-plugin-liquid-glass-api": "^0.1.6",
     "vue": "^3.5.13",
     "vue-i18n": "^11.3.0"

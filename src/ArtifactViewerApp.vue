@@ -9,6 +9,7 @@ import ArtifactMarkdownView from "./components/artifact/ArtifactMarkdownView.vue
 import ArtifactHtmlView from "./components/artifact/ArtifactHtmlView.vue";
 import ArtifactSvgView from "./components/artifact/ArtifactSvgView.vue";
 import ArtifactMermaidView from "./components/artifact/ArtifactMermaidView.vue";
+import ArtifactReactView from "./components/artifact/ArtifactReactView.vue";
 import type { ArtifactMeta, ArtifactData, ArtifactChangedEvent } from "./types/artifact";
 
 const { t } = useI18n();
@@ -30,7 +31,7 @@ const typeIcons: Record<string, string> = {
   "text/html": "pi-globe",
   "image/svg+xml": "pi-image",
   "application/vnd.ant.mermaid": "pi-sitemap",
-  "application/vnd.ant.react": "pi-code",
+  "application/vnd.ant.react": "pi-play",
 };
 
 function typeIcon(contentType: string): string {
@@ -177,7 +178,10 @@ onUnmounted(() => {
             v-else-if="selectedArtifact.content_type === 'application/vnd.ant.mermaid'"
             :content="selectedArtifact.content"
           />
-          <!-- application/vnd.ant.react やその他はコードとして表示 -->
+          <ArtifactReactView
+            v-else-if="selectedArtifact.content_type === 'application/vnd.ant.react'"
+            :content="selectedArtifact.content"
+          />
           <ArtifactCodeView
             v-else
             :content="selectedArtifact.content"
