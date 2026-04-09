@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import ArtifactCodeView from "./ArtifactCodeView.vue";
-import { buildReactSrcdoc } from "../../utils/reactArtifactSrcdoc";
+import { buildVendorHead, buildReactSrcdoc } from "../../utils/reactArtifactSrcdoc";
 
 // モジュールスコープキャッシュ: コンポーネントの再マウント時に再フェッチしない
 let _vendorCache: { react: string; reactDom: string; babel: string } | null = null;
@@ -44,10 +44,17 @@ onMounted(async () => {
   vendorLoading.value = false;
 });
 
-const srcdocHtml = computed(() => {
+// ベンダーヘッド（~2MB）は vendorScripts が変化したときのみ再計算する
+const vendorHead = computed(() => {
   if (!vendorScripts.value) return "";
   const { react, reactDom, babel } = vendorScripts.value;
-  return buildReactSrcdoc(react, reactDom, babel, props.content);
+  return buildVendorHead(react, reactDom, babel);
+});
+
+// content が変わっても vendorHead は再計算されない
+const srcdocHtml = computed(() => {
+  if (!vendorHead.value) return "";
+  return buildReactSrcdoc(vendorHead.value, props.content);
 });
 </script>
 
