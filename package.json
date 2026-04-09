@@ -1,7 +1,7 @@
 {
   "name": "oretachi",
   "private": true,
-  "version": "0.17.9",
+  "version": "0.18.0",
   "type": "module",
   "scripts": {
     "prepare": "node scripts/copy-vendor.mjs",
