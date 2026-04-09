@@ -17,6 +17,7 @@ const props = defineProps<{
   artifactCount?: number;
   loading?: boolean;
   loadingText?: string;
+  cancellable?: boolean;
   autoApproval?: boolean;
   aiJudging?: boolean;
 }>();
@@ -27,6 +28,7 @@ const emit = defineEmits<{
   dragEnd: [];
   addTerminal: [worktreeId: string];
   removeWorktree: [worktreeId: string];
+  cancelRemove: [worktreeId: string];
   openInIde: [worktreeId: string];
   moveToSubWindow: [worktreeId: string];
   moveToMainWindow: [worktreeId: string];
@@ -196,6 +198,13 @@ const terminalList = computed(() =>
     <div v-if="loading" class="loading-overlay">
       <span class="pi pi-spinner pi-spin loading-icon" />
       <span class="loading-text">{{ loadingText ?? t('deletingText') }}</span>
+      <button
+        v-if="cancellable"
+        class="cancel-remove-btn"
+        @click.stop="emit('cancelRemove', worktree.id)"
+      >
+        {{ t('cancelRemove') }}
+      </button>
     </div>
   </div>
 </template>
@@ -416,6 +425,22 @@ const terminalList = computed(() =>
   font-size: 12px;
   color: #a6adc8;
 }
+
+.cancel-remove-btn {
+  margin-top: 4px;
+  padding: 4px 12px;
+  font-size: 11px;
+  color: #cdd6f4;
+  background: rgba(243, 139, 168, 0.15);
+  border: 1px solid rgba(243, 139, 168, 0.4);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.cancel-remove-btn:hover {
+  background: rgba(243, 139, 168, 0.3);
+}
 </style>
 
 <i18n lang="json">
@@ -429,6 +454,7 @@ const terminalList = computed(() =>
     "addTerminal": "Add terminal",
     "noTerminals": "No terminals",
     "deletingText": "Deleting...",
+    "cancelRemove": "Cancel",
     "menu": {
       "autoApproval": "Auto approval",
       "setHotkey": "Assign hotkey",
@@ -448,6 +474,7 @@ const terminalList = computed(() =>
     "addTerminal": "ターミナルを追加",
     "noTerminals": "ターミナルがありません",
     "deletingText": "削除中...",
+    "cancelRemove": "キャンセル",
     "menu": {
       "autoApproval": "自動承認",
       "setHotkey": "ホットキー割り当て",

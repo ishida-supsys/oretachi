@@ -1,5 +1,7 @@
-use crate::process_utils::make_command;
+use crate::process_utils::{kill_external_processes_in_dir, make_command};
 use crate::settings::NotificationHookEntry;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use serde::Serialize;
 
 /// git コマンドを repo_path で実行して stdout を返す共通ヘルパー
@@ -1075,6 +1077,113 @@ pub fn worktree_remove(repo_path: &str, worktree_path: &str) -> Result<(), Strin
     }
 
     Err(last_dir_error)
+}
+
+/// ワークツリーを削除する（永続リトライ付き）。
+///
+/// Phase 1: 既存の `worktree_remove`（最大5回リトライ）を試みる。
+/// Phase 2: 失敗した場合、`on_enter_persistent` を呼び出した後、
+///          cancel_flag が true になるまで無限にリトライを続ける。
+///          各反復で `kill_external_processes_in_dir` を呼びプロセスをkillしてから削除を試みる。
+///
+/// キャンセルされた場合は `Err("cancelled")` を返す。
+pub fn worktree_remove_persistent(
+    repo_path: &str,
+    worktree_path: &str,
+    cancel_flag: Arc<AtomicBool>,
+    on_enter_persistent: Option<&dyn Fn()>,
+) -> Result<(), String> {
+    // Phase 1: 通常の5回リトライ
+    let phase1_err = match worktree_remove(repo_path, worktree_path) {
+        Ok(()) => return Ok(()),
+        Err(e) => e,
+    };
+
+    // ロック起因エラーの場合のみ永続リトライへ移行する。
+    // メタデータ破損・リポジトリパス不正など回復不能なエラーは即座に返す。
+    if !is_lock_error(&phase1_err) {
+        return Err(phase1_err);
+    }
+
+    log::warn!(
+        "worktree_remove failed with lock error, entering persistent retry: {}",
+        phase1_err
+    );
+
+    // Phase 2: 永続リトライ（ロックエラー専用）
+    if let Some(cb) = on_enter_persistent {
+        cb();
+    }
+
+    loop {
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err("cancelled".to_string());
+        }
+
+        // CWD ベースのプロセスkill
+        let killed = kill_external_processes_in_dir(worktree_path);
+        if killed > 0 {
+            log::info!(
+                "worktree_remove_persistent: killed {} processes in {}",
+                killed, worktree_path
+            );
+            // ファイルハンドル解放を待つ（200ms×5回、各スリープ前にキャンセルチェック）
+            for _ in 0..5 {
+                if cancel_flag.load(Ordering::Relaxed) {
+                    return Err("cancelled".to_string());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+
+        if cancel_flag.load(Ordering::Relaxed) {
+            return Err("cancelled".to_string());
+        }
+
+        // ディレクトリが既に無ければメタデータ掃除だけ
+        let path = std::path::Path::new(worktree_path);
+        if !path.exists() {
+            let _ = make_command("git")
+                .args(["worktree", "prune"])
+                .current_dir(repo_path)
+                .output();
+            return Ok(());
+        }
+
+        // git worktree remove を試みる
+        let git_ok = make_command("git")
+            .args(["worktree", "remove", "--force", "--force", worktree_path])
+            .current_dir(repo_path)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+
+        if git_ok {
+            return Ok(());
+        }
+
+        // 直接ディレクトリ削除にフォールバック
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => {
+                let _ = make_command("git")
+                    .args(["worktree", "prune"])
+                    .current_dir(repo_path)
+                    .output();
+                return Ok(());
+            }
+            Err(e) => {
+                log::info!("worktree_remove_persistent: remove_dir_all failed: {}", e);
+            }
+        }
+
+        // 2秒待機（200ms×10、各スリープでキャンセルチェック）
+        for _ in 0..10 {
+            if cancel_flag.load(Ordering::Relaxed) {
+                return Err("cancelled".to_string());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
 }
 
 /// ワークツリーの `.claude/settings.local.json` に Claude Code 通知フックを書き込む

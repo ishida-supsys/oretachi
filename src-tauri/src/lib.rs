@@ -18,6 +18,7 @@ mod terminal_session;
 mod acrylic;
 
 use fs_watcher::FsWatcherManager;
+use process_utils::WorktreeRemoveManager;
 use pty_manager::{AiAgentChangedPayload, PtyManager};
 use settings::{AppSettings, SettingsManager};
 use tauri::{Emitter, Manager, State};
@@ -161,21 +162,64 @@ async fn git_worktree_add(
 async fn git_worktree_remove(
     app_handle: tauri::AppHandle,
     pty_manager: State<'_, PtyManager>,
+    remove_manager: State<'_, WorktreeRemoveManager>,
     repo_path: String,
     worktree_path: String,
 ) -> Result<(), String> {
-    // 削除対象ディレクトリをcwdとして掴んでいる子プロセスを先にkill
+    // 削除対象ディレクトリをcwdとして掴んでいるPTYセッションを先にkill
     let killed = pty_manager.kill_sessions_in_dir(&worktree_path);
     if killed > 0 {
         // プロセスが完全に終了してファイルハンドルを解放するまで待機
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
+
+    // NtAPI による外部プロセスkillは worktree_remove_persistent の Phase 2 ループ内で実行する。
+    // ここで呼ぶと git がパスを正規のワークツリーと確認する前にプロセスをkillしてしまい、
+    // 不正なパスを渡された場合に無関係なプロセスを終了するリスクがある。
+
+    let cancel_flag = remove_manager.create_cancel_flag(&worktree_path);
     let wp = worktree_path.clone();
-    run_git(move || git_worktree::worktree_remove(&repo_path, &worktree_path)).await?;
+    let wp2 = worktree_path.clone();
+    let ah = app_handle.clone();
+
+    let result = tokio::task::spawn_blocking(move || {
+        git_worktree::worktree_remove_persistent(
+            &repo_path,
+            &worktree_path,
+            cancel_flag,
+            Some(&|| {
+                let _ = ah.emit(
+                    "worktree-remove-retrying",
+                    serde_json::json!({ "worktreePath": wp2 }),
+                );
+            }),
+        )
+    })
+    .await
+    .map_err(|e| format!("task join error: {}", e))?;
+
+    remove_manager.remove(&wp);
+
+    // キャンセルはエラーとして伝播（フロントエンドで特別処理）
+    result?;
+
     if let Some(pool) = app_handle.try_state::<report_db::ReportPool>() {
         let _ = report_db::insert(&pool.0, "worktree_change:remove", &wp).await;
     }
     Ok(())
+}
+
+#[tauri::command]
+fn cancel_worktree_remove(
+    remove_manager: State<'_, WorktreeRemoveManager>,
+    worktree_path: String,
+) -> Result<(), String> {
+    if remove_manager.cancel(&worktree_path) {
+        Ok(())
+    } else {
+        // すでに完了または存在しない場合は無視
+        Ok(())
+    }
 }
 
 #[tauri::command]
@@ -702,6 +746,7 @@ pub fn run() {
 
     let app = builder
         .manage(PtyManager::new())
+        .manage(WorktreeRemoveManager::new())
         .manage(SettingsManager::new())
         .manage(mcp_server::McpServerManager::new())
         .manage(mcp_server::McpPeerRegistry(std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()))))
@@ -723,6 +768,7 @@ pub fn run() {
             git_pull,
             git_worktree_add,
             git_worktree_remove,
+            cancel_worktree_remove,
             git_worktree_restore,
             git_list_branches,
             detect_package_manager,

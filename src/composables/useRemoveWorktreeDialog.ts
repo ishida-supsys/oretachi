@@ -1,6 +1,7 @@
-import { ref, nextTick } from "vue";
+import { ref, reactive, nextTick } from "vue";
 import type { Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { message } from "@tauri-apps/plugin-dialog";
 import { useWorktrees } from "./useWorktrees";
 import { cancelApproval } from "../utils/autoApproval";
@@ -57,6 +58,31 @@ export function useRemoveWorktreeDialog(options: {
   } = options;
 
   const { worktrees, removeWorktree, listBranches } = useWorktrees();
+
+  // 永続リトライ中のワークツリーID（キャンセルボタン表示用）
+  const cancellableWorktrees = reactive(new Set<string>());
+
+  // バックエンドから永続リトライ開始イベントを受信したらキャンセル可能状態に移行
+  listen<{ worktreePath: string }>("worktree-remove-retrying", (event) => {
+    const worktree = worktrees.value.find(
+      (w) => w.path === event.payload.worktreePath
+    );
+    if (worktree) {
+      cancellableWorktrees.add(worktree.id);
+      loadingWorktrees.set(worktree.id, t("retryingDeleteText"));
+    }
+  });
+
+  /** 永続リトライ中の削除をキャンセルする */
+  async function cancelWorktreeRemove(worktreeId: string): Promise<void> {
+    const worktree = worktrees.value.find((w) => w.id === worktreeId);
+    if (!worktree) return;
+    try {
+      await invoke("cancel_worktree_remove", { worktreePath: worktree.path });
+    } catch {
+      // すでに完了している場合は無視
+    }
+  }
 
   // ダイアログ state
   const showRemoveDialog = ref(false);
@@ -139,14 +165,15 @@ export function useRemoveWorktreeDialog(options: {
       await closeArtifactWindow(worktreeId);
       await cancelApproval(worktreeId);
 
+      // ターミナルプロセスをkillする（ディレクトリのファイルハンドル解放が目的）。
+      // ただし UI 状態のクリア（terminals.splice / frameBundles.delete）は削除成功後に行う。
+      // キャンセル時にワークツリーが UI に残った際、空ターミナルではなく停止済み状態で表示できるようにする。
       const bundle = worktreeFrameBundles.get(worktreeId);
-      for (const terminal of [...worktree.terminals]) {
+      const terminalsSnapshot = [...worktree.terminals];
+      for (const terminal of terminalsSnapshot) {
         const term = bundle?.terminalRefs.get(terminal.id) ?? getTerminalRef(terminal.id);
         if (term?.isRunning) await term.kill();
-        terminalWorktreeMap.delete(terminal.id);
       }
-      worktree.terminals.splice(0);
-      worktreeFrameBundles.delete(worktreeId);
 
       if (activeWorktreeId.value === worktreeId) goHome();
 
@@ -164,6 +191,12 @@ export function useRemoveWorktreeDialog(options: {
             savedPositions = homeViewRef.value?.hideCard(worktreeId);
           },
         );
+        // 削除成功後に UI 状態をクリア
+        for (const terminal of terminalsSnapshot) {
+          terminalWorktreeMap.delete(terminal.id);
+        }
+        worktree.terminals.splice(0);
+        worktreeFrameBundles.delete(worktreeId);
         // git 操作成功後の後処理（MCP通知など）
         if (afterRemove) {
           try { await afterRemove(worktree); } catch { /* 通知失敗はワークツリー削除の成否に影響しない */ }
@@ -176,9 +209,13 @@ export function useRemoveWorktreeDialog(options: {
         if (onRemoveFailed) {
           try { await onRemoveFailed(worktree); } catch { /* ロールバック失敗は無視 */ }
         }
-        await message(t("deleteFailed", { error: e }), { kind: "error" });
+        // "cancelled" はユーザー操作によるキャンセルなのでエラーダイアログを出さない
+        if (String(e) !== "cancelled") {
+          await message(t("deleteFailed", { error: e }), { kind: "error" });
+        }
       } finally {
         homeViewRef.value?.unhideCard(worktreeId);
+        cancellableWorktrees.delete(worktreeId);
       }
     } catch (e) {
       // UI 後処理ステップ（moveToMainWindow・closeArtifactWindow 等）が失敗した場合。
@@ -186,9 +223,12 @@ export function useRemoveWorktreeDialog(options: {
       if (onRemoveFailed) {
         try { await onRemoveFailed(worktree); } catch { /* ロールバック失敗は無視 */ }
       }
-      await message(t("deleteFailed", { error: e }), { kind: "error" });
+      if (String(e) !== "cancelled") {
+        await message(t("deleteFailed", { error: e }), { kind: "error" });
+      }
     } finally {
       loadingWorktrees.delete(worktreeId);
+      cancellableWorktrees.delete(worktreeId);
     }
   }
 
@@ -244,9 +284,11 @@ export function useRemoveWorktreeDialog(options: {
     removeTargetWorktree,
     removeBranches,
     removeDirtyFiles,
+    cancellableWorktrees,
     onRemoveWorktree,
     onRemoveWorktreeConfirm,
     onArchiveWorktreeConfirm,
+    cancelWorktreeRemove,
     dismissDialog,
   };
 }

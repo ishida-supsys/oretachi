@@ -166,6 +166,7 @@ const props = defineProps<{
   hotkeyChars: Map<string, string>;
   artifactCounts: Map<string, number>;
   loadingWorktrees: Map<string, string>;
+  cancellableWorktrees: Set<string>;
   autoApprovals: Map<string, boolean>;
   aiJudgingWorktrees: Set<string>;
 }>();
@@ -187,6 +188,7 @@ const emit = defineEmits<{
   setHotkeyChar: [worktreeId: string];
   toggleAutoApproval: [worktreeId: string];
   cancelAiJudging: [worktreeId: string];
+  cancelRemove: [worktreeId: string];
   duplicateWorktree: [worktreeId: string];
   addTask: [];
   removeTask: [taskId: string];
@@ -366,6 +368,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
               :artifact-count="artifactCounts.get(worktree.id) ?? 0"
               :loading="loadingWorktrees.has(worktree.id)"
               :loading-text="loadingWorktrees.get(worktree.id)"
+              :cancellable="cancellableWorktrees.has(worktree.id)"
               :auto-approval="autoApprovals.get(worktree.id) ?? false"
               :ai-judging="aiJudgingWorktrees.has(worktree.id)"
               @drag-start="onCardDragStart"
@@ -381,6 +384,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
               @set-hotkey-char="emit('setHotkeyChar', $event)"
               @toggle-auto-approval="emit('toggleAutoApproval', $event)"
               @cancel-ai-judging="emit('cancelAiJudging', $event)"
+              @cancel-remove="emit('cancelRemove', $event)"
               @duplicate-worktree="emit('duplicateWorktree', $event)"
             />
           </div>
