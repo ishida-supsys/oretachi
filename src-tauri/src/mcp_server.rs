@@ -125,7 +125,7 @@ pub struct NotifyWorktreeEvent {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ArtifactParams {
-    #[schemars(description = "操作の種類: \"create\"(新規作成) / \"update\"(差分更新) / \"rewrite\"(全置換) / \"get\"(1件取得)")]
+    #[schemars(description = "操作の種類: \"create\"(新規作成) / \"update\"(差分更新) / \"rewrite\"(全置換) / \"get\"(1件取得) / \"outline\"(構造概要取得。contentを除く)")]
     pub command: String,
     #[schemars(description = "アーティファクトを識別する一意なID")]
     pub id: String,
@@ -157,6 +157,8 @@ struct ArtifactData {
     content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     language: Option<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    modules: HashMap<String, String>,
     created_at: u64,
     updated_at: u64,
 }
@@ -169,6 +171,26 @@ pub struct SearchArtifactParams {
     pub branch: String,
     #[schemars(description = "検索キーワード (省略時は全件返却)。title, content, type, language を対象に部分一致検索")]
     pub query: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ArtifactModuleParams {
+    #[schemars(description = "操作の種類: \"list\"(一覧), \"get\"(取得), \"create\"(作成), \"update\"(差分更新), \"rewrite\"(全置換), \"delete\"(削除)")]
+    pub command: String,
+    #[schemars(description = "アーティファクトID")]
+    pub id: String,
+    #[schemars(description = "リポジトリ名")]
+    pub repository: String,
+    #[schemars(description = "ブランチ名")]
+    pub branch: String,
+    #[schemars(description = "モジュール名 (例: \"components/Header\", \"screens/Login\")。list時は省略可")]
+    pub module_name: Option<String>,
+    #[schemars(description = "モジュールのソースコード (create/rewrite時必須)")]
+    pub content: Option<String>,
+    #[schemars(description = "update時: 置き換え元の文字列 (モジュール内に1箇所だけ存在すること)")]
+    pub old_str: Option<String>,
+    #[schemars(description = "update時: 置き換え後の文字列")]
+    pub new_str: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -288,6 +310,59 @@ impl NotifyService {
             return Ok(CallToolResult::success(vec![Content::text(raw)]));
         }
 
+        if command == "outline" {
+            let raw = tokio_fs::read_to_string(&artifact_path).await
+                .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))?;
+            let data: ArtifactData = serde_json::from_str(&raw)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+            fn extract_exports(src: &str) -> Vec<String> {
+                let mut names = Vec::new();
+                for line in src.lines() {
+                    let trimmed = line.trim();
+                    // export default function/class Name
+                    if trimmed.starts_with("export default function ") || trimmed.starts_with("export default class ") {
+                        let rest = trimmed.trim_start_matches("export default function ").trim_start_matches("export default class ");
+                        let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                        if !name.is_empty() { names.push(name); }
+                    }
+                    // export function/const/class Name
+                    else if trimmed.starts_with("export function ") || trimmed.starts_with("export const ") || trimmed.starts_with("export class ") {
+                        let rest = trimmed
+                            .trim_start_matches("export function ")
+                            .trim_start_matches("export const ")
+                            .trim_start_matches("export class ");
+                        let name: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                        if !name.is_empty() { names.push(name); }
+                    }
+                }
+                names.dedup();
+                names
+            }
+
+            let entry_lines = data.content.lines().count();
+            let entry_exports = extract_exports(&data.content);
+            let modules_outline: serde_json::Value = data.modules.iter().map(|(name, src)| {
+                (name.clone(), serde_json::json!({
+                    "lines": src.lines().count(),
+                    "exports": extract_exports(src),
+                }))
+            }).collect::<serde_json::Map<_, _>>().into();
+
+            let outline = serde_json::json!({
+                "id": data.id,
+                "title": data.title,
+                "type": data.content_type,
+                "entry_lines": entry_lines,
+                "entry_exports": entry_exports,
+                "modules": modules_outline,
+            });
+            let json = serde_json::to_string_pretty(&outline)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            log::info!("[mcp] artifact command=outline id={} worktree_id={}", id, worktree_id);
+            return Ok(CallToolResult::success(vec![Content::text(json)]));
+        }
+
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_secs())
@@ -306,7 +381,7 @@ impl NotifyService {
                 })?;
                 tokio_fs::create_dir_all(&artifacts_dir).await
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-                ArtifactData { id: id.clone(), content_type, title, content, language, created_at: now, updated_at: now }
+                ArtifactData { id: id.clone(), content_type, title, content, language, modules: HashMap::new(), created_at: now, updated_at: now }
             }
             "update" => {
                 let old_str = old_str.ok_or_else(|| {
@@ -343,7 +418,7 @@ impl NotifyService {
                 data
             }
             other => return Err(McpError::invalid_params(
-                format!("不明なコマンド '{}'. create / update / rewrite / get のいずれかを指定してください", other),
+                format!("不明なコマンド '{}'. create / update / rewrite / get / outline のいずれかを指定してください", other),
                 None,
             )),
         };
@@ -367,6 +442,139 @@ impl NotifyService {
             }
         }
         Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "Reactアーティファクトのモジュールを操作する。大規模アーティファクトをファイル単位で管理するために使用。list: モジュール一覧(行数のみ), get: 1モジュール取得, create: 追加, update: 差分更新, rewrite: 全置換, delete: 削除")]
+    async fn artifact_module(
+        &self,
+        Parameters(ArtifactModuleParams {
+            command, id, repository, branch,
+            module_name, content, old_str, new_str,
+        }): Parameters<ArtifactModuleParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // モジュール名バリデーション
+        fn validate_module_name(name: &str) -> Result<(), McpError> {
+            if name.contains("..") || name.starts_with('/') || name.contains('\\') || name.contains('\0') {
+                return Err(McpError::invalid_params(
+                    format!("無効なモジュール名: '{}'", name), None,
+                ));
+            }
+            Ok(())
+        }
+
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+        let wt = settings
+            .worktrees
+            .iter()
+            .find(|wt| wt.repository_name == repository && wt.branch_name == branch)
+            .ok_or_else(|| McpError::invalid_params(
+                format!("repository='{}', branch='{}' に一致するワークツリーが存在しません", repository, branch),
+                None,
+            ))?;
+        let worktree_id = wt.id.clone();
+
+        let artifacts_dir = self.app_handle.path().app_data_dir()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            .join("artifacts")
+            .join(&worktree_id);
+        let artifact_path = artifacts_dir.join(format!("{}.json", id));
+
+        let raw = tokio_fs::read_to_string(&artifact_path).await
+            .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))?;
+        let mut data: ArtifactData = serde_json::from_str(&raw)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+
+        let result_json: String = match command.as_str() {
+            "list" => {
+                let list: Vec<serde_json::Value> = data.modules.iter().map(|(name, src)| {
+                    serde_json::json!({ "module_name": name, "lines": src.lines().count() })
+                }).collect();
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "id": id,
+                    "modules": list,
+                })).map_err(|e| McpError::internal_error(e.to_string(), None))?
+            }
+            "get" => {
+                let name = module_name.as_deref()
+                    .ok_or_else(|| McpError::invalid_params("module_name が必要です", None))?;
+                validate_module_name(name)?;
+                let src = data.modules.get(name)
+                    .ok_or_else(|| McpError::invalid_params(format!("モジュール '{}' が存在しません", name), None))?;
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "id": id, "module_name": name, "content": src,
+                })).map_err(|e| McpError::internal_error(e.to_string(), None))?
+            }
+            "create" | "rewrite" => {
+                let name = module_name.as_deref()
+                    .ok_or_else(|| McpError::invalid_params("module_name が必要です", None))?;
+                validate_module_name(name)?;
+                let src = content
+                    .ok_or_else(|| McpError::invalid_params("content が必要です", None))?;
+                data.modules.insert(name.to_string(), src);
+                data.updated_at = now;
+                let json = serde_json::to_string_pretty(&data)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                tokio_fs::write(&artifact_path, &json).await
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
+                    "worktreeId": worktree_id, "artifactId": id, "command": command,
+                })) { log::warn!("Failed to emit artifact-changed: {}", e); }
+                json
+            }
+            "update" => {
+                let name = module_name.as_deref()
+                    .ok_or_else(|| McpError::invalid_params("module_name が必要です", None))?;
+                validate_module_name(name)?;
+                let old = old_str.ok_or_else(|| McpError::invalid_params("old_str が必要です", None))?;
+                let new = new_str.ok_or_else(|| McpError::invalid_params("new_str が必要です", None))?;
+                let src = data.modules.get_mut(name)
+                    .ok_or_else(|| McpError::invalid_params(format!("モジュール '{}' が存在しません", name), None))?;
+                let count = src.matches(old.as_str()).count();
+                if count == 0 {
+                    return Err(McpError::invalid_params(format!("old_str がモジュール '{}' 内に見つかりません", name), None));
+                }
+                if count > 1 {
+                    return Err(McpError::invalid_params(format!("old_str がモジュール '{}' 内に{}箇所あります。1箇所だけにしてください", name, count), None));
+                }
+                *src = src.replacen(old.as_str(), new.as_str(), 1);
+                data.updated_at = now;
+                let json = serde_json::to_string_pretty(&data)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                tokio_fs::write(&artifact_path, &json).await
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
+                    "worktreeId": worktree_id, "artifactId": id, "command": "update",
+                })) { log::warn!("Failed to emit artifact-changed: {}", e); }
+                json
+            }
+            "delete" => {
+                let name = module_name.as_deref()
+                    .ok_or_else(|| McpError::invalid_params("module_name が必要です", None))?;
+                validate_module_name(name)?;
+                if data.modules.remove(name).is_none() {
+                    return Err(McpError::invalid_params(format!("モジュール '{}' が存在しません", name), None));
+                }
+                data.updated_at = now;
+                let json = serde_json::to_string_pretty(&data)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                tokio_fs::write(&artifact_path, &json).await
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
+                    "worktreeId": worktree_id, "artifactId": id, "command": "delete_module",
+                })) { log::warn!("Failed to emit artifact-changed: {}", e); }
+                json
+            }
+            other => return Err(McpError::invalid_params(
+                format!("不明なコマンド '{}'. list/get/create/update/rewrite/delete のいずれかを指定してください", other),
+                None,
+            )),
+        };
+
+        log::info!("[mcp] artifact_module command={} id={} module={:?}", command, id, module_name);
+        Ok(CallToolResult::success(vec![Content::text(result_json)]))
     }
 
     #[tool(description = "ワークツリーに通知を送信する")]

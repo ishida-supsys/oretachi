@@ -31,10 +31,13 @@ function loadVendors(): Promise<VendorScripts> {
 
 const props = defineProps<{
   content: string;
+  modules?: Record<string, string>;
 }>();
 
 type Mode = "preview" | "code";
 const mode = ref<Mode>("preview");
+// コードビューで選択中のファイル: "" = エントリポイント、それ以外はモジュール名
+const selectedFile = ref<string>("");
 
 const vendorScripts = ref<VendorScripts | null>(null);
 const vendorLoading = ref(true);
@@ -60,8 +63,14 @@ const vendorHead = computed(() => {
 // content が変わっても vendorHead は再計算されない
 const srcdocHtml = computed(() => {
   if (!vendorHead.value) return "";
-  return buildReactSrcdoc(vendorHead.value, props.content);
+  return buildReactSrcdoc(vendorHead.value, props.content, props.modules);
 });
+
+const moduleNames = computed(() => Object.keys(props.modules ?? {}));
+
+const codeContent = computed(() =>
+  selectedFile.value === "" ? props.content : (props.modules?.[selectedFile.value] ?? "")
+);
 </script>
 
 <template>
@@ -99,11 +108,24 @@ const srcdocHtml = computed(() => {
       />
     </div>
 
-    <ArtifactCodeView
-      v-else
-      :content="content"
-      language="typescriptreact"
-    />
+    <div v-else class="code-area">
+      <div v-if="moduleNames.length > 0" class="module-tabs">
+        <button
+          :class="{ active: selectedFile === '' }"
+          @click="selectedFile = ''"
+        >index</button>
+        <button
+          v-for="name in moduleNames"
+          :key="name"
+          :class="{ active: selectedFile === name }"
+          @click="selectedFile = name"
+        >{{ name.split('/').pop() }}</button>
+      </div>
+      <ArtifactCodeView
+        :content="codeContent"
+        language="typescriptreact"
+      />
+    </div>
   </div>
 </template>
 
@@ -185,5 +207,44 @@ const srcdocHtml = computed(() => {
   flex: 1;
   border: none;
   background: #fff;
+}
+
+.code-area {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.module-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 4px 8px;
+  background: #181825;
+  border-bottom: 1px solid #313244;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.module-tabs button {
+  padding: 2px 10px;
+  border: 1px solid #313244;
+  border-radius: 3px;
+  background: transparent;
+  color: #6c7086;
+  font-size: 11px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s;
+}
+
+.module-tabs button:hover {
+  background: #313244;
+  color: #cdd6f4;
+}
+
+.module-tabs button.active {
+  background: #313244;
+  color: #cdd6f4;
+  border-color: #45475a;
 }
 </style>
