@@ -3,7 +3,7 @@ import { ref, computed, onMounted } from "vue";
 import ArtifactCodeView from "./ArtifactCodeView.vue";
 import { buildVendorHead, buildReactSrcdoc } from "../../utils/reactArtifactSrcdoc";
 
-type VendorScripts = { react: string; reactDom: string; babel: string };
+type VendorScripts = { react: string; reactDom: string; babel: string; tailwind: string };
 
 // Promise キャッシュ: 同時マウント時も重複フェッチしない。失敗時は null にリセットしてリトライ可能にする。
 let _vendorPromise: Promise<VendorScripts> | null = null;
@@ -19,7 +19,8 @@ function loadVendors(): Promise<VendorScripts> {
       fetchText("/vendor/react.production.min.js"),
       fetchText("/vendor/react-dom.production.min.js"),
       import("@babel/standalone/babel.min.js?raw").then((m) => m.default),
-    ]).then(([react, reactDom, babel]) => ({ react, reactDom, babel }))
+      fetchText("/vendor/tailwindcss-browser.js"),
+    ]).then(([react, reactDom, babel, tailwind]) => ({ react, reactDom, babel, tailwind }))
       .catch((e) => {
         _vendorPromise = null; // 失敗時はリトライ可能にする
         throw e;
@@ -52,8 +53,8 @@ onMounted(async () => {
 // ベンダーヘッド（~2MB）は vendorScripts が変化したときのみ再計算する
 const vendorHead = computed(() => {
   if (!vendorScripts.value) return "";
-  const { react, reactDom, babel } = vendorScripts.value;
-  return buildVendorHead(react, reactDom, babel);
+  const { react, reactDom, babel, tailwind } = vendorScripts.value;
+  return buildVendorHead(react, reactDom, babel, tailwind);
 });
 
 // content が変わっても vendorHead は再計算されない

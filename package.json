@@ -50,6 +50,7 @@
   },
   "devDependencies": {
     "@intlify/unplugin-vue-i18n": "^11.0.7",
+    "@tailwindcss/browser": "^4.2.1",
     "@tailwindcss/vite": "^4.2.1",
     "@tauri-apps/cli": "^2",
     "@types/dompurify": "^3.2.0",

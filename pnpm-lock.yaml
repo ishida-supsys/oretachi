@@ -105,6 +105,9 @@ importers:
       '@intlify/unplugin-vue-i18n':
         specifier: ^11.0.7
         version: 11.0.7(@vue/compiler-dom@3.5.29)(eslint@10.0.3(jiti@2.6.1))(rollup@4.59.0)(typescript@5.6.3)(vue-i18n@11.3.0(vue@3.5.29(typescript@5.6.3)))(vue@3.5.29(typescript@5.6.3))
+      '@tailwindcss/browser':
+        specifier: ^4.2.1
+        version: 4.2.2
       '@tailwindcss/vite':
         specifier: ^4.2.1
         version: 4.2.1(vite@6.4.1(jiti@2.6.1)(lightningcss@1.31.1)(yaml@2.8.2))
@@ -798,6 +801,9 @@ packages:
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
+
+  '@tailwindcss/browser@4.2.2':
+    resolution: {integrity: sha512-JVdJBWWtvKxliBI9CtpOrqxgk8aijUWGsn0STxcOcXAYsUFAbOxN5PwawOJ+v0PoQfPcOK9eZoj9LTwvBV0Vmw==}
 
   '@tailwindcss/node@4.2.1':
     resolution: {integrity: sha512-jlx6sLk4EOwO6hHe1oCGm1Q4AN/s0rSrTTPBGPM0/RQ6Uylwq17FuU8IeJJKEjtc6K6O07zsvP+gDO6MMWo7pg==}
@@ -3071,6 +3077,8 @@ snapshots:
     optional: true
 
   '@standard-schema/spec@1.1.0': {}
+
+  '@tailwindcss/browser@4.2.2': {}
 
   '@tailwindcss/node@4.2.1':
     dependencies:
