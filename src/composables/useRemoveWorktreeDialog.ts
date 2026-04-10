@@ -116,35 +116,26 @@ export function useRemoveWorktreeDialog(options: {
     removeDirtyFiles.value = [];
   }
 
-  /** 共通: ダイアログ後処理・ターミナル停止・アニメーション付きワークツリー削除
+  /** 共通コア: ターミナル停止・アニメーション付きワークツリー削除
+   *  ダイアログ state に依存しない純粋な削除処理。ダイアログ経由・MCP経由の両方から呼ばれる。
    *  beforeRemove: git 操作前に呼ぶ任意の非同期処理（アーカイブ保存など）
    *  onRemoveFailed: git 操作失敗時に beforeRemove の副作用をロールバックするコールバック
    *  afterRemove: git 操作成功後に呼ぶ任意の非同期処理（MCP通知など）
    */
-  async function _confirm(
+  async function _execute(
+    worktreeId: string,
     removeOptions: RemoveOptions,
     loadingText: string,
     beforeRemove?: (worktree: Worktree) => Promise<void>,
     onRemoveFailed?: (worktree: Worktree) => Promise<void>,
     afterRemove?: (worktree: Worktree) => Promise<void>,
   ): Promise<void> {
-    if (!removeTargetWorktree.value) return;
-    const { id: worktreeId } = removeTargetWorktree.value;
-
     const worktree = worktrees.value.find((w) => w.id === worktreeId);
-    if (!worktree) {
-      showRemoveDialog.value = false;
-      removeDirtyFiles.value = [];
-      return;
-    }
+    if (!worktree) return;
 
-    showRemoveDialog.value = false;
-    removeTargetWorktree.value = null;
-    removeBranches.value = [];
-    removeDirtyFiles.value = [];
     clearNotification(worktreeId);
 
-    // ダイアログを閉じた後、UI 破壊的操作の前に事前処理（アーカイブ保存など）を実行する。
+    // UI 破壊的操作の前に事前処理（アーカイブ保存など）を実行する。
     // ここで失敗した場合はワークツリーに何も手を加えずエラーを表示して終了する。
     if (beforeRemove) {
       try {
@@ -232,6 +223,31 @@ export function useRemoveWorktreeDialog(options: {
     }
   }
 
+  /** ダイアログ経由の確認後に呼ぶラッパー。ダイアログ state をクリアしてから _execute を呼ぶ */
+  async function _confirm(
+    removeOptions: RemoveOptions,
+    loadingText: string,
+    beforeRemove?: (worktree: Worktree) => Promise<void>,
+    onRemoveFailed?: (worktree: Worktree) => Promise<void>,
+    afterRemove?: (worktree: Worktree) => Promise<void>,
+  ): Promise<void> {
+    if (!removeTargetWorktree.value) return;
+    const { id: worktreeId } = removeTargetWorktree.value;
+
+    if (!worktrees.value.find((w) => w.id === worktreeId)) {
+      showRemoveDialog.value = false;
+      removeDirtyFiles.value = [];
+      return;
+    }
+
+    showRemoveDialog.value = false;
+    removeTargetWorktree.value = null;
+    removeBranches.value = [];
+    removeDirtyFiles.value = [];
+
+    await _execute(worktreeId, removeOptions, loadingText, beforeRemove, onRemoveFailed, afterRemove);
+  }
+
   async function onRemoveWorktreeConfirm(removeOptions: RemoveOptions): Promise<void> {
     await _confirm(removeOptions, t("deletingText"));
   }
@@ -279,6 +295,48 @@ export function useRemoveWorktreeDialog(options: {
     );
   }
 
+  /** MCP経由のワークツリーアーカイブ。ダイアログを経由せず直接 _execute を呼ぶ */
+  async function archiveWorktreeByMcp(
+    worktreeId: string,
+    removeOptions: RemoveOptions,
+  ): Promise<void> {
+    await _execute(
+      worktreeId,
+      removeOptions,
+      t("archivingText"),
+      async (worktree) => {
+        await saveArchive({
+          id: worktree.id,
+          name: worktree.name,
+          repository_id: worktree.repositoryId,
+          repository_name: worktree.repositoryName,
+          path: worktree.path,
+          branch_name: worktree.branchName,
+          archived_at: Date.now(),
+        });
+      },
+      async (worktree) => {
+        const pathStillExists = await invoke<boolean>("path_exists", { path: worktree.path }).catch(() => false);
+        if (pathStillExists) {
+          await deleteArchive(worktree.id);
+        } else {
+          await invoke("notify_worktree_archived", {
+            id: worktree.id,
+            name: worktree.name,
+            branchName: worktree.branchName,
+          }).catch(() => { /* 通知失敗は無視 */ });
+        }
+      },
+      async (worktree) => {
+        await invoke("notify_worktree_archived", {
+          id: worktree.id,
+          name: worktree.name,
+          branchName: worktree.branchName,
+        });
+      },
+    );
+  }
+
   return {
     showRemoveDialog,
     removeTargetWorktree,
@@ -288,6 +346,7 @@ export function useRemoveWorktreeDialog(options: {
     onRemoveWorktree,
     onRemoveWorktreeConfirm,
     onArchiveWorktreeConfirm,
+    archiveWorktreeByMcp,
     cancelWorktreeRemove,
     dismissDialog,
   };
