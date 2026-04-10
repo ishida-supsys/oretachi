@@ -73,7 +73,7 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
       cancellableWorktrees.add(worktree.id);
       loadingWorktrees.set(worktree.id, t("retryingDeleteText"));
     }
-  });
+  }).catch(() => { /* リスナー登録失敗時は無視（通常発生しない） */ });
 
   /** 永続リトライ中の削除をキャンセルする */
   async function cancelWorktreeRemove(worktreeId: string): Promise<void> {
