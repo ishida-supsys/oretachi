@@ -6,6 +6,15 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.18.1] - 2026-04-10
+
+### Added
+- Annotate React artifact type with Tailwind CSS availability in MCP tool description
+- Load Tailwind browser runtime in artifact viewer
+
+### Fixed
+- Move @tailwindcss/browser to dependencies for production builds
+
 ## [0.18.0] - 2026-04-10
 
 ### Added
@@ -203,7 +212,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.18.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.18.1...HEAD
+[0.18.1]: https://github.com/ishida-supsys/oretachi/compare/0.18.0...0.18.1
 [0.18.0]: https://github.com/ishida-supsys/oretachi/compare/0.17.9...0.18.0
 [0.17.9]: https://github.com/ishida-supsys/oretachi/compare/0.17.8...0.17.9
 [0.17.8]: https://github.com/ishida-supsys/oretachi/compare/0.17.7...0.17.8
