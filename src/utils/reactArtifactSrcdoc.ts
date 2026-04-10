@@ -45,23 +45,27 @@ const RUNTIME_JS =
   "try{" +
   "  var moduleSources=JSON.parse(document.getElementById('_modules').value||'{}');" +
   "  var moduleCache={};" +
-  "  function makeRequire(){" +
+  "  function resolvePath(base,rel){" +
+  "    if(!rel.startsWith('./')){return rel;}" +
+  "    var dir=base.includes('/')?base.substring(0,base.lastIndexOf('/')):'';" +
+  "    return dir?dir+'/'+rel.slice(2):rel.slice(2);" +
+  "  }" +
+  "  function makeRequire(currentKey){" +
   "    var libs={'react':React,'react-dom':ReactDOM,'react-dom/client':ReactDOM,'react/jsx-runtime':React};" +
-  "    function req(name){" +
+  "    return function req(name){" +
   "      if(libs[name]!==undefined)return libs[name];" +
-  "      var key=name.replace(/^\\.\\//, '');" +
-  "      if(moduleSources[key]===undefined)throw new Error('Module not found: '+name);" +
+  "      var key=(name.startsWith('./'))?resolvePath(currentKey,name):name;" +
+  "      if(moduleSources[key]===undefined)throw new Error('Module not found: '+name+' (resolved: '+key+')');" +
   "      if(moduleCache[key])return moduleCache[key].exports;" +
   "      var mod={exports:{}};" +
   "      moduleCache[key]=mod;" +
   "      var code=Babel.transform(moduleSources[key],{presets:['env','react','typescript'],filename:key+'.tsx'}).code;" +
   "      var fn=new Function('React','ReactDOM','exports','module','require',code);" +
-  "      fn(React,ReactDOM,mod.exports,mod,req);" +
+  "      fn(React,ReactDOM,mod.exports,mod,makeRequire(key));" +
   "      return mod.exports;" +
-  "    }" +
-  "    return req;" +
+  "    };" +
   "  }" +
-  "  var require=makeRequire();" +
+  "  var require=makeRequire('');" +
   "  var source=document.getElementById('_source').value;" +
   "  var transformed=Babel.transform(source,{presets:['env','react','typescript'],filename:'artifact.tsx'}).code;" +
   "  var exports={};" +

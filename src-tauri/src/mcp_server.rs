@@ -518,13 +518,24 @@ impl NotifyService {
         let mut data: ArtifactData = serde_json::from_str(&raw)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
 
+        // モジュール操作は application/vnd.ant.react のみ対象
+        if data.content_type != "application/vnd.ant.react" {
+            return Err(McpError::invalid_params(
+                format!("artifact_module は application/vnd.ant.react のみ対象です (現在: {})", data.content_type),
+                None,
+            ));
+        }
+
         let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
 
         let result_json: String = match command.as_str() {
             "list" => {
-                let list: Vec<serde_json::Value> = data.modules.iter().map(|(name, src)| {
+                let mut list: Vec<serde_json::Value> = data.modules.iter().map(|(name, src)| {
                     serde_json::json!({ "module_name": name, "lines": src.lines().count() })
                 }).collect();
+                list.sort_by(|a, b| {
+                    a["module_name"].as_str().unwrap_or("").cmp(b["module_name"].as_str().unwrap_or(""))
+                });
                 serde_json::to_string_pretty(&serde_json::json!({
                     "id": id,
                     "modules": list,
