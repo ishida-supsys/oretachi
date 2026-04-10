@@ -146,6 +146,10 @@ pub struct ArtifactParams {
     pub old_str: Option<String>,
     #[schemars(description = "update時: 置き換え後の文字列")]
     pub new_str: Option<String>,
+    #[schemars(description = "get時: 取得開始行 (0始まり、省略時は0)")]
+    pub offset: Option<u32>,
+    #[schemars(description = "get時: 取得する行数 (省略時は全行)")]
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -191,6 +195,10 @@ pub struct ArtifactModuleParams {
     pub old_str: Option<String>,
     #[schemars(description = "update時: 置き換え後の文字列")]
     pub new_str: Option<String>,
+    #[schemars(description = "get時: 取得開始行 (0始まり、省略時は0)")]
+    pub offset: Option<u32>,
+    #[schemars(description = "get時: 取得する行数 (省略時は全行)")]
+    pub limit: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -255,7 +263,7 @@ impl NotifyService {
         }
     }
 
-    #[tool(description = "アーティファクトを操作する。create: 新規作成, update: 差分更新(old_str→new_str), rewrite: 全置換, get: 1件取得(全フィールド含む)")]
+    #[tool(description = "アーティファクトを操作する。create: 新規作成, update: 差分更新(old_str→new_str), rewrite: 全置換, get: 1件取得(offset/limitで行範囲指定可)")]
     async fn artifact(
         &self,
         Parameters(ArtifactParams {
@@ -269,6 +277,8 @@ impl NotifyService {
             language,
             old_str,
             new_str,
+            offset,
+            limit,
         }): Parameters<ArtifactParams>,
     ) -> Result<CallToolResult, McpError> {
         let settings_manager = self.app_handle.state::<SettingsManager>();
@@ -306,8 +316,25 @@ impl NotifyService {
         if command == "get" {
             let raw = tokio_fs::read_to_string(&artifact_path).await
                 .map_err(|_| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))?;
-            log::info!("[mcp] artifact command=get id={} worktree_id={}", id, worktree_id);
-            return Ok(CallToolResult::success(vec![Content::text(raw)]));
+            let mut data: ArtifactData = serde_json::from_str(&raw)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            let total_lines = data.content.lines().count();
+            let off = offset.unwrap_or(0) as usize;
+            if let Some(lim) = limit {
+                data.content = data.content.lines().skip(off).take(lim as usize).collect::<Vec<_>>().join("\n");
+            } else if off > 0 {
+                data.content = data.content.lines().skip(off).collect::<Vec<_>>().join("\n");
+            }
+            let mut json_val = serde_json::to_value(&data)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            if offset.is_some() || limit.is_some() {
+                json_val["content_total_lines"] = serde_json::Value::Number(total_lines.into());
+                json_val["content_offset"] = serde_json::Value::Number(off.into());
+            }
+            let json = serde_json::to_string_pretty(&json_val)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            log::info!("[mcp] artifact command=get id={} offset={:?} limit={:?} worktree_id={}", id, offset, limit, worktree_id);
+            return Ok(CallToolResult::success(vec![Content::text(json)]));
         }
 
         if command == "outline" {
@@ -444,12 +471,13 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Reactアーティファクトのモジュールを操作する。大規模アーティファクトをファイル単位で管理するために使用。list: モジュール一覧(行数のみ), get: 1モジュール取得, create: 追加, update: 差分更新, rewrite: 全置換, delete: 削除")]
+    #[tool(description = "Reactアーティファクトのモジュールを操作する。大規模アーティファクトをファイル単位で管理するために使用。list: モジュール一覧(行数のみ), get: 1モジュール取得(offset/limitで行範囲指定可), create: 追加, update: 差分更新, rewrite: 全置換, delete: 削除")]
     async fn artifact_module(
         &self,
         Parameters(ArtifactModuleParams {
             command, id, repository, branch,
             module_name, content, old_str, new_str,
+            offset, limit,
         }): Parameters<ArtifactModuleParams>,
     ) -> Result<CallToolResult, McpError> {
         // モジュール名バリデーション
@@ -473,6 +501,11 @@ impl NotifyService {
                 None,
             ))?;
         let worktree_id = wt.id.clone();
+
+        // artifact ID のパストラバーサル防止
+        if id.contains("..") || id.contains('/') || id.contains('\\') || id.contains('\0') {
+            return Err(McpError::invalid_params("不正なアーティファクトIDです".to_string(), None));
+        }
 
         let artifacts_dir = self.app_handle.path().app_data_dir()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -503,11 +536,45 @@ impl NotifyService {
                 validate_module_name(name)?;
                 let src = data.modules.get(name)
                     .ok_or_else(|| McpError::invalid_params(format!("モジュール '{}' が存在しません", name), None))?;
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "id": id, "module_name": name, "content": src,
-                })).map_err(|e| McpError::internal_error(e.to_string(), None))?
+                let total_lines = src.lines().count();
+                let off = offset.unwrap_or(0) as usize;
+                let sliced = if let Some(lim) = limit {
+                    src.lines().skip(off).take(lim as usize).collect::<Vec<_>>().join("\n")
+                } else if off > 0 {
+                    src.lines().skip(off).collect::<Vec<_>>().join("\n")
+                } else {
+                    src.clone()
+                };
+                let mut val = serde_json::json!({ "id": id, "module_name": name, "content": sliced });
+                if offset.is_some() || limit.is_some() {
+                    val["content_total_lines"] = serde_json::Value::Number(total_lines.into());
+                    val["content_offset"] = serde_json::Value::Number(off.into());
+                }
+                serde_json::to_string_pretty(&val).map_err(|e| McpError::internal_error(e.to_string(), None))?
             }
-            "create" | "rewrite" => {
+            "create" => {
+                let name = module_name.as_deref()
+                    .ok_or_else(|| McpError::invalid_params("module_name が必要です", None))?;
+                validate_module_name(name)?;
+                if data.modules.contains_key(name) {
+                    return Err(McpError::invalid_params(
+                        format!("モジュール '{}' は既に存在します。上書きするには rewrite を使用してください", name), None,
+                    ));
+                }
+                let src = content
+                    .ok_or_else(|| McpError::invalid_params("content が必要です", None))?;
+                data.modules.insert(name.to_string(), src);
+                data.updated_at = now;
+                let json = serde_json::to_string_pretty(&data)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                tokio_fs::write(&artifact_path, &json).await
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
+                    "worktreeId": worktree_id, "artifactId": id, "command": "create",
+                })) { log::warn!("Failed to emit artifact-changed: {}", e); }
+                json
+            }
+            "rewrite" => {
                 let name = module_name.as_deref()
                     .ok_or_else(|| McpError::invalid_params("module_name が必要です", None))?;
                 validate_module_name(name)?;
@@ -520,7 +587,7 @@ impl NotifyService {
                 tokio_fs::write(&artifact_path, &json).await
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
                 if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
-                    "worktreeId": worktree_id, "artifactId": id, "command": command,
+                    "worktreeId": worktree_id, "artifactId": id, "command": "rewrite",
                 })) { log::warn!("Failed to emit artifact-changed: {}", e); }
                 json
             }
