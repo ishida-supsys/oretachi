@@ -6,6 +6,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.18.2] - 2026-04-10
+
+### Added
+- Add modular React artifact support with MCP flow integration
+
+### Fixed
+- Address review feedback for React artifact MCP flow
+
 ## [0.18.1] - 2026-04-10
 
 ### Added
@@ -212,7 +220,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.18.1...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.18.2...HEAD
+[0.18.2]: https://github.com/ishida-supsys/oretachi/compare/0.18.1...0.18.2
 [0.18.1]: https://github.com/ishida-supsys/oretachi/compare/0.18.0...0.18.1
 [0.18.0]: https://github.com/ishida-supsys/oretachi/compare/0.17.9...0.18.0
 [0.17.9]: https://github.com/ishida-supsys/oretachi/compare/0.17.8...0.17.9
