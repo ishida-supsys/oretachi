@@ -1018,6 +1018,12 @@ onMounted(async () => {
       await closeArtifactWindow(worktree_id);
       await cancelApproval(worktree_id);
       if (activeWorktreeId.value === worktree_id) goHome();
+      // MCPクライアントへアーカイブ完了を通知
+      await invoke("notify_worktree_archived", {
+        id: worktree.id,
+        name: worktree.name,
+        branchName: worktree.branchName,
+      }).catch(() => { /* 通知失敗はワークツリー削除の成否に影響しない */ });
     } catch {
       // 失敗時: ワークツリーパスの有無でケースを判定する
       const pathStillExists = await invoke<boolean>("path_exists", { path: worktree.path }).catch(() => false);
@@ -1029,6 +1035,12 @@ onMounted(async () => {
         await closeArtifactWindow(worktree_id);
         await cancelApproval(worktree_id);
         if (activeWorktreeId.value === worktree_id) goHome();
+        // MCPクライアントへアーカイブ完了を通知
+        await invoke("notify_worktree_archived", {
+          id: worktree.id,
+          name: worktree.name,
+          branchName: worktree.branchName,
+        }).catch(() => { /* 通知失敗はワークツリー削除の成否に影響しない */ });
       }
     } finally {
       loadingWorktrees.delete(worktree_id);
