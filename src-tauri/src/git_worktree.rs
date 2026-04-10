@@ -1240,17 +1240,39 @@ pub fn write_claude_hooks(
     }
 
     // ユーザーが指定していない MANAGED_EVENTS は kind "hook" で自動注入（モニタリング用）
+    // 既存エントリがあれば oretachi のフックを追記（既に含まれていれば更新、ユーザー定義フックは保持）
     for &ev in MANAGED_EVENTS {
         if !user_events.contains(ev) {
             let command = format!(
                 "\"{}\" --notify \"{}\" --kind hook --agent cc",
                 exe_path, worktree_name
             );
-            let hook_entry = serde_json::json!([{
+            let oretachi_group = serde_json::json!({
                 "matcher": "",
                 "hooks": [{ "type": "command", "command": command }]
-            }]);
-            hooks_obj.insert(ev.to_string(), hook_entry);
+            });
+            if let Some(existing) = hooks_obj.get_mut(ev) {
+                if let Some(arr) = existing.as_array_mut() {
+                    // oretachi の --notify フックが既に含まれているかチェック
+                    let has_oretachi = arr.iter().any(|group| {
+                        group.get("hooks")
+                            .and_then(|h| h.as_array())
+                            .map_or(false, |hs| {
+                                hs.iter().any(|h| {
+                                    h.get("command")
+                                        .and_then(|c| c.as_str())
+                                        .map_or(false, |c| c.contains("--notify") && c.contains("--kind hook"))
+                                })
+                            })
+                    });
+                    if !has_oretachi {
+                        arr.push(oretachi_group);
+                    }
+                }
+                // else: 配列でない既存エントリは保持（上書きしない）
+            } else {
+                hooks_obj.insert(ev.to_string(), serde_json::json!([oretachi_group]));
+            }
         }
     }
 
