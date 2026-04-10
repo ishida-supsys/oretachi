@@ -321,9 +321,13 @@ impl NotifyService {
             let total_lines = data.content.lines().count();
             let off = offset.unwrap_or(0) as usize;
             if let Some(lim) = limit {
-                data.content = data.content.lines().skip(off).take(lim as usize).collect::<Vec<_>>().join("\n");
+                let had_trailing_newline = data.content.ends_with('\n');
+                let sliced = data.content.lines().skip(off).take(lim as usize).collect::<Vec<_>>().join("\n");
+                data.content = if had_trailing_newline { sliced + "\n" } else { sliced };
             } else if off > 0 {
-                data.content = data.content.lines().skip(off).collect::<Vec<_>>().join("\n");
+                let had_trailing_newline = data.content.ends_with('\n');
+                let sliced = data.content.lines().skip(off).collect::<Vec<_>>().join("\n");
+                data.content = if had_trailing_newline { sliced + "\n" } else { sliced };
             }
             let mut json_val = serde_json::to_value(&data)
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -549,12 +553,18 @@ impl NotifyService {
                     .ok_or_else(|| McpError::invalid_params(format!("モジュール '{}' が存在しません", name), None))?;
                 let total_lines = src.lines().count();
                 let off = offset.unwrap_or(0) as usize;
+                let had_trailing_newline = src.ends_with('\n');
                 let sliced = if let Some(lim) = limit {
                     src.lines().skip(off).take(lim as usize).collect::<Vec<_>>().join("\n")
                 } else if off > 0 {
                     src.lines().skip(off).collect::<Vec<_>>().join("\n")
                 } else {
                     src.clone()
+                };
+                let sliced = if (offset.is_some() || limit.is_some()) && had_trailing_newline {
+                    sliced + "\n"
+                } else {
+                    sliced
                 };
                 let mut val = serde_json::json!({ "id": id, "module_name": name, "content": sliced });
                 if offset.is_some() || limit.is_some() {

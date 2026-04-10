@@ -46,16 +46,32 @@ const RUNTIME_JS =
   "  var moduleSources=JSON.parse(document.getElementById('_modules').value||'{}');" +
   "  var moduleCache={};" +
   "  function resolvePath(base,rel){" +
-  "    if(!rel.startsWith('./')){return rel;}" +
-  "    var dir=base.includes('/')?base.substring(0,base.lastIndexOf('/')):'';" +
-  "    return dir?dir+'/'+rel.slice(2):rel.slice(2);" +
+  "    var parts=(base.includes('/')?base.substring(0,base.lastIndexOf('/')):'')" +
+  "      .split('/').filter(function(p){return p!==''&&p!=='.'});" +
+  "    var relParts=rel.split('/');" +
+  "    for(var i=0;i<relParts.length;i++){" +
+  "      var p=relParts[i];" +
+  "      if(p==='..')parts.pop();" +
+  "      else if(p!=='.')parts.push(p);" +
+  "    }" +
+  "    return parts.join('/');" +
+  "  }" +
+  "  var EXT_RE=/\\.(tsx?|jsx?)$/;" +
+  "  function resolveModuleKey(key){" +
+  "    if(moduleSources[key]!==undefined)return key;" +
+  "    var noExt=key.replace(EXT_RE,'');" +
+  "    if(moduleSources[noExt]!==undefined)return noExt;" +
+  "    var withTsx=noExt+'.tsx';" +
+  "    if(moduleSources[withTsx]!==undefined)return withTsx;" +
+  "    return null;" +
   "  }" +
   "  function makeRequire(currentKey){" +
   "    var libs={'react':React,'react-dom':ReactDOM,'react-dom/client':ReactDOM,'react/jsx-runtime':React};" +
   "    return function req(name){" +
   "      if(libs[name]!==undefined)return libs[name];" +
-  "      var key=(name.startsWith('./'))?resolvePath(currentKey,name):name;" +
-  "      if(moduleSources[key]===undefined)throw new Error('Module not found: '+name+' (resolved: '+key+')');" +
+  "      var resolved=(name.startsWith('./')||name.startsWith('../'))?resolvePath(currentKey,name):name;" +
+  "      var key=resolveModuleKey(resolved);" +
+  "      if(key===null)throw new Error('Module not found: '+name+' (resolved: '+resolved+')');" +
   "      if(moduleCache[key])return moduleCache[key].exports;" +
   "      var mod={exports:{}};" +
   "      moduleCache[key]=mod;" +
