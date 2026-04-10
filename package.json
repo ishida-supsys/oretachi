@@ -42,6 +42,7 @@
     "monaco-editor": "^0.55.1",
     "primeicons": "^7.0.0",
     "primevue": "^4.5.4",
+    "@tailwindcss/browser": "^4.2.1",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "tauri-plugin-liquid-glass-api": "^0.1.6",
@@ -50,7 +51,6 @@
   },
   "devDependencies": {
     "@intlify/unplugin-vue-i18n": "^11.0.7",
-    "@tailwindcss/browser": "^4.2.1",
     "@tailwindcss/vite": "^4.2.1",
     "@tauri-apps/cli": "^2",
     "@types/dompurify": "^3.2.0",
