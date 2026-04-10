@@ -39,6 +39,7 @@ import type { FrameNode } from "./types/frame";
 import { useWorktreeFrameBundles } from "./composables/useWorktreeFrameBundles";
 import { useCodeReviewChatListener } from "./composables/useCodeReviewLineChat";
 import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
+import { useWorktreeRemove } from "./composables/useWorktreeRemove";
 import { useRemoveWorktreeDialog } from "./composables/useRemoveWorktreeDialog";
 import { useAutoHotkey } from "./composables/useAutoHotkey";
 import { useAppAutoApproval } from "./composables/useAppAutoApproval";
@@ -278,20 +279,8 @@ const { showAddTaskDialog, rerunTaskId, rerunPrompt, onAddTaskConfirm, onAddTask
     }
   });
 
-// ワークツリー削除/アーカイブダイアログ
-const {
-  showRemoveDialog,
-  removeTargetWorktree,
-  removeBranches,
-  removeDirtyFiles,
-  cancellableWorktrees,
-  onRemoveWorktree,
-  onRemoveWorktreeConfirm,
-  onArchiveWorktreeConfirm,
-  archiveWorktreeByMcp,
-  cancelWorktreeRemove,
-  dismissDialog: onRemoveWorktreeDismiss,
-} = useRemoveWorktreeDialog({
+// ワークツリー削除/アーカイブ コア処理
+const worktreeRemoveCore = useWorktreeRemove({
   loadingWorktrees,
   clearNotification,
   isDetached,
@@ -306,6 +295,19 @@ const {
   homeViewRef,
   t,
 });
+const { cancellableWorktrees, cancelWorktreeRemove, archiveWorktree } = worktreeRemoveCore;
+
+// ワークツリー削除/アーカイブダイアログ
+const {
+  showRemoveDialog,
+  removeTargetWorktree,
+  removeBranches,
+  removeDirtyFiles,
+  onRemoveWorktree,
+  onRemoveWorktreeConfirm,
+  onArchiveWorktreeConfirm,
+  dismissDialog: onRemoveWorktreeDismiss,
+} = useRemoveWorktreeDialog(worktreeRemoveCore);
 
 // IDE 選択
 const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect();
@@ -974,7 +976,7 @@ onMounted(async () => {
   // MCPからのワークツリークローズ（アーカイブ）
   await listen<{ worktree_id: string; worktree_name: string; merge_to: string; delete_branch: boolean; force_branch: boolean }>("mcp-close-worktree", async (event) => {
     const { worktree_id, merge_to, delete_branch, force_branch } = event.payload;
-    await archiveWorktreeByMcp(worktree_id, {
+    await archiveWorktree(worktree_id, {
       mergeTo: merge_to,
       deleteBranch: delete_branch,
       forceBranch: force_branch,
