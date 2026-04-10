@@ -43,15 +43,49 @@ const RUNTIME_JS =
   "}" +
   "window.onerror=function(msg,src,line,col,err){showError(err||new Error(msg));return true;};" +
   "try{" +
+  "  var moduleSources=JSON.parse(document.getElementById('_modules').value||'{}');" +
+  "  var moduleCache={};" +
+  "  function resolvePath(base,rel){" +
+  "    var parts=(base.includes('/')?base.substring(0,base.lastIndexOf('/')):'')" +
+  "      .split('/').filter(function(p){return p!==''&&p!=='.'});" +
+  "    var relParts=rel.split('/');" +
+  "    for(var i=0;i<relParts.length;i++){" +
+  "      var p=relParts[i];" +
+  "      if(p==='..')parts.pop();" +
+  "      else if(p!=='.')parts.push(p);" +
+  "    }" +
+  "    return parts.join('/');" +
+  "  }" +
+  "  var EXT_RE=/\\.(tsx?|jsx?)$/;" +
+  "  var TRY_EXTS=['.tsx','.ts','.jsx','.js'];" +
+  "  function resolveModuleKey(key){" +
+  "    if(moduleSources[key]!==undefined)return key;" +
+  "    var noExt=key.replace(EXT_RE,'');" +
+  "    if(noExt!==key&&moduleSources[noExt]!==undefined)return noExt;" +
+  "    for(var i=0;i<TRY_EXTS.length;i++){var k=noExt+TRY_EXTS[i];if(moduleSources[k]!==undefined)return k;}" +
+  "    return null;" +
+  "  }" +
+  "  function makeRequire(currentKey){" +
+  "    var libs={'react':React,'react-dom':ReactDOM,'react-dom/client':ReactDOM,'react/jsx-runtime':React};" +
+  "    return function req(name){" +
+  "      if(libs[name]!==undefined)return libs[name];" +
+  "      var resolved=(name.startsWith('./')||name.startsWith('../'))?resolvePath(currentKey,name):name;" +
+  "      var key=resolveModuleKey(resolved);" +
+  "      if(key===null)throw new Error('Module not found: '+name+' (resolved: '+resolved+')');" +
+  "      if(moduleCache[key])return moduleCache[key].exports;" +
+  "      var mod={exports:{}};" +
+  "      moduleCache[key]=mod;" +
+  "      var code=Babel.transform(moduleSources[key],{presets:['env','react','typescript'],filename:key+'.tsx'}).code;" +
+  "      var fn=new Function('React','ReactDOM','exports','module','require',code);" +
+  "      fn(React,ReactDOM,mod.exports,mod,makeRequire(key));" +
+  "      return mod.exports;" +
+  "    };" +
+  "  }" +
+  "  var require=makeRequire('');" +
   "  var source=document.getElementById('_source').value;" +
   "  var transformed=Babel.transform(source,{presets:['env','react','typescript'],filename:'artifact.tsx'}).code;" +
   "  var exports={};" +
   "  var module={exports:exports};" +
-  "  var require=function(name){" +
-  "    var libs={'react':React,'react-dom':ReactDOM,'react-dom/client':ReactDOM,'react/jsx-runtime':React};" +
-  "    if(libs[name]!==undefined)return libs[name];" +
-  "    throw new Error('Module not found: '+name);" +
-  "  };" +
   "  var fn=new Function('React','ReactDOM','exports','module','require',transformed);" +
   "  fn(React,ReactDOM,exports,module,require);" +
   "  var Component=exports['default']||module.exports['default']||module.exports;" +
@@ -105,14 +139,19 @@ export function buildVendorHead(react: string, reactDom: string, babel: string, 
 /**
  * vendorHead（buildVendorHead の結果）と content を組み合わせて完全な srcdoc を生成する。
  * content が変わるたびに呼ばれるが、ベンダー部分は含まない。
+ * modules が指定された場合、各モジュールは require() で解決可能になる。
  */
-export function buildReactSrcdoc(vendorHead: string, content: string): string {
+export function buildReactSrcdoc(vendorHead: string, content: string, modules?: Record<string, string>): string {
+  const modulesJson = modules && Object.keys(modules).length > 0
+    ? htmlEscape(JSON.stringify(modules))
+    : "{}";
   return (
     vendorHead +
     "<body>\n" +
     '<div id="root"></div>\n' +
     '<div id="error-display" class="error-overlay" style="display:none"></div>\n' +
     '<textarea id="_source" style="display:none">' + htmlEscape(content) + "</textarea>\n" +
+    '<textarea id="_modules" style="display:none">' + modulesJson + "</textarea>\n" +
     openTag(RUNTIME_JS) + "\n" +
     "</body>\n</html>"
   );

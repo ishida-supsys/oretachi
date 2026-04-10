@@ -181,6 +181,7 @@ onUnmounted(() => {
           <ArtifactReactView
             v-else-if="selectedArtifact.content_type === 'application/vnd.ant.react'"
             :content="selectedArtifact.content"
+            :modules="selectedArtifact.modules"
           />
           <ArtifactCodeView
             v-else

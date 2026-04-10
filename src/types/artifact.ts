@@ -9,6 +9,7 @@ export interface ArtifactMeta {
 
 export interface ArtifactData extends ArtifactMeta {
   content: string;
+  modules?: Record<string, string>;
 }
 
 export interface ArtifactChangedEvent {
