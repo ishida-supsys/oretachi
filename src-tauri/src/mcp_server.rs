@@ -320,12 +320,12 @@ impl NotifyService {
                 .map_err(|e| McpError::internal_error(e.to_string(), None))?;
             let total_lines = data.content.lines().count();
             let off = offset.unwrap_or(0) as usize;
+            let had_trailing_newline = data.content.ends_with('\n');
             if let Some(lim) = limit {
-                let had_trailing_newline = data.content.ends_with('\n');
+                let at_end = off + lim as usize >= total_lines;
                 let sliced = data.content.lines().skip(off).take(lim as usize).collect::<Vec<_>>().join("\n");
-                data.content = if had_trailing_newline { sliced + "\n" } else { sliced };
+                data.content = if had_trailing_newline && at_end { sliced + "\n" } else { sliced };
             } else if off > 0 {
-                let had_trailing_newline = data.content.ends_with('\n');
                 let sliced = data.content.lines().skip(off).collect::<Vec<_>>().join("\n");
                 data.content = if had_trailing_newline { sliced + "\n" } else { sliced };
             }
@@ -555,16 +555,14 @@ impl NotifyService {
                 let off = offset.unwrap_or(0) as usize;
                 let had_trailing_newline = src.ends_with('\n');
                 let sliced = if let Some(lim) = limit {
-                    src.lines().skip(off).take(lim as usize).collect::<Vec<_>>().join("\n")
+                    let at_end = off + lim as usize >= total_lines;
+                    let s = src.lines().skip(off).take(lim as usize).collect::<Vec<_>>().join("\n");
+                    if had_trailing_newline && at_end { s + "\n" } else { s }
                 } else if off > 0 {
-                    src.lines().skip(off).collect::<Vec<_>>().join("\n")
+                    let s = src.lines().skip(off).collect::<Vec<_>>().join("\n");
+                    if had_trailing_newline { s + "\n" } else { s }
                 } else {
                     src.clone()
-                };
-                let sliced = if (offset.is_some() || limit.is_some()) && had_trailing_newline {
-                    sliced + "\n"
-                } else {
-                    sliced
                 };
                 let mut val = serde_json::json!({ "id": id, "module_name": name, "content": sliced });
                 if offset.is_some() || limit.is_some() {

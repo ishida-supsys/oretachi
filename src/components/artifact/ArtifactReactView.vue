@@ -68,6 +68,19 @@ const srcdocHtml = computed(() => {
 
 const moduleNames = computed(() => Object.keys(props.modules ?? {}));
 
+// 同名ファイルが複数ある場合は親ディレクトリを含めて表示
+const moduleLabel = computed(() => {
+  const names = moduleNames.value;
+  const basenames = names.map(n => n.split('/').pop() ?? n);
+  return (name: string) => {
+    const base = name.split('/').pop() ?? name;
+    const isDuplicate = basenames.filter(b => b === base).length > 1;
+    if (!isDuplicate) return base;
+    const parts = name.split('/');
+    return parts.length >= 2 ? `${parts[parts.length - 2]}/${base}` : name;
+  };
+});
+
 const codeContent = computed(() =>
   selectedFile.value === "" ? props.content : (props.modules?.[selectedFile.value] ?? "")
 );
@@ -118,8 +131,9 @@ const codeContent = computed(() =>
           v-for="name in moduleNames"
           :key="name"
           :class="{ active: selectedFile === name }"
+          :title="name"
           @click="selectedFile = name"
-        >{{ name.split('/').pop() }}</button>
+        >{{ moduleLabel(name) }}</button>
       </div>
       <ArtifactCodeView
         :content="codeContent"

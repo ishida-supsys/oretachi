@@ -57,12 +57,12 @@ const RUNTIME_JS =
   "    return parts.join('/');" +
   "  }" +
   "  var EXT_RE=/\\.(tsx?|jsx?)$/;" +
+  "  var TRY_EXTS=['.tsx','.ts','.jsx','.js'];" +
   "  function resolveModuleKey(key){" +
   "    if(moduleSources[key]!==undefined)return key;" +
   "    var noExt=key.replace(EXT_RE,'');" +
-  "    if(moduleSources[noExt]!==undefined)return noExt;" +
-  "    var withTsx=noExt+'.tsx';" +
-  "    if(moduleSources[withTsx]!==undefined)return withTsx;" +
+  "    if(noExt!==key&&moduleSources[noExt]!==undefined)return noExt;" +
+  "    for(var i=0;i<TRY_EXTS.length;i++){var k=noExt+TRY_EXTS[i];if(moduleSources[k]!==undefined)return k;}" +
   "    return null;" +
   "  }" +
   "  function makeRequire(currentKey){" +
