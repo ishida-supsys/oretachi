@@ -78,10 +78,10 @@ const RUNTIME_JS =
   "})();";
 
 /**
- * ベンダースクリプト（React/ReactDOM/Babel）から静的な <head> 部分を構築する。
+ * ベンダースクリプト（React/ReactDOM/Babel/Tailwind）から静的な <head> 部分を構築する。
  * content が変わっても再計算不要なため、呼び出し側でキャッシュすること。
  */
-export function buildVendorHead(react: string, reactDom: string, babel: string): string {
+export function buildVendorHead(react: string, reactDom: string, babel: string, tailwind: string): string {
   return (
     "<!DOCTYPE html>\n<html>\n<head>\n" +
     '<meta charset="utf-8" />\n' +
@@ -92,9 +92,12 @@ export function buildVendorHead(react: string, reactDom: string, babel: string):
     // 親ウィンドウ・Cookie・localStorage へのアクセスは遮断されている。
     '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\' \'unsafe-eval\'; style-src \'unsafe-inline\'; img-src data: blob:;" />\n' +
     "<style>" + STYLES + "</style>\n" +
+    // @tailwindcss/browser の初期化エントリポイント
+    '<style type="text/tailwindcss">@import "tailwindcss";</style>\n' +
     openTag(react) + "\n" +
     openTag(reactDom) + "\n" +
     openTag(babel) + "\n" +
+    openTag(tailwind) + "\n" +
     "</head>\n"
   );
 }

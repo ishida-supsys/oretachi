@@ -15,6 +15,7 @@ fs.mkdirSync(destDir, { recursive: true });
 const files = [
   ["react/umd/react.production.min.js", "react.production.min.js"],
   ["react-dom/umd/react-dom.production.min.js", "react-dom.production.min.js"],
+  ["@tailwindcss/browser/dist/index.global.js", "tailwindcss-browser.js"],
 ];
 
 for (const [src, dest] of files) {

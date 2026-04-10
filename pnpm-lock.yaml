@@ -20,6 +20,9 @@ importers:
       '@primeuix/themes':
         specifier: ^2.0.3
         version: 2.0.3
+      '@tailwindcss/browser':
+        specifier: ^4.2.1
+        version: 4.2.2
       '@tauri-apps/api':
         specifier: ^2
         version: 2.10.1
@@ -798,6 +801,9 @@ packages:
 
   '@standard-schema/spec@1.1.0':
     resolution: {integrity: sha512-l2aFy5jALhniG5HgqrD6jXLi/rUWrKvqN/qJx6yoJsgKhblVd+iqqU4RCXavm/jPityDo5TCvKMnpjKnOriy0w==}
+
+  '@tailwindcss/browser@4.2.2':
+    resolution: {integrity: sha512-JVdJBWWtvKxliBI9CtpOrqxgk8aijUWGsn0STxcOcXAYsUFAbOxN5PwawOJ+v0PoQfPcOK9eZoj9LTwvBV0Vmw==}
 
   '@tailwindcss/node@4.2.1':
     resolution: {integrity: sha512-jlx6sLk4EOwO6hHe1oCGm1Q4AN/s0rSrTTPBGPM0/RQ6Uylwq17FuU8IeJJKEjtc6K6O07zsvP+gDO6MMWo7pg==}
@@ -3071,6 +3077,8 @@ snapshots:
     optional: true
 
   '@standard-schema/spec@1.1.0': {}
+
+  '@tailwindcss/browser@4.2.2': {}
 
   '@tailwindcss/node@4.2.1':
     dependencies:
