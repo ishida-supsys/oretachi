@@ -1225,7 +1225,8 @@ pub fn write_claude_hooks(
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
 
-    // 有効なイベントを上書き
+    // ユーザー指定イベントを上書き
+    let user_events: std::collections::HashSet<&str> = hooks.iter().map(|h| h.event.as_str()).collect();
     for entry in &hooks {
         let command = format!(
             "\"{}\" --notify \"{}\" --kind {}",
@@ -1238,11 +1239,18 @@ pub fn write_claude_hooks(
         hooks_obj.insert(entry.event.clone(), hook_entry);
     }
 
-    // oretachi管理イベントのうち無効化されたものを既存hooksから削除
-    let enabled: std::collections::HashSet<&str> = hooks.iter().map(|h| h.event.as_str()).collect();
+    // ユーザーが指定していない MANAGED_EVENTS は kind "hook" で自動注入（モニタリング用）
     for &ev in MANAGED_EVENTS {
-        if !enabled.contains(ev) {
-            hooks_obj.remove(ev);
+        if !user_events.contains(ev) {
+            let command = format!(
+                "\"{}\" --notify \"{}\" --kind hook --agent cc",
+                exe_path, worktree_name
+            );
+            let hook_entry = serde_json::json!([{
+                "matcher": "",
+                "hooks": [{ "type": "command", "command": command }]
+            }]);
+            hooks_obj.insert(ev.to_string(), hook_entry);
         }
     }
 

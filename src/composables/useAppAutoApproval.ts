@@ -76,7 +76,7 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
       );
 
       if (!wt) return;
-      if (kind === "completed") return;
+      if (kind === "completed" || kind === "hook") return;
       if (!autoApprovalMap.get(wt.id)) return;
 
       if (aiJudgingWorktrees.has(wt.id)) {
