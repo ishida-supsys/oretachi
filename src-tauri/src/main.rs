@@ -58,7 +58,7 @@ fn read_stdin_if_piped() -> Option<String> {
     std::thread::spawn(move || {
         use std::io::Read;
         let mut buf = String::new();
-        let _ = std::io::stdin().take(65536).read_to_string(&mut buf);
+        let _ = std::io::stdin().read_to_string(&mut buf);
         let _ = tx.send(buf);
     });
     match rx.recv_timeout(std::time::Duration::from_secs(2)) {
