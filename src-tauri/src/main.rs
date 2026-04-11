@@ -5,7 +5,14 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if let Some(name) = find_notify_arg(&args) {
         let kind = find_kind_arg(&args);
-        if let Err(e) = oretachi_lib::mcp_server::send_notification_standalone(&name, kind.as_deref()) {
+        let agent = find_agent_arg(&args);
+        let body = read_stdin_if_piped();
+        if let Err(e) = oretachi_lib::mcp_server::send_notification_standalone(
+            &name,
+            kind.as_deref(),
+            body.as_deref(),
+            agent.as_deref(),
+        ) {
             #[cfg(debug_assertions)]
             eprintln!("Notification failed: {}", e);
             std::process::exit(1);
@@ -34,6 +41,30 @@ fn find_notify_arg(args: &[String]) -> Option<String> {
 
 fn find_kind_arg(args: &[String]) -> Option<String> {
     find_arg(args, "--kind", "-k")
+}
+
+fn find_agent_arg(args: &[String]) -> Option<String> {
+    find_arg(args, "--agent", "-a")
+}
+
+/// stdin がパイプ（非 TTY）の場合のみ読み取り、タイムアウト付きで返す。
+/// Claude Code ライフサイクルフックのコンテキスト JSON を body として受け取るために使用。
+fn read_stdin_if_piped() -> Option<String> {
+    use std::io::IsTerminal;
+    if std::io::stdin().is_terminal() {
+        return None;
+    }
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        use std::io::Read;
+        let mut buf = String::new();
+        let _ = std::io::stdin().read_to_string(&mut buf);
+        let _ = tx.send(buf);
+    });
+    match rx.recv_timeout(std::time::Duration::from_secs(2)) {
+        Ok(s) if !s.is_empty() => Some(s),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -98,5 +129,29 @@ mod tests {
     fn test_find_kind_arg_none() {
         let args = vec!["bin".to_string(), "--notify".to_string(), "myname".to_string()];
         assert_eq!(find_kind_arg(&args), None);
+    }
+
+    #[test]
+    fn test_find_agent_arg_long_space() {
+        let args = vec!["bin".to_string(), "--agent".to_string(), "cc".to_string()];
+        assert_eq!(find_agent_arg(&args), Some("cc".to_string()));
+    }
+
+    #[test]
+    fn test_find_agent_arg_long_eq() {
+        let args = vec!["bin".to_string(), "--agent=codex".to_string()];
+        assert_eq!(find_agent_arg(&args), Some("codex".to_string()));
+    }
+
+    #[test]
+    fn test_find_agent_arg_short() {
+        let args = vec!["bin".to_string(), "-a".to_string(), "gemini".to_string()];
+        assert_eq!(find_agent_arg(&args), Some("gemini".to_string()));
+    }
+
+    #[test]
+    fn test_find_agent_arg_none() {
+        let args = vec!["bin".to_string(), "--notify".to_string(), "myname".to_string()];
+        assert_eq!(find_agent_arg(&args), None);
     }
 }

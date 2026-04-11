@@ -57,6 +57,8 @@ pub struct McpServerManager {
     archive_listener_id: Mutex<Option<tauri::EventId>>,
     /// worktree-added リスナーID（再起動時にアンリジスターするために保持）
     added_listener_id: Mutex<Option<tauri::EventId>>,
+    /// notify-worktree リスナーID（再起動時にアンリジスターするために保持）
+    notify_listener_id: Mutex<Option<tauri::EventId>>,
 }
 
 impl McpServerManager {
@@ -69,6 +71,7 @@ impl McpServerManager {
             generation: Arc::new(AtomicU64::new(0)),
             archive_listener_id: Mutex::new(None),
             added_listener_id: Mutex::new(None),
+            notify_listener_id: Mutex::new(None),
         }
     }
 
@@ -107,20 +110,26 @@ impl McpServerManager {
 pub struct NotifyPayload {
     pub worktree: String,
     pub kind: Option<String>,
+    pub body: Option<String>,
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NotifyWorktreeParams {
     #[schemars(description = "通知するワークツリー名")]
     pub worktree_name: String,
-    #[schemars(description = "通知種別: \"approval\"(承認待ち) / \"completed\"(作業完了) / \"general\"(汎用)。省略時は \"general\"")]
+    #[schemars(description = "通知種別: \"approval\"(承認待ち) / \"completed\"(作業完了) / \"general\"(汎用) / \"hook\"(ライフサイクルフック)。省略時は \"general\"")]
     pub kind: Option<String>,
+    #[schemars(description = "通知本文（ライフサイクルフックのコンテキスト情報など）。省略可")]
+    pub body: Option<String>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NotifyWorktreeEvent {
     pub worktree_name: String,
     pub kind: String,
+    pub body: Option<String>,
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -666,11 +675,13 @@ impl NotifyService {
     #[tool(description = "ワークツリーに通知を送信する")]
     fn notify_worktree(
         &self,
-        Parameters(NotifyWorktreeParams { worktree_name, kind }): Parameters<NotifyWorktreeParams>,
+        Parameters(NotifyWorktreeParams { worktree_name, kind, body }): Parameters<NotifyWorktreeParams>,
     ) -> Result<CallToolResult, McpError> {
         let event = NotifyWorktreeEvent {
             worktree_name: worktree_name.clone(),
             kind: kind.unwrap_or_else(|| "general".to_string()),
+            body,
+            agent: None,
         };
         self.app_handle
             .emit("notify-worktree", &event)
@@ -955,6 +966,8 @@ async fn notify_handler(
     let event = NotifyWorktreeEvent {
         worktree_name: payload.worktree.clone(),
         kind: payload.kind.unwrap_or_else(|| "general".to_string()),
+        body: payload.body,
+        agent: payload.agent,
     };
     match app_handle.emit("notify-worktree", &event) {
         Ok(_) => {
@@ -1100,6 +1113,21 @@ async fn broadcast_worktree_added(peer_registry: &PeerMap, timeout_counts: &Peer
     broadcast_notification(peer_registry, timeout_counts, params).await;
 }
 
+async fn broadcast_notify_worktree(peer_registry: &PeerMap, timeout_counts: &PeerTimeoutCounts, event: &NotifyWorktreeEvent) {
+    let params = LoggingMessageNotificationParam {
+        level: LoggingLevel::Info,
+        logger: Some("oretachi".to_string()),
+        data: serde_json::json!({
+            "event": "notify_worktree",
+            "worktreeName": event.worktree_name,
+            "kind": event.kind,
+            "body": event.body,
+            "agent": event.agent,
+        }),
+    };
+    broadcast_notification(peer_registry, timeout_counts, params).await;
+}
+
 // ─── Port file management ─────────────────────────────────────────────────────
 
 fn port_file_path(app_handle: &AppHandle) -> Option<PathBuf> {
@@ -1220,6 +1248,11 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
             app_handle.unlisten(old_id);
         }
     }
+    if let Ok(mut guard) = manager.notify_listener_id.lock() {
+        if let Some(old_id) = guard.take() {
+            app_handle.unlisten(old_id);
+        }
+    }
 
     drop(manager);
 
@@ -1276,6 +1309,25 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
     let manager = app_handle.state::<McpServerManager>();
     if let Ok(mut guard) = manager.added_listener_id.lock() {
         *guard = Some(added_listener_id);
+    }
+    drop(manager);
+
+    // notify-worktree イベント受信時に全 MCP クライアントへブロードキャスト
+    let peer_map_for_notify_listener = peer_map.clone();
+    let timeout_counts_for_notify_listener = timeout_counts.clone();
+    let notify_listener_id = app_handle.listen("notify-worktree", move |event: tauri::Event| {
+        let registry = peer_map_for_notify_listener.clone();
+        let tc = timeout_counts_for_notify_listener.clone();
+        if let Ok(payload) = serde_json::from_str::<NotifyWorktreeEvent>(event.payload()) {
+            tauri::async_runtime::spawn(async move {
+                broadcast_notify_worktree(&registry, &tc, &payload).await;
+            });
+        }
+    });
+
+    let manager = app_handle.state::<McpServerManager>();
+    if let Ok(mut guard) = manager.notify_listener_id.lock() {
+        *guard = Some(notify_listener_id);
     }
     drop(manager);
 
@@ -1392,18 +1444,25 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
 
 // ─── CLI notification sender (standalone, no AppHandle needed) ───────────────
 
-pub fn send_notification_standalone(worktree_name: &str, kind: Option<&str>) -> Result<(), String> {
+pub fn send_notification_standalone(worktree_name: &str, kind: Option<&str>, body: Option<&str>, agent: Option<&str>) -> Result<(), String> {
     let (port, api_key) = read_server_info_standalone()?;
-    let body = serde_json::json!({
+    let mut payload = serde_json::json!({
         "worktree": worktree_name,
         "kind": kind.unwrap_or("general"),
-    }).to_string();
+    });
+    if let Some(b) = body {
+        payload["body"] = serde_json::Value::String(b.to_string());
+    }
+    if let Some(a) = agent {
+        payload["agent"] = serde_json::Value::String(a.to_string());
+    }
+    let payload_str = payload.to_string();
     let request = format!(
-        "POST /notify HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAuthorization: Bearer {api_key}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
-        body.len()
+        "POST /notify HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAuthorization: Bearer {api_key}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload_str}",
+        payload_str.len()
     );
 
-    use std::io::{Read, Write};
+    use std::io::Write;
     use std::time::Duration;
 
     let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port)
@@ -1412,11 +1471,12 @@ pub fn send_notification_standalone(worktree_name: &str, kind: Option<&str>) -> 
     let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(3))
         .map_err(|e| format!("Cannot connect to oretachi MCP server: {}", e))?;
     stream
-        .set_read_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| format!("Failed to set read timeout: {}", e))?;
-    stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| format!("Failed to set write timeout: {}", e))?;
+    // 短い読み取りタイムアウトで応答をチェック（非ブロッキング性を維持しつつ確実な配信失敗を検出）
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .map_err(|e| format!("Failed to set read timeout: {}", e))?;
     stream
         .write_all(request.as_bytes())
         .map_err(|e| format!("Failed to send notification: {}", e))?;
@@ -1424,17 +1484,15 @@ pub fn send_notification_standalone(worktree_name: &str, kind: Option<&str>) -> 
         .flush()
         .map_err(|e| format!("Failed to flush: {}", e))?;
 
-    let mut response = Vec::new();
-    stream
-        .read_to_end(&mut response)
-        .map_err(|e| format!("Failed to read response: {}", e))?;
-
-    let response_str = String::from_utf8_lossy(&response);
-    // ステータス行 "HTTP/1.x 200 " を確認（単純な contains("200") は誤検知の恐れ）
-    let first_line = response_str.lines().next().unwrap_or("");
-    if !first_line.starts_with("HTTP/") || !first_line.contains(" 200 ") {
-        return Err(format!("Server returned unexpected response: {}", response_str));
+    // 応答の最初の行だけ読んでステータスを確認する（タイムアウトは無視してベストエフォートとする）
+    use std::io::{BufRead, BufReader};
+    let reader = BufReader::new(&stream);
+    if let Some(Ok(first_line)) = reader.lines().next() {
+        if first_line.starts_with("HTTP/") && !first_line.contains(" 200 ") {
+            return Err(format!("Server returned unexpected response: {}", first_line));
+        }
     }
+    // タイムアウトや読み取りエラーはベストエフォート成功扱い（フックのブロック防止）
     Ok(())
 }
 

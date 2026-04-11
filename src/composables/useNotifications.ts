@@ -13,7 +13,9 @@ export type NotificationKind = "approval" | "completed" | "general";
 
 export interface NotifyWorktreeEvent {
   worktree_name: string;
-  kind: NotificationKind;
+  kind: NotificationKind | "hook";
+  body?: string;
+  agent?: string;
 }
 
 interface NotificationEntry {
@@ -82,6 +84,8 @@ export function useNotifications() {
 
     await listen<NotifyWorktreeEvent>("notify-worktree", async (event) => {
       const { worktree_name: worktreeName, kind } = event.payload;
+      // hook はモニタリング目的の MCP ブロードキャスト専用。UI 通知はスキップ
+      if (kind === "hook") return;
       const id = resolveWorktreeId(worktreeName);
       if (id) {
         if (shouldHold?.(id, kind)) return;

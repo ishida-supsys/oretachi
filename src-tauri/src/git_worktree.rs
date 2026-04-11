@@ -1225,7 +1225,8 @@ pub fn write_claude_hooks(
         .and_then(|v| v.as_object().cloned())
         .unwrap_or_default();
 
-    // 有効なイベントを上書き
+    // ユーザー指定イベントを上書き
+    let user_events: std::collections::HashSet<&str> = hooks.iter().map(|h| h.event.as_str()).collect();
     for entry in &hooks {
         let command = format!(
             "\"{}\" --notify \"{}\" --kind {}",
@@ -1238,11 +1239,44 @@ pub fn write_claude_hooks(
         hooks_obj.insert(entry.event.clone(), hook_entry);
     }
 
-    // oretachi管理イベントのうち無効化されたものを既存hooksから削除
-    let enabled: std::collections::HashSet<&str> = hooks.iter().map(|h| h.event.as_str()).collect();
+    // ユーザーが指定していない MANAGED_EVENTS は kind "hook" で自動注入（モニタリング用）
+    // 既存エントリがあれば oretachi のフックを追記（既に含まれていれば更新、ユーザー定義フックは保持）
     for &ev in MANAGED_EVENTS {
-        if !enabled.contains(ev) {
-            hooks_obj.remove(ev);
+        if !user_events.contains(ev) {
+            let command = format!(
+                "\"{}\" --notify \"{}\" --kind hook --agent cc",
+                exe_path, worktree_name
+            );
+            let oretachi_group = serde_json::json!({
+                "matcher": "",
+                "hooks": [{ "type": "command", "command": command }]
+            });
+            if let Some(existing) = hooks_obj.get_mut(ev) {
+                if let Some(arr) = existing.as_array_mut() {
+                    // oretachi の --notify フックが既に含まれていれば最新コマンドで更新
+                    let mut found = false;
+                    for group in arr.iter_mut() {
+                        if let Some(hs) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                            for h in hs.iter_mut() {
+                                if h.get("command")
+                                    .and_then(|c| c.as_str())
+                                    // oretachi が注入したフックの識別: --kind hook と --agent の組み合わせで特定
+                                    .map_or(false, |c| c.contains("--kind hook") && c.contains("--agent "))
+                                {
+                                    h["command"] = serde_json::Value::String(command.clone());
+                                    found = true;
+                                }
+                            }
+                        }
+                    }
+                    if !found {
+                        arr.push(oretachi_group);
+                    }
+                }
+                // else: 配列でない既存エントリは保持（上書きしない）
+            } else {
+                hooks_obj.insert(ev.to_string(), serde_json::json!([oretachi_group]));
+            }
         }
     }
 

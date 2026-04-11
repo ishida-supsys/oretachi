@@ -1,6 +1,6 @@
 export interface NotificationHookEntry {
   event: 'Stop' | 'Notification' | 'SubagentStop' | 'PreToolUse' | 'PostToolUse' | 'PermissionRequest';
-  kind: 'completed' | 'approval' | 'general';
+  kind: 'completed' | 'approval' | 'general' | 'hook';
 }
 
 export interface Repository {
