@@ -1260,7 +1260,8 @@ pub fn write_claude_hooks(
                             for h in hs.iter_mut() {
                                 if h.get("command")
                                     .and_then(|c| c.as_str())
-                                    .map_or(false, |c| c.contains("--notify") && c.contains("--kind hook"))
+                                    // oretachi が注入したフックの識別: --kind hook と --agent の組み合わせで特定
+                                    .map_or(false, |c| c.contains("--kind hook") && c.contains("--agent "))
                                 {
                                     h["command"] = serde_json::Value::String(command.clone());
                                     found = true;
