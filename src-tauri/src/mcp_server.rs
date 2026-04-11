@@ -1473,14 +1473,26 @@ pub fn send_notification_standalone(worktree_name: &str, kind: Option<&str>, bod
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .map_err(|e| format!("Failed to set write timeout: {}", e))?;
+    // 短い読み取りタイムアウトで応答をチェック（非ブロッキング性を維持しつつ確実な配信失敗を検出）
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .map_err(|e| format!("Failed to set read timeout: {}", e))?;
     stream
         .write_all(request.as_bytes())
         .map_err(|e| format!("Failed to send notification: {}", e))?;
     stream
         .flush()
         .map_err(|e| format!("Failed to flush: {}", e))?;
-    // レスポンスは待たずに即リターン（fire-and-forget）
-    // PreToolUse 等の返り値待ちフックが Claude Code をブロックしないようにするため
+
+    // 応答の最初の行だけ読んでステータスを確認する（タイムアウトは無視してベストエフォートとする）
+    use std::io::{BufRead, BufReader};
+    let reader = BufReader::new(&stream);
+    if let Some(Ok(first_line)) = reader.lines().next() {
+        if first_line.starts_with("HTTP/") && !first_line.contains(" 200 ") {
+            return Err(format!("Server returned unexpected response: {}", first_line));
+        }
+    }
+    // タイムアウトや読み取りエラーはベストエフォート成功扱い（フックのブロック防止）
     Ok(())
 }
 

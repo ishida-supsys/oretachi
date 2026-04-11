@@ -1253,19 +1253,22 @@ pub fn write_claude_hooks(
             });
             if let Some(existing) = hooks_obj.get_mut(ev) {
                 if let Some(arr) = existing.as_array_mut() {
-                    // oretachi の --notify フックが既に含まれているかチェック
-                    let has_oretachi = arr.iter().any(|group| {
-                        group.get("hooks")
-                            .and_then(|h| h.as_array())
-                            .map_or(false, |hs| {
-                                hs.iter().any(|h| {
-                                    h.get("command")
-                                        .and_then(|c| c.as_str())
-                                        .map_or(false, |c| c.contains("--notify") && c.contains("--kind hook"))
-                                })
-                            })
-                    });
-                    if !has_oretachi {
+                    // oretachi の --notify フックが既に含まれていれば最新コマンドで更新
+                    let mut found = false;
+                    for group in arr.iter_mut() {
+                        if let Some(hs) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
+                            for h in hs.iter_mut() {
+                                if h.get("command")
+                                    .and_then(|c| c.as_str())
+                                    .map_or(false, |c| c.contains("--notify") && c.contains("--kind hook"))
+                                {
+                                    h["command"] = serde_json::Value::String(command.clone());
+                                    found = true;
+                                }
+                            }
+                        }
+                    }
+                    if !found {
                         arr.push(oretachi_group);
                     }
                 }
