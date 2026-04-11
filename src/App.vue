@@ -39,15 +39,14 @@ import type { FrameNode } from "./types/frame";
 import { useWorktreeFrameBundles } from "./composables/useWorktreeFrameBundles";
 import { useCodeReviewChatListener } from "./composables/useCodeReviewLineChat";
 import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
+import { useWorktreeRemove } from "./composables/useWorktreeRemove";
 import { useRemoveWorktreeDialog } from "./composables/useRemoveWorktreeDialog";
 import { useAutoHotkey } from "./composables/useAutoHotkey";
 import { useAppAutoApproval } from "./composables/useAppAutoApproval";
 import { useAppHotkeys } from "./composables/useAppHotkeys";
 import { useSubWindowEvents } from "./composables/useSubWindowEvents";
 import { useShutdownGuard } from "./composables/useShutdownGuard";
-import { saveArchive, deleteArchive } from "./composables/useArchivePersistence";
 import type { ArchiveRow } from "./types/archive";
-import { cancelApproval } from "./utils/autoApproval";
 import { debug } from "@tauri-apps/plugin-log";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useUpdater } from "./composables/useUpdater";
@@ -66,7 +65,7 @@ const { checkForUpdate, downloadAndInstall } = useUpdater();
 type ViewMode = "home" | "settings" | "terminal";
 
 const { settings, loadSettings, scheduleSave } = useSettings();
-const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, removeWorktree, reorderWorktree, saveWorktreeOrder, restoreWorktreeOrder, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
+const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, reorderWorktree, saveWorktreeOrder, restoreWorktreeOrder, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, registerTerminalSession, closeAllSubWindows } = useSubWindows();
 const { autoApprovalPromptMap, lastJudgedCommandMap, showAutoApprovalPromptDialog, autoApprovalPromptTargetId, restoreFromSettings: restoreAutoApprovalPrompts, onClickAutoApproval, onSaveAutoApprovalPrompt } = useAutoApprovalPrompt(settings, scheduleSave, isDetached);
 const { notifications, initNotificationListener, addNotification, clearNotification, purgeStaleNotifications, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
@@ -280,19 +279,8 @@ const { showAddTaskDialog, rerunTaskId, rerunPrompt, onAddTaskConfirm, onAddTask
     }
   });
 
-// ワークツリー削除/アーカイブダイアログ
-const {
-  showRemoveDialog,
-  removeTargetWorktree,
-  removeBranches,
-  removeDirtyFiles,
-  cancellableWorktrees,
-  onRemoveWorktree,
-  onRemoveWorktreeConfirm,
-  onArchiveWorktreeConfirm,
-  cancelWorktreeRemove,
-  dismissDialog: onRemoveWorktreeDismiss,
-} = useRemoveWorktreeDialog({
+// ワークツリー削除/アーカイブ コア処理
+const worktreeRemoveCore = useWorktreeRemove({
   loadingWorktrees,
   clearNotification,
   isDetached,
@@ -307,6 +295,19 @@ const {
   homeViewRef,
   t,
 });
+const { cancellableWorktrees, cancelWorktreeRemove, archiveWorktree } = worktreeRemoveCore;
+
+// ワークツリー削除/アーカイブダイアログ
+const {
+  showRemoveDialog,
+  removeTargetWorktree,
+  removeBranches,
+  removeDirtyFiles,
+  onRemoveWorktree,
+  onRemoveWorktreeConfirm,
+  onArchiveWorktreeConfirm,
+  dismissDialog: onRemoveWorktreeDismiss,
+} = useRemoveWorktreeDialog(worktreeRemoveCore);
 
 // IDE 選択
 const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect();
@@ -975,64 +976,11 @@ onMounted(async () => {
   // MCPからのワークツリークローズ（アーカイブ）
   await listen<{ worktree_id: string; worktree_name: string; merge_to: string; delete_branch: boolean; force_branch: boolean }>("mcp-close-worktree", async (event) => {
     const { worktree_id, merge_to, delete_branch, force_branch } = event.payload;
-    const worktree = worktrees.value.find((w) => w.id === worktree_id);
-    if (!worktree) return;
-
-    clearNotification(worktree_id);
-    loadingWorktrees.set(worktree_id, t("archivingText"));
-    try {
-      // アーカイブをDBに保存（git操作前に実行）
-      await saveArchive({
-        id: worktree.id,
-        name: worktree.name,
-        repository_id: worktree.repositoryId,
-        repository_name: worktree.repositoryName,
-        path: worktree.path,
-        branch_name: worktree.branchName,
-        archived_at: Date.now(),
-      });
-
-      // detachedの場合はメインウィンドウに戻してからターミナルを停止する
-      // （サブウィンドウのターミナルrefはメインウィンドウから参照できないため）
-      if (isDetached(worktree_id)) {
-        await moveToMainWindow(worktree_id);
-        subWindowEvents.subWindowFocusMap.delete(worktree_id);
-      }
-
-      // ターミナルを停止（git worktree remove前にファイルハンドルを解放するため）
-      const bundle = worktreeFrameBundles.get(worktree_id);
-      for (const terminal of [...worktree.terminals]) {
-        const term = bundle?.terminalRefs.get(terminal.id) ?? getTerminalRef(terminal.id);
-        if (term?.isRunning) await term.kill();
-        terminalWorktreeMap.delete(terminal.id);
-      }
-      worktreeFrameBundles.delete(worktree_id);
-
-      await removeWorktree(worktree_id, {
-        mergeTo: merge_to || undefined,
-        deleteBranch: delete_branch,
-        forceBranch: force_branch,
-      });
-
-      // git操作成功後にUIをクリーンアップ
-      await closeArtifactWindow(worktree_id);
-      await cancelApproval(worktree_id);
-      if (activeWorktreeId.value === worktree_id) goHome();
-    } catch {
-      // 失敗時: ワークツリーパスの有無でケースを判定する
-      const pathStillExists = await invoke<boolean>("path_exists", { path: worktree.path }).catch(() => false);
-      if (pathStillExists) {
-        // git_worktree_remove が失敗（ワークツリーが残っている）→ アーカイブをロールバック
-        await deleteArchive(worktree_id);
-      } else {
-        // ワークツリーは削除済み（ブランチ削除のみ失敗）→ UIクリーンアップは実行する
-        await closeArtifactWindow(worktree_id);
-        await cancelApproval(worktree_id);
-        if (activeWorktreeId.value === worktree_id) goHome();
-      }
-    } finally {
-      loadingWorktrees.delete(worktree_id);
-    }
+    await archiveWorktree(worktree_id, {
+      mergeTo: merge_to,
+      deleteBranch: delete_branch,
+      forceBranch: force_branch,
+    });
   });
 
   // サブウィンドウ準備完了 → init データをイベントで送信（サブウィンドウ復元より前に登録必須）
