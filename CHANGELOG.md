@@ -6,6 +6,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.19.0] - 2026-04-12
+
+### Added
+- Replace direct hook injection with Claude Code plugin system
+
+### Fixed
+- Address Claude review feedback for plugin system
+
 ## [0.18.3] - 2026-04-11
 
 ### Added
@@ -230,7 +238,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.18.3...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.19.0...HEAD
+[0.19.0]: https://github.com/ishida-supsys/oretachi/compare/0.18.3...0.19.0
 [0.18.3]: https://github.com/ishida-supsys/oretachi/compare/0.18.2...0.18.3
 [0.18.2]: https://github.com/ishida-supsys/oretachi/compare/0.18.1...0.18.2
 [0.18.1]: https://github.com/ishida-supsys/oretachi/compare/0.18.0...0.18.1
