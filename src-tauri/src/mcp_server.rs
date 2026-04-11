@@ -1174,6 +1174,11 @@ fn write_server_info_file(app_handle: &AppHandle, port: u16, api_key: &str) {
         if let Err(e) = fs::write(&path, serde_json::to_string_pretty(&info).unwrap_or_default()) {
             log::warn!("Failed to write server info file: {}", e);
         }
+
+        // プラグインの .mcp.json も同じ値で更新
+        if let Err(e) = crate::claude_plugin::update_mcp_config(app_handle, effective_port, api_key) {
+            log::warn!("[ClaudePlugin] Failed to update .mcp.json: {}", e);
+        }
     }
 
     // 後方互換: 旧 mcp-port テキストファイルも書き込む

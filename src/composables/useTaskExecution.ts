@@ -262,10 +262,10 @@ export function useTaskExecution(deps: {
         }
       }
 
-      // Claude Code通知フックが設定されていれば settings.local.json を生成
+      // Claude Code プラグイン設定を settings.local.json に書き込む
       if (repo.notificationHooks?.length) {
         try {
-          await invoke("write_claude_hooks", {
+          await invoke("write_claude_plugin_config", {
             worktreePath: entry.path,
             worktreeName: entry.name,
             hooks: repo.notificationHooks,
