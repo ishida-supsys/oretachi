@@ -1,5 +1,4 @@
 use crate::process_utils::{kill_external_processes_in_dir, make_command};
-use crate::settings::NotificationHookEntry;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use serde::Serialize;
@@ -1184,110 +1183,6 @@ pub fn worktree_remove_persistent(
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
     }
-}
-
-/// ワークツリーの `.claude/settings.local.json` に Claude Code 通知フックを書き込む
-pub fn write_claude_hooks(
-    worktree_path: &str,
-    worktree_name: &str,
-    hooks: Vec<NotificationHookEntry>,
-) -> Result<(), String> {
-    use std::path::Path;
-
-    let claude_dir = Path::new(worktree_path).join(".claude");
-    std::fs::create_dir_all(&claude_dir)
-        .map_err(|e| format!("Failed to create .claude dir: {}", e))?;
-
-    let settings_path = claude_dir.join("settings.local.json");
-
-    // 既存ファイルを読み込む（存在しなければ空オブジェクト）
-    let mut json: serde_json::Value = if settings_path.exists() {
-        let content = std::fs::read_to_string(&settings_path)
-            .map_err(|e| format!("Failed to read settings.local.json: {}", e))?;
-        serde_json::from_str(&content)
-            .map_err(|e| format!("Failed to parse settings.local.json: {}", e))?
-    } else {
-        serde_json::json!({})
-    };
-
-    // oretachi.exe のパスを取得してforward slashに統一
-    let exe_path = std::env::current_exe()
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
-        .unwrap_or_else(|_| "oretachi".to_string());
-
-    // oretachiが管理するイベント一覧（このリスト外は保持）
-    const MANAGED_EVENTS: &[&str] =
-        &["Stop", "Notification", "SubagentStop", "PreToolUse", "PostToolUse", "PermissionRequest"];
-
-    // 既存のhooksオブジェクトを取得し、oretachiが管理するeventキーのみ上書き（他は保持）
-    let mut hooks_obj = json
-        .get("hooks")
-        .and_then(|v| v.as_object().cloned())
-        .unwrap_or_default();
-
-    // ユーザー指定イベントを上書き
-    let user_events: std::collections::HashSet<&str> = hooks.iter().map(|h| h.event.as_str()).collect();
-    for entry in &hooks {
-        let command = format!(
-            "\"{}\" --notify \"{}\" --kind {}",
-            exe_path, worktree_name, entry.kind
-        );
-        let hook_entry = serde_json::json!([{
-            "matcher": "",
-            "hooks": [{ "type": "command", "command": command }]
-        }]);
-        hooks_obj.insert(entry.event.clone(), hook_entry);
-    }
-
-    // ユーザーが指定していない MANAGED_EVENTS は kind "hook" で自動注入（モニタリング用）
-    // 既存エントリがあれば oretachi のフックを追記（既に含まれていれば更新、ユーザー定義フックは保持）
-    for &ev in MANAGED_EVENTS {
-        if !user_events.contains(ev) {
-            let command = format!(
-                "\"{}\" --notify \"{}\" --kind hook --agent cc",
-                exe_path, worktree_name
-            );
-            let oretachi_group = serde_json::json!({
-                "matcher": "",
-                "hooks": [{ "type": "command", "command": command }]
-            });
-            if let Some(existing) = hooks_obj.get_mut(ev) {
-                if let Some(arr) = existing.as_array_mut() {
-                    // oretachi の --notify フックが既に含まれていれば最新コマンドで更新
-                    let mut found = false;
-                    for group in arr.iter_mut() {
-                        if let Some(hs) = group.get_mut("hooks").and_then(|h| h.as_array_mut()) {
-                            for h in hs.iter_mut() {
-                                if h.get("command")
-                                    .and_then(|c| c.as_str())
-                                    // oretachi が注入したフックの識別: --kind hook と --agent の組み合わせで特定
-                                    .map_or(false, |c| c.contains("--kind hook") && c.contains("--agent "))
-                                {
-                                    h["command"] = serde_json::Value::String(command.clone());
-                                    found = true;
-                                }
-                            }
-                        }
-                    }
-                    if !found {
-                        arr.push(oretachi_group);
-                    }
-                }
-                // else: 配列でない既存エントリは保持（上書きしない）
-            } else {
-                hooks_obj.insert(ev.to_string(), serde_json::json!([oretachi_group]));
-            }
-        }
-    }
-
-    json["hooks"] = serde_json::Value::Object(hooks_obj);
-
-    let content = serde_json::to_string_pretty(&json)
-        .map_err(|e| format!("Failed to serialize settings.local.json: {}", e))?;
-    std::fs::write(&settings_path, content)
-        .map_err(|e| format!("Failed to write settings.local.json: {}", e))?;
-
-    Ok(())
 }
 
 /// パスを Claude Code のプロジェクトディレクトリ名に変換する

@@ -2,6 +2,7 @@ mod ai_commit_message;
 mod ai_judge;
 mod ai_provider;
 mod archive_db;
+mod claude_plugin;
 mod fs_watcher;
 mod git_worktree;
 mod ide_launcher;
@@ -247,12 +248,19 @@ async fn copy_gitignore_targets(
 }
 
 #[tauri::command]
-async fn write_claude_hooks(
+async fn write_claude_plugin_config(
+    app_handle: tauri::AppHandle,
     worktree_path: String,
     worktree_name: String,
     hooks: Vec<crate::settings::NotificationHookEntry>,
 ) -> Result<(), String> {
-    run_git(move || git_worktree::write_claude_hooks(&worktree_path, &worktree_name, hooks)).await
+    let marketplace_dir = claude_plugin::marketplace_dir(&app_handle)?
+        .to_string_lossy()
+        .replace('\\', "/");
+    run_git(move || {
+        claude_plugin::write_plugin_config(&worktree_path, &worktree_name, hooks, &marketplace_dir)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -774,7 +782,7 @@ pub fn run() {
             detect_package_manager,
             read_gitignore,
             copy_gitignore_targets,
-            write_claude_hooks,
+            write_claude_plugin_config,
             copy_claude_session_data,
             copy_working_changes,
             git_merge_branch,
@@ -911,6 +919,11 @@ pub fn run() {
             }
             let settings_manager = app.state::<SettingsManager>();
             settings_manager.init(app.handle());
+
+            // Claude Code プラグインファイルを生成・更新
+            if let Err(e) = claude_plugin::generate_plugin_files(app.handle()) {
+                log::warn!("[ClaudePlugin] Failed to generate plugin files: {}", e);
+            }
 
             // AIエージェントインジケーター用ポーリング起動
             let pty_manager = app.state::<PtyManager>();
