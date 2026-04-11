@@ -1154,19 +1154,25 @@ fn write_server_info_file(app_handle: &AppHandle, port: u16, api_key: &str) {
         .unwrap_or(true);
 
     // mcp-server.json を書き込む（ポート確定値 or キー更新のため常に更新）
+    // ポート上書き禁止かつ既存ファイルがある場合: ポートは既存値を使い、APIキーのみ更新
+    let effective_port = if !overwrite_port {
+        server_info_file_path(app_handle)
+            .and_then(|p| {
+                if p.exists() {
+                    fs::read_to_string(&p)
+                        .ok()
+                        .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
+                        .and_then(|v| v["port"].as_u64())
+                        .map(|n| n as u16)
+                } else {
+                    None
+                }
+            })
+            .unwrap_or(port)
+    } else {
+        port
+    };
     if let Some(path) = server_info_file_path(app_handle) {
-        // ポート上書き禁止かつ既存ファイルがある場合: ポートは既存値を使い、APIキーのみ更新
-        let effective_port = if !overwrite_port && path.exists() {
-            // 既存ファイルからポートを読み取る
-            fs::read_to_string(&path)
-                .ok()
-                .and_then(|c| serde_json::from_str::<serde_json::Value>(&c).ok())
-                .and_then(|v| v["port"].as_u64())
-                .map(|p| p as u16)
-                .unwrap_or(port)
-        } else {
-            port
-        };
         if let Some(parent) = path.parent() {
             let _ = fs::create_dir_all(parent);
         }
@@ -1174,11 +1180,11 @@ fn write_server_info_file(app_handle: &AppHandle, port: u16, api_key: &str) {
         if let Err(e) = fs::write(&path, serde_json::to_string_pretty(&info).unwrap_or_default()) {
             log::warn!("Failed to write server info file: {}", e);
         }
+    }
 
-        // プラグインの .mcp.json も同じ値で更新
-        if let Err(e) = crate::claude_plugin::update_mcp_config(app_handle, effective_port, api_key) {
-            log::warn!("[ClaudePlugin] Failed to update .mcp.json: {}", e);
-        }
+    // プラグインの .mcp.json も同じ値で更新（app_data_dir 取得失敗時は plugin_dir.exists() で早期 return）
+    if let Err(e) = crate::claude_plugin::update_mcp_config(app_handle, effective_port, api_key) {
+        log::warn!("[ClaudePlugin] Failed to update .mcp.json: {}", e);
     }
 
     // 後方互換: 旧 mcp-port テキストファイルも書き込む
