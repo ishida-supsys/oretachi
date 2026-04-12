@@ -53,9 +53,8 @@ pub fn generate_plugin_files(app_handle: &AppHandle) -> Result<(), String> {
     std::fs::create_dir_all(&hooks_dir)
         .map_err(|e| format!("Failed to create hooks dir: {}", e))?;
 
-    // marketplace.json (directory形式マーケットプレイスでは相対パスが解決されないため絶対パスを使用)
-    let plugin_dir_str = plugin_dir.to_string_lossy().replace('\\', "/");
-    let marketplace_json = build_marketplace_json(&plugin_dir_str);
+    // marketplace.json
+    let marketplace_json = build_marketplace_json();
     let marketplace_json_path = mkt_claude_plugin_dir.join("marketplace.json");
     std::fs::write(
         &marketplace_json_path,
@@ -158,7 +157,7 @@ fn build_hooks_json() -> serde_json::Value {
     serde_json::json!({ "hooks": hooks })
 }
 
-fn build_marketplace_json(plugin_dir_abs: &str) -> serde_json::Value {
+fn build_marketplace_json() -> serde_json::Value {
     serde_json::json!({
         "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
         "name": PLUGIN_NAME,
@@ -170,7 +169,10 @@ fn build_marketplace_json(plugin_dir_abs: &str) -> serde_json::Value {
             {
                 "name": PLUGIN_NAME,
                 "description": "oretachi worktree notification hooks & MCP server",
-                "source": plugin_dir_abs
+                "source": {
+                    "source": "directory",
+                    "path": format!("./{}", PLUGIN_NAME)
+                }
             }
         ]
     })
