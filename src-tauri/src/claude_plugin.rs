@@ -35,18 +35,33 @@ fn plugin_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
 
 /// 起動時にプラグインファイル群を生成・更新する
 /// - ディレクトリ構造の作成
+/// - marketplace.json: マーケットプレイスルートのカタログ
 /// - plugin.json: env.ORETACHI_APP_PATH を現在のexeパスで更新
 /// - hooks/hooks.json: 全イベントのフック定義
 /// - .mcp.json はポート確定後に update_mcp_config で書き込むため、ここでは生成しない
 pub fn generate_plugin_files(app_handle: &AppHandle) -> Result<(), String> {
+    let mkt_dir = marketplace_dir(app_handle)?;
     let plugin_dir = plugin_dir(app_handle)?;
+    let mkt_claude_plugin_dir = mkt_dir.join(".claude-plugin");
     let claude_plugin_dir = plugin_dir.join(".claude-plugin");
     let hooks_dir = plugin_dir.join("hooks");
 
+    std::fs::create_dir_all(&mkt_claude_plugin_dir)
+        .map_err(|e| format!("Failed to create marketplace .claude-plugin dir: {}", e))?;
     std::fs::create_dir_all(&claude_plugin_dir)
         .map_err(|e| format!("Failed to create .claude-plugin dir: {}", e))?;
     std::fs::create_dir_all(&hooks_dir)
         .map_err(|e| format!("Failed to create hooks dir: {}", e))?;
+
+    // marketplace.json
+    let marketplace_json = build_marketplace_json();
+    let marketplace_json_path = mkt_claude_plugin_dir.join("marketplace.json");
+    std::fs::write(
+        &marketplace_json_path,
+        serde_json::to_string_pretty(&marketplace_json)
+            .map_err(|e| format!("Failed to serialize marketplace.json: {}", e))?,
+    )
+    .map_err(|e| format!("Failed to write marketplace.json: {}", e))?;
 
     let exe_path = std::env::current_exe()
         .map(|p| p.to_string_lossy().replace('\\', "/"))
@@ -140,6 +155,24 @@ fn build_hooks_json() -> serde_json::Value {
         );
     }
     serde_json::json!({ "hooks": hooks })
+}
+
+fn build_marketplace_json() -> serde_json::Value {
+    serde_json::json!({
+        "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+        "name": PLUGIN_NAME,
+        "description": "oretachi worktree notification hooks & MCP server",
+        "owner": {
+            "name": "oretachi"
+        },
+        "plugins": [
+            {
+                "name": PLUGIN_NAME,
+                "description": "oretachi worktree notification hooks & MCP server",
+                "source": format!("./{}", PLUGIN_NAME)
+            }
+        ]
+    })
 }
 
 fn build_mcp_json(port: u16, api_key: &str) -> serde_json::Value {
