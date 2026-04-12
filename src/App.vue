@@ -119,6 +119,9 @@ const terminalExitCodes = reactive(new Map<number, number>());
 // terminalId → AIエージェント稼働中フラグ
 const terminalAgentStatus = reactive(new Map<number, boolean>());
 
+// terminalId → AIエージェントセッション情報（タブツールチップ用）
+const terminalAiSessions = reactive(new Map<number, import("./types/terminal").AiSessionInfo>());
+
 // terminalId → Webセッション情報（claude --remote で起動したターミナル）
 const terminalWebSessions = reactive(new Map<number, import("./types/terminal").WebSessionInfo>());
 
@@ -144,6 +147,7 @@ const {
   terminalExitCodes,
   terminalAgentStatus,
   terminalWebSessions,
+  terminalAiSessions,
   removeTerminal,
   clearNotification,
 });
@@ -990,11 +994,14 @@ onMounted(async () => {
     subWindowEvents.subWindowFocusMap.set(worktreeId, true);
     const initData = getPendingInitData(worktreeId);
     if (initData) {
-      // このワークツリーに属するターミナルのWebセッション情報を収集
+      // このワークツリーに属するターミナルのWebセッション情報とAIセッション情報を収集
       const webSessions: Record<number, import("./types/terminal").WebSessionInfo> = {};
+      const aiSessions: Record<number, import("./types/terminal").AiSessionInfo> = {};
       for (const t of initData.terminals) {
-        const info = terminalWebSessions.get(t.id);
-        if (info) webSessions[t.id] = info;
+        const webInfo = terminalWebSessions.get(t.id);
+        if (webInfo) webSessions[t.id] = webInfo;
+        const aiInfo = terminalAiSessions.get(t.id);
+        if (aiInfo) aiSessions[t.id] = aiInfo;
       }
       await emitTo(`sub-${worktreeId}`, "sub-init", {
         worktreeId,
@@ -1003,6 +1010,7 @@ onMounted(async () => {
         autoApprovalPrompt: initData.autoApprovalPrompt,
         layout: initData.layout,
         webSessions,
+        aiSessions,
       });
       clearPendingInitData(worktreeId);
     }
@@ -1096,9 +1104,9 @@ onMounted(async () => {
   // サブウィンドウイベントリスナーを初期化
   await subWindowEvents.init();
 
-  // AIエージェントインジケーター: pty-ai-agent-changed を受信して terminalAgentStatus を更新
-  await listen<{ sessions: Record<number, boolean> }>("pty-ai-agent-changed", (event) => {
-    // sessionId → terminalId の逆引きマップを構築
+  // AIエージェントインジケーター: pty-ai-agent-changed を受信して terminalAgentStatus / terminalAiSessions を更新
+  await listen<{ sessions: Record<number, { isAgent: boolean; agentName?: string; sessionId?: string }> }>("pty-ai-agent-changed", (event) => {
+    // pty sessionId → terminalId の逆引きマップを構築
     const sessionToTerminal = new Map<number, number>();
     for (const [, bundle] of worktreeFrameBundles) {
       for (const [tid, termRef] of bundle.terminalRefs) {
@@ -1106,14 +1114,24 @@ onMounted(async () => {
         if (sid != null) sessionToTerminal.set(sid, tid);
       }
     }
-    for (const [sessionIdStr, isAgent] of Object.entries(event.payload.sessions)) {
+    for (const [sessionIdStr, info] of Object.entries(event.payload.sessions)) {
       const sid = Number(sessionIdStr);
       const tid = sessionToTerminal.get(sid);
       if (tid != null) {
-        if (isAgent) {
+        if (info.isAgent) {
           terminalAgentStatus.set(tid, true);
+          if (info.sessionId && info.agentName) {
+            const aiInfo = { agentType: info.agentName, sessionId: info.sessionId };
+            terminalAiSessions.set(tid, aiInfo);
+            // サブウィンドウに移動済みの場合は同期イベントを送る
+            const worktreeId = terminalWorktreeMap.get(tid);
+            if (worktreeId && isDetached(worktreeId)) {
+              emitTo(`sub-${worktreeId}`, "sub-ai-session", { terminalId: tid, info: aiInfo });
+            }
+          }
         } else {
           terminalAgentStatus.delete(tid);
+          terminalAiSessions.delete(tid);
         }
       }
     }
@@ -1457,6 +1475,7 @@ onMounted(async () => {
               :terminal-exit-codes="terminalExitCodes"
               :terminal-agent-status="terminalAgentStatus"
               :terminal-web-sessions="terminalWebSessions"
+              :terminal-ai-sessions="terminalAiSessions"
               @switch-terminal="(leafId, tid) => onFrameSwitch(wt.id, leafId, tid)"
               @close-terminal="(leafId, tid) => onFrameClose(wt.id, leafId, tid)"
               @tab-drop="(sl, tid, tl, idx) => onFrameTabDrop(wt.id, sl, tid, tl, idx)"
