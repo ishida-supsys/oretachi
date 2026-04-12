@@ -6,6 +6,15 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.19.3] - 2026-04-12
+
+### Added
+- Add debug mode to control log verbosity
+- Identify AI agent session IDs and display in tab tooltips
+
+### Fixed
+- Cleanup terminalAiSessions on terminal close in useWorktreeFrameBundles
+
 ## [0.19.2] - 2026-04-12
 
 ### Fixed
@@ -250,7 +259,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.19.2...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.19.3...HEAD
+[0.19.3]: https://github.com/ishida-supsys/oretachi/compare/0.19.2...0.19.3
 [0.19.2]: https://github.com/ishida-supsys/oretachi/compare/0.19.1...0.19.2
 [0.19.1]: https://github.com/ishida-supsys/oretachi/compare/0.19.0...0.19.1
 [0.19.0]: https://github.com/ishida-supsys/oretachi/compare/0.18.3...0.19.0
