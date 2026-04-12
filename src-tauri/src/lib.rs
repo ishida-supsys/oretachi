@@ -670,6 +670,21 @@ fn is_mcp_enabled() -> bool {
         .unwrap_or(true)
 }
 
+#[tauri::command]
+fn set_debug_mode(enabled: bool) {
+    if enabled {
+        log::set_max_level(log::LevelFilter::Debug);
+    } else {
+        log::set_max_level(log::LevelFilter::Info);
+    }
+    log::info!("Debug mode changed to: {}", enabled);
+}
+
+#[tauri::command]
+fn get_debug_mode() -> bool {
+    log::max_level() >= log::LevelFilter::Debug
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Windows: tauri-plugin-notification はパスが \target\release で終わる場合に
@@ -682,6 +697,18 @@ pub fn run() {
             let _ = SetCurrentProcessExplicitAppUserModelID(&HSTRING::from("com.ia.oretachi"));
         }
     }
+
+    // .env 読み込み（Vite の .env 規約に準拠）
+    // builder チェーンより前に読み込む必要があるためここで実施
+    let _ = dotenvy::from_filename(".env");
+    if cfg!(debug_assertions) {
+        let _ = dotenvy::from_filename_override(".env.development");
+    }
+
+    // ORETACHI_DEBUG 環境変数でデバッグモードを判定（起動時点で確定）
+    let env_debug = std::env::var("ORETACHI_DEBUG")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
 
     #[cfg(target_os = "windows")]
     let (acrylic_enabled, acrylic_opacity, acrylic_color) = acrylic::load_settings();
@@ -837,8 +864,16 @@ pub fn run() {
             notify_worktree_added,
             list_archives,
             delete_archive,
+            set_debug_mode,
+            get_debug_mode,
         ])
         .setup(move |app| {
+            // env var が false の場合は DB初期化などの起動ログを含め debug! を抑制する。
+            // settings.debug_mode は後で読み込まれるため、env var のみで先行設定する。
+            if !env_debug {
+                log::set_max_level(log::LevelFilter::Info);
+            }
+
             // レポート DB を同期的に初期化（ファイル接続のみで高速、起動前に完了させる）
             {
                 let handle = app.handle().clone();
@@ -887,12 +922,6 @@ pub fn run() {
                 });
             }
 
-            // .env 読み込み（Vite の .env 規約に準拠）
-            let _ = dotenvy::from_filename(".env");
-            if cfg!(debug_assertions) {
-                let _ = dotenvy::from_filename_override(".env.development");
-            }
-
             // アップデート後の再起動でPATHが不完全になる問題を修正:
             // NSISインストーラー経由で再起動した場合、ユーザーの完全なPATHが
             // 継承されないため、レジストリから最新PATHを取得して上書きする。
@@ -923,6 +952,23 @@ pub fn run() {
             }
             let settings_manager = app.state::<SettingsManager>();
             settings_manager.init(app.handle());
+
+            // settings.debug_mode を反映: env=false かつ settings=true の場合は Debug に昇格
+            {
+                let settings_debug = settings_manager.get().debug_mode;
+                let debug_enabled = env_debug || settings_debug;
+                if debug_enabled && !env_debug {
+                    // env_debug=false で既に Info に設定済みのため、settings で有効なら Debug に昇格
+                    log::set_max_level(log::LevelFilter::Debug);
+                } else if !debug_enabled {
+                    // env_debug=true の場合は plugin が Debug にしているためここに来ない想定だが念のため
+                    log::set_max_level(log::LevelFilter::Info);
+                }
+                log::info!(
+                    "Debug mode: {} (env={}, settings={})",
+                    debug_enabled, env_debug, settings_debug
+                );
+            }
 
             // Claude Code プラグインファイルを生成・更新
             if let Err(e) = claude_plugin::generate_plugin_files(app.handle()) {

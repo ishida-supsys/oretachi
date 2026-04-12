@@ -332,6 +332,8 @@ pub struct AppSettings {
     pub enable_home_cat: bool,
     #[serde(default = "default_ai_timeout_secs", rename = "aiTimeoutSecs")]
     pub ai_timeout_secs: u64,
+    #[serde(default, rename = "debugMode")]
+    pub debug_mode: bool,
 }
 
 impl AppSettings {
@@ -365,6 +367,7 @@ impl Default for AppSettings {
             mcp_remote_access: false,
             enable_home_cat: false,
             ai_timeout_secs: default_ai_timeout_secs(),
+            debug_mode: false,
         }
     }
 }

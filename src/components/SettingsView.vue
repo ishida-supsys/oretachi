@@ -26,6 +26,10 @@ const { isChecking, checkForUpdate, downloadAndInstall } = useUpdater();
 
 const appVersion = ref("");
 
+async function onDebugModeChange(enabled: boolean) {
+  await invoke("set_debug_mode", { enabled });
+}
+
 async function onCheckUpdate() {
   const update = await checkForUpdate();
   if (update) {
@@ -658,6 +662,21 @@ function getSoundLabel(sound: string | null | undefined): string {
       </div>
     </div>
 
+    <!-- デバッグモード -->
+    <div class="field-group">
+      <label class="field-label">{{ t('debug.label') }}</label>
+      <div class="row-input row-input--inline">
+        <input
+          id="debugMode"
+          type="checkbox"
+          class="toggle-checkbox"
+          :checked="settings.debugMode === true"
+          @change="(e) => { settings.debugMode = (e.target as HTMLInputElement).checked; onDebugModeChange(settings.debugMode!); scheduleSave(); }"
+        />
+        <label for="debugMode" class="inline-label toggle-label">{{ t('debug.enable') }}</label>
+      </div>
+    </div>
+
     <!-- バージョン情報 -->
     <div class="field-group">
       <label class="field-label">{{ t('about.label') }}</label>
@@ -1165,6 +1184,10 @@ function getSoundLabel(sound: string | null | undefined): string {
     "homeCat": {
       "label": "Terminal Cat (Experimental)",
       "enable": "Show cat on home screen"
+    },
+    "debug": {
+      "label": "Debug Mode",
+      "enable": "Enable verbose debug logging"
     }
   },
   "ja": {
@@ -1255,6 +1278,10 @@ function getSoundLabel(sound: string | null | undefined): string {
     "homeCat": {
       "label": "ターミナル猫（試験的）",
       "enable": "ホーム画面に猫を表示する"
+    },
+    "debug": {
+      "label": "デバッグモード",
+      "enable": "詳細なデバッグログを有効にする"
     }
   }
 }
