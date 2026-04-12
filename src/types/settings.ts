@@ -111,4 +111,5 @@ export interface AppSettings {
   mcpRemoteAccess?: boolean;
   enableHomeCat?: boolean;
   aiTimeoutSecs?: number; // AIタイムアウト秒数 (デフォルト: 120)
+  debugMode?: boolean;
 }
