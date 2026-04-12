@@ -78,7 +78,7 @@ pub fn generate_plugin_files(app_handle: &AppHandle) -> Result<(), String> {
     .map_err(|e| format!("Failed to write plugin.json: {}", e))?;
 
     // hooks/hooks.json
-    let hooks_json = build_hooks_json();
+    let hooks_json = build_hooks_json(&exe_path);
     let hooks_json_path = hooks_dir.join("hooks.json");
     std::fs::write(
         &hooks_json_path,
@@ -115,19 +115,26 @@ fn build_plugin_json(exe_path: &str) -> serde_json::Value {
     let mut user_config = serde_json::Map::new();
     user_config.insert(
         "worktree_name".to_string(),
-        serde_json::json!({ "description": "Worktree name for notifications" }),
+        serde_json::json!({
+            "type": "string",
+            "title": "Worktree name",
+            "description": "Worktree name for notifications"
+        }),
     );
     for (_, key) in EVENT_CONFIG_KEYS {
         user_config.insert(
             key.to_string(),
-            serde_json::json!({ "description": format!("Notification kind for {} event", key) }),
+            serde_json::json!({
+                "type": "string",
+                "title": *key,
+                "description": format!("Notification kind for {} event", key)
+            }),
         );
     }
 
     serde_json::json!({
         "name": PLUGIN_NAME,
         "description": "oretachi worktree notification hooks & MCP server",
-        "hooks": "./hooks/hooks.json",
         "mcpServers": "./.mcp.json",
         "env": {
             "ORETACHI_APP_PATH": exe_path
@@ -136,15 +143,15 @@ fn build_plugin_json(exe_path: &str) -> serde_json::Value {
     })
 }
 
-fn build_hooks_json() -> serde_json::Value {
-    // ${ORETACHI_APP_PATH} は plugin.json の env フィールドで定義された環境変数。
+fn build_hooks_json(exe_path: &str) -> serde_json::Value {
+    // exe_path はビルド時に確定した実行ファイルの絶対パスを直接ハードコードする。
     // ${user_config.XXX} は Claude Code プラグイン仕様のユーザー設定値展開構文。
     // 各ワークツリーの pluginConfigs.oretachi@oretachi.options から値が注入される。
     let mut hooks = serde_json::Map::new();
     for (event, key) in EVENT_CONFIG_KEYS {
         let command = format!(
-            "\"${{ORETACHI_APP_PATH}}\" --notify \"${{user_config.worktree_name}}\" --kind ${{user_config.{}}} --agent cc",
-            key
+            "\"{}\" --notify \"${{user_config.worktree_name}}\" --kind ${{user_config.{}}} --agent cc",
+            exe_path, key
         );
         hooks.insert(
             event.to_string(),
@@ -169,10 +176,7 @@ fn build_marketplace_json() -> serde_json::Value {
             {
                 "name": PLUGIN_NAME,
                 "description": "oretachi worktree notification hooks & MCP server",
-                "source": {
-                    "source": "directory",
-                    "path": format!("./{}", PLUGIN_NAME)
-                }
+                "source": format!("./{}", PLUGIN_NAME)
             }
         ]
     })
@@ -180,13 +184,11 @@ fn build_marketplace_json() -> serde_json::Value {
 
 fn build_mcp_json(port: u16, api_key: &str) -> serde_json::Value {
     serde_json::json!({
-        "mcpServers": {
-            PLUGIN_NAME: {
-                "type": "streamableHttp",
-                "url": format!("http://127.0.0.1:{}/mcp", port),
-                "headers": {
-                    "x-api-key": api_key
-                }
+        PLUGIN_NAME: {
+            "type": "http",
+            "url": format!("http://127.0.0.1:{}/mcp", port),
+            "headers": {
+                "Authorization": format!("Bearer {}", api_key)
             }
         }
     })
