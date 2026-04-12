@@ -38,9 +38,19 @@ pub struct PtyExitPayload {
 }
 
 #[derive(serde::Serialize, Clone)]
+pub struct AiAgentInfo {
+    #[serde(rename = "isAgent")]
+    pub is_agent: bool,
+    #[serde(rename = "agentName")]
+    pub agent_name: Option<String>,
+    #[serde(rename = "sessionId")]
+    pub session_id: Option<String>,
+}
+
+#[derive(serde::Serialize, Clone)]
 pub struct AiAgentChangedPayload {
-    /// sessionId → isAiAgent のマップ
-    pub sessions: HashMap<u32, bool>,
+    /// pty_session_id → AiAgentInfo のマップ
+    pub sessions: HashMap<u32, AiAgentInfo>,
 }
 
 /// 全プロセス一覧を (pid, parent_pid, name) のリストで返す。
@@ -176,28 +186,43 @@ fn scan_all_processes() -> Vec<(u32, u32, String)> {
     }
 }
 
-/// 指定PIDのサブツリーにAIエージェントプロセスが含まれるか判定（最大depth段）
-fn has_ai_agent_in_subtree(
+/// 指定PIDのサブツリーからAIエージェントプロセスを探す（最大depth段）
+/// 見つかった場合は (agent_name, agent_pid) を返す
+fn find_ai_agent_in_subtree(
     root_pid: u32,
     children_map: &HashMap<u32, Vec<(u32, String)>>,
     depth: u32,
-) -> bool {
+) -> Option<(String, u32)> {
     if depth == 0 {
-        return false;
+        return None;
     }
     if let Some(children) = children_map.get(&root_pid) {
         for (child_pid, child_name) in children {
             let name_lower = child_name.to_lowercase();
             let name_stem = name_lower.trim_end_matches(".exe");
             if AI_AGENT_NAMES.iter().any(|&a| name_stem == a) {
-                return true;
+                return Some((name_stem.to_string(), *child_pid));
             }
-            if has_ai_agent_in_subtree(*child_pid, children_map, depth - 1) {
-                return true;
+            if let Some(found) = find_ai_agent_in_subtree(*child_pid, children_map, depth - 1) {
+                return Some(found);
             }
         }
     }
-    false
+    None
+}
+
+/// Claude Code の PID から ~/.claude/sessions/<pid>.json を読んでセッション UUID を返す
+fn get_claude_session_id_by_pid(pid: u32) -> Option<String> {
+    let home = std::env::var("USERPROFILE")
+        .or_else(|_| std::env::var("HOME"))
+        .ok()?;
+    let session_file = std::path::Path::new(&home)
+        .join(".claude")
+        .join("sessions")
+        .join(format!("{}.json", pid));
+    let content = std::fs::read_to_string(&session_file).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&content).ok()?;
+    v.get("sessionId")?.as_str().map(|s| s.to_string())
 }
 
 impl PtyManager {
@@ -236,7 +261,8 @@ impl PtyManager {
         let polling_alive = self.polling_alive.clone();
 
         std::thread::spawn(move || {
-            let mut last_status: HashMap<u32, bool> = HashMap::new();
+            // (is_agent, session_id) のペアで差分検出
+            let mut last_status: HashMap<u32, (bool, Option<String>)> = HashMap::new();
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(10));
 
@@ -265,33 +291,57 @@ impl PtyManager {
                     children_map.entry(*ppid).or_default().push((*pid, name.clone()));
                 }
 
-                let mut current_status: HashMap<u32, bool> = HashMap::new();
-                let mut new_statuses = Vec::new();
+                // pty_session_id → AiAgentInfo のマップを構築
+                let mut current_status: HashMap<u32, (bool, Option<String>)> = HashMap::new();
+                let mut new_infos: Vec<(u32, bool, AiAgentInfo)> = Vec::new();
 
                 for (session_id, child_pid) in session_pids {
-                    let status = if let Some(pid) = child_pid {
-                        has_ai_agent_in_subtree(pid, &children_map, 4)
+                    let (is_agent, info) = if let Some(pid) = child_pid {
+                        match find_ai_agent_in_subtree(pid, &children_map, 4) {
+                            Some((agent_name, agent_pid)) => {
+                                let claude_session_id = if agent_name == "claude" {
+                                    get_claude_session_id_by_pid(agent_pid)
+                                } else {
+                                    None
+                                };
+                                (true, AiAgentInfo {
+                                    is_agent: true,
+                                    agent_name: Some(agent_name),
+                                    session_id: claude_session_id,
+                                })
+                            }
+                            None => (false, AiAgentInfo { is_agent: false, agent_name: None, session_id: None }),
+                        }
                     } else {
-                        false
+                        (false, AiAgentInfo { is_agent: false, agent_name: None, session_id: None })
                     };
-                    current_status.insert(session_id, status);
-                    new_statuses.push((session_id, status));
+                    let session_id_val = info.session_id.clone();
+                    current_status.insert(session_id, (is_agent, session_id_val));
+                    new_infos.push((session_id, is_agent, info));
                 }
 
                 // 内部状態を更新
                 if let Ok(mut sessions) = sessions_arc.lock() {
-                    for (id, status) in &new_statuses {
+                    for (id, is_agent, _) in &new_infos {
                         if let Some(session) = sessions.get_mut(id) {
-                            session.is_ai_agent = *status;
+                            session.is_ai_agent = *is_agent;
                         }
                     }
                 }
 
-                // 前回との差分を検出
-                let changed: HashMap<u32, bool> = current_status
-                    .iter()
-                    .filter(|(&id, &status)| last_status.get(&id) != Some(&status))
-                    .map(|(&id, &status)| (id, status))
+                // 前回との差分を検出（is_agent または session_id が変わった場合）
+                let changed: HashMap<u32, AiAgentInfo> = new_infos
+                    .into_iter()
+                    .filter(|(id, _, info)| {
+                        let prev = last_status.get(id);
+                        match prev {
+                            None => true,
+                            Some((prev_is, prev_sid)) => {
+                                *prev_is != info.is_agent || *prev_sid != info.session_id
+                            }
+                        }
+                    })
+                    .map(|(id, _, info)| (id, info))
                     .collect();
 
                 if !changed.is_empty() {

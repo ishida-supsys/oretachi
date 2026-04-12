@@ -21,7 +21,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { debug } from "@tauri-apps/plugin-log";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import AutoApprovalPromptDialog from "./components/AutoApprovalPromptDialog.vue";
-import type { SubTerminalEntry, WebSessionInfo } from "./types/terminal";
+import type { SubTerminalEntry, WebSessionInfo, AiSessionInfo } from "./types/terminal";
 import type { FrameNode } from "./types/frame";
 import { useI18n } from "vue-i18n";
 import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
@@ -49,6 +49,9 @@ const terminalAgentStatus = reactive(new Map<number, boolean>());
 
 // terminalId → Webセッション情報
 const terminalWebSessions = reactive(new Map<number, WebSessionInfo>());
+
+// terminalId → AIエージェントセッション情報（タブツールチップ用）
+const terminalAiSessions = reactive(new Map<number, AiSessionInfo>());
 
 // 自動承認フラグ
 const autoApproval = ref(false);
@@ -127,6 +130,7 @@ const {
     terminalExitCodes.delete(terminalId);
     terminalAgentStatus.delete(terminalId);
     terminalWebSessions.delete(terminalId);
+    terminalAiSessions.delete(terminalId);
     await emitTo("main", "sub-remove-terminal", { worktreeId, terminalId });
   },
 });
@@ -230,19 +234,23 @@ onMounted(async () => {
   }));
 
   // AIエージェントインジケーター: sessionId → terminalId に変換して terminalAgentStatus を更新
-  collect(await listen<{ sessions: Record<number, boolean> }>("pty-ai-agent-changed", (event) => {
+  collect(await listen<{ sessions: Record<number, { isAgent: boolean; agentName?: string; sessionId?: string }> }>("pty-ai-agent-changed", (event) => {
     const sessionToTerminal = new Map<number, number>();
     for (const [tid, entry] of terminalEntries) {
       if (entry.sessionId) sessionToTerminal.set(entry.sessionId, tid);
     }
-    for (const [sessionIdStr, isAgent] of Object.entries(event.payload.sessions)) {
+    for (const [sessionIdStr, info] of Object.entries(event.payload.sessions)) {
       const sid = Number(sessionIdStr);
       const tid = sessionToTerminal.get(sid);
       if (tid != null) {
-        if (isAgent) {
+        if (info.isAgent) {
           terminalAgentStatus.set(tid, true);
+          if (info.sessionId && info.agentName) {
+            terminalAiSessions.set(tid, { agentType: info.agentName, sessionId: info.sessionId });
+          }
         } else {
           terminalAgentStatus.delete(tid);
+          terminalAiSessions.delete(tid);
         }
       }
     }
@@ -251,6 +259,11 @@ onMounted(async () => {
   // メインウィンドウからのWebセッション情報を受信
   collect(await listen<{ terminalId: number; info: WebSessionInfo }>("sub-web-session", (event) => {
     terminalWebSessions.set(event.payload.terminalId, event.payload.info);
+  }));
+
+  // メインウィンドウからのAIセッション情報を受信
+  collect(await listen<{ terminalId: number; info: AiSessionInfo }>("sub-ai-session", (event) => {
+    terminalAiSessions.set(event.payload.terminalId, event.payload.info);
   }));
 
   const appWindow = getCurrentWindow();
@@ -263,6 +276,7 @@ onMounted(async () => {
     autoApprovalPrompt?: string;
     layout?: FrameNode;
     webSessions?: Record<number, WebSessionInfo>;
+    aiSessions?: Record<number, AiSessionInfo>;
   }>(
     "sub-init",
     async (event) => {
@@ -281,6 +295,12 @@ onMounted(async () => {
       if (event.payload.webSessions) {
         for (const [idStr, info] of Object.entries(event.payload.webSessions)) {
           terminalWebSessions.set(Number(idStr), info);
+        }
+      }
+
+      if (event.payload.aiSessions) {
+        for (const [idStr, info] of Object.entries(event.payload.aiSessions)) {
+          terminalAiSessions.set(Number(idStr), info);
         }
       }
 
@@ -550,6 +570,7 @@ async function onCancelAiJudging() {
           :terminal-exit-codes="terminalExitCodes"
           :terminal-agent-status="terminalAgentStatus"
           :terminal-web-sessions="terminalWebSessions"
+          :terminal-ai-sessions="terminalAiSessions"
           @switch-terminal="switchTerminal"
           @close-terminal="closeTerminal"
           @title-change="onTerminalTitleChange"
