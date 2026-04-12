@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.19.1] - 2026-04-12
+
+### Fixed
+- Generate marketplace.json to fix Claude plugin load error
+
 ## [0.19.0] - 2026-04-12
 
 ### Added
@@ -238,7 +243,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.19.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.19.1...HEAD
+[0.19.1]: https://github.com/ishida-supsys/oretachi/compare/0.19.0...0.19.1
 [0.19.0]: https://github.com/ishida-supsys/oretachi/compare/0.18.3...0.19.0
 [0.18.3]: https://github.com/ishida-supsys/oretachi/compare/0.18.2...0.18.3
 [0.18.2]: https://github.com/ishida-supsys/oretachi/compare/0.18.1...0.18.2
