@@ -10,7 +10,7 @@ import { ref, computed } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import type { FrameLeaf } from "../types/frame";
-import type { SubTerminalEntry, WebSessionInfo } from "../types/terminal";
+import type { SubTerminalEntry, WebSessionInfo, AiSessionInfo } from "../types/terminal";
 import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
@@ -30,6 +30,7 @@ const props = defineProps<{
   terminalExitCodes?: Map<number, number>;
   terminalAgentStatus?: Map<number, boolean>;
   terminalWebSessions?: Map<number, WebSessionInfo>;
+  terminalAiSessions?: Map<number, AiSessionInfo>;
 }>();
 
 const emit = defineEmits<{
@@ -42,6 +43,14 @@ const emit = defineEmits<{
   tabReorder: [leafId: string, terminalId: number, insertIndex: number];
   requestAddTerminal: [leafId: string];
 }>();
+
+// タブボタンのツールチップ文字列を生成する
+function tabTooltip(tid: number): string {
+  const title = props.terminalEntries.get(tid)?.title ?? `Terminal ${tid}`;
+  const session = props.terminalAiSessions?.get(tid);
+  if (session) return `${title}\nSession: ${session.sessionId}`;
+  return title;
+}
 
 // アクティブターミナルのWebセッション情報
 const activeWebSession = computed(() => {
@@ -247,6 +256,7 @@ function overlayStyle(zone: DropZone): Record<string, string> {
           :key="tid"
           class="tab-button"
           :class="tid === leaf.activeTerminalId ? 'tab-active' : 'tab-inactive'"
+          :title="tabTooltip(tid)"
           draggable="true"
           @dragstart="onTabDragStart($event, tid)"
           @dragend="onTabDragEnd"

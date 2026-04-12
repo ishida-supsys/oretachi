@@ -86,7 +86,11 @@ fn pty_set_ai_agent(
 ) -> Result<(), String> {
     state.set_ai_agent(session_id, is_agent)?;
     let mut sessions = std::collections::HashMap::new();
-    sessions.insert(session_id, is_agent);
+    sessions.insert(session_id, pty_manager::AiAgentInfo {
+        is_agent,
+        agent_name: None,
+        session_id: None,
+    });
     let _ = app_handle.emit("pty-ai-agent-changed", AiAgentChangedPayload { sessions });
     Ok(())
 }

@@ -1,7 +1,7 @@
 import { ref, reactive, shallowReactive, nextTick } from "vue";
 import type { Ref } from "vue";
 import { useWorktreeFrame } from "./useWorktreeFrame";
-import type { SubTerminalEntry, WebSessionInfo } from "../types/terminal";
+import type { SubTerminalEntry, WebSessionInfo, AiSessionInfo } from "../types/terminal";
 import type { Worktree } from "../types/worktree";
 import type { FrameNode } from "../types/frame";
 import type TerminalView from "../components/TerminalView.vue";
@@ -23,6 +23,7 @@ export function useWorktreeFrameBundles(options: {
   terminalExitCodes: Map<number, number>;
   terminalAgentStatus: Map<number, boolean>;
   terminalWebSessions: Map<number, WebSessionInfo>;
+  terminalAiSessions: Map<number, AiSessionInfo>;
   removeTerminal: (worktreeId: string, terminalId: number) => void;
   clearNotification: (worktreeId: string) => void;
 }) {
@@ -33,6 +34,7 @@ export function useWorktreeFrameBundles(options: {
     terminalExitCodes,
     terminalAgentStatus,
     terminalWebSessions,
+    terminalAiSessions,
     removeTerminal,
     clearNotification,
   } = options;
@@ -53,6 +55,7 @@ export function useWorktreeFrameBundles(options: {
         terminalExitCodes.delete(terminalId);
         terminalAgentStatus.delete(terminalId);
         terminalWebSessions.delete(terminalId);
+        terminalAiSessions.delete(terminalId);
         removeTerminal(worktreeId, terminalId);
       },
     });
