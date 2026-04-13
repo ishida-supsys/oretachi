@@ -3,6 +3,7 @@ mod ai_judge;
 mod ai_provider;
 mod archive_db;
 mod claude_plugin;
+mod claude_plugin_skills;
 mod fs_watcher;
 mod git_worktree;
 mod ide_launcher;

@@ -1,0 +1,62 @@
+/// Claude Code プラグインに同梱するスキルファイルの埋め込みデータ。
+/// 各エントリは (プラグイン skills/ ディレクトリからの相対パス, ファイル内容) のペア。
+pub const SKILL_FILES: &[(&str, &str)] = &[
+    // --- domain-model-diagram ---
+    (
+        "domain-model-diagram/SKILL.md",
+        include_str!("../skills/domain-model-diagram/SKILL.md"),
+    ),
+    (
+        "domain-model-diagram/templates/entry-point.jsx",
+        include_str!("../skills/domain-model-diagram/templates/entry-point.jsx"),
+    ),
+    (
+        "domain-model-diagram/templates/components--EntityBox.jsx",
+        include_str!("../skills/domain-model-diagram/templates/components--EntityBox.jsx"),
+    ),
+    (
+        "domain-model-diagram/templates/components--RelationshipLine.jsx",
+        include_str!(
+            "../skills/domain-model-diagram/templates/components--RelationshipLine.jsx"
+        ),
+    ),
+    (
+        "domain-model-diagram/templates/data--entities.example.jsx",
+        include_str!("../skills/domain-model-diagram/templates/data--entities.example.jsx"),
+    ),
+    (
+        "domain-model-diagram/templates/data--relationships.example.jsx",
+        include_str!(
+            "../skills/domain-model-diagram/templates/data--relationships.example.jsx"
+        ),
+    ),
+    // --- wireframe ---
+    (
+        "wireframe/SKILL.md",
+        include_str!("../skills/wireframe/SKILL.md"),
+    ),
+    (
+        "wireframe/templates/entry-point.jsx",
+        include_str!("../skills/wireframe/templates/entry-point.jsx"),
+    ),
+    (
+        "wireframe/templates/components--W.jsx",
+        include_str!("../skills/wireframe/templates/components--W.jsx"),
+    ),
+    (
+        "wireframe/templates/components--layout.jsx",
+        include_str!("../skills/wireframe/templates/components--layout.jsx"),
+    ),
+    (
+        "wireframe/templates/components--primitives.jsx",
+        include_str!("../skills/wireframe/templates/components--primitives.jsx"),
+    ),
+    (
+        "wireframe/templates/screens--OverviewScreen.example.jsx",
+        include_str!("../skills/wireframe/templates/screens--OverviewScreen.example.jsx"),
+    ),
+    (
+        "wireframe/templates/screens--screen.example.jsx",
+        include_str!("../skills/wireframe/templates/screens--screen.example.jsx"),
+    ),
+];
