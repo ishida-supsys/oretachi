@@ -87,6 +87,24 @@ pub fn generate_plugin_files(app_handle: &AppHandle) -> Result<(), String> {
     )
     .map_err(|e| format!("Failed to write hooks.json: {}", e))?;
 
+    // skills/
+    write_skill_files(&plugin_dir)?;
+
+    Ok(())
+}
+
+fn write_skill_files(plugin_dir: &std::path::Path) -> Result<(), String> {
+    let skills_dir = plugin_dir.join("skills");
+    for (rel_path, content) in crate::claude_plugin_skills::SKILL_FILES {
+        let dest = skills_dir.join(rel_path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                format!("Failed to create skill dir {}: {}", parent.display(), e)
+            })?;
+        }
+        std::fs::write(&dest, content)
+            .map_err(|e| format!("Failed to write skill file {}: {}", dest.display(), e))?;
+    }
     Ok(())
 }
 
@@ -136,6 +154,7 @@ fn build_plugin_json(exe_path: &str) -> serde_json::Value {
         "name": PLUGIN_NAME,
         "description": "oretachi worktree notification hooks & MCP server",
         "mcpServers": "./.mcp.json",
+        "skills": "./skills/",
         "env": {
             "ORETACHI_APP_PATH": exe_path
         },
