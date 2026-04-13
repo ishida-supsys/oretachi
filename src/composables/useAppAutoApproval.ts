@@ -69,30 +69,32 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
     // notify-worktree → 自動承認チェック
     await listen<{ worktree_name: string; kind: string }>("notify-worktree", async (event) => {
       const { worktree_name: worktreeName, kind } = event.payload;
-      const wt = deps.worktrees.value.find((w) => w.name === worktreeName);
 
-      await debug(
-        `[AutoApproval] notify-worktree received worktreeName=${worktreeName} resolved=${wt?.id ?? "null"} autoApproval=${wt ? autoApprovalMap.get(wt.id) : "undefined"}`
-      );
-
-      if (!wt) return;
+      // hook/completed はこのリスナーでは不要。フィルタをすべての async 処理の前に置く
       if (kind === "completed" || kind === "hook") return;
+
+      const wt = deps.worktrees.value.find((w) => w.name === worktreeName);
+      if (!wt) return;
       if (!autoApprovalMap.get(wt.id)) return;
 
+      debug(
+        `[AutoApproval] notify-worktree received worktreeName=${worktreeName} resolved=${wt.id} autoApproval=true`
+      );
+
       if (aiJudgingWorktrees.has(wt.id)) {
-        await debug(`[AutoApproval] already in progress for ${wt.id}, skipping`);
+        debug(`[AutoApproval] already in progress for ${wt.id}, skipping`);
         return;
       }
 
       if (deps.isDetached(wt.id)) {
-        await debug(`[AutoApproval] delegating to sub-window ${wt.id}`);
+        debug(`[AutoApproval] delegating to sub-window ${wt.id}`);
         await emitTo(`sub-${wt.id}`, "sub-try-auto-approve", {
           additionalPrompt: deps.autoApprovalPromptMap.get(wt.id) ?? "",
         });
         return;
       }
 
-      await debug(`[AutoApproval] local terminals check, count=${wt.terminals.length}`);
+      debug(`[AutoApproval] local terminals check, count=${wt.terminals.length}`);
       aiJudgingWorktrees.add(wt.id);
       let loopResult: { approved: boolean; lastCommand: string | undefined };
       try {

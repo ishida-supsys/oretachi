@@ -59,6 +59,8 @@ pub struct McpServerManager {
     added_listener_id: Mutex<Option<tauri::EventId>>,
     /// notify-worktree リスナーID（再起動時にアンリジスターするために保持）
     notify_listener_id: Mutex<Option<tauri::EventId>>,
+    /// notify-worktree-mcp リスナーID（hook専用内部イベント、再起動時にアンリジスターするために保持）
+    hook_notify_listener_id: Mutex<Option<tauri::EventId>>,
 }
 
 impl McpServerManager {
@@ -72,6 +74,7 @@ impl McpServerManager {
             archive_listener_id: Mutex::new(None),
             added_listener_id: Mutex::new(None),
             notify_listener_id: Mutex::new(None),
+            hook_notify_listener_id: Mutex::new(None),
         }
     }
 
@@ -683,8 +686,11 @@ impl NotifyService {
             body,
             agent: None,
         };
+        // hook イベントはフロントエンドの両リスナーでフィルタされるため WebView には送らない。
+        // 内部専用イベント名でブロードキャストリスナーのみに届ける。
+        let event_name = if event.kind == "hook" { "notify-worktree-mcp" } else { "notify-worktree" };
         self.app_handle
-            .emit("notify-worktree", &event)
+            .emit(event_name, &event)
             .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
         log::info!("[mcp] notify_worktree: {} kind={}", worktree_name, event.kind);
         Ok(CallToolResult::success(vec![Content::text("ok")]))
@@ -969,13 +975,15 @@ async fn notify_handler(
         body: payload.body,
         agent: payload.agent,
     };
-    match app_handle.emit("notify-worktree", &event) {
+    // hook イベントはフロントエンドの両リスナーでフィルタされるため WebView には送らない。
+    let event_name = if event.kind == "hook" { "notify-worktree-mcp" } else { "notify-worktree" };
+    match app_handle.emit(event_name, &event) {
         Ok(_) => {
             log::info!("[notify] worktree={} kind={}", payload.worktree, event.kind);
             StatusCode::OK
         }
         Err(e) => {
-            log::error!("Failed to emit notify-worktree: {}", e);
+            log::error!("Failed to emit {}: {}", event_name, e);
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
@@ -1264,6 +1272,11 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
             app_handle.unlisten(old_id);
         }
     }
+    if let Ok(mut guard) = manager.hook_notify_listener_id.lock() {
+        if let Some(old_id) = guard.take() {
+            app_handle.unlisten(old_id);
+        }
+    }
 
     drop(manager);
 
@@ -1339,6 +1352,25 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
     let manager = app_handle.state::<McpServerManager>();
     if let Ok(mut guard) = manager.notify_listener_id.lock() {
         *guard = Some(notify_listener_id);
+    }
+    drop(manager);
+
+    // hook 専用の内部イベント（WebView をスキップして MCP ピアにのみブロードキャスト）
+    let peer_map_for_hook_listener = peer_map.clone();
+    let timeout_counts_for_hook_listener = timeout_counts.clone();
+    let hook_notify_listener_id = app_handle.listen("notify-worktree-mcp", move |event: tauri::Event| {
+        let registry = peer_map_for_hook_listener.clone();
+        let tc = timeout_counts_for_hook_listener.clone();
+        if let Ok(payload) = serde_json::from_str::<NotifyWorktreeEvent>(event.payload()) {
+            tauri::async_runtime::spawn(async move {
+                broadcast_notify_worktree(&registry, &tc, &payload).await;
+            });
+        }
+    });
+
+    let manager = app_handle.state::<McpServerManager>();
+    if let Ok(mut guard) = manager.hook_notify_listener_id.lock() {
+        *guard = Some(hook_notify_listener_id);
     }
     drop(manager);
 
