@@ -366,7 +366,14 @@ watch(
   }
 );
 
+// ターミナルライフサイクルカウンター（ハング診断用）
+export let terminalMountCount = 0;
+export let terminalUnmountCount = 0;
+export let terminalActiveCount = 0;
+
 onMounted(async () => {
+  terminalMountCount++;
+  terminalActiveCount++;
   debug(`[TerminalView] onMounted initialSessionId=${props.initialSessionId} autoStart=${props.autoStart} cwd=${props.cwd}`);
   initTerminal();
   if (props.initialSessionId !== undefined) {
@@ -382,6 +389,8 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  terminalUnmountCount++;
+  terminalActiveCount--;
   debug(`[TerminalView] onUnmounted sessionId=${sessionId.value} cwd=${props.cwd}`);
   if (resizeDebounce) clearTimeout(resizeDebounce);
   resizeObserver?.disconnect();

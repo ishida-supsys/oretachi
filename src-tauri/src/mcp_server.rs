@@ -983,7 +983,25 @@ async fn notify_handler(
             StatusCode::OK
         }
         Err(e) => {
-            log::error!("Failed to emit {}: {}", event_name, e);
+            // webview の状態情報を詳細ログに記録してハング診断に役立てる
+            let window_info: Vec<String> = app_handle
+                .webview_windows()
+                .iter()
+                .map(|(label, w)| {
+                    format!(
+                        "{}(visible={:?} focused={:?})",
+                        label,
+                        w.is_visible().unwrap_or(false),
+                        w.is_focused().unwrap_or(false)
+                    )
+                })
+                .collect();
+            log::error!(
+                "[emit-failed] event={} error={} windows=[{}]",
+                event_name,
+                e,
+                window_info.join(", ")
+            );
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
