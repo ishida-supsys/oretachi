@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.19.7] - 2026-04-15
+
+### Fixed
+- Fix invalid export in TerminalView.vue script setup
+
 ## [0.19.6] - 2026-04-15
 
 ### Added
@@ -274,7 +279,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.19.6...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.19.7...HEAD
+[0.19.7]: https://github.com/ishida-supsys/oretachi/compare/0.19.6...0.19.7
 [0.19.6]: https://github.com/ishida-supsys/oretachi/compare/0.19.5...0.19.6
 [0.19.5]: https://github.com/ishida-supsys/oretachi/compare/0.19.4...0.19.5
 [0.19.4]: https://github.com/ishida-supsys/oretachi/compare/0.19.3...0.19.4
