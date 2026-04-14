@@ -2,7 +2,7 @@
 import { ref, reactive, nextTick, onMounted, computed, watch } from "vue";
 import { renderToDataUrl } from "./composables/useTerminalThumbnail";
 import { isDirty, clearDirty } from "./composables/usePtyDispatcher";
-import { listen, emitTo } from "@tauri-apps/api/event";
+import { listen, emitTo, emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import TerminalView from "./components/TerminalView.vue";
 import FrameContainer from "./components/FrameContainer.vue";
@@ -48,6 +48,8 @@ import { useSubWindowEvents } from "./composables/useSubWindowEvents";
 import { useShutdownGuard } from "./composables/useShutdownGuard";
 import type { ArchiveRow } from "./types/archive";
 import { debug } from "@tauri-apps/plugin-log";
+import { startEventLoopMonitor } from "./utils/eventLoopMonitor";
+import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useUpdater } from "./composables/useUpdater";
 import Toast from "primevue/toast";
@@ -1295,6 +1297,23 @@ onMounted(async () => {
       }
     }
   }, 3000);
+
+  // Webview ハング診断: Rust からの heartbeat ping に pong で応答
+  await listen<{ ts: number }>("__webview-heartbeat-ping", async (event) => {
+    const mem = (performance as { memory?: { usedJSHeapSize?: number } }).memory?.usedJSHeapSize;
+    await emit("__webview-heartbeat-pong", {
+      ts: event.payload.ts,
+      mem,
+      terminals: {
+        active: terminalActiveCount,
+        totalMounts: terminalMountCount,
+        totalUnmounts: terminalUnmountCount,
+      },
+    }).catch(() => {});
+  });
+
+  // Webview ハング診断: JS メインスレッドのブロック検出
+  startEventLoopMonitor();
 });
 
 </script>

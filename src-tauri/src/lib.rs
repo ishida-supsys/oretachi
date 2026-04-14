@@ -23,7 +23,7 @@ use fs_watcher::FsWatcherManager;
 use process_utils::WorktreeRemoveManager;
 use pty_manager::{AiAgentChangedPayload, PtyManager};
 use settings::{AppSettings, SettingsManager};
-use tauri::{Emitter, Manager, State};
+use tauri::{Emitter, Listener, Manager, State};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 /// パスコンポーネントに `..`、絶対パス区切り文字、NULバイトが含まれていないか検証する
@@ -979,6 +979,92 @@ pub fn run() {
             // AIエージェントインジケーター用ポーリング起動
             let pty_manager = app.state::<PtyManager>();
             pty_manager.start_polling(app.handle().clone());
+
+            // Webview ハング診断: heartbeat ループ（30秒間隔で ping → pong のラウンドトリップ計測）
+            {
+                use std::sync::Arc;
+                use std::sync::atomic::{AtomicU64, Ordering};
+                use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+                let last_pong_ms = Arc::new(AtomicU64::new(0));
+                let last_pong_for_listener = last_pong_ms.clone();
+                let heartbeat_handle = app.handle().clone();
+
+                // pong リスナー登録
+                heartbeat_handle.listen("__webview-heartbeat-pong", move |event: tauri::Event| {
+                    #[derive(serde::Deserialize)]
+                    struct PongPayload {
+                        ts: u64,
+                        mem: Option<u64>,
+                        terminals: Option<TerminalStats>,
+                    }
+                    #[derive(serde::Deserialize)]
+                    struct TerminalStats {
+                        active: u32,
+                        #[serde(rename = "totalMounts")]
+                        total_mounts: u32,
+                        #[serde(rename = "totalUnmounts")]
+                        total_unmounts: u32,
+                    }
+                    let now_ms = SystemTime::now()
+                        .duration_since(UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_millis() as u64;
+                    last_pong_for_listener.store(now_ms, Ordering::Relaxed);
+                    if let Ok(payload) = serde_json::from_str::<PongPayload>(event.payload()) {
+                        let rtt = now_ms.saturating_sub(payload.ts);
+                        let mem_mb = payload.mem.unwrap_or(0) / 1024 / 1024;
+                        if let Some(t) = &payload.terminals {
+                            log::debug!(
+                                "[heartbeat] pong rtt={}ms mem={}MB terminals(active={} mounts={} unmounts={})",
+                                rtt, mem_mb, t.active, t.total_mounts, t.total_unmounts
+                            );
+                        } else {
+                            log::debug!("[heartbeat] pong rtt={}ms mem={}MB", rtt, mem_mb);
+                        }
+                        if rtt > 5000 {
+                            log::warn!("[heartbeat] webview response slow: rtt={}ms", rtt);
+                        }
+                    }
+                });
+
+                // ping ループ
+                let ping_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut ping_pending_since: Option<u64> = None;
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        let now_ms = SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        // pong が届いていれば pending をクリア（エラー判定より先に行う）
+                        let last_pong = last_pong_ms.load(Ordering::Relaxed);
+                        if last_pong > 0 && now_ms.saturating_sub(last_pong) < 35_000 {
+                            ping_pending_since = None;
+                        }
+                        // クリアされずに残っている場合のみ本当の未応答と判定
+                        if let Some(pending_since) = ping_pending_since {
+                            let unresponsive_secs = now_ms.saturating_sub(pending_since) / 1000;
+                            log::error!(
+                                "[heartbeat] webview unresponsive, no pong for {}s",
+                                unresponsive_secs
+                            );
+                        }
+                        match ping_handle.emit("__webview-heartbeat-ping", serde_json::json!({ "ts": now_ms })) {
+                            Ok(_) => {
+                                if ping_pending_since.is_none() {
+                                    ping_pending_since = Some(now_ms);
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("[heartbeat] ping emit failed: {}", e);
+                                ping_pending_since = None;
+                            }
+                        }
+                    }
+                });
+            }
 
             // 通常モード: MCP サーバー起動 + ウィンドウ表示
             if mcp_enabled {
