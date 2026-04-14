@@ -1,3 +1,10 @@
+<script lang="ts">
+// ターミナルライフサイクルカウンター（ハング診断用）
+export let terminalMountCount = 0;
+export let terminalUnmountCount = 0;
+export let terminalActiveCount = 0;
+</script>
+
 <script setup lang="ts">
 import { ref, watch, onMounted, onUnmounted, nextTick } from "vue";
 import { Terminal } from "@xterm/xterm";
@@ -365,11 +372,6 @@ watch(
     }
   }
 );
-
-// ターミナルライフサイクルカウンター（ハング診断用）
-export let terminalMountCount = 0;
-export let terminalUnmountCount = 0;
-export let terminalActiveCount = 0;
 
 onMounted(async () => {
   terminalMountCount++;
