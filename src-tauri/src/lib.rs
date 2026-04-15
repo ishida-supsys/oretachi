@@ -244,6 +244,11 @@ async fn read_gitignore(repo_path: String) -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
+async fn detect_tsbuildinfo_files(repo_path: String) -> Result<Vec<String>, String> {
+    run_git(move || git_worktree::detect_tsbuildinfo_files(&repo_path)).await
+}
+
+#[tauri::command]
 async fn copy_gitignore_targets(
     repo_path: String,
     worktree_path: String,
@@ -813,6 +818,7 @@ pub fn run() {
             git_list_branches,
             detect_package_manager,
             read_gitignore,
+            detect_tsbuildinfo_files,
             copy_gitignore_targets,
             write_claude_plugin_config,
             copy_claude_session_data,

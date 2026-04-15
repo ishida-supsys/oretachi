@@ -736,6 +736,40 @@ pub fn read_gitignore(repo_path: &str) -> Result<Vec<String>, String> {
     Ok(entries)
 }
 
+/// リポジトリ内の .tsbuildinfo ファイルを検出して相対パスのリストを返す。
+/// node_modules, .git, target 等は除外する。
+pub fn detect_tsbuildinfo_files(repo_path: &str) -> Result<Vec<String>, String> {
+    let repo = std::path::Path::new(repo_path);
+    let pattern = format!("{}/**/*.tsbuildinfo", repo_path.replace('\\', "/"));
+    let mut results = Vec::new();
+
+    let exclude_dirs = ["node_modules", ".git", "target"];
+
+    let iter = match glob::glob(&pattern) {
+        Ok(iter) => iter,
+        Err(e) => {
+            log::warn!("tsbuildinfo glob error: {}", e);
+            return Ok(results);
+        }
+    };
+
+    for entry in iter.filter_map(|r| r.ok()) {
+        if !entry.is_file() {
+            continue;
+        }
+        let rel = entry.strip_prefix(repo).unwrap_or(&entry);
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if exclude_dirs.iter().any(|d| {
+            rel_str.starts_with(&format!("{}/", d)) || rel_str.contains(&format!("/{}/", d))
+        }) {
+            continue;
+        }
+        results.push(rel_str);
+    }
+
+    Ok(results)
+}
+
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<u32, String> {
     std::fs::create_dir_all(dst).map_err(|e| format!("failed to create dir {:?}: {}", dst, e))?;
     let mut count = 0u32;
