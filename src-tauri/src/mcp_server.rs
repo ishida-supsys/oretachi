@@ -14,7 +14,7 @@ use rmcp::{
 };
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Listener, Manager};
-use tokio::sync::{oneshot, watch, RwLock};
+use tokio::sync::{broadcast, oneshot, watch, RwLock};
 
 use crate::git_worktree::get_git_remotes;
 use crate::settings::SettingsManager;
@@ -59,8 +59,11 @@ pub struct McpServerManager {
     added_listener_id: Mutex<Option<tauri::EventId>>,
     /// notify-worktree リスナーID（再起動時にアンリジスターするために保持）
     notify_listener_id: Mutex<Option<tauri::EventId>>,
-    /// notify-worktree-mcp リスナーID（hook専用内部イベント、再起動時にアンリジスターするために保持）
-    hook_notify_listener_id: Mutex<Option<tauri::EventId>>,
+    /// hook 通知をWebView IPCを経由せずMCPピアへ直接配信するチャネル
+    /// (WebView IPC を使うと UIスレッドに負荷がかかるため broadcast channel を使用)
+    pub hook_tx: broadcast::Sender<NotifyWorktreeEvent>,
+    /// hook 通知の rate limiting: worktree ごとの最終通知時刻
+    hook_last_sent: Mutex<HashMap<String, std::time::Instant>>,
 }
 
 impl McpServerManager {
@@ -74,7 +77,8 @@ impl McpServerManager {
             archive_listener_id: Mutex::new(None),
             added_listener_id: Mutex::new(None),
             notify_listener_id: Mutex::new(None),
-            hook_notify_listener_id: Mutex::new(None),
+            hook_tx: broadcast::channel::<NotifyWorktreeEvent>(256).0,
+            hook_last_sent: Mutex::new(HashMap::new()),
         }
     }
 
@@ -686,14 +690,18 @@ impl NotifyService {
             body,
             agent: None,
         };
-        // hook イベントはフロントエンドの両リスナーでフィルタされるため WebView には送らない。
-        // 内部専用イベント名でブロードキャストリスナーのみに届ける。
-        let event_name = if event.kind == "hook" { "notify-worktree-mcp" } else { "notify-worktree" };
-        self.app_handle
-            .emit(event_name, &event)
-            .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
-        log::info!("[mcp] notify_worktree: {} kind={}", worktree_name, event.kind);
-        Ok(CallToolResult::success(vec![Content::text("ok")]))
+        if event.kind == "hook" {
+            // hook イベントは broadcast channel 経由で MCP ピアに直接送信する（WebView IPC をバイパス）
+            let manager = self.app_handle.state::<McpServerManager>();
+            let _ = manager.hook_tx.send(event);
+            Ok(CallToolResult::success(vec![Content::text("ok")]))
+        } else {
+            self.app_handle
+                .emit("notify-worktree", &event)
+                .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
+            log::info!("[mcp] notify_worktree: {} kind={}", worktree_name, event.kind);
+            Ok(CallToolResult::success(vec![Content::text("ok")]))
+        }
     }
 
     #[tool(description = "登録済みワークツリーのステータス一覧を取得する")]
@@ -975,34 +983,55 @@ async fn notify_handler(
         body: payload.body,
         agent: payload.agent,
     };
-    // hook イベントはフロントエンドの両リスナーでフィルタされるため WebView には送らない。
-    let event_name = if event.kind == "hook" { "notify-worktree-mcp" } else { "notify-worktree" };
-    match app_handle.emit(event_name, &event) {
-        Ok(_) => {
-            log::info!("[notify] worktree={} kind={}", payload.worktree, event.kind);
-            StatusCode::OK
+    log::info!("[notify] worktree={} kind={}", payload.worktree, event.kind);
+
+    if event.kind == "hook" {
+        // hook 通知は WebView IPC を経由せず broadcast channel で直接 MCP ピアへ配信。
+        // app_handle.emit() は WebView UIスレッドを経由するため、高頻度の hook 通知では
+        // UIスレッドへの負荷が累積しフリーズの原因になる。
+        //
+        // さらに同一 worktree の hook 通知を 3秒間デバウンスして MCP ピアへの過剰送信を防ぐ。
+        const HOOK_DEBOUNCE_SECS: u64 = 3;
+        let manager = app_handle.state::<McpServerManager>();
+        let should_send = {
+            let mut last_sent = manager.hook_last_sent.lock().unwrap_or_else(|e| e.into_inner());
+            let now = std::time::Instant::now();
+            let entry = last_sent.entry(event.worktree_name.clone()).or_insert_with(|| now - std::time::Duration::from_secs(HOOK_DEBOUNCE_SECS + 1));
+            if now.duration_since(*entry).as_secs() >= HOOK_DEBOUNCE_SECS {
+                *entry = now;
+                true
+            } else {
+                false
+            }
+        };
+        if should_send {
+            let _ = manager.hook_tx.send(event);
         }
-        Err(e) => {
-            // webview の状態情報を詳細ログに記録してハング診断に役立てる
-            let window_info: Vec<String> = app_handle
-                .webview_windows()
-                .iter()
-                .map(|(label, w)| {
-                    format!(
-                        "{}(visible={:?} focused={:?})",
-                        label,
-                        w.is_visible().unwrap_or(false),
-                        w.is_focused().unwrap_or(false)
-                    )
-                })
-                .collect();
-            log::error!(
-                "[emit-failed] event={} error={} windows=[{}]",
-                event_name,
-                e,
-                window_info.join(", ")
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
+        StatusCode::OK
+    } else {
+        match app_handle.emit("notify-worktree", &event) {
+            Ok(_) => StatusCode::OK,
+            Err(e) => {
+                // webview の状態情報を詳細ログに記録してハング診断に役立てる
+                let window_info: Vec<String> = app_handle
+                    .webview_windows()
+                    .iter()
+                    .map(|(label, w)| {
+                        format!(
+                            "{}(visible={:?} focused={:?})",
+                            label,
+                            w.is_visible().unwrap_or(false),
+                            w.is_focused().unwrap_or(false)
+                        )
+                    })
+                    .collect();
+                log::error!(
+                    "[emit-failed] event=notify-worktree error={} windows=[{}]",
+                    e,
+                    window_info.join(", ")
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         }
     }
 }
@@ -1290,11 +1319,6 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
             app_handle.unlisten(old_id);
         }
     }
-    if let Ok(mut guard) = manager.hook_notify_listener_id.lock() {
-        if let Some(old_id) = guard.take() {
-            app_handle.unlisten(old_id);
-        }
-    }
 
     drop(manager);
 
@@ -1373,24 +1397,33 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
     }
     drop(manager);
 
-    // hook 専用の内部イベント（WebView をスキップして MCP ピアにのみブロードキャスト）
-    let peer_map_for_hook_listener = peer_map.clone();
-    let timeout_counts_for_hook_listener = timeout_counts.clone();
-    let hook_notify_listener_id = app_handle.listen("notify-worktree-mcp", move |event: tauri::Event| {
-        let registry = peer_map_for_hook_listener.clone();
-        let tc = timeout_counts_for_hook_listener.clone();
-        if let Ok(payload) = serde_json::from_str::<NotifyWorktreeEvent>(event.payload()) {
-            tauri::async_runtime::spawn(async move {
-                broadcast_notify_worktree(&registry, &tc, &payload).await;
-            });
-        }
-    });
-
-    let manager = app_handle.state::<McpServerManager>();
-    if let Ok(mut guard) = manager.hook_notify_listener_id.lock() {
-        *guard = Some(hook_notify_listener_id);
+    // hook 通知は broadcast channel 経由で MCP ピアにのみ配信（WebView IPC を完全バイパス）
+    {
+        let peer_map_for_hook = peer_map.clone();
+        let timeout_counts_for_hook = timeout_counts.clone();
+        let mut hook_rx = app_handle.state::<McpServerManager>().hook_tx.subscribe();
+        let mut shutdown_rx_for_hook = shutdown_rx.clone();
+        tauri::async_runtime::spawn(async move {
+            loop {
+                tokio::select! {
+                    result = hook_rx.recv() => {
+                        match result {
+                            Ok(payload) => {
+                                broadcast_notify_worktree(&peer_map_for_hook, &timeout_counts_for_hook, &payload).await;
+                            }
+                            Err(broadcast::error::RecvError::Lagged(n)) => {
+                                log::warn!("[mcp] hook broadcast lagged, {} messages dropped", n);
+                            }
+                            Err(broadcast::error::RecvError::Closed) => break,
+                        }
+                    }
+                    _ = shutdown_rx_for_hook.changed() => {
+                        if *shutdown_rx_for_hook.borrow() { break; }
+                    }
+                }
+            }
+        });
     }
-    drop(manager);
 
     tauri::async_runtime::spawn(async move {
         let service = StreamableHttpService::new(
