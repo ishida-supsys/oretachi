@@ -1056,6 +1056,19 @@ pub fn run() {
                                 "[heartbeat] webview unresponsive, no pong for {}s",
                                 unresponsive_secs
                             );
+                            // 最初の unresponsive 検出時にメインウィンドウの強制リロードを試みる
+                            if unresponsive_secs < 35 {
+                                log::warn!("[heartbeat] attempting webview reload to recover from hang");
+                                for (label, webview) in ping_handle.webview_windows() {
+                                    if label == "main" {
+                                        if let Err(e) = webview.eval("location.reload()") {
+                                            log::error!("[heartbeat] reload eval failed for {}: {}", label, e);
+                                        } else {
+                                            log::info!("[heartbeat] reload triggered for {}", label);
+                                        }
+                                    }
+                                }
+                            }
                         }
                         match ping_handle.emit("__webview-heartbeat-ping", serde_json::json!({ "ts": now_ms })) {
                             Ok(_) => {
