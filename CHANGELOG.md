@@ -6,6 +6,15 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.19.8] - 2026-04-16
+
+### Added
+- Auto-detect `.tsbuildinfo` files when adding a worktree and include them in the copy list
+
+### Fixed
+- Unify `notify_worktree` MCP tool hook notifications via broadcast channel to prevent WebView IPC freeze
+- Exclude packages from `.tsbuildinfo` detection inside `node_modules`, targeting only cache files
+
 ## [0.19.7] - 2026-04-15
 
 ### Fixed
@@ -279,7 +288,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.19.7...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.19.8...HEAD
+[0.19.8]: https://github.com/ishida-supsys/oretachi/compare/0.19.7...0.19.8
 [0.19.7]: https://github.com/ishida-supsys/oretachi/compare/0.19.6...0.19.7
 [0.19.6]: https://github.com/ishida-supsys/oretachi/compare/0.19.5...0.19.6
 [0.19.5]: https://github.com/ishida-supsys/oretachi/compare/0.19.4...0.19.5
