@@ -54,7 +54,15 @@ onMounted(async () => {
       invoke<string[]>("read_gitignore", { repoPath: props.repoPath }),
       invoke<string[]>("detect_package_manager", { repoPath: props.repoPath }),
     ]);
-    entries.value = gitignoreResult;
+    const tsbiResult = await invoke<string[]>("detect_tsbuildinfo_files", { repoPath: props.repoPath }).catch(() => []);
+    // gitignore エントリに .tsbuildinfo 検出結果を統合（重複除外）
+    const merged = [...gitignoreResult];
+    for (const tsbi of tsbiResult) {
+      if (!merged.includes(tsbi)) {
+        merged.push(tsbi);
+      }
+    }
+    entries.value = merged;
     detectedPMs.value = detectedResult;
     // 未設定かつ検出結果があれば自動選択
     if (selectedPM.value === undefined && detectedResult.length > 0) {
@@ -195,6 +203,7 @@ function onConfirm() {
               @change="toggle(entry)"
             />
             <span class="entry-text">{{ entry }}</span>
+            <span v-if="entry.endsWith('.tsbuildinfo')" class="badge-ts">TS cache</span>
           </label>
         </div>
       </div>
@@ -464,6 +473,17 @@ function onConfirm() {
 .hook-kind-select:disabled {
   opacity: 0.4;
   cursor: not-allowed;
+}
+
+.badge-ts {
+  font-size: 10px;
+  color: #89b4fa;
+  background: #1e3a5f;
+  border: 1px solid #3a5a8f;
+  border-radius: 3px;
+  padding: 1px 5px;
+  margin-left: auto;
+  white-space: nowrap;
 }
 </style>
 

@@ -736,6 +736,64 @@ pub fn read_gitignore(repo_path: &str) -> Result<Vec<String>, String> {
     Ok(entries)
 }
 
+/// リポジトリ内の .tsbuildinfo ファイルを検出して相対パスのリストを返す。
+/// .git, target は除外。node_modules 内はパッケージディレクトリを除外し、
+/// .cache 等のドットディレクトリのみ検索する。
+pub fn detect_tsbuildinfo_files(repo_path: &str) -> Result<Vec<String>, String> {
+    let repo = std::path::Path::new(repo_path);
+    let pattern = format!("{}/**/*.tsbuildinfo", repo_path.replace('\\', "/"));
+    let mut results = Vec::new();
+
+    let exclude_dirs = [".git", "target"];
+
+    let iter = match glob::glob(&pattern) {
+        Ok(iter) => iter,
+        Err(e) => {
+            log::warn!("tsbuildinfo glob error: {}", e);
+            return Ok(results);
+        }
+    };
+
+    for entry in iter.filter_map(|r| r.ok()) {
+        if !entry.is_file() {
+            continue;
+        }
+        let rel = entry.strip_prefix(repo).unwrap_or(&entry);
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        if exclude_dirs.iter().any(|d| {
+            rel_str.starts_with(&format!("{}/", d)) || rel_str.contains(&format!("/{}/", d))
+        }) {
+            continue;
+        }
+        // node_modules 内のパッケージディレクトリを除外（.cache 等のドットディレクトリは許可）
+        if is_in_node_modules_package(&rel_str) {
+            continue;
+        }
+        results.push(rel_str);
+    }
+
+    Ok(results)
+}
+
+/// node_modules/ 直下のパッケージディレクトリ内かどうかを判定する。
+/// `node_modules/.cache/` 等のドットディレクトリは許可、それ以外（パッケージ）は除外。
+fn is_in_node_modules_package(rel_str: &str) -> bool {
+    let nm = "node_modules/";
+    let mut search_from = 0;
+    while let Some(pos) = rel_str[search_from..].find(nm) {
+        let after_nm = search_from + pos + nm.len();
+        if after_nm < rel_str.len() {
+            let next_char = rel_str.as_bytes()[after_nm];
+            // ドットで始まるディレクトリ (.cache 等) は許可、それ以外はパッケージ
+            if next_char != b'.' {
+                return true;
+            }
+        }
+        search_from = after_nm;
+    }
+    false
+}
+
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> Result<u32, String> {
     std::fs::create_dir_all(dst).map_err(|e| format!("failed to create dir {:?}: {}", dst, e))?;
     let mut count = 0u32;
