@@ -6,6 +6,13 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.19.9] - 2026-04-21
+
+### Fixed
+- Add `blockedMs` to heartbeat payload and switch to native reload for WebView hang recovery
+- Add 180s intermediate sign to unresponsive heartbeat log and reset unresponsive state on ping emit failure so subsequent 300s logs are not suppressed
+- Move `startEventLoopMonitor()` before pong listener registration to avoid missing blocked-time measurements until the first pong
+
 ## [0.19.8] - 2026-04-16
 
 ### Added
@@ -288,7 +295,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.19.8...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.19.9...HEAD
+[0.19.9]: https://github.com/ishida-supsys/oretachi/compare/0.19.8...0.19.9
 [0.19.8]: https://github.com/ishida-supsys/oretachi/compare/0.19.7...0.19.8
 [0.19.7]: https://github.com/ishida-supsys/oretachi/compare/0.19.6...0.19.7
 [0.19.6]: https://github.com/ishida-supsys/oretachi/compare/0.19.5...0.19.6
