@@ -48,7 +48,7 @@ import { useSubWindowEvents } from "./composables/useSubWindowEvents";
 import { useShutdownGuard } from "./composables/useShutdownGuard";
 import type { ArchiveRow } from "./types/archive";
 import { debug } from "@tauri-apps/plugin-log";
-import { startEventLoopMonitor } from "./utils/eventLoopMonitor";
+import { consumeMaxBlockedMs, startEventLoopMonitor } from "./utils/eventLoopMonitor";
 import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useUpdater } from "./composables/useUpdater";
@@ -1298,12 +1298,17 @@ onMounted(async () => {
     }
   }, 3000);
 
+  // Webview ハング診断: JS メインスレッドのブロック検出
+  // pong listen より先に起動して、初回 pong までのブロック時間も漏れなく測定する
+  startEventLoopMonitor();
+
   // Webview ハング診断: Rust からの heartbeat ping に pong で応答
   await listen<{ ts: number }>("__webview-heartbeat-ping", async (event) => {
     const mem = (performance as { memory?: { usedJSHeapSize?: number } }).memory?.usedJSHeapSize;
     await emit("__webview-heartbeat-pong", {
       ts: event.payload.ts,
       mem,
+      blockedMs: consumeMaxBlockedMs(),
       terminals: {
         active: terminalActiveCount,
         totalMounts: terminalMountCount,
@@ -1311,9 +1316,6 @@ onMounted(async () => {
       },
     }).catch(() => {});
   });
-
-  // Webview ハング診断: JS メインスレッドのブロック検出
-  startEventLoopMonitor();
 });
 
 </script>
