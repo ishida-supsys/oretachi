@@ -48,7 +48,7 @@ import { useSubWindowEvents } from "./composables/useSubWindowEvents";
 import { useShutdownGuard } from "./composables/useShutdownGuard";
 import type { ArchiveRow } from "./types/archive";
 import { debug } from "@tauri-apps/plugin-log";
-import { startEventLoopMonitor } from "./utils/eventLoopMonitor";
+import { consumeMaxBlockedMs, startEventLoopMonitor } from "./utils/eventLoopMonitor";
 import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useUpdater } from "./composables/useUpdater";
@@ -1304,6 +1304,7 @@ onMounted(async () => {
     await emit("__webview-heartbeat-pong", {
       ts: event.payload.ts,
       mem,
+      blockedMs: consumeMaxBlockedMs(),
       terminals: {
         active: terminalActiveCount,
         totalMounts: terminalMountCount,

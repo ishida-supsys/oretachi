@@ -1002,6 +1002,8 @@ pub fn run() {
                     struct PongPayload {
                         ts: u64,
                         mem: Option<u64>,
+                        #[serde(rename = "blockedMs")]
+                        blocked_ms: Option<u64>,
                         terminals: Option<TerminalStats>,
                     }
                     #[derive(serde::Deserialize)]
@@ -1020,16 +1022,26 @@ pub fn run() {
                     if let Ok(payload) = serde_json::from_str::<PongPayload>(event.payload()) {
                         let rtt = now_ms.saturating_sub(payload.ts);
                         let mem_mb = payload.mem.unwrap_or(0) / 1024 / 1024;
+                        let blocked_ms = payload.blocked_ms.unwrap_or(0);
                         if let Some(t) = &payload.terminals {
                             log::debug!(
-                                "[heartbeat] pong rtt={}ms mem={}MB terminals(active={} mounts={} unmounts={})",
-                                rtt, mem_mb, t.active, t.total_mounts, t.total_unmounts
+                                "[heartbeat] pong rtt={}ms mem={}MB blockedMs={} terminals(active={} mounts={} unmounts={})",
+                                rtt, mem_mb, blocked_ms, t.active, t.total_mounts, t.total_unmounts
                             );
                         } else {
-                            log::debug!("[heartbeat] pong rtt={}ms mem={}MB", rtt, mem_mb);
+                            log::debug!(
+                                "[heartbeat] pong rtt={}ms mem={}MB blockedMs={}",
+                                rtt, mem_mb, blocked_ms
+                            );
                         }
                         if rtt > 5000 {
                             log::warn!("[heartbeat] webview response slow: rtt={}ms", rtt);
+                        }
+                        if blocked_ms >= 5000 {
+                            log::warn!(
+                                "[heartbeat] main thread blocked since last pong: {}ms",
+                                blocked_ms
+                            );
                         }
                     }
                 });
@@ -1038,6 +1050,7 @@ pub fn run() {
                 let ping_handle = app.handle().clone();
                 tauri::async_runtime::spawn(async move {
                     let mut ping_pending_since: Option<u64> = None;
+                    let mut unresponsive_logged_until_secs: u64 = 0;
                     loop {
                         tokio::time::sleep(Duration::from_secs(30)).await;
                         let now_ms = SystemTime::now()
@@ -1048,21 +1061,35 @@ pub fn run() {
                         let last_pong = last_pong_ms.load(Ordering::Relaxed);
                         if last_pong > 0 && now_ms.saturating_sub(last_pong) < 35_000 {
                             ping_pending_since = None;
+                            unresponsive_logged_until_secs = 0;
                         }
                         // クリアされずに残っている場合のみ本当の未応答と判定
                         if let Some(pending_since) = ping_pending_since {
                             let unresponsive_secs = now_ms.saturating_sub(pending_since) / 1000;
-                            log::error!(
-                                "[heartbeat] webview unresponsive, no pong for {}s",
-                                unresponsive_secs
-                            );
-                            // 最初の unresponsive 検出時にメインウィンドウの強制リロードを試みる
+                            // 90秒までは毎回、以降は 300秒到達時に 1 回だけログ（無限連続出力を抑制）
+                            if unresponsive_secs <= 90 || unresponsive_secs >= 300 {
+                                if unresponsive_secs < 300 || unresponsive_logged_until_secs < 300 {
+                                    log::error!(
+                                        "[heartbeat] webview unresponsive, no pong for {}s",
+                                        unresponsive_secs
+                                    );
+                                    if unresponsive_secs >= 300 {
+                                        unresponsive_logged_until_secs = 300;
+                                    }
+                                }
+                            }
+                            // 最初の unresponsive 検出時にメインウィンドウの強制リロードを試みる。
+                            // eval("location.reload()") は JS タスクキュー経由のため、
+                            // JS メインスレッドが詰まっていると実行されない。
+                            // WebviewWindow::reload() は Tauri runtime 経由で UI スレッドに
+                            // post され、wry から ICoreWebView2::Reload() をネイティブ呼び出しするため、
+                            // JS がブロック状態でも復帰できる。
                             if unresponsive_secs < 35 {
                                 log::warn!("[heartbeat] attempting webview reload to recover from hang");
                                 for (label, webview) in ping_handle.webview_windows() {
                                     if label == "main" {
-                                        if let Err(e) = webview.eval("location.reload()") {
-                                            log::error!("[heartbeat] reload eval failed for {}: {}", label, e);
+                                        if let Err(e) = webview.reload() {
+                                            log::error!("[heartbeat] reload failed for {}: {}", label, e);
                                         } else {
                                             log::info!("[heartbeat] reload triggered for {}", label);
                                         }
