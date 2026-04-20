@@ -1298,6 +1298,10 @@ onMounted(async () => {
     }
   }, 3000);
 
+  // Webview ハング診断: JS メインスレッドのブロック検出
+  // pong listen より先に起動して、初回 pong までのブロック時間も漏れなく測定する
+  startEventLoopMonitor();
+
   // Webview ハング診断: Rust からの heartbeat ping に pong で応答
   await listen<{ ts: number }>("__webview-heartbeat-ping", async (event) => {
     const mem = (performance as { memory?: { usedJSHeapSize?: number } }).memory?.usedJSHeapSize;
@@ -1312,9 +1316,6 @@ onMounted(async () => {
       },
     }).catch(() => {});
   });
-
-  // Webview ハング診断: JS メインスレッドのブロック検出
-  startEventLoopMonitor();
 });
 
 </script>

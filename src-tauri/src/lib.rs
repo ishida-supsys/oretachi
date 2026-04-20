@@ -1066,16 +1066,26 @@ pub fn run() {
                         // クリアされずに残っている場合のみ本当の未応答と判定
                         if let Some(pending_since) = ping_pending_since {
                             let unresponsive_secs = now_ms.saturating_sub(pending_since) / 1000;
-                            // 90秒までは毎回、以降は 300秒到達時に 1 回だけログ（無限連続出力を抑制）
-                            if unresponsive_secs <= 90 || unresponsive_secs >= 300 {
-                                if unresponsive_secs < 300 || unresponsive_logged_until_secs < 300 {
-                                    log::error!(
-                                        "[heartbeat] webview unresponsive, no pong for {}s",
-                                        unresponsive_secs
-                                    );
-                                    if unresponsive_secs >= 300 {
-                                        unresponsive_logged_until_secs = 300;
-                                    }
+                            // 90秒までは毎回、180秒で 1 回中間サイン、300秒で 1 回最終警告
+                            // （無限連続出力を抑制しつつ、長時間フリーズ継続中かどうかの目安を残す）
+                            let should_log = if unresponsive_secs <= 90 {
+                                true
+                            } else if unresponsive_secs >= 180
+                                && unresponsive_logged_until_secs < 180
+                            {
+                                true
+                            } else {
+                                unresponsive_secs >= 300 && unresponsive_logged_until_secs < 300
+                            };
+                            if should_log {
+                                log::error!(
+                                    "[heartbeat] webview unresponsive, no pong for {}s",
+                                    unresponsive_secs
+                                );
+                                if unresponsive_secs >= 300 {
+                                    unresponsive_logged_until_secs = 300;
+                                } else if unresponsive_secs >= 180 {
+                                    unresponsive_logged_until_secs = 180;
                                 }
                             }
                             // 最初の unresponsive 検出時にメインウィンドウの強制リロードを試みる。
@@ -1106,6 +1116,7 @@ pub fn run() {
                             Err(e) => {
                                 log::error!("[heartbeat] ping emit failed: {}", e);
                                 ping_pending_since = None;
+                                unresponsive_logged_until_secs = 0;
                             }
                         }
                     }
