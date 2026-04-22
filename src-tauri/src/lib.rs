@@ -1193,7 +1193,19 @@ pub fn run() {
                                                 log::warn!("[heartbeat] recreate: set_focus failed: {}", e);
                                             }
                                             log::info!("[heartbeat] recreate: main webview rebuilt and shown");
-                                            // 成功フラグはそのまま true。pong 復帰で false に戻る。
+                                            // 成功確定後の dead-end 救済: 新窓のフロント bundle ロード
+                                            // 失敗 / pong listener 登録到達前のエラーで pong が永久に
+                                            // 戻らないケースに備え、300秒経っても pong 復帰しなければ
+                                            // フラグを false に戻して再試行可能にする。
+                                            // 通常は pong 復帰で即 false にリセットされる経路の方が
+                                            // 先に走るため、このタイマーは保険として機能する。
+                                            tokio::time::sleep(Duration::from_secs(300)).await;
+                                            if recreate_attempted_inner.load(Ordering::Relaxed) {
+                                                log::warn!(
+                                                    "[heartbeat] recreate: 300s elapsed without pong recovery, allowing retry"
+                                                );
+                                                recreate_attempted_inner.store(false, Ordering::Relaxed);
+                                            }
                                         }
                                         Err(e) => {
                                             log::error!("[heartbeat] recreate: build failed: {}", e);

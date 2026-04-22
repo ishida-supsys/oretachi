@@ -93,9 +93,10 @@ export async function runApprovalLoop(
       await debug(`[AutoApproval] tid=${termRef.id} terminal=null, skip`);
       continue;
     }
-    // 事前に末尾30行でプロンプト判定し、無ければAI判定と200行取得をスキップ。
+    // 事前に末尾60行でプロンプト判定し、無ければAI判定と200行取得をスキップ。
     // (大半の tick は「プロンプト無し」なのでここで早期returnすれば debug log ノイズも減る)
-    const quickContent = getRecentLines(terminal, 30);
+    // 60行はプロンプト直後に追加ログが出るケースに対するマージン。
+    const quickContent = getRecentLines(terminal, 60);
     if (!hasApprovalPrompt(quickContent)) {
       continue;
     }

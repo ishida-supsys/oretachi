@@ -62,10 +62,10 @@ pub struct McpServerManager {
     /// hook 通知をWebView IPCを経由せずMCPピアへ直接配信するチャネル
     /// (WebView IPC を使うと UIスレッドに負荷がかかるため broadcast channel を使用)
     pub hook_tx: broadcast::Sender<NotifyWorktreeEvent>,
-    /// 通知の rate limiting: (worktree_name, kind) → 最終送信時刻
+    /// 通知の rate limiting: (worktree_name, kind) → 最終送信時刻 (None=未送信)
     /// hook: 3秒、approval: 1秒 debounce。general/completed や任意の kind は
     /// debounce しない（MCP クライアントの意図的な通知を握り潰さないため）
-    notify_last_sent: Mutex<HashMap<(String, String), std::time::Instant>>,
+    notify_last_sent: Mutex<HashMap<(String, String), Option<std::time::Instant>>>,
 }
 
 /// kind ごとの debounce 秒数。None の kind は debounce しない（毎回送信）。
@@ -82,9 +82,10 @@ fn notify_debounce_secs(kind: &str) -> Option<u64> {
 }
 
 /// worktree_name × kind の組み合わせで debounce 判定する。
-/// true を返したら送信すべき（前回送信から debounce 秒数以上経過、または対象外 kind）。
+/// true を返したら送信すべき（初回、または前回送信から debounce 秒数以上経過、
+/// または対象外 kind）。
 fn should_send_notify(
-    last_sent: &Mutex<HashMap<(String, String), std::time::Instant>>,
+    last_sent: &Mutex<HashMap<(String, String), Option<std::time::Instant>>>,
     worktree_name: &str,
     kind: &str,
 ) -> bool {
@@ -94,11 +95,15 @@ fn should_send_notify(
     let mut map = last_sent.lock().unwrap_or_else(|e| e.into_inner());
     let now = std::time::Instant::now();
     let key = (worktree_name.to_string(), kind.to_string());
-    let entry = map
-        .entry(key)
-        .or_insert_with(|| now - std::time::Duration::from_secs(debounce + 1));
-    if now.duration_since(*entry).as_secs() >= debounce {
-        *entry = now;
+    // Option で初回を None として明示。Instant 減算による underflow panic を
+    // 回避しつつ、初回は必ず送信する旧仕様の挙動も維持。
+    let entry = map.entry(key).or_insert(None);
+    let should = match *entry {
+        None => true,
+        Some(prev) => now.duration_since(prev).as_secs() >= debounce,
+    };
+    if should {
+        *entry = Some(now);
         true
     } else {
         log::debug!(
