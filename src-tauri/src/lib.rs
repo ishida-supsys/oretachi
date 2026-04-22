@@ -1057,6 +1057,11 @@ pub fn run() {
                     // recreate は spawn 内のタスクから書き戻すため AtomicBool。
                     let mut reload_attempted = false;
                     let recreate_attempted = Arc::new(AtomicBool::new(false));
+                    // recreate 世代カウンタ。新規 recreate 発火または pong 復帰で +1 し、
+                    // spawn 内のバックオフタイマーが「自分が起動した世代」と一致するときだけ
+                    // フラグをリセットする。これで「タイマーAが残存中にタスクBが新たな
+                    // recreate を spawn → タイマーAがBの状態を上書きして false に戻す」race を防ぐ。
+                    let recreate_generation = Arc::new(AtomicU64::new(0));
                     loop {
                         tokio::time::sleep(Duration::from_secs(30)).await;
                         let now_ms = SystemTime::now()
@@ -1070,6 +1075,8 @@ pub fn run() {
                             unresponsive_logged_until_secs = 0;
                             reload_attempted = false;
                             recreate_attempted.store(false, Ordering::Relaxed);
+                            // 残存している recreate バックオフタスクを世代カウンタで invalidate
+                            recreate_generation.fetch_add(1, Ordering::Relaxed);
                         }
                         // クリアされずに残っている場合のみ本当の未応答と判定
                         if let Some(pending_since) = ping_pending_since {
@@ -1127,12 +1134,15 @@ pub fn run() {
                             // 30s loop と相まって過度な連発を避けつつ復旧不能を防ぐ。
                             if !recreate_attempted.load(Ordering::Relaxed) && unresponsive_secs >= 95 {
                                 recreate_attempted.store(true, Ordering::Relaxed);
+                                // 自世代を確定して spawn 内に持ち込む。fetch_add は古い値を返すため +1。
+                                let my_gen = recreate_generation.fetch_add(1, Ordering::Relaxed) + 1;
                                 log::warn!(
-                                    "[heartbeat] reload ineffective, attempting main webview recreate (unresponsive={}s)",
-                                    unresponsive_secs
+                                    "[heartbeat] reload ineffective, attempting main webview recreate (unresponsive={}s gen={})",
+                                    unresponsive_secs, my_gen
                                 );
                                 let recreate_handle = ping_handle.clone();
                                 let recreate_attempted_inner = recreate_attempted.clone();
+                                let recreate_generation_inner = recreate_generation.clone();
                                 tauri::async_runtime::spawn(async move {
                                     let main_cfg = recreate_handle
                                         .config()
@@ -1145,9 +1155,11 @@ pub fn run() {
                                         log::error!(
                                             "[heartbeat] recreate: main window config not found in tauri.conf.json"
                                         );
-                                        // バックオフ後リトライ可能にする
+                                        // バックオフ後、世代一致時のみリトライ可能に戻す
                                         tokio::time::sleep(Duration::from_secs(60)).await;
-                                        recreate_attempted_inner.store(false, Ordering::Relaxed);
+                                        if recreate_generation_inner.load(Ordering::Relaxed) == my_gen {
+                                            recreate_attempted_inner.store(false, Ordering::Relaxed);
+                                        }
                                         return;
                                     };
 
@@ -1192,17 +1204,21 @@ pub fn run() {
                                             if let Err(e) = new_window.set_focus() {
                                                 log::warn!("[heartbeat] recreate: set_focus failed: {}", e);
                                             }
-                                            log::info!("[heartbeat] recreate: main webview rebuilt and shown");
+                                            log::info!("[heartbeat] recreate: main webview rebuilt and shown (gen={})", my_gen);
                                             // 成功確定後の dead-end 救済: 新窓のフロント bundle ロード
                                             // 失敗 / pong listener 登録到達前のエラーで pong が永久に
                                             // 戻らないケースに備え、300秒経っても pong 復帰しなければ
                                             // フラグを false に戻して再試行可能にする。
                                             // 通常は pong 復帰で即 false にリセットされる経路の方が
                                             // 先に走るため、このタイマーは保険として機能する。
+                                            // 自世代と一致するときだけ書き戻し、別 recreate に巻き込まれないようにする。
                                             tokio::time::sleep(Duration::from_secs(300)).await;
-                                            if recreate_attempted_inner.load(Ordering::Relaxed) {
+                                            if recreate_generation_inner.load(Ordering::Relaxed) == my_gen
+                                                && recreate_attempted_inner.load(Ordering::Relaxed)
+                                            {
                                                 log::warn!(
-                                                    "[heartbeat] recreate: 300s elapsed without pong recovery, allowing retry"
+                                                    "[heartbeat] recreate: 300s elapsed without pong recovery (gen={}), allowing retry",
+                                                    my_gen
                                                 );
                                                 recreate_attempted_inner.store(false, Ordering::Relaxed);
                                             }
@@ -1210,9 +1226,12 @@ pub fn run() {
                                         Err(e) => {
                                             log::error!("[heartbeat] recreate: build failed: {}", e);
                                             // 失敗 → 60秒後にリトライ可能に戻す（連発を抑制）。
+                                            // 自世代と一致するときだけ書き戻す。
                                             tokio::time::sleep(Duration::from_secs(60)).await;
-                                            recreate_attempted_inner.store(false, Ordering::Relaxed);
-                                            log::info!("[heartbeat] recreate: backoff elapsed, retry allowed");
+                                            if recreate_generation_inner.load(Ordering::Relaxed) == my_gen {
+                                                recreate_attempted_inner.store(false, Ordering::Relaxed);
+                                                log::info!("[heartbeat] recreate: backoff elapsed (gen={}), retry allowed", my_gen);
+                                            }
                                         }
                                     }
                                 });
