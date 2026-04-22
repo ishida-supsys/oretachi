@@ -63,27 +63,34 @@ pub struct McpServerManager {
     /// (WebView IPC を使うと UIスレッドに負荷がかかるため broadcast channel を使用)
     pub hook_tx: broadcast::Sender<NotifyWorktreeEvent>,
     /// 通知の rate limiting: (worktree_name, kind) → 最終送信時刻
-    /// hook: 3秒、approval/general/completed/他: 1秒 debounce で
-    /// WebView イベントキューの過剰蓄積を防ぐ
+    /// hook: 3秒、approval: 1秒 debounce。general/completed や任意の kind は
+    /// debounce しない（MCP クライアントの意図的な通知を握り潰さないため）
     notify_last_sent: Mutex<HashMap<(String, String), std::time::Instant>>,
 }
 
-/// kind ごとの debounce 秒数
-fn notify_debounce_secs(kind: &str) -> u64 {
+/// kind ごとの debounce 秒数。None の kind は debounce しない（毎回送信）。
+///
+/// hook/approval は短時間に大量発火する可能性があり WebView イベントキューを
+/// 圧迫するため debounce する。general/completed や任意のカスタム kind は
+/// MCP クライアントの意図的な通知のため握り潰さない。
+fn notify_debounce_secs(kind: &str) -> Option<u64> {
     match kind {
-        "hook" => 3,
-        _ => 1,
+        "hook" => Some(3),
+        "approval" => Some(1),
+        _ => None,
     }
 }
 
 /// worktree_name × kind の組み合わせで debounce 判定する。
-/// true を返したら送信すべき（前回送信から debounce 秒数以上経過）。
+/// true を返したら送信すべき（前回送信から debounce 秒数以上経過、または対象外 kind）。
 fn should_send_notify(
     last_sent: &Mutex<HashMap<(String, String), std::time::Instant>>,
     worktree_name: &str,
     kind: &str,
 ) -> bool {
-    let debounce = notify_debounce_secs(kind);
+    let Some(debounce) = notify_debounce_secs(kind) else {
+        return true;
+    };
     let mut map = last_sent.lock().unwrap_or_else(|e| e.into_inner());
     let now = std::time::Instant::now();
     let key = (worktree_name.to_string(), kind.to_string());
@@ -94,6 +101,10 @@ fn should_send_notify(
         *entry = now;
         true
     } else {
+        log::debug!(
+            "[notify] debounced worktree={} kind={} (window={}s)",
+            worktree_name, kind, debounce
+        );
         false
     }
 }
@@ -723,7 +734,7 @@ impl NotifyService {
             agent: None,
         };
         let manager = self.app_handle.state::<McpServerManager>();
-        // HTTP 経路と同じ (worktree, kind) debounce を適用して WebView 負荷を抑える
+        // HTTP 経路と同じ debounce ポリシー (hook=3s, approval=1s, 他は対象外) を適用
         let should_send = should_send_notify(&manager.notify_last_sent, &event.worktree_name, &event.kind);
         if !should_send {
             return Ok(CallToolResult::success(vec![Content::text("ok")]));
@@ -1023,8 +1034,8 @@ async fn notify_handler(
     log::info!("[notify] worktree={} kind={}", payload.worktree, event.kind);
 
     let manager = app_handle.state::<McpServerManager>();
-    // hook: 3秒、それ以外: 1秒 debounce で (worktree, kind) 単位に送信制限。
-    // WebView IPC キューの過剰蓄積とメインスレッド負荷を抑える。
+    // hook: 3秒 / approval: 1秒 で (worktree, kind) 単位に送信制限。
+    // それ以外の kind (general/completed/任意) は debounce 対象外で常に通す。
     let should_send = should_send_notify(&manager.notify_last_sent, &event.worktree_name, &event.kind);
     if !should_send {
         return StatusCode::OK;

@@ -990,7 +990,7 @@ pub fn run() {
             // Webview ハング診断: heartbeat ループ（30秒間隔で ping → pong のラウンドトリップ計測）
             {
                 use std::sync::Arc;
-                use std::sync::atomic::{AtomicU64, Ordering};
+                use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
                 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
                 let last_pong_ms = Arc::new(AtomicU64::new(0));
@@ -1054,8 +1054,9 @@ pub fn run() {
                     let mut ping_pending_since: Option<u64> = None;
                     let mut unresponsive_logged_until_secs: u64 = 0;
                     // reload() / 再作成が効いたかを追跡するフラグ。pong 復帰で reset。
+                    // recreate は spawn 内のタスクから書き戻すため AtomicBool。
                     let mut reload_attempted = false;
-                    let mut recreate_attempted = false;
+                    let recreate_attempted = Arc::new(AtomicBool::new(false));
                     loop {
                         tokio::time::sleep(Duration::from_secs(30)).await;
                         let now_ms = SystemTime::now()
@@ -1068,7 +1069,7 @@ pub fn run() {
                             ping_pending_since = None;
                             unresponsive_logged_until_secs = 0;
                             reload_attempted = false;
-                            recreate_attempted = false;
+                            recreate_attempted.store(false, Ordering::Relaxed);
                         }
                         // クリアされずに残っている場合のみ本当の未応答と判定
                         if let Some(pending_since) = ping_pending_since {
@@ -1116,17 +1117,22 @@ pub fn run() {
                             }
 
                             // 第2段階（95s 未応答）: reload が効かなかった場合は WebView ウィンドウ
-                            // 自体を close → tauri.conf.json の設定から再作成する。WebView2 プロセス
+                            // 自体を destroy → tauri.conf.json の設定から再作成する。WebView2 プロセス
                             // 自身が応答不能な場合、reload メッセージが届かずこの段階に到達する。
                             // PTY セッションは kill しない（既存挙動）。フロントは再マウント時に
                             // TerminalView.initialSessionId 経由で既存セッションに再 attach する。
-                            if !recreate_attempted && unresponsive_secs >= 95 {
-                                recreate_attempted = true;
+                            //
+                            // recreate_attempted は spawn 内タスクから成功/失敗に応じて書き戻す。
+                            // 失敗時は 60s 後に false にリセットしてリトライ可能にし、成功までは
+                            // 30s loop と相まって過度な連発を避けつつ復旧不能を防ぐ。
+                            if !recreate_attempted.load(Ordering::Relaxed) && unresponsive_secs >= 95 {
+                                recreate_attempted.store(true, Ordering::Relaxed);
                                 log::warn!(
                                     "[heartbeat] reload ineffective, attempting main webview recreate (unresponsive={}s)",
                                     unresponsive_secs
                                 );
                                 let recreate_handle = ping_handle.clone();
+                                let recreate_attempted_inner = recreate_attempted.clone();
                                 tauri::async_runtime::spawn(async move {
                                     let main_cfg = recreate_handle
                                         .config()
@@ -1139,33 +1145,62 @@ pub fn run() {
                                         log::error!(
                                             "[heartbeat] recreate: main window config not found in tauri.conf.json"
                                         );
+                                        // バックオフ後リトライ可能にする
+                                        tokio::time::sleep(Duration::from_secs(60)).await;
+                                        recreate_attempted_inner.store(false, Ordering::Relaxed);
                                         return;
                                     };
 
-                                    // 旧ウィンドウを閉じる。close() が効かないほど詰まっている場合は
-                                    // エラーになるが、そのまま再作成を試みる（同ラベル衝突は後段で検知）。
+                                    // 旧ウィンドウを destroy で強制破棄。close() は CloseRequested
+                                    // イベント経由のソフトクローズで race の余地があるため避ける。
                                     if let Some(old) = recreate_handle.get_webview_window("main") {
-                                        if let Err(e) = old.close() {
-                                            log::error!("[heartbeat] recreate: close old window failed: {}", e);
+                                        if let Err(e) = old.destroy() {
+                                            log::error!("[heartbeat] recreate: destroy old window failed: {}", e);
                                         } else {
-                                            log::info!("[heartbeat] recreate: old window close requested");
+                                            log::info!("[heartbeat] recreate: old window destroyed");
                                         }
                                     }
 
-                                    // close が反映されるまで少し待つ
-                                    tokio::time::sleep(Duration::from_millis(800)).await;
+                                    // label 解放を待つ
+                                    tokio::time::sleep(Duration::from_millis(500)).await;
 
-                                    match tauri::WebviewWindowBuilder::from_config(&recreate_handle, &cfg) {
-                                        Ok(builder) => match builder.build() {
-                                            Ok(_) => {
-                                                log::info!("[heartbeat] recreate: main webview rebuilt");
-                                            }
-                                            Err(e) => {
-                                                log::error!("[heartbeat] recreate: build failed: {}", e);
-                                            }
-                                        },
+                                    // build を試行。WindowLabelAlreadyExists は label 解放前のため、
+                                    // 1秒追加で待ってもう一度試す。
+                                    let try_build = |handle: &tauri::AppHandle, cfg: &tauri::utils::config::WindowConfig| -> Result<tauri::WebviewWindow, String> {
+                                        tauri::WebviewWindowBuilder::from_config(handle, cfg)
+                                            .map_err(|e| format!("from_config: {}", e))?
+                                            .build()
+                                            .map_err(|e| format!("build: {}", e))
+                                    };
+
+                                    let result = match try_build(&recreate_handle, &cfg) {
+                                        Ok(w) => Ok(w),
                                         Err(e) => {
-                                            log::error!("[heartbeat] recreate: builder from_config failed: {}", e);
+                                            log::warn!("[heartbeat] recreate: first attempt failed ({}), retry after 1s", e);
+                                            tokio::time::sleep(Duration::from_secs(1)).await;
+                                            try_build(&recreate_handle, &cfg)
+                                        }
+                                    };
+
+                                    match result {
+                                        Ok(new_window) => {
+                                            // tauri.conf.json で visible:false のため明示的に show する。
+                                            // setup() (lib.rs の通常起動経路) と同じ振る舞いに揃える。
+                                            if let Err(e) = new_window.show() {
+                                                log::error!("[heartbeat] recreate: show failed: {}", e);
+                                            }
+                                            if let Err(e) = new_window.set_focus() {
+                                                log::warn!("[heartbeat] recreate: set_focus failed: {}", e);
+                                            }
+                                            log::info!("[heartbeat] recreate: main webview rebuilt and shown");
+                                            // 成功フラグはそのまま true。pong 復帰で false に戻る。
+                                        }
+                                        Err(e) => {
+                                            log::error!("[heartbeat] recreate: build failed: {}", e);
+                                            // 失敗 → 60秒後にリトライ可能に戻す（連発を抑制）。
+                                            tokio::time::sleep(Duration::from_secs(60)).await;
+                                            recreate_attempted_inner.store(false, Ordering::Relaxed);
+                                            log::info!("[heartbeat] recreate: backoff elapsed, retry allowed");
                                         }
                                     }
                                 });
