@@ -62,8 +62,40 @@ pub struct McpServerManager {
     /// hook 通知をWebView IPCを経由せずMCPピアへ直接配信するチャネル
     /// (WebView IPC を使うと UIスレッドに負荷がかかるため broadcast channel を使用)
     pub hook_tx: broadcast::Sender<NotifyWorktreeEvent>,
-    /// hook 通知の rate limiting: worktree ごとの最終通知時刻
-    hook_last_sent: Mutex<HashMap<String, std::time::Instant>>,
+    /// 通知の rate limiting: (worktree_name, kind) → 最終送信時刻
+    /// hook: 3秒、approval/general/completed/他: 1秒 debounce で
+    /// WebView イベントキューの過剰蓄積を防ぐ
+    notify_last_sent: Mutex<HashMap<(String, String), std::time::Instant>>,
+}
+
+/// kind ごとの debounce 秒数
+fn notify_debounce_secs(kind: &str) -> u64 {
+    match kind {
+        "hook" => 3,
+        _ => 1,
+    }
+}
+
+/// worktree_name × kind の組み合わせで debounce 判定する。
+/// true を返したら送信すべき（前回送信から debounce 秒数以上経過）。
+fn should_send_notify(
+    last_sent: &Mutex<HashMap<(String, String), std::time::Instant>>,
+    worktree_name: &str,
+    kind: &str,
+) -> bool {
+    let debounce = notify_debounce_secs(kind);
+    let mut map = last_sent.lock().unwrap_or_else(|e| e.into_inner());
+    let now = std::time::Instant::now();
+    let key = (worktree_name.to_string(), kind.to_string());
+    let entry = map
+        .entry(key)
+        .or_insert_with(|| now - std::time::Duration::from_secs(debounce + 1));
+    if now.duration_since(*entry).as_secs() >= debounce {
+        *entry = now;
+        true
+    } else {
+        false
+    }
 }
 
 impl McpServerManager {
@@ -78,7 +110,7 @@ impl McpServerManager {
             added_listener_id: Mutex::new(None),
             notify_listener_id: Mutex::new(None),
             hook_tx: broadcast::channel::<NotifyWorktreeEvent>(256).0,
-            hook_last_sent: Mutex::new(HashMap::new()),
+            notify_last_sent: Mutex::new(HashMap::new()),
         }
     }
 
@@ -690,9 +722,14 @@ impl NotifyService {
             body,
             agent: None,
         };
+        let manager = self.app_handle.state::<McpServerManager>();
+        // HTTP 経路と同じ (worktree, kind) debounce を適用して WebView 負荷を抑える
+        let should_send = should_send_notify(&manager.notify_last_sent, &event.worktree_name, &event.kind);
+        if !should_send {
+            return Ok(CallToolResult::success(vec![Content::text("ok")]));
+        }
         if event.kind == "hook" {
             // hook イベントは broadcast channel 経由で MCP ピアに直接送信する（WebView IPC をバイパス）
-            let manager = self.app_handle.state::<McpServerManager>();
             let _ = manager.hook_tx.send(event);
             Ok(CallToolResult::success(vec![Content::text("ok")]))
         } else {
@@ -985,28 +1022,19 @@ async fn notify_handler(
     };
     log::info!("[notify] worktree={} kind={}", payload.worktree, event.kind);
 
+    let manager = app_handle.state::<McpServerManager>();
+    // hook: 3秒、それ以外: 1秒 debounce で (worktree, kind) 単位に送信制限。
+    // WebView IPC キューの過剰蓄積とメインスレッド負荷を抑える。
+    let should_send = should_send_notify(&manager.notify_last_sent, &event.worktree_name, &event.kind);
+    if !should_send {
+        return StatusCode::OK;
+    }
+
     if event.kind == "hook" {
         // hook 通知は WebView IPC を経由せず broadcast channel で直接 MCP ピアへ配信。
         // app_handle.emit() は WebView UIスレッドを経由するため、高頻度の hook 通知では
         // UIスレッドへの負荷が累積しフリーズの原因になる。
-        //
-        // さらに同一 worktree の hook 通知を 3秒間デバウンスして MCP ピアへの過剰送信を防ぐ。
-        const HOOK_DEBOUNCE_SECS: u64 = 3;
-        let manager = app_handle.state::<McpServerManager>();
-        let should_send = {
-            let mut last_sent = manager.hook_last_sent.lock().unwrap_or_else(|e| e.into_inner());
-            let now = std::time::Instant::now();
-            let entry = last_sent.entry(event.worktree_name.clone()).or_insert_with(|| now - std::time::Duration::from_secs(HOOK_DEBOUNCE_SECS + 1));
-            if now.duration_since(*entry).as_secs() >= HOOK_DEBOUNCE_SECS {
-                *entry = now;
-                true
-            } else {
-                false
-            }
-        };
-        if should_send {
-            let _ = manager.hook_tx.send(event);
-        }
+        let _ = manager.hook_tx.send(event);
         StatusCode::OK
     } else {
         match app_handle.emit("notify-worktree", &event) {

@@ -612,8 +612,8 @@ impl PtyManager {
         Ok(())
     }
 
-    pub fn kill(&self, session_id: u32) -> Result<(), String> {
-        log::debug!("[Terminal] pty_manager::kill session_id={}", session_id);
+    pub fn kill(&self, session_id: u32, source: &str) -> Result<(), String> {
+        log::info!("[Terminal] pty_manager::kill session_id={} source={}", session_id, source);
         // sessions ロックのスコープを最小化: remove + alive=false の設定のみ行い、
         // 重い処理（taskkill, join）はロック外で実行する。
         // taskkill /F /T は Windows 上で数秒かかることがあり、ロック保持中に実行すると
@@ -652,12 +652,13 @@ impl PtyManager {
         Ok(())
     }
 
-    pub fn kill_all(&self) {
+    pub fn kill_all(&self, source: &str) {
         let ids: Vec<u32> = self.sessions.lock()
             .unwrap_or_else(|e| e.into_inner())
             .keys().cloned().collect();
+        log::info!("[Terminal] pty_manager::kill_all source={} count={}", source, ids.len());
         for id in ids {
-            let _ = self.kill(id);
+            let _ = self.kill(id, source);
         }
     }
 
@@ -682,8 +683,8 @@ impl PtyManager {
                 .collect()
         };
         for id in &ids {
-            log::info!("[Terminal] kill_sessions_in_dir: killing session {} (worktree={})", id, dir);
-            let _ = self.kill(*id);
+            let source = format!("kill_sessions_in_dir(worktree={})", dir);
+            let _ = self.kill(*id, &source);
         }
         ids.len()
     }
@@ -702,7 +703,7 @@ impl Drop for PtyManager {
             Err(e) => !e.into_inner().is_empty(),
         };
         if has_sessions {
-            self.kill_all();
+            self.kill_all("PtyManager::drop");
         }
     }
 }
