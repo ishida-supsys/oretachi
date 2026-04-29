@@ -1,7 +1,28 @@
 use crate::ai_provider::{self, AiAgentKind};
 use crate::process_utils::CancellableManager;
 use crate::settings::SettingsManager;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tauri::{Manager, State};
+
+/// 実行中の judge_approval の同時進行数。heartbeat 診断で参照する。
+pub static AI_JUDGING_IN_FLIGHT: AtomicUsize = AtomicUsize::new(0);
+
+pub fn ai_in_flight() -> usize {
+    AI_JUDGING_IN_FLIGHT.load(Ordering::Relaxed)
+}
+
+struct InFlightGuard;
+impl InFlightGuard {
+    fn acquire() -> Self {
+        AI_JUDGING_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+        Self
+    }
+}
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        AI_JUDGING_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    }
+}
 
 
 const PROMPT_TEMPLATE: &str = r#"You are a safety gate preventing risky auto-approvals of CLI actions.
@@ -70,6 +91,9 @@ pub async fn judge_approval(
     if state.is_in_progress(&worktree_id)? {
         return Err("already in progress".to_string());
     }
+
+    // 同時進行数カウンタ: early return 後・エラー後を含め Drop で必ず減算
+    let _in_flight = InFlightGuard::acquire();
 
     let additional = additional_prompt
         .filter(|s| !s.is_empty())

@@ -75,7 +75,8 @@ fn pty_resize(state: State<PtyManager>, session_id: u32, rows: u16, cols: u16) -
 
 #[tauri::command]
 fn pty_kill(state: State<PtyManager>, session_id: u32) -> Result<(), String> {
-    state.kill(session_id)
+    log::info!("[Terminal] cmd::pty_kill session_id={} source=webview-invoke", session_id);
+    state.kill(session_id, "webview-invoke")
 }
 
 #[tauri::command]
@@ -989,7 +990,7 @@ pub fn run() {
             // Webview ハング診断: heartbeat ループ（30秒間隔で ping → pong のラウンドトリップ計測）
             {
                 use std::sync::Arc;
-                use std::sync::atomic::{AtomicU64, Ordering};
+                use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
                 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
                 let last_pong_ms = Arc::new(AtomicU64::new(0));
@@ -1023,15 +1024,16 @@ pub fn run() {
                         let rtt = now_ms.saturating_sub(payload.ts);
                         let mem_mb = payload.mem.unwrap_or(0) / 1024 / 1024;
                         let blocked_ms = payload.blocked_ms.unwrap_or(0);
+                        let ai_in_flight = crate::ai_judge::ai_in_flight();
                         if let Some(t) = &payload.terminals {
                             log::debug!(
-                                "[heartbeat] pong rtt={}ms mem={}MB blockedMs={} terminals(active={} mounts={} unmounts={})",
-                                rtt, mem_mb, blocked_ms, t.active, t.total_mounts, t.total_unmounts
+                                "[heartbeat] pong rtt={}ms mem={}MB blockedMs={} aiInFlight={} terminals(active={} mounts={} unmounts={})",
+                                rtt, mem_mb, blocked_ms, ai_in_flight, t.active, t.total_mounts, t.total_unmounts
                             );
                         } else {
                             log::debug!(
-                                "[heartbeat] pong rtt={}ms mem={}MB blockedMs={}",
-                                rtt, mem_mb, blocked_ms
+                                "[heartbeat] pong rtt={}ms mem={}MB blockedMs={} aiInFlight={}",
+                                rtt, mem_mb, blocked_ms, ai_in_flight
                             );
                         }
                         if rtt > 5000 {
@@ -1051,6 +1053,15 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     let mut ping_pending_since: Option<u64> = None;
                     let mut unresponsive_logged_until_secs: u64 = 0;
+                    // reload() / 再作成が効いたかを追跡するフラグ。pong 復帰で reset。
+                    // recreate は spawn 内のタスクから書き戻すため AtomicBool。
+                    let mut reload_attempted = false;
+                    let recreate_attempted = Arc::new(AtomicBool::new(false));
+                    // recreate 世代カウンタ。新規 recreate 発火または pong 復帰で +1 し、
+                    // spawn 内のバックオフタイマーが「自分が起動した世代」と一致するときだけ
+                    // フラグをリセットする。これで「タイマーAが残存中にタスクBが新たな
+                    // recreate を spawn → タイマーAがBの状態を上書きして false に戻す」race を防ぐ。
+                    let recreate_generation = Arc::new(AtomicU64::new(0));
                     loop {
                         tokio::time::sleep(Duration::from_secs(30)).await;
                         let now_ms = SystemTime::now()
@@ -1062,6 +1073,10 @@ pub fn run() {
                         if last_pong > 0 && now_ms.saturating_sub(last_pong) < 35_000 {
                             ping_pending_since = None;
                             unresponsive_logged_until_secs = 0;
+                            reload_attempted = false;
+                            recreate_attempted.store(false, Ordering::Relaxed);
+                            // 残存している recreate バックオフタスクを世代カウンタで invalidate
+                            recreate_generation.fetch_add(1, Ordering::Relaxed);
                         }
                         // クリアされずに残っている場合のみ本当の未応答と判定
                         if let Some(pending_since) = ping_pending_since {
@@ -1079,8 +1094,9 @@ pub fn run() {
                             };
                             if should_log {
                                 log::error!(
-                                    "[heartbeat] webview unresponsive, no pong for {}s",
-                                    unresponsive_secs
+                                    "[heartbeat] webview unresponsive, no pong for {}s aiInFlight={}",
+                                    unresponsive_secs,
+                                    crate::ai_judge::ai_in_flight()
                                 );
                                 if unresponsive_secs >= 300 {
                                     unresponsive_logged_until_secs = 300;
@@ -1088,13 +1104,13 @@ pub fn run() {
                                     unresponsive_logged_until_secs = 180;
                                 }
                             }
-                            // 最初の unresponsive 検出時にメインウィンドウの強制リロードを試みる。
-                            // eval("location.reload()") は JS タスクキュー経由のため、
-                            // JS メインスレッドが詰まっていると実行されない。
-                            // WebviewWindow::reload() は Tauri runtime 経由で UI スレッドに
-                            // post され、wry から ICoreWebView2::Reload() をネイティブ呼び出しするため、
-                            // JS がブロック状態でも復帰できる。
-                            if unresponsive_secs < 35 {
+                            // 第1段階（30s 未応答）: メインウィンドウの強制リロードを試みる。
+                            // eval("location.reload()") は JS タスクキュー経由のため、JS メインスレッド
+                            // が詰まっていると実行されない。WebviewWindow::reload() は Tauri runtime
+                            // 経由で UI スレッドに post され、wry から ICoreWebView2::Reload() をネイ
+                            // ティブ呼び出しするため、JS がブロック状態でも復帰できる場合がある。
+                            if !reload_attempted && unresponsive_secs < 35 {
+                                reload_attempted = true;
                                 log::warn!("[heartbeat] attempting webview reload to recover from hang");
                                 for (label, webview) in ping_handle.webview_windows() {
                                     if label == "main" {
@@ -1105,6 +1121,120 @@ pub fn run() {
                                         }
                                     }
                                 }
+                            }
+
+                            // 第2段階（95s 未応答）: reload が効かなかった場合は WebView ウィンドウ
+                            // 自体を destroy → tauri.conf.json の設定から再作成する。WebView2 プロセス
+                            // 自身が応答不能な場合、reload メッセージが届かずこの段階に到達する。
+                            // PTY セッションは kill しない（既存挙動）。フロントは再マウント時に
+                            // TerminalView.initialSessionId 経由で既存セッションに再 attach する。
+                            //
+                            // recreate_attempted は spawn 内タスクから成功/失敗に応じて書き戻す。
+                            // 失敗時は 60s 後に false にリセットしてリトライ可能にし、成功までは
+                            // 30s loop と相まって過度な連発を避けつつ復旧不能を防ぐ。
+                            if !recreate_attempted.load(Ordering::Relaxed) && unresponsive_secs >= 95 {
+                                recreate_attempted.store(true, Ordering::Relaxed);
+                                // 自世代を確定して spawn 内に持ち込む。fetch_add は古い値を返すため +1。
+                                let my_gen = recreate_generation.fetch_add(1, Ordering::Relaxed) + 1;
+                                log::warn!(
+                                    "[heartbeat] reload ineffective, attempting main webview recreate (unresponsive={}s gen={})",
+                                    unresponsive_secs, my_gen
+                                );
+                                let recreate_handle = ping_handle.clone();
+                                let recreate_attempted_inner = recreate_attempted.clone();
+                                let recreate_generation_inner = recreate_generation.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    let main_cfg = recreate_handle
+                                        .config()
+                                        .app
+                                        .windows
+                                        .iter()
+                                        .find(|w| w.label == "main")
+                                        .cloned();
+                                    let Some(cfg) = main_cfg else {
+                                        log::error!(
+                                            "[heartbeat] recreate: main window config not found in tauri.conf.json"
+                                        );
+                                        // バックオフ後、世代一致時のみリトライ可能に戻す
+                                        tokio::time::sleep(Duration::from_secs(60)).await;
+                                        if recreate_generation_inner.load(Ordering::Relaxed) == my_gen {
+                                            recreate_attempted_inner.store(false, Ordering::Relaxed);
+                                        }
+                                        return;
+                                    };
+
+                                    // 旧ウィンドウを destroy で強制破棄。close() は CloseRequested
+                                    // イベント経由のソフトクローズで race の余地があるため避ける。
+                                    if let Some(old) = recreate_handle.get_webview_window("main") {
+                                        if let Err(e) = old.destroy() {
+                                            log::error!("[heartbeat] recreate: destroy old window failed: {}", e);
+                                        } else {
+                                            log::info!("[heartbeat] recreate: old window destroyed");
+                                        }
+                                    }
+
+                                    // label 解放を待つ
+                                    tokio::time::sleep(Duration::from_millis(500)).await;
+
+                                    // build を試行。WindowLabelAlreadyExists は label 解放前のため、
+                                    // 1秒追加で待ってもう一度試す。
+                                    let try_build = |handle: &tauri::AppHandle, cfg: &tauri::utils::config::WindowConfig| -> Result<tauri::WebviewWindow, String> {
+                                        tauri::WebviewWindowBuilder::from_config(handle, cfg)
+                                            .map_err(|e| format!("from_config: {}", e))?
+                                            .build()
+                                            .map_err(|e| format!("build: {}", e))
+                                    };
+
+                                    let result = match try_build(&recreate_handle, &cfg) {
+                                        Ok(w) => Ok(w),
+                                        Err(e) => {
+                                            log::warn!("[heartbeat] recreate: first attempt failed ({}), retry after 1s", e);
+                                            tokio::time::sleep(Duration::from_secs(1)).await;
+                                            try_build(&recreate_handle, &cfg)
+                                        }
+                                    };
+
+                                    match result {
+                                        Ok(new_window) => {
+                                            // tauri.conf.json で visible:false のため明示的に show する。
+                                            // setup() (lib.rs の通常起動経路) と同じ振る舞いに揃える。
+                                            if let Err(e) = new_window.show() {
+                                                log::error!("[heartbeat] recreate: show failed: {}", e);
+                                            }
+                                            if let Err(e) = new_window.set_focus() {
+                                                log::warn!("[heartbeat] recreate: set_focus failed: {}", e);
+                                            }
+                                            log::info!("[heartbeat] recreate: main webview rebuilt and shown (gen={})", my_gen);
+                                            // 成功確定後の dead-end 救済: 新窓のフロント bundle ロード
+                                            // 失敗 / pong listener 登録到達前のエラーで pong が永久に
+                                            // 戻らないケースに備え、300秒経っても pong 復帰しなければ
+                                            // フラグを false に戻して再試行可能にする。
+                                            // 通常は pong 復帰で即 false にリセットされる経路の方が
+                                            // 先に走るため、このタイマーは保険として機能する。
+                                            // 自世代と一致するときだけ書き戻し、別 recreate に巻き込まれないようにする。
+                                            tokio::time::sleep(Duration::from_secs(300)).await;
+                                            if recreate_generation_inner.load(Ordering::Relaxed) == my_gen
+                                                && recreate_attempted_inner.load(Ordering::Relaxed)
+                                            {
+                                                log::warn!(
+                                                    "[heartbeat] recreate: 300s elapsed without pong recovery (gen={}), allowing retry",
+                                                    my_gen
+                                                );
+                                                recreate_attempted_inner.store(false, Ordering::Relaxed);
+                                            }
+                                        }
+                                        Err(e) => {
+                                            log::error!("[heartbeat] recreate: build failed: {}", e);
+                                            // 失敗 → 60秒後にリトライ可能に戻す（連発を抑制）。
+                                            // 自世代と一致するときだけ書き戻す。
+                                            tokio::time::sleep(Duration::from_secs(60)).await;
+                                            if recreate_generation_inner.load(Ordering::Relaxed) == my_gen {
+                                                recreate_attempted_inner.store(false, Ordering::Relaxed);
+                                                log::info!("[heartbeat] recreate: backoff elapsed (gen={}), retry allowed", my_gen);
+                                            }
+                                        }
+                                    }
+                                });
                             }
                         }
                         match ping_handle.emit("__webview-heartbeat-ping", serde_json::json!({ "ts": now_ms })) {
@@ -1144,7 +1274,7 @@ pub fn run() {
     app.run(move |app_handle, event| {
         if let tauri::RunEvent::Exit = event {
             let pty_manager = app_handle.state::<PtyManager>();
-            pty_manager.kill_all();
+            pty_manager.kill_all("app-exit");
             let mcp_manager = app_handle.state::<mcp_server::McpServerManager>();
             mcp_manager.stop();
             if mcp_enabled {
