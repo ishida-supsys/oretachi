@@ -6,6 +6,20 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.19.10] - 2026-04-29
+
+### Fixed
+- Add second-stage WebView recreate fallback when heartbeat is unresponsive for 95s (close + rebuild without killing PTY)
+- Require `source` on `pty_manager::kill` / `kill_all` so the issuer of `pty_kill` can be identified in logs
+- Add `AI_JUDGING_IN_FLIGHT` counter with `InFlightGuard` and surface `aiInFlight` in heartbeat pong/unresponsive logs
+- Extend MCP notify debounce key to `(worktree, kind)` and apply hook=3s only, leaving general/completed/custom kinds unthrottled to avoid swallowing intentional notifications
+- Skip AI judgment in `runApprovalLoop` when the last 60 lines show no approval prompt to reduce log noise
+- Call `show()` / `set_focus()` after WebView rebuild so the recreated window actually becomes visible
+- Make `recreate_attempted` an `Arc<AtomicBool>` and reset after 60s on failure / 300s on missing pong to prevent permanent dead-end after a failed or stalled recreation
+- Switch WebView teardown from `close()` to `destroy()` and retry build once after 1s to avoid wry async-destroy race
+- Track MCP notify last-sent timestamps as `Option<Instant>` to avoid theoretical underflow on Linux right after boot
+- Introduce a recreate generation counter so backoff timers from prior cycles cannot reset state set by a newer recreate cycle
+
 ## [0.19.9] - 2026-04-21
 
 ### Fixed
@@ -295,7 +309,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.19.9...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.19.10...HEAD
+[0.19.10]: https://github.com/ishida-supsys/oretachi/compare/0.19.9...0.19.10
 [0.19.9]: https://github.com/ishida-supsys/oretachi/compare/0.19.8...0.19.9
 [0.19.8]: https://github.com/ishida-supsys/oretachi/compare/0.19.7...0.19.8
 [0.19.7]: https://github.com/ishida-supsys/oretachi/compare/0.19.6...0.19.7
