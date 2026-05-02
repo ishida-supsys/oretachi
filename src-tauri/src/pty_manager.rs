@@ -688,6 +688,18 @@ impl PtyManager {
         }
         ids.len()
     }
+
+    /// 全 PTY セッションを (session_id, cwd, is_ai_agent) のタプル列で返す。
+    pub fn list_sessions(&self) -> Vec<(u32, Option<String>, bool)> {
+        let sessions = match self.sessions.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        sessions
+            .iter()
+            .map(|(id, s)| (*id, s.cwd.clone(), s.is_ai_agent))
+            .collect()
+    }
 }
 
 impl Drop for PtyManager {

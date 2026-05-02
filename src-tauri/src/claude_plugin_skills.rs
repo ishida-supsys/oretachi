@@ -59,4 +59,9 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
         "wireframe/templates/screens--screen.example.jsx",
         include_str!("../skills/wireframe/templates/screens--screen.example.jsx"),
     ),
+    // --- background-command ---
+    (
+        "background-command/SKILL.md",
+        include_str!("../skills/background-command/SKILL.md"),
+    ),
 ];

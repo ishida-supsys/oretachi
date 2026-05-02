@@ -989,6 +989,32 @@ onMounted(async () => {
     });
   });
 
+  // MCPからの新規ターミナル追加（pnpm dev など長時間バックグラウンドコマンド用）
+  await listen<{ worktree_id: string; worktree_name: string; command: string; title: string | null }>(
+    "mcp-spawn-terminal",
+    async (event) => {
+      const { worktree_id, command, title } = event.payload;
+      if (!worktrees.value.find((w) => w.id === worktree_id)) {
+        debug(`[Terminal] mcp-spawn-terminal: worktree ${worktree_id} not found, skipping`);
+        return;
+      }
+      const cmd = command.endsWith("\n") ? command : command + "\n";
+      pendingScripts.set(worktree_id, cmd);
+      try {
+        await onAddTerminal(worktree_id);
+      } catch (e) {
+        pendingScripts.delete(worktree_id);
+        debug(`[Terminal] mcp-spawn-terminal: onAddTerminal failed: ${e}`);
+        return;
+      }
+      if (title) {
+        const wt = worktrees.value.find((w) => w.id === worktree_id);
+        const newTerm = wt?.terminals[wt.terminals.length - 1];
+        if (newTerm) onTerminalTitleChange(worktree_id, newTerm.id, title);
+      }
+    },
+  );
+
   // サブウィンドウ準備完了 → init データをイベントで送信（サブウィンドウ復元より前に登録必須）
   await listen<{ worktreeId: string }>("sub-ready", async (event) => {
     const { worktreeId } = event.payload;

@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter, Listener, Manager};
 use tokio::sync::{broadcast, oneshot, watch, RwLock};
 
 use crate::git_worktree::get_git_remotes;
+use crate::pty_manager::PtyManager;
 use crate::settings::SettingsManager;
 
 const PORT_FILE: &str = "mcp-port";
@@ -306,6 +307,42 @@ struct CloseWorktreeEvent {
     merge_to: String,
     delete_branch: bool,
     force_branch: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SpawnTerminalParams {
+    #[schemars(description = "対象ワークツリーの名前")]
+    pub worktree_name: String,
+    #[schemars(description = "ワークツリーID（同名ワークツリーが複数ある場合に指定）")]
+    pub worktree_id: Option<String>,
+    #[schemars(description = "新規ターミナルで実行するコマンド（末尾改行は自動付与）")]
+    pub command: String,
+    #[schemars(description = "ターミナルタブのタイトル（省略時はデフォルト）")]
+    pub title: Option<String>,
+    #[schemars(description = "起動理由のメモ（ログ用、省略可）")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct SpawnTerminalEvent {
+    worktree_id: String,
+    worktree_name: String,
+    command: String,
+    title: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListTerminalsParams {
+    #[schemars(description = "絞り込みするワークツリー名（省略時は全ワークツリー横断）")]
+    pub worktree_name: Option<String>,
+    #[schemars(description = "ワークツリーID（同名ワークツリーが複数ある場合に指定）")]
+    pub worktree_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct KillTerminalParams {
+    #[schemars(description = "停止する PTY セッションID（oretachi_list_terminals で取得）")]
+    pub session_id: u32,
 }
 
 // ─── MCP Service ──────────────────────────────────────────────────────────────
@@ -988,6 +1025,145 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(
             "ワークツリーのクローズリクエストを送信しました。処理は非同期に行われます。",
         )]))
+    }
+
+    #[tool(description = "指定ワークツリーに新しいターミナルタブを追加し、与えられたコマンドを流し込む。pnpm dev / tauri dev / vite / next dev など長時間常駐するバックグラウンドコマンドを oretachi UI 上で起動するために使う")]
+    fn oretachi_spawn_terminal(
+        &self,
+        Parameters(SpawnTerminalParams { worktree_name, worktree_id, command, title, reason }): Parameters<SpawnTerminalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let worktree_name = worktree_name.trim().to_string();
+        if worktree_name.is_empty() {
+            return Err(McpError::invalid_params("worktree_name must not be empty", None));
+        }
+        if command.trim().is_empty() {
+            return Err(McpError::invalid_params("command must not be empty", None));
+        }
+
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+
+        let wt = if let Some(id) = worktree_id.as_deref() {
+            settings.worktrees.iter().find(|w| w.id == id).ok_or_else(|| {
+                McpError::invalid_params(format!("worktree id '{}' not found", id), None)
+            })?
+        } else {
+            let matches: Vec<_> = settings.worktrees.iter().filter(|w| w.name == worktree_name).collect();
+            match matches.len() {
+                0 => {
+                    let names: Vec<&str> = settings.worktrees.iter().map(|w| w.name.as_str()).collect();
+                    return Err(McpError::invalid_params(
+                        format!("worktree '{}' not found. available: [{}]", worktree_name, names.join(", ")),
+                        None,
+                    ));
+                }
+                1 => matches[0],
+                _ => {
+                    let ids: Vec<&str> = matches.iter().map(|w| w.id.as_str()).collect();
+                    return Err(McpError::invalid_params(
+                        format!("multiple worktrees named '{}'. specify worktree_id to disambiguate: [{}]", worktree_name, ids.join(", ")),
+                        None,
+                    ));
+                }
+            }
+        };
+
+        let event = SpawnTerminalEvent {
+            worktree_id: wt.id.clone(),
+            worktree_name: wt.name.clone(),
+            command: command.clone(),
+            title: title.clone(),
+        };
+        self.app_handle
+            .emit("mcp-spawn-terminal", &event)
+            .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
+        log::info!(
+            "[mcp] oretachi_spawn_terminal: worktree={} command={:?} title={:?} reason={:?}",
+            worktree_name, command, title, reason
+        );
+        Ok(CallToolResult::success(vec![Content::text(
+            "新規ターミナルの追加リクエストを送信しました。oretachi UI に新しいタブが追加され、コマンドが流し込まれます。",
+        )]))
+    }
+
+    #[tool(description = "現在の PTY セッション一覧を返す。session_id, cwd, isAiAgent, ワークツリー名/ID を含む。oretachi_kill_terminal を呼ぶ前の確認に使う")]
+    fn oretachi_list_terminals(
+        &self,
+        Parameters(ListTerminalsParams { worktree_name, worktree_id }): Parameters<ListTerminalsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let pty = self.app_handle.state::<PtyManager>();
+        let raw = pty.list_sessions();
+
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+
+        let filter_id: Option<String> = if let Some(id) = worktree_id.as_deref() {
+            if !settings.worktrees.iter().any(|w| w.id == id) {
+                return Err(McpError::invalid_params(format!("worktree id '{}' not found", id), None));
+            }
+            Some(id.to_string())
+        } else if let Some(name) = worktree_name.as_deref() {
+            let matches: Vec<_> = settings.worktrees.iter().filter(|w| w.name == name).collect();
+            match matches.len() {
+                0 => {
+                    let names: Vec<&str> = settings.worktrees.iter().map(|w| w.name.as_str()).collect();
+                    return Err(McpError::invalid_params(
+                        format!("worktree '{}' not found. available: [{}]", name, names.join(", ")),
+                        None,
+                    ));
+                }
+                1 => Some(matches[0].id.clone()),
+                _ => {
+                    let ids: Vec<&str> = matches.iter().map(|w| w.id.as_str()).collect();
+                    return Err(McpError::invalid_params(
+                        format!("multiple worktrees named '{}'. specify worktree_id to disambiguate: [{}]", name, ids.join(", ")),
+                        None,
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut items: Vec<serde_json::Value> = Vec::new();
+        for (session_id, cwd, is_ai_agent) in raw {
+            let matched_wt = cwd.as_deref().and_then(|c| {
+                let cp = std::path::Path::new(c);
+                settings.worktrees.iter().find(|w| {
+                    let wp = std::path::Path::new(&w.path);
+                    cp.starts_with(wp)
+                })
+            });
+            let matched_wt_id = matched_wt.map(|w| w.id.clone());
+            if let Some(ref fid) = filter_id {
+                if matched_wt_id.as_deref() != Some(fid.as_str()) {
+                    continue;
+                }
+            }
+            items.push(serde_json::json!({
+                "sessionId": session_id,
+                "cwd": cwd,
+                "isAiAgent": is_ai_agent,
+                "worktreeId": matched_wt_id,
+                "worktreeName": matched_wt.map(|w| w.name.clone()),
+            }));
+        }
+
+        let json = serde_json::to_string(&items)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "指定 PTY セッションを停止する。oretachi_list_terminals で取得した session_id を渡す。UI のタブは pty-exit イベント経由で自動的に消える")]
+    fn oretachi_kill_terminal(
+        &self,
+        Parameters(KillTerminalParams { session_id }): Parameters<KillTerminalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let pty = self.app_handle.state::<PtyManager>();
+        pty.kill(session_id)
+            .map_err(|e| McpError::internal_error(e, None))?;
+        log::info!("[mcp] oretachi_kill_terminal: session_id={}", session_id);
+        Ok(CallToolResult::success(vec![Content::text("killed")]))
     }
 }
 
