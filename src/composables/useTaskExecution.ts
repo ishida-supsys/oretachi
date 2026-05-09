@@ -25,7 +25,7 @@ export function useTaskExecution(deps: {
   onAddTerminal: (worktreeId: string) => Promise<void>;
   onMoveToSubWindow: (worktreeId: string) => Promise<void>;
   loadingWorktrees: Map<string, string>;
-  pendingScripts: Map<string, string>;
+  pendingScripts: Map<string, string[]>;
   autoApprovalMap: Map<string, boolean>;
   onWebSessionDetected?: (terminalId: number, info: WebSessionInfo) => void;
 }) {
@@ -277,7 +277,12 @@ export function useTaskExecution(deps: {
 
       const pending = buildPendingCommand(repo, entry);
       if (pending) {
-        pendingScripts.set(entry.id, pending);
+        const existing = pendingScripts.get(entry.id);
+        if (existing) {
+          existing.push(pending);
+        } else {
+          pendingScripts.set(entry.id, [pending]);
+        }
       }
 
       await onAddTerminal(entry.id);

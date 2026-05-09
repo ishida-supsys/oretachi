@@ -173,8 +173,37 @@ const { setup: setupCodeReviewChatListener } = useCodeReviewChatListener({
 // terminalId → サムネイル data URL
 const thumbnailUrls = reactive(new Map<number, string>());
 
-// worktreeId → 実行待ちスクリプトコマンド文字列
-const pendingScripts = new Map<string, string>();
+// worktreeId → 実行待ちスクリプトコマンド文字列の FIFO キュー
+// MCP からの連続 oretachi_spawn_terminal でコマンドを取りこぼさないためにキュー化している。
+// 同じワークツリーで複数ターミナルが立ち上がる順に shift して消費する。
+const pendingScripts = new Map<string, string[]>();
+
+function pushPendingScript(worktreeId: string, command: string): void {
+  const existing = pendingScripts.get(worktreeId);
+  if (existing) {
+    existing.push(command);
+  } else {
+    pendingScripts.set(worktreeId, [command]);
+  }
+}
+
+function shiftPendingScript(worktreeId: string): string | undefined {
+  const queue = pendingScripts.get(worktreeId);
+  if (!queue || queue.length === 0) return undefined;
+  const cmd = queue.shift();
+  if (queue.length === 0) pendingScripts.delete(worktreeId);
+  return cmd;
+}
+
+function dropLastPendingScript(worktreeId: string, expected: string): void {
+  // pushPendingScript の直後に失敗した場合のロールバック用。末尾が expected と一致する時のみ削除。
+  const queue = pendingScripts.get(worktreeId);
+  if (!queue || queue.length === 0) return;
+  if (queue[queue.length - 1] === expected) {
+    queue.pop();
+    if (queue.length === 0) pendingScripts.delete(worktreeId);
+  }
+}
 
 // terminalId → 復元スナップショット（起動時セッション復元用）
 const pendingSnapshots = new Map<number, string>();
@@ -354,9 +383,8 @@ async function onTerminalReady(worktreeId: string, terminalId: number) {
   }
   pendingSnapshots.delete(terminalId);
   pendingSessionAttach.delete(terminalId);
-  const command = pendingScripts.get(worktreeId);
+  const command = shiftPendingScript(worktreeId);
   if (command) {
-    pendingScripts.delete(worktreeId);
     const ref = getTerminalRef(terminalId);
     await ref?.write(command);
   }
@@ -641,7 +669,7 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string,
     if (repo) {
       const pending = buildPendingCommand(repo, entry);
       if (pending) {
-        pendingScripts.set(entry.id, pending);
+        pushPendingScript(entry.id, pending);
       }
     }
 
@@ -1042,11 +1070,11 @@ onMounted(async () => {
       // FramePane.vue / TerminalView.vue paste と同じく \r に正規化する。
       const normalized = command.replace(/\r?\n/g, "\r");
       const cmd = normalized.endsWith("\r") ? normalized : normalized + "\r";
-      pendingScripts.set(worktree_id, cmd);
+      pushPendingScript(worktree_id, cmd);
       try {
         await onAddTerminal(worktree_id, { background: true });
       } catch (e) {
-        pendingScripts.delete(worktree_id);
+        dropLastPendingScript(worktree_id, cmd);
         debug(`[Terminal] mcp-spawn-terminal: onAddTerminal failed: ${e}`);
         return;
       }

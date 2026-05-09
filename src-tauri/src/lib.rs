@@ -796,6 +796,7 @@ pub fn run() {
         .manage(SettingsManager::new())
         .manage(mcp_server::McpServerManager::new())
         .manage(mcp_server::McpPeerRegistry(std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()))))
+        .manage(mcp_server::DetachedWorktreeRegistry::default())
         .manage(ai_judge::ApprovalManager::new())
         .manage(ai_commit_message::CommitMessageManager::new())
         .manage(task_executor::TaskGenerateManager::new())
@@ -842,6 +843,8 @@ pub fn run() {
             get_mcp_status,
             restart_mcp_server,
             regenerate_mcp_api_key,
+            mcp_server::register_detached_worktree,
+            mcp_server::unregister_detached_worktree,
             prepare_for_relaunch,
             ai_judge::judge_approval,
             ai_judge::cancel_approval,

@@ -607,6 +607,10 @@ impl PtyManager {
 
     /// 指定セッションの出力履歴を取得する。
     /// max_bytes を指定するとバッファ末尾から最大 max_bytes バイトを返す。
+    /// バッファ全体を返さない場合、開始位置を以下の順で補正する:
+    ///   1) UTF-8 マルチバイト継続バイト (0b10xxxxxx) を読み飛ばし文字境界に揃える
+    ///   2) 直近 512 バイト以内に LF があれば、その直後まで進める
+    ///      （ANSI シーケンスの途中切断による strip_ansi 残骸を回避）
     pub fn read_output_history(
         &self,
         session_id: u32,
@@ -622,8 +626,27 @@ impl PtyManager {
         let hist = history_arc
             .lock()
             .map_err(|e| format!("history lock error: {}", e))?;
-        let take = max_bytes.unwrap_or(usize::MAX).min(hist.len());
-        let start = hist.len() - take;
+        let total = hist.len();
+        let take = max_bytes.unwrap_or(usize::MAX).min(total);
+        let mut start = total - take;
+
+        // 全体を返す場合は補正不要
+        if start > 0 {
+            // (1) UTF-8 継続バイトをスキップ
+            while start < total && (hist[start] & 0xC0) == 0x80 {
+                start += 1;
+            }
+            // (2) 近傍に LF があれば、その直後まで進めて中断 ANSI 残骸を捨てる
+            const NEWLINE_SCAN_WINDOW: usize = 512;
+            let scan_end = (start + NEWLINE_SCAN_WINDOW).min(total);
+            for i in start..scan_end {
+                if hist[i] == b'\n' {
+                    start = i + 1;
+                    break;
+                }
+            }
+        }
+
         Ok(hist.iter().copied().skip(start).collect())
     }
 
@@ -803,4 +826,66 @@ pub fn strip_ansi(input: &[u8]) -> String {
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_ansi_plain_text() {
+        assert_eq!(strip_ansi(b"hello\nworld"), "hello\nworld");
+    }
+
+    #[test]
+    fn strip_ansi_csi_color() {
+        // ESC[31m red ESC[0m
+        let input = b"\x1b[31mred\x1b[0m text";
+        assert_eq!(strip_ansi(input), "red text");
+    }
+
+    #[test]
+    fn strip_ansi_osc_title_bel() {
+        // ESC]0;title\x07
+        let input = b"\x1b]0;window title\x07hello";
+        assert_eq!(strip_ansi(input), "hello");
+    }
+
+    #[test]
+    fn strip_ansi_osc_title_st() {
+        // ESC]0;title ESC\\
+        let input = b"\x1b]0;t\x1b\\done";
+        assert_eq!(strip_ansi(input), "done");
+    }
+
+    #[test]
+    fn strip_ansi_incomplete_esc_at_end() {
+        // 末尾が不完全 ESC のみ → ESC は単独でも丸ごと捨てる
+        let input = b"abc\x1b";
+        assert_eq!(strip_ansi(input), "abc");
+    }
+
+    #[test]
+    fn strip_ansi_keeps_tab_and_crlf() {
+        let input = b"a\tb\r\nc";
+        assert_eq!(strip_ansi(input), "a\tb\r\nc");
+    }
+
+    #[test]
+    fn strip_ansi_drops_non_print_control() {
+        // 0x01 (SOH) など制御文字は除去
+        let input = b"a\x01b";
+        assert_eq!(strip_ansi(input), "ab");
+    }
+
+    #[test]
+    fn strip_ansi_empty() {
+        assert_eq!(strip_ansi(b""), "");
+    }
+
+    #[test]
+    fn strip_ansi_utf8_passthrough() {
+        let input = "日本語\x1b[1mbold\x1b[0m".as_bytes();
+        assert_eq!(strip_ansi(input), "日本語bold");
+    }
 }

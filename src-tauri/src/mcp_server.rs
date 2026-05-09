@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, path::PathBuf, sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}}, time::{SystemTime, UNIX_EPOCH}};
 use tokio::fs as tokio_fs;
 
 use axum::{extract::{Request, State}, http::StatusCode, middleware::{self, Next}, response::Response, routing::post, Json};
@@ -33,6 +33,40 @@ const PEER_NOTIFY_TIMEOUT_SECS: u64 = 5;
 
 /// 接続中のMCPクライアントのPeerを保持するTauri managed state
 pub struct McpPeerRegistry(pub PeerMap);
+
+/// サブウィンドウへ移送中の worktree ID を保持。MCP ツールが silent failure せず
+/// 即座にエラーを返すために、フロント側で detached/attached が変わるたびに更新する。
+#[derive(Default)]
+pub struct DetachedWorktreeRegistry(pub Mutex<HashSet<String>>);
+
+impl DetachedWorktreeRegistry {
+    pub fn is_detached(&self, worktree_id: &str) -> bool {
+        match self.0.lock() {
+            Ok(g) => g.contains(worktree_id),
+            Err(e) => e.into_inner().contains(worktree_id),
+        }
+    }
+}
+
+#[tauri::command]
+pub fn register_detached_worktree(
+    worktree_id: String,
+    registry: tauri::State<'_, DetachedWorktreeRegistry>,
+) {
+    if let Ok(mut g) = registry.0.lock() {
+        g.insert(worktree_id);
+    }
+}
+
+#[tauri::command]
+pub fn unregister_detached_worktree(
+    worktree_id: String,
+    registry: tauri::State<'_, DetachedWorktreeRegistry>,
+) {
+    if let Ok(mut g) = registry.0.lock() {
+        g.remove(&worktree_id);
+    }
+}
 
 static PEER_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -1084,6 +1118,20 @@ impl NotifyService {
                 }
             }
         };
+
+        // detached（サブウィンドウ化済み）ワークツリーへの spawn は App.vue 側で
+        // 早期 return されるため、MCP 経由で投入してもユーザに silent failure として
+        // 見えてしまう。事前に検知して明示的なエラーを返す。
+        let detached_registry = self.app_handle.state::<DetachedWorktreeRegistry>();
+        if detached_registry.is_detached(&wt.id) {
+            return Err(McpError::invalid_params(
+                format!(
+                    "worktree '{}' is currently detached (open in a sub-window). MCP spawn into detached worktrees is not supported. Bring the worktree back into the main window first.",
+                    worktree_name
+                ),
+                None,
+            ));
+        }
 
         let event = SpawnTerminalEvent {
             worktree_id: wt.id.clone(),
