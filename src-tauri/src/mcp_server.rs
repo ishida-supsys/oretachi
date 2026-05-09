@@ -1164,7 +1164,7 @@ impl NotifyService {
                 None,
             ));
         }
-        pty.kill(session_id)
+        pty.kill(session_id, "mcp-kill-terminal")
             .map_err(|e| McpError::internal_error(e, None))?;
         log::info!("[mcp] oretachi_kill_terminal: session_id={}", session_id);
         Ok(CallToolResult::success(vec![Content::text("killed")]))
