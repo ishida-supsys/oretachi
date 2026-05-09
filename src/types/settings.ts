@@ -30,6 +30,8 @@ export interface WorktreeEntry {
 export interface TerminalSettings {
   fontSize: number;
   shell?: string; // デフォルトシェル (空 = 各 OS のデフォルトにフォールバック)
+  /** MCP 等で起動する背景ペインの分割方向 (デフォルト: bottom) */
+  backgroundPaneSplitDirection?: "left" | "right" | "top" | "bottom";
 }
 
 export interface HotkeyBinding {

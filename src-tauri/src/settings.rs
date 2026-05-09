@@ -165,6 +165,8 @@ pub struct TerminalSettings {
     pub font_size: u32,
     #[serde(default)]
     pub shell: Option<String>,
+    #[serde(default, rename = "backgroundPaneSplitDirection")]
+    pub background_pane_split_direction: Option<String>,
 }
 
 fn default_font_size() -> u32 {
@@ -176,6 +178,7 @@ impl Default for TerminalSettings {
         TerminalSettings {
             font_size: default_font_size(),
             shell: None,
+            background_pane_split_direction: Some("bottom".to_string()),
         }
     }
 }

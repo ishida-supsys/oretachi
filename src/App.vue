@@ -36,7 +36,7 @@ import { useTaskExecution } from "./composables/useTaskExecution";
 import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
 import { useAutoApprovalPrompt } from "./composables/useAutoApprovalPrompt";
 import type { FrameNode } from "./types/frame";
-import { useWorktreeFrameBundles } from "./composables/useWorktreeFrameBundles";
+import { useWorktreeFrameBundles, type WorktreeFrameBundle } from "./composables/useWorktreeFrameBundles";
 import { useCodeReviewChatListener } from "./composables/useCodeReviewLineChat";
 import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
 import { useWorktreeRemove } from "./composables/useWorktreeRemove";
@@ -435,7 +435,31 @@ async function closeWindow() {
   await getCurrentWindow().close();
 }
 
-async function onAddTerminal(worktreeId: string) {
+/**
+ * バックグラウンド専用リーフ（pnpm dev 等を MCP 経由で投入する用）の id を返す。
+ * - 既存の背景リーフがあれば再利用
+ * - ターミナル未配置の単一リーフが存在すれば、それを背景化して再利用
+ * - それ以外は設定の分割方向で last-focused から新リーフを切り出す
+ */
+function getOrCreateBackgroundLeafId(bundle: WorktreeFrameBundle): string {
+  const existing = bundle.frame.findBackgroundLeaf();
+  if (existing) return existing.id;
+
+  const allLeafs = bundle.frame.getAllLeafs();
+  const noTerminalsAtAll = allLeafs.every((l) => l.terminalIds.length === 0);
+  if (noTerminalsAtAll && allLeafs.length === 1) {
+    bundle.frame.markLeafBackground(allLeafs[0].id, true);
+    return allLeafs[0].id;
+  }
+
+  const dir = (settings.value.terminal.backgroundPaneSplitDirection ?? "bottom") as
+    "left" | "right" | "top" | "bottom";
+  const newLeaf = bundle.frame.addBackgroundLeaf(dir);
+  return newLeaf.id;
+}
+
+async function onAddTerminal(worktreeId: string, options?: { background?: boolean }) {
+  const background = options?.background === true;
   clearNotification(worktreeId);
   if (isDetached(worktreeId)) {
     await handleSubAddTerminalRequest(worktreeId);
@@ -445,7 +469,7 @@ async function onAddTerminal(worktreeId: string) {
   const terminal = addTerminal(worktreeId);
   pendingManualStart.add(terminal.id);
   terminalWorktreeMap.set(terminal.id, worktreeId);
-  debug(`[Terminal] onAddTerminal worktreeId=${worktreeId} terminalId=${terminal.id}`);
+  debug(`[Terminal] onAddTerminal worktreeId=${worktreeId} terminalId=${terminal.id} background=${background}`);
 
   // バンドルがなければ作成（ワークツリー追加直後など）
   if (!worktreeFrameBundles.has(worktreeId)) {
@@ -455,19 +479,25 @@ async function onAddTerminal(worktreeId: string) {
   const bundle = worktreeFrameBundles.get(worktreeId)!;
   bundle.terminalEntries.set(terminal.id, { id: terminal.id, title: terminal.title, sessionId: 0, snapshot: "" });
 
-  const leafId = bundle.frame.lastFocusedLeafId.value || bundle.frame.getAllLeafs()[0]?.id;
-  debug(`[Terminal] onAddTerminal leafId=${leafId ?? "null"} terminalId=${terminal.id}`);
-  if (leafId) {
+  const targetLeafId = background
+    ? getOrCreateBackgroundLeafId(bundle)
+    : (bundle.frame.lastFocusedLeafId.value || bundle.frame.getAllLeafs()[0]?.id);
+  debug(`[Terminal] onAddTerminal leafId=${targetLeafId ?? "null"} terminalId=${terminal.id}`);
+  if (targetLeafId) {
     bundle.frame.returnAllToOffscreen();
-    bundle.frame.addTerminalToLeaf(leafId, terminal.id);
-    bundle.frame.lastFocusedLeafId.value = leafId;
+    bundle.frame.addTerminalToLeaf(targetLeafId, terminal.id);
+    if (!background) {
+      bundle.frame.lastFocusedLeafId.value = targetLeafId;
+    }
   } else {
     bundle.frame.initLayout([terminal.id]);
     bundle.frame.lastFocusedLeafId.value = bundle.frame.getAllLeafs()[0]?.id ?? "";
   }
 
-  viewMode.value = "terminal";
-  activeWorktreeId.value = worktreeId;
+  if (!background) {
+    viewMode.value = "terminal";
+    activeWorktreeId.value = worktreeId;
+  }
 
   await nextTick();
   debug(`[Terminal] onAddTerminal after nextTick terminalId=${terminal.id}`);
@@ -481,7 +511,9 @@ async function onAddTerminal(worktreeId: string) {
     pendingManualStart.delete(terminal.id);
     await term.startPty();
     debug(`[Terminal] onAddTerminal after startPty terminalId=${terminal.id}`);
-    term.focus();
+    if (!background) {
+      term.focus();
+    }
     // 安全策: flexレイアウト確定が遅延する場合に備えた再fit
     setTimeout(() => {
       debug(`[Terminal] onAddTerminal setTimeout re-fit terminalId=${terminal.id}`);
@@ -1006,10 +1038,13 @@ onMounted(async () => {
         return;
       }
       const beforeIds = new Set(targetWt.terminals.map((t) => t.id));
-      const cmd = command.endsWith("\n") ? command : command + "\n";
+      // PowerShell/conpty は LF だけだとプロンプト継続行扱いになり Enter が発火しない。
+      // FramePane.vue / TerminalView.vue paste と同じく \r に正規化する。
+      const normalized = command.replace(/\r?\n/g, "\r");
+      const cmd = normalized.endsWith("\r") ? normalized : normalized + "\r";
       pendingScripts.set(worktree_id, cmd);
       try {
-        await onAddTerminal(worktree_id);
+        await onAddTerminal(worktree_id, { background: true });
       } catch (e) {
         pendingScripts.delete(worktree_id);
         debug(`[Terminal] mcp-spawn-terminal: onAddTerminal failed: ${e}`);
