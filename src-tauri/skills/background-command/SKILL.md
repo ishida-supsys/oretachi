@@ -1,7 +1,7 @@
 ---
 name: background-command
-description: pnpm dev / pnpm run tauri dev / next dev / vite / nodemon / cargo watch / docker compose up など長時間常駐する開発サーバ・watcher・background プロセスを起動するときに、bash の run_in_background ではなく oretachi MCP ツール経由で oretachi UI の新しいターミナルタブとして起動するためのスキル。
-allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_spawn_terminal, mcp__plugin_oretachi_oretachi__oretachi_list_terminals, mcp__plugin_oretachi_oretachi__oretachi_kill_terminal, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status
+description: pnpm dev / pnpm run tauri dev / next dev / vite / nodemon / cargo watch / docker compose up など長時間常駐する開発サーバ・watcher・background プロセスを起動するときに、bash の run_in_background ではなく oretachi MCP ツール経由で oretachi UI の新しいターミナルタブとして起動するためのスキル。起動後の出力参照・キー入力（vitest の再実行など）にも対応。
+allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_spawn_terminal, mcp__plugin_oretachi_oretachi__oretachi_list_terminals, mcp__plugin_oretachi_oretachi__oretachi_kill_terminal, mcp__plugin_oretachi_oretachi__oretachi_read_terminal, mcp__plugin_oretachi_oretachi__oretachi_write_terminal, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status
 ---
 
 # background-command スキル
@@ -62,19 +62,60 @@ oretachi UI に新しいタブが追加され、`pnpm dev` がそのターミナ
 
 数秒待ってから `oretachi_list_terminals({ worktree_name: "<name>" })` を呼ぶと、`session_id` / `cwd` / `isAiAgent` を含む配列が返る。直前に追加したセッションが含まれていれば起動成功。
 
-### Step 4: 停止する場合
+### Step 4: 出力ログを参照する
+
+dev サーバのコンパイルエラー確認、vitest の結果確認などに使う。
+
+```
+oretachi_read_terminal({
+  session_id: <値>,
+  max_bytes: 8192   // 省略可。デフォルト 8192。長い場合は 32768 等まで増やす
+})
+```
+
+戻り値は **ANSI エスケープ除去済みの UTF-8 文字列**（バッファ末尾から `max_bytes` バイト）。リングバッファは 64KiB で、それを超える出力は古い側から破棄される。
+
+### Step 5: ターミナルへ入力する
+
+vitest の単一キー入力（`a` で再実行 / `q` で終了）、対話プロンプトへの応答、PowerShell へのコマンド追加投入などに使う。
+
+```
+oretachi_write_terminal({
+  session_id: <値>,
+  text: "pnpm test\n",
+  submit: true   // デフォルト true。PowerShell/conpty 互換に \r へ正規化＋末尾保証する
+})
+
+// vitest の press 'a' to re-run all 等、生キーを送りたい時
+oretachi_write_terminal({
+  session_id: <値>,
+  text: "a",
+  submit: false  // 改行付与なし、raw 送信
+})
+```
+
+`submit: true` ならコマンド送信扱い（Enter まで押す）。`submit: false` なら raw 送信。
+
+### Step 6: 停止する場合
 
 `oretachi_list_terminals` で対象の `session_id` を特定してから:
 
 ```
-oretachi_kill_terminal({ session_id: <値> })
+oretachi_kill_terminal({ session_id: <値> })  // 強制 kill
 ```
+
+graceful に終了させたい場合（dev サーバの後始末を走らせたい等）は kill ではなく `oretachi_write_terminal` で `Ctrl-C` 相当のシグナルが必要。現状の write は文字列送信のみで `\x03` の効果は限定的なので、安全策としては:
+
+1. まず `oretachi_write_terminal({ text: "exit", submit: true })` を試す（シェルプロンプトに戻った状態の時のみ有効）
+2. それで終わらない常駐プロセスは `oretachi_kill_terminal` で強制 kill
 
 UI のタブは `pty-exit` イベント経由で自動的に消える。
 
 ## 注意点
 
-- `command` は末尾に改行が無くても、oretachi 側で `\n` が自動付与される
+- `command` 中の改行は oretachi 側で `\r` に正規化され、末尾にも `\r` が保証される（PowerShell/conpty が LF だけだと Enter を発火しないため）
 - シェルは oretachi のデフォルト（Windows なら PowerShell、それ以外は OS のシェル）。プラットフォーム固有の構文（PowerShell の `;` と bash の `&&` の違い等）に留意
-- `pendingScripts` 機構の制限により、同一ワークツリーに連続して `oretachi_spawn_terminal` を呼ぶ場合は前のコマンド投入完了まで待つこと。並行投入すると先に積まれたコマンドが上書きされる可能性がある
+- 同一ワークツリーに連続して `oretachi_spawn_terminal` を呼んでも、内部的には FIFO キューで管理されるためコマンドは取りこぼされない（先入れ先出しで対応するターミナルに流し込まれる）
+- 対象ワークツリーが**サブウィンドウ化（detached）**されている場合、`oretachi_spawn_terminal` は明示的に invalid_params エラーを返す。エラー本文に従ってメインウィンドウに戻すよう促す
 - 同名ワークツリーが複数あって `worktree_id` を指定しなかった場合は `invalid_params` エラーが返る。エラー本文に候補 ID が含まれているのでそれを使って再試行する
+- `oretachi_read_terminal` の戻り値先頭は、リングバッファ容量超過時にバイト境界調整が走るため UTF-8 マルチバイトや ANSI シーケンスの欠片が落とされる。**末尾側は正確、先頭側は近似**と理解する
