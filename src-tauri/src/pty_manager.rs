@@ -1,11 +1,12 @@
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter};
 
 const AI_AGENT_NAMES: &[&str] = &["claude", "gemini", "codex", "cline"];
 const MAX_PTY_SESSIONS: usize = 32;
+const OUTPUT_HISTORY_BYTES: usize = 65_536;
 
 struct PtySession {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -16,6 +17,7 @@ struct PtySession {
     watcher_handle: Option<std::thread::JoinHandle<()>>,
     is_ai_agent: bool,
     cwd: Option<String>,
+    output_history: Arc<Mutex<VecDeque<u8>>>,
 }
 
 pub struct PtyManager {
@@ -478,6 +480,10 @@ impl PtyManager {
 
         let alive = Arc::new(Mutex::new(true));
 
+        // PTY 出力リングバッファ（MCP の oretachi_read_terminal で参照される）
+        let output_history: Arc<Mutex<VecDeque<u8>>> =
+            Arc::new(Mutex::new(VecDeque::with_capacity(OUTPUT_HISTORY_BYTES)));
+
         // child_pid と child_killer を spawn 直後に取得
         let child_pid = child.process_id();
         let child_killer = child.clone_killer();
@@ -537,6 +543,7 @@ impl PtyManager {
 
         // 読み取りスレッド起動
         let app_handle_reader = app_handle.clone();
+        let history_for_reader = output_history.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
             loop {
@@ -544,6 +551,15 @@ impl PtyManager {
                     Ok(0) => break,
                     Ok(n) => {
                         let data = buf[..n].to_vec();
+                        // リングバッファへ push（容量超過分は先頭から drain）。
+                        // ロック失敗は best-effort で握り潰す（emit は止めない）
+                        if let Ok(mut hist) = history_for_reader.lock() {
+                            if hist.len() + n > OUTPUT_HISTORY_BYTES {
+                                let drop_n = hist.len() + n - OUTPUT_HISTORY_BYTES;
+                                hist.drain(..drop_n);
+                            }
+                            hist.extend(data.iter().copied());
+                        }
                         let _ = app_handle_reader
                             .emit("pty-output", PtyOutputPayload { session_id, data });
                     }
@@ -564,6 +580,7 @@ impl PtyManager {
             watcher_handle: Some(watcher_handle),
             is_ai_agent: false,
             cwd,
+            output_history,
         };
 
         self.sessions.lock().map_err(|e| format!("lock error: {}", e))?.insert(session_id, session);
@@ -586,6 +603,28 @@ impl PtyManager {
         writer.write_all(&data).map_err(|e| format!("Write error: {}", e))?;
         writer.flush().map_err(|e| format!("Flush error: {}", e))?;
         Ok(())
+    }
+
+    /// 指定セッションの出力履歴を取得する。
+    /// max_bytes を指定するとバッファ末尾から最大 max_bytes バイトを返す。
+    pub fn read_output_history(
+        &self,
+        session_id: u32,
+        max_bytes: Option<usize>,
+    ) -> Result<Vec<u8>, String> {
+        let history_arc = {
+            let sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            let session = sessions
+                .get(&session_id)
+                .ok_or_else(|| format!("Session {} not found", session_id))?;
+            session.output_history.clone()
+        };
+        let hist = history_arc
+            .lock()
+            .map_err(|e| format!("history lock error: {}", e))?;
+        let take = max_bytes.unwrap_or(usize::MAX).min(hist.len());
+        let start = hist.len() - take;
+        Ok(hist.iter().copied().skip(start).collect())
     }
 
     pub fn resize(&self, session_id: u32, rows: u16, cols: u16) -> Result<(), String> {
@@ -718,4 +757,50 @@ impl Drop for PtyManager {
             self.kill_all("PtyManager::drop");
         }
     }
+}
+
+/// ANSI/VT100 エスケープシーケンスを除去する単純なストリッパ。
+/// CSI (`ESC [ ... letter`)、OSC (`ESC ] ... BEL` or `ESC \`)、その他 ESC+1byte を除去。
+/// 改行・タブは保持。完全な VT100 emulation ではないが AI が読む用途には十分。
+pub fn strip_ansi(input: &[u8]) -> String {
+    let mut out: Vec<u8> = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        let b = input[i];
+        if b == 0x1b && i + 1 < input.len() {
+            let next = input[i + 1];
+            if next == b'[' {
+                i += 2;
+                while i < input.len() && !(0x40..=0x7e).contains(&input[i]) {
+                    i += 1;
+                }
+                if i < input.len() {
+                    i += 1;
+                }
+                continue;
+            } else if next == b']' {
+                i += 2;
+                while i < input.len() {
+                    if input[i] == 0x07 {
+                        i += 1;
+                        break;
+                    }
+                    if input[i] == 0x1b && i + 1 < input.len() && input[i + 1] == b'\\' {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            } else {
+                i += 2;
+                continue;
+            }
+        }
+        if b >= 0x20 || b == b'\n' || b == b'\r' || b == b'\t' {
+            out.push(b);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }

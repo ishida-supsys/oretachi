@@ -344,6 +344,24 @@ pub struct KillTerminalParams {
     pub session_id: u32,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReadTerminalParams {
+    #[schemars(description = "PTY セッションID（oretachi_list_terminals で取得）")]
+    pub session_id: u32,
+    #[schemars(description = "末尾から取得する最大バイト数（デフォルト 8192）")]
+    pub max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct WriteTerminalParams {
+    #[schemars(description = "PTY セッションID（oretachi_list_terminals で取得）")]
+    pub session_id: u32,
+    #[schemars(description = "送信するテキスト")]
+    pub text: String,
+    #[schemars(description = "true なら改行を \\r 正規化＋末尾 \\r 保証してから送信（デフォルト true）。vitest の単一キー入力など改行不要時は false")]
+    pub submit: Option<bool>,
+}
+
 // ─── MCP Service ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -1168,6 +1186,58 @@ impl NotifyService {
             .map_err(|e| McpError::internal_error(e, None))?;
         log::info!("[mcp] oretachi_kill_terminal: session_id={}", session_id);
         Ok(CallToolResult::success(vec![Content::text("killed")]))
+    }
+
+    #[tool(description = "指定 PTY セッションの最近の出力履歴を返す（ANSI 除去済み UTF-8）。pnpm dev のログ確認や vitest の結果参照に使う。max_bytes 省略時は 8192 バイト。先に oretachi_list_terminals で session_id を取得すること")]
+    fn oretachi_read_terminal(
+        &self,
+        Parameters(ReadTerminalParams { session_id, max_bytes }): Parameters<ReadTerminalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let pty = self.app_handle.state::<PtyManager>();
+        let raw = pty
+            .read_output_history(session_id, Some(max_bytes.unwrap_or(8192)))
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        let text = crate::pty_manager::strip_ansi(&raw);
+        log::info!(
+            "[mcp] oretachi_read_terminal: session_id={} bytes={}",
+            session_id,
+            raw.len()
+        );
+        Ok(CallToolResult::success(vec![Content::text(text)]))
+    }
+
+    #[tool(description = "指定 PTY セッションへテキストを送信する。submit=true（デフォルト）なら改行を PowerShell/conpty 互換の \\r へ正規化し末尾にも保証して、コマンド送信扱いにする。submit=false なら raw のまま送る（vitest の単一キー入力など）")]
+    fn oretachi_write_terminal(
+        &self,
+        Parameters(WriteTerminalParams { session_id, text, submit }): Parameters<WriteTerminalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let pty = self.app_handle.state::<PtyManager>();
+        if !pty.list_sessions().iter().any(|(id, _, _)| *id == session_id) {
+            return Err(McpError::invalid_params(
+                format!("session_id {} not found", session_id),
+                None,
+            ));
+        }
+        let payload = if submit.unwrap_or(true) {
+            let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
+            if normalized.ends_with('\r') {
+                normalized
+            } else {
+                normalized + "\r"
+            }
+        } else {
+            text
+        };
+        let bytes_len = payload.len();
+        pty.write(session_id, payload.into_bytes())
+            .map_err(|e| McpError::internal_error(e, None))?;
+        log::info!(
+            "[mcp] oretachi_write_terminal: session_id={} bytes={} submit={:?}",
+            session_id,
+            bytes_len,
+            submit
+        );
+        Ok(CallToolResult::success(vec![Content::text("written")]))
     }
 }
 
