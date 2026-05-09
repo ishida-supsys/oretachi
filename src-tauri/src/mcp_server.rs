@@ -326,7 +326,6 @@ pub struct SpawnTerminalParams {
 #[derive(Debug, Serialize, Clone)]
 struct SpawnTerminalEvent {
     worktree_id: String,
-    worktree_name: String,
     command: String,
     title: Option<String>,
 }
@@ -1070,7 +1069,6 @@ impl NotifyService {
 
         let event = SpawnTerminalEvent {
             worktree_id: wt.id.clone(),
-            worktree_name: wt.name.clone(),
             command: command.clone(),
             title: title.clone(),
         };
@@ -1160,6 +1158,12 @@ impl NotifyService {
         Parameters(KillTerminalParams { session_id }): Parameters<KillTerminalParams>,
     ) -> Result<CallToolResult, McpError> {
         let pty = self.app_handle.state::<PtyManager>();
+        if !pty.list_sessions().iter().any(|(id, _, _)| *id == session_id) {
+            return Err(McpError::invalid_params(
+                format!("session_id {} not found", session_id),
+                None,
+            ));
+        }
         pty.kill(session_id)
             .map_err(|e| McpError::internal_error(e, None))?;
         log::info!("[mcp] oretachi_kill_terminal: session_id={}", session_id);

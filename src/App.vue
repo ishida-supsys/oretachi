@@ -990,14 +990,22 @@ onMounted(async () => {
   });
 
   // MCPからの新規ターミナル追加（pnpm dev など長時間バックグラウンドコマンド用）
-  await listen<{ worktree_id: string; worktree_name: string; command: string; title: string | null }>(
+  await listen<{ worktree_id: string; command: string; title: string | null }>(
     "mcp-spawn-terminal",
     async (event) => {
       const { worktree_id, command, title } = event.payload;
-      if (!worktrees.value.find((w) => w.id === worktree_id)) {
+      const targetWt = worktrees.value.find((w) => w.id === worktree_id);
+      if (!targetWt) {
         debug(`[Terminal] mcp-spawn-terminal: worktree ${worktree_id} not found, skipping`);
         return;
       }
+      // detached（サブウィンドウ化済み）ワークツリーは onAddTerminal が
+      // handleSubAddTerminalRequest に分岐し pendingScripts を消費しないため未対応
+      if (isDetached(worktree_id)) {
+        debug(`[Terminal] mcp-spawn-terminal: worktree ${worktree_id} is detached, not supported`);
+        return;
+      }
+      const beforeIds = new Set(targetWt.terminals.map((t) => t.id));
       const cmd = command.endsWith("\n") ? command : command + "\n";
       pendingScripts.set(worktree_id, cmd);
       try {
@@ -1009,7 +1017,7 @@ onMounted(async () => {
       }
       if (title) {
         const wt = worktrees.value.find((w) => w.id === worktree_id);
-        const newTerm = wt?.terminals[wt.terminals.length - 1];
+        const newTerm = wt?.terminals.find((t) => !beforeIds.has(t.id));
         if (newTerm) onTerminalTitleChange(worktree_id, newTerm.id, title);
       }
     },
