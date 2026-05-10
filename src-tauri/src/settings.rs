@@ -165,6 +165,8 @@ pub struct TerminalSettings {
     pub font_size: u32,
     #[serde(default)]
     pub shell: Option<String>,
+    #[serde(default, rename = "backgroundPaneSplitDirection")]
+    pub background_pane_split_direction: Option<String>,
 }
 
 fn default_font_size() -> u32 {
@@ -176,6 +178,7 @@ impl Default for TerminalSettings {
         TerminalSettings {
             font_size: default_font_size(),
             shell: None,
+            background_pane_split_direction: Some("bottom".to_string()),
         }
     }
 }
@@ -233,6 +236,8 @@ impl Default for AppearanceSettings {
 }
 
 fn default_ai_timeout_secs() -> u64 { 120 }
+
+fn default_use_oretachi_terminal_for_background() -> bool { true }
 
 fn default_notification_volume() -> u32 { 80 }
 
@@ -334,6 +339,8 @@ pub struct AppSettings {
     pub ai_timeout_secs: u64,
     #[serde(default, rename = "debugMode")]
     pub debug_mode: bool,
+    #[serde(default = "default_use_oretachi_terminal_for_background", rename = "useOretachiTerminalForBackground")]
+    pub use_oretachi_terminal_for_background: bool,
 }
 
 impl AppSettings {
@@ -368,6 +375,7 @@ impl Default for AppSettings {
             enable_home_cat: false,
             ai_timeout_secs: default_ai_timeout_secs(),
             debug_mode: false,
+            use_oretachi_terminal_for_background: default_use_oretachi_terminal_for_background(),
         }
     }
 }

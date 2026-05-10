@@ -30,6 +30,8 @@ export interface WorktreeEntry {
 export interface TerminalSettings {
   fontSize: number;
   shell?: string; // デフォルトシェル (空 = 各 OS のデフォルトにフォールバック)
+  /** MCP 等で起動する背景ペインの分割方向 (デフォルト: bottom) */
+  backgroundPaneSplitDirection?: "left" | "right" | "top" | "bottom";
 }
 
 export interface HotkeyBinding {
@@ -112,4 +114,5 @@ export interface AppSettings {
   enableHomeCat?: boolean;
   aiTimeoutSecs?: number; // AIタイムアウト秒数 (デフォルト: 120)
   debugMode?: boolean;
+  useOretachiTerminalForBackground?: boolean; // AI からの background コマンドを oretachi ターミナルで起動するか (デフォルト: true)
 }

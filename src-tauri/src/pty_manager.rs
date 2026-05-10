@@ -1,11 +1,20 @@
 use portable_pty::{native_pty_system, CommandBuilder, PtySize};
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    Arc, Mutex,
+};
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 const AI_AGENT_NAMES: &[&str] = &["claude", "gemini", "codex", "cline"];
 const MAX_PTY_SESSIONS: usize = 32;
+const OUTPUT_HISTORY_BYTES: usize = 65_536;
+/// シェル本体が自然終了したセッションを map に残しておく寿命。
+/// この期間内なら MCP クライアントから exit code や最終ログを参照できる。
+/// MAX_PTY_SESSIONS の枠を一時的に圧迫し得るが、TTL 経過後は lazy sweep で除去される。
+const EXITED_SESSION_TTL: Duration = Duration::from_secs(30);
 
 struct PtySession {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -16,6 +25,46 @@ struct PtySession {
     watcher_handle: Option<std::thread::JoinHandle<()>>,
     is_ai_agent: bool,
     cwd: Option<String>,
+    output_history: Arc<Mutex<VecDeque<u8>>>,
+    /// reader 経由で書き込まれた累積バイト数。MCP の差分読み (cursor) の起点として参照する。
+    total_bytes_written: Arc<AtomicU64>,
+    /// プロセス全体（PTY が走らせているシェル本体）の exit code。watcher が拾う。
+    exit_status: Arc<Mutex<Option<i64>>>,
+    /// 直近コマンドの exit code（シェル統合の OSC 777 を reader thread が拾って保存）。
+    last_command_exit_code: Arc<Mutex<Option<i64>>>,
+    /// シェル本体が自然終了した時刻。`Some` ならゾンビ状態（map 上は残っているが死亡）。
+    /// `EXITED_SESSION_TTL` 経過後の lazy sweep で除去される。
+    exited_at: Arc<Mutex<Option<Instant>>>,
+}
+
+/// 寿命の切れた exited セッションを `sessions` map から除去する。
+/// `sessions.lock()` を取った直後の各 path から呼び出すことで、MCP クライアントが
+/// 最大 `EXITED_SESSION_TTL` の間は exit code / 最終ログを参照できる状態を保つ。
+fn sweep_exited(map: &mut HashMap<u32, PtySession>) {
+    map.retain(|_, s| {
+        let exited = s.exited_at.lock().ok().and_then(|g| *g);
+        match exited {
+            None => true,
+            Some(t) => t.elapsed() < EXITED_SESSION_TTL,
+        }
+    });
+}
+
+#[derive(Clone)]
+pub struct SessionInfo {
+    pub session_id: u32,
+    pub cwd: Option<String>,
+    pub is_ai_agent: bool,
+    pub exit_code: Option<i64>,
+    pub last_command_exit_code: Option<i64>,
+}
+
+pub struct ReadHistoryResult {
+    pub data: Vec<u8>,
+    /// data 末尾に対応する累積バイト位置。次回呼び出しで `from_cursor` に渡せば差分が取れる。
+    pub cursor: u64,
+    /// 要求 cursor がリングバッファ範囲外だったときに失われた先頭バイト数。
+    pub lost_bytes: u64,
 }
 
 pub struct PtyManager {
@@ -237,6 +286,7 @@ impl PtyManager {
     /// AIエージェントフラグを明示的にセットする（executeAgentWorktree 用）
     pub fn set_ai_agent(&self, session_id: u32, is_agent: bool) -> Result<(), String> {
         let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+        sweep_exited(&mut sessions);
         if let Some(session) = sessions.get_mut(&session_id) {
             session.is_ai_agent = is_agent;
             Ok(())
@@ -247,7 +297,8 @@ impl PtyManager {
 
     /// AIエージェントフラグを参照する
     pub fn is_ai_agent(&self, session_id: u32) -> Result<bool, String> {
-        let sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+        let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+        sweep_exited(&mut sessions);
         if let Some(session) = sessions.get(&session_id) {
             Ok(session.is_ai_agent)
         } else {
@@ -272,10 +323,11 @@ impl PtyManager {
 
                 // セッション情報を取得
                 let session_pids: Vec<(u32, Option<u32>)> = {
-                    let sessions = match sessions_arc.lock() {
+                    let mut sessions = match sessions_arc.lock() {
                         Ok(s) => s,
                         Err(_) => continue,
                     };
+                    sweep_exited(&mut sessions);
                     sessions.iter().map(|(&id, s)| (id, s.child_pid)).collect()
                 };
 
@@ -363,7 +415,8 @@ impl PtyManager {
     ) -> Result<u32, String> {
         log::debug!("[Terminal] pty_manager::spawn rows={} cols={} shell={:?} cwd={:?}", rows, cols, shell, cwd);
         {
-            let sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            sweep_exited(&mut sessions);
             if sessions.len() >= MAX_PTY_SESSIONS {
                 return Err(format!(
                     "PTYセッション数の上限（{}）に達しています。不要なターミナルを閉じてください",
@@ -478,6 +531,16 @@ impl PtyManager {
 
         let alive = Arc::new(Mutex::new(true));
 
+        // PTY 出力リングバッファ（MCP の oretachi_read_terminal で参照される）
+        let output_history: Arc<Mutex<VecDeque<u8>>> =
+            Arc::new(Mutex::new(VecDeque::with_capacity(OUTPUT_HISTORY_BYTES)));
+
+        // 差分読みのカーソル基点 / プロセス exit / OSC 777 直近コマンド exit
+        let total_bytes_written: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
+        let exit_status: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
+        let last_command_exit_code: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
+        let exited_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+
         // child_pid と child_killer を spawn 直後に取得
         let child_pid = child.process_id();
         let child_killer = child.clone_killer();
@@ -493,6 +556,8 @@ impl PtyManager {
         let alive_watcher = alive.clone();
         let master_watcher = master_arc.clone();
         let child_watcher = child_arc.clone();
+        let exit_status_setter = exit_status.clone();
+        let exited_at_setter = exited_at.clone();
         let watcher_handle = std::thread::spawn(move || {
             let child_opt = match child_watcher.lock() {
                 Ok(mut g) => g.take(),
@@ -500,6 +565,7 @@ impl PtyManager {
             };
             if let Some(mut child) = child_opt {
                 // try_wait() ポーリング: alive=false (kill() 呼び出し済み) なら即座に終了
+                let mut captured_exit: Option<i64> = None;
                 let exited = loop {
                     let alive = match alive_watcher.lock() {
                         Ok(g) => *g,
@@ -509,13 +575,23 @@ impl PtyManager {
                         break false;
                     }
                     match child.try_wait() {
-                        Ok(Some(_)) => break true,
+                        Ok(Some(status)) => {
+                            // u32 → i64: Windows の異常終了コード (0xC000013A 等) を符号反転させない
+                            captured_exit = Some(status.exit_code() as i64);
+                            break true;
+                        }
                         Ok(None) => std::thread::sleep(std::time::Duration::from_millis(100)),
                         Err(_) => break false,
                     }
                 };
                 // 自然終了した場合のみ master を drop して reader に EOF を送る
                 if exited {
+                    if let Some(code) = captured_exit {
+                        match exit_status_setter.lock() {
+                            Ok(mut s) => *s = Some(code),
+                            Err(e) => *e.into_inner() = Some(code),
+                        }
+                    }
                     let should_drop = match alive_watcher.lock() {
                         Ok(mut g) => {
                             if *g { *g = false; true } else { false }
@@ -531,19 +607,59 @@ impl PtyManager {
                             Err(e) => { e.into_inner().take(); }
                         }
                     }
+                    // 自然終了したセッションは map に残し、exited_at をセットする。
+                    // MCP クライアントが exit code / 最終ログを参照できるよう EXITED_SESSION_TTL の
+                    // 間は保持し、各 sessions.lock() path の sweep_exited で TTL 切れを除去する。
+                    // UI タブは pty-exit イベントで消える（フロント側の整合性は維持）。
+                    match exited_at_setter.lock() {
+                        Ok(mut g) => *g = Some(Instant::now()),
+                        Err(e) => *e.into_inner() = Some(Instant::now()),
+                    }
                 }
             }
         });
 
         // 読み取りスレッド起動
         let app_handle_reader = app_handle.clone();
+        let history_for_reader = output_history.clone();
+        let total_for_reader = total_bytes_written.clone();
+        let last_cmd_exit_for_reader = last_command_exit_code.clone();
         std::thread::spawn(move || {
             let mut buf = [0u8; 8192];
+            // OSC 777 のシーケンスは reader read の境界をまたぐ可能性があるため、
+            // 末尾数バイトを次回読み取り時の頭にくっつけてパースする
+            let mut osc_lookback: Vec<u8> = Vec::new();
+            const OSC_LOOKBACK_MAX: usize = 256;
             loop {
                 match reader.read(&mut buf) {
                     Ok(0) => break,
                     Ok(n) => {
                         let data = buf[..n].to_vec();
+                        // リングバッファへ push と total 更新を **同じ critical section で実行**。
+                        // 別 lock にすると read_output_history が中間状態（hist は新しいが total は古い）を観測し、
+                        // buf_start = total - hist.len() が巻き戻って差分読みが重複する。
+                        if let Ok(mut hist) = history_for_reader.lock() {
+                            if hist.len() + n > OUTPUT_HISTORY_BYTES {
+                                let drop_n = hist.len() + n - OUTPUT_HISTORY_BYTES;
+                                hist.drain(..drop_n);
+                            }
+                            hist.extend(data.iter().copied());
+                            total_for_reader.fetch_add(n as u64, Ordering::Relaxed);
+                        }
+
+                        // OSC 777 直近コマンド exit code を抽出
+                        osc_lookback.extend_from_slice(&buf[..n]);
+                        while let Some(code) = consume_osc_777_exit_code(&mut osc_lookback) {
+                            match last_cmd_exit_for_reader.lock() {
+                                Ok(mut s) => *s = Some(code),
+                                Err(e) => *e.into_inner() = Some(code),
+                            }
+                        }
+                        if osc_lookback.len() > OSC_LOOKBACK_MAX {
+                            let drop_n = osc_lookback.len() - OSC_LOOKBACK_MAX;
+                            osc_lookback.drain(..drop_n);
+                        }
+
                         let _ = app_handle_reader
                             .emit("pty-output", PtyOutputPayload { session_id, data });
                     }
@@ -564,6 +680,11 @@ impl PtyManager {
             watcher_handle: Some(watcher_handle),
             is_ai_agent: false,
             cwd,
+            output_history,
+            total_bytes_written,
+            exit_status,
+            last_command_exit_code,
+            exited_at,
         };
 
         self.sessions.lock().map_err(|e| format!("lock error: {}", e))?.insert(session_id, session);
@@ -575,7 +696,8 @@ impl PtyManager {
     pub fn write(&self, session_id: u32, data: Vec<u8>) -> Result<(), String> {
         // sessions ロックは Arc 取得のみ（瞬時）→ I/O 中は他セッション操作をブロックしない
         let writer_arc = {
-            let sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            sweep_exited(&mut sessions);
             let session = sessions
                 .get(&session_id)
                 .ok_or_else(|| format!("Session {} not found", session_id))?;
@@ -588,10 +710,76 @@ impl PtyManager {
         Ok(())
     }
 
+    /// 指定セッションの出力履歴を取得する。
+    /// - `from_cursor` を指定すると、それ以降の新規バイトのみを返す（差分読み）。
+    ///   要求 cursor がリングバッファ範囲外の場合は `lost_bytes` で先頭の欠落量を通知する。
+    /// - `from_cursor` 未指定の場合は、バッファ末尾から `max_bytes` バイトを返す（従来挙動）。
+    /// - 開始位置がバッファ先頭でない場合のみ、UTF-8 / ANSI 境界補正を実施する:
+    ///   1) UTF-8 継続バイト (0b10xxxxxx) を読み飛ばし文字境界に揃える
+    ///   2) 直近 512 バイト以内に LF があればその直後まで進める（ANSI 中断残骸の回避）
+    ///   ただし from_cursor 連続呼び出し（lost_bytes == 0）では cursor が文字境界済みなので
+    ///   補正をスキップして差分の先頭バイトを欠落させない。
+    pub fn read_output_history(
+        &self,
+        session_id: u32,
+        max_bytes: Option<usize>,
+        from_cursor: Option<u64>,
+    ) -> Result<ReadHistoryResult, String> {
+        let (history_arc, total_arc) = {
+            let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            sweep_exited(&mut sessions);
+            let session = sessions
+                .get(&session_id)
+                .ok_or_else(|| format!("Session {} not found", session_id))?;
+            (session.output_history.clone(), session.total_bytes_written.clone())
+        };
+        // hist lock を取った後に total を load し、reader thread の hist push + total update が
+        // 同じ lock の中で行われていることに合わせる（race による cursor 後退対策）。
+        let hist = history_arc
+            .lock()
+            .map_err(|e| format!("history lock error: {}", e))?;
+        let total = total_arc.load(Ordering::Relaxed);
+        let buf_len = hist.len() as u64;
+        let buf_start = total.saturating_sub(buf_len);
+
+        let req_start = match from_cursor {
+            None => total.saturating_sub(max_bytes.unwrap_or(usize::MAX) as u64),
+            Some(c) => c.min(total),
+        };
+        let actual_start = req_start.max(buf_start);
+        let lost_bytes = actual_start - req_start;
+
+        let mut buf_idx = (actual_start - buf_start) as usize;
+
+        let needs_alignment = from_cursor.is_none() || lost_bytes > 0;
+        if needs_alignment && buf_idx > 0 && buf_idx < hist.len() {
+            while buf_idx < hist.len() && (hist[buf_idx] & 0xC0) == 0x80 {
+                buf_idx += 1;
+            }
+            const NEWLINE_SCAN_WINDOW: usize = 512;
+            let scan_end = (buf_idx + NEWLINE_SCAN_WINDOW).min(hist.len());
+            for i in buf_idx..scan_end {
+                if hist[i] == b'\n' {
+                    buf_idx = i + 1;
+                    break;
+                }
+            }
+        }
+
+        let take_n = max_bytes
+            .unwrap_or(usize::MAX)
+            .min(hist.len() - buf_idx);
+        let data: Vec<u8> = hist.iter().skip(buf_idx).take(take_n).copied().collect();
+        let cursor = buf_start + buf_idx as u64 + take_n as u64;
+
+        Ok(ReadHistoryResult { data, cursor, lost_bytes })
+    }
+
     pub fn resize(&self, session_id: u32, rows: u16, cols: u16) -> Result<(), String> {
         log::debug!("[Terminal] pty_manager::resize session_id={} rows={} cols={}", session_id, rows, cols);
         let master_arc = {
-            let sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            sweep_exited(&mut sessions);
             let session = sessions
                 .get(&session_id)
                 .ok_or_else(|| format!("Session {} not found", session_id))?;
@@ -620,6 +808,7 @@ impl PtyManager {
         // pty_write, pty_resize 等すべてのセッション操作がブロックされる。
         let removed = {
             let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            sweep_exited(&mut sessions);
             if let Some(session) = sessions.remove(&session_id) {
                 // poison でも alive=false を確実にセット（ウォッチャースレッドの停止に必要）
                 match session.alive.lock() {
@@ -653,9 +842,11 @@ impl PtyManager {
     }
 
     pub fn kill_all(&self, source: &str) {
-        let ids: Vec<u32> = self.sessions.lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .keys().cloned().collect();
+        let ids: Vec<u32> = {
+            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            sweep_exited(&mut sessions);
+            sessions.keys().cloned().collect()
+        };
         log::info!("[Terminal] pty_manager::kill_all source={} count={}", source, ids.len());
         for id in ids {
             let _ = self.kill(id, source);
@@ -668,10 +859,11 @@ impl PtyManager {
     pub fn kill_sessions_in_dir(&self, dir: &str) -> usize {
         let target = std::path::Path::new(dir);
         let ids: Vec<u32> = {
-            let sessions = match self.sessions.lock() {
+            let mut sessions = match self.sessions.lock() {
                 Ok(s) => s,
                 Err(e) => e.into_inner(),
             };
+            sweep_exited(&mut sessions);
             sessions
                 .iter()
                 .filter(|(_, s)| {
@@ -687,6 +879,27 @@ impl PtyManager {
             let _ = self.kill(*id, &source);
         }
         ids.len()
+    }
+
+    /// 全 PTY セッションを `SessionInfo` のリストで返す。
+    /// `exit_code` は watcher が拾ったプロセス全体（シェル本体）の exit code。
+    /// `last_command_exit_code` はシェル統合 OSC 777 が出した直近コマンドの exit code。
+    pub fn list_sessions(&self) -> Vec<SessionInfo> {
+        let mut sessions = match self.sessions.lock() {
+            Ok(s) => s,
+            Err(e) => e.into_inner(),
+        };
+        sweep_exited(&mut sessions);
+        sessions
+            .iter()
+            .map(|(id, s)| SessionInfo {
+                session_id: *id,
+                cwd: s.cwd.clone(),
+                is_ai_agent: s.is_ai_agent,
+                exit_code: s.exit_status.lock().ok().and_then(|g| *g),
+                last_command_exit_code: s.last_command_exit_code.lock().ok().and_then(|g| *g),
+            })
+            .collect()
     }
 }
 
@@ -705,5 +918,224 @@ impl Drop for PtyManager {
         if has_sessions {
             self.kill_all("PtyManager::drop");
         }
+    }
+}
+
+/// シェル統合の OSC 777 シーケンス `\x1b]777;exit_code;<digits>(\x07|\x1b\\)` を
+/// 1 個消費し、パースした exit code を返す。
+/// - 終端 (BEL or ESC\) まで届いていない場合は `None` を返し、buf を保持する
+///   （次回の reader read で続きが届くのを待つ）。
+/// - 一致したシーケンスとそれより前のゴミは buf から drain される。
+/// 末尾不完全 ESC は OSC_LOOKBACK_MAX で切り詰められる呼び出し側に任せる。
+pub fn consume_osc_777_exit_code(buf: &mut Vec<u8>) -> Option<i64> {
+    let prefix = b"\x1b]777;exit_code;";
+    let start = buf.windows(prefix.len()).position(|w| w == prefix)?;
+    let payload_start = start + prefix.len();
+    let mut term_end: Option<(usize, usize)> = None;
+    let mut i = payload_start;
+    while i < buf.len() {
+        if buf[i] == 0x07 {
+            term_end = Some((i, i + 1));
+            break;
+        }
+        if buf[i] == 0x1b && i + 1 < buf.len() && buf[i + 1] == b'\\' {
+            term_end = Some((i, i + 2));
+            break;
+        }
+        i += 1;
+    }
+    let (digits_end, total_end) = term_end?;
+    // 終端まで来た以上、parse 成否にかかわらずシーケンスは消費する。
+    // 不正 payload を残すと次回呼び出しで同じ位置に再ヒットし、後続の正常 OSC 777 が
+    // OSC_LOOKBACK_MAX で潰されるまで検出されなくなる（last_command_exit_code の固着）。
+    let parsed = std::str::from_utf8(&buf[payload_start..digits_end])
+        .ok()
+        .and_then(|s| s.trim().parse::<i64>().ok());
+    buf.drain(..total_end);
+    parsed
+}
+
+/// ANSI/VT100 エスケープシーケンスを除去する単純なストリッパ。
+/// CSI (`ESC [ ... letter`)、OSC (`ESC ] ... BEL` or `ESC \`)、その他 ESC+1byte を除去。
+/// 改行・タブは保持。完全な VT100 emulation ではないが AI が読む用途には十分。
+pub fn strip_ansi(input: &[u8]) -> String {
+    let mut out: Vec<u8> = Vec::with_capacity(input.len());
+    let mut i = 0;
+    while i < input.len() {
+        let b = input[i];
+        if b == 0x1b && i + 1 < input.len() {
+            let next = input[i + 1];
+            if next == b'[' {
+                i += 2;
+                while i < input.len() && !(0x40..=0x7e).contains(&input[i]) {
+                    i += 1;
+                }
+                if i < input.len() {
+                    i += 1;
+                }
+                continue;
+            } else if next == b']' {
+                i += 2;
+                while i < input.len() {
+                    if input[i] == 0x07 {
+                        i += 1;
+                        break;
+                    }
+                    if input[i] == 0x1b && i + 1 < input.len() && input[i + 1] == b'\\' {
+                        i += 2;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            } else {
+                i += 2;
+                continue;
+            }
+        }
+        if b >= 0x20 || b == b'\n' || b == b'\r' || b == b'\t' {
+            out.push(b);
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn strip_ansi_plain_text() {
+        assert_eq!(strip_ansi(b"hello\nworld"), "hello\nworld");
+    }
+
+    #[test]
+    fn strip_ansi_csi_color() {
+        // ESC[31m red ESC[0m
+        let input = b"\x1b[31mred\x1b[0m text";
+        assert_eq!(strip_ansi(input), "red text");
+    }
+
+    #[test]
+    fn strip_ansi_osc_title_bel() {
+        // ESC]0;title\x07
+        let input = b"\x1b]0;window title\x07hello";
+        assert_eq!(strip_ansi(input), "hello");
+    }
+
+    #[test]
+    fn strip_ansi_osc_title_st() {
+        // ESC]0;title ESC\\
+        let input = b"\x1b]0;t\x1b\\done";
+        assert_eq!(strip_ansi(input), "done");
+    }
+
+    #[test]
+    fn strip_ansi_incomplete_esc_at_end() {
+        // 末尾が不完全 ESC のみ → ESC は単独でも丸ごと捨てる
+        let input = b"abc\x1b";
+        assert_eq!(strip_ansi(input), "abc");
+    }
+
+    #[test]
+    fn strip_ansi_keeps_tab_and_crlf() {
+        let input = b"a\tb\r\nc";
+        assert_eq!(strip_ansi(input), "a\tb\r\nc");
+    }
+
+    #[test]
+    fn strip_ansi_drops_non_print_control() {
+        // 0x01 (SOH) など制御文字は除去
+        let input = b"a\x01b";
+        assert_eq!(strip_ansi(input), "ab");
+    }
+
+    #[test]
+    fn strip_ansi_empty() {
+        assert_eq!(strip_ansi(b""), "");
+    }
+
+    #[test]
+    fn strip_ansi_utf8_passthrough() {
+        let input = "日本語\x1b[1mbold\x1b[0m".as_bytes();
+        assert_eq!(strip_ansi(input), "日本語bold");
+    }
+
+    #[test]
+    fn osc_777_bel_terminator() {
+        let mut buf = b"prefix\x1b]777;exit_code;0\x07tail".to_vec();
+        assert_eq!(consume_osc_777_exit_code(&mut buf), Some(0));
+        // start より前の "prefix" もシーケンス全体と一緒に drain される
+        assert_eq!(buf, b"tail");
+    }
+
+    #[test]
+    fn osc_777_st_terminator() {
+        let mut buf = b"\x1b]777;exit_code;42\x1b\\rest".to_vec();
+        assert_eq!(consume_osc_777_exit_code(&mut buf), Some(42));
+        assert_eq!(buf, b"rest");
+    }
+
+    #[test]
+    fn osc_777_split_across_reads() {
+        // 1 回目: 終端なし → None、buf はそのまま
+        let mut buf = b"\x1b]777;exit_code;1".to_vec();
+        assert_eq!(consume_osc_777_exit_code(&mut buf), None);
+        assert_eq!(buf, b"\x1b]777;exit_code;1");
+        // 2 回目: 続きを足して再パース
+        buf.extend_from_slice(b"23\x07after");
+        assert_eq!(consume_osc_777_exit_code(&mut buf), Some(123));
+        assert_eq!(buf, b"after");
+    }
+
+    #[test]
+    fn osc_777_multiple_in_one_buffer() {
+        let mut buf = b"\x1b]777;exit_code;0\x07ok\x1b]777;exit_code;7\x07tail".to_vec();
+        assert_eq!(consume_osc_777_exit_code(&mut buf), Some(0));
+        assert_eq!(consume_osc_777_exit_code(&mut buf), Some(7));
+        assert_eq!(consume_osc_777_exit_code(&mut buf), None);
+        assert_eq!(buf, b"tail");
+    }
+
+    #[test]
+    fn osc_777_invalid_digits_drains() {
+        // 不正な digits でも終端まで来ているなら buf から消費する。
+        // 残すと後続の正常 OSC 777 が OSC_LOOKBACK_MAX で潰されるまで検出されない（リグレッション防止）
+        let mut buf = b"\x1b]777;exit_code;abc\x07after".to_vec();
+        assert_eq!(consume_osc_777_exit_code(&mut buf), None);
+        assert_eq!(buf, b"after");
+    }
+
+    #[test]
+    fn osc_777_empty_payload_drains() {
+        let mut buf = b"\x1b]777;exit_code;\x07after".to_vec();
+        assert_eq!(consume_osc_777_exit_code(&mut buf), None);
+        assert_eq!(buf, b"after");
+    }
+
+    #[test]
+    fn osc_777_invalid_then_valid_recovered() {
+        // 不正シーケンスの後ろに正常シーケンスがある場合、不正分を消費した上で
+        // 次の呼び出しで正常分が拾える
+        let mut buf = b"\x1b]777;exit_code;abc\x07\x1b]777;exit_code;42\x07tail".to_vec();
+        assert_eq!(consume_osc_777_exit_code(&mut buf), None);
+        assert_eq!(consume_osc_777_exit_code(&mut buf), Some(42));
+        assert_eq!(buf, b"tail");
+    }
+
+    #[test]
+    fn osc_777_negative_exit_code() {
+        // i64 化したので Unix 系の負の signal kill 表現も保持できる
+        let mut buf = b"\x1b]777;exit_code;-1\x07".to_vec();
+        assert_eq!(consume_osc_777_exit_code(&mut buf), Some(-1));
+    }
+
+    #[test]
+    fn osc_777_large_windows_exit_code() {
+        // Windows の Ctrl-C kill (0xC000013A = 3221225786) は u32 のため i32 では負値化するが、
+        // OSC 777 は シェルが文字列で吐くため i64 でそのまま受け取れる
+        let mut buf = b"\x1b]777;exit_code;3221225786\x07".to_vec();
+        assert_eq!(consume_osc_777_exit_code(&mut buf), Some(3221225786));
     }
 }

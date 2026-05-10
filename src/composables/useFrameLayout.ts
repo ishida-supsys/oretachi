@@ -6,13 +6,15 @@ function newId(prefix: string): string {
   return `${prefix}-${++idCounter}`;
 }
 
-function makeLeaf(terminalIds: number[]): FrameLeaf {
-  return {
+function makeLeaf(terminalIds: number[], isBackground = false): FrameLeaf {
+  const leaf: FrameLeaf = {
     type: "leaf",
     id: newId("leaf"),
     terminalIds: [...terminalIds],
     activeTerminalId: terminalIds[0] ?? null,
   };
+  if (isBackground) leaf.isBackground = true;
+  return leaf;
 }
 
 function makeContainer(
@@ -95,11 +97,12 @@ export function useFrameLayout() {
   function splitLeaf(
     leafId: string,
     direction: "left" | "right" | "top" | "bottom",
-    terminalIds: number[] = []
+    terminalIds: number[] = [],
+    isBackground = false
   ): FrameLeaf {
     const layout = direction === "left" || direction === "right" ? "horizontal" : "vertical";
     const insertBefore = direction === "left" || direction === "top";
-    const newLeaf = makeLeaf(terminalIds);
+    const newLeaf = makeLeaf(terminalIds, isBackground);
 
     const parentInfo = findParent(leafId);
     const existingLeaf = findLeafById(leafId);
@@ -263,6 +266,20 @@ export function useFrameLayout() {
     return leafs;
   }
 
+  function findBackgroundLeaf(): FrameLeaf | null {
+    return getAllLeafs().find((l) => l.isBackground) ?? null;
+  }
+
+  function markLeafBackground(leafId: string, value: boolean) {
+    const leaf = findLeafById(leafId);
+    if (!leaf) return;
+    if (value) {
+      leaf.isBackground = true;
+    } else {
+      delete leaf.isBackground;
+    }
+  }
+
   return {
     root,
     initLayout,
@@ -274,5 +291,7 @@ export function useFrameLayout() {
     setActiveTerminal,
     pruneTree,
     getAllLeafs,
+    findBackgroundLeaf,
+    markLeafBackground,
   };
 }

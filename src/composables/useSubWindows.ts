@@ -1,7 +1,15 @@
 import { reactive } from "vue";
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { emitTo, listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import type { FrameNode } from "../types/frame";
+
+// Rust 側 DetachedWorktreeRegistry に通知して MCP ツールの状態と同期する。
+// 失敗してもフロントの動作には影響しないため握りつぶす。
+function syncDetachedToBackend(worktreeId: string, detached: boolean): void {
+  const cmd = detached ? "register_detached_worktree" : "unregister_detached_worktree";
+  invoke(cmd, { worktreeId }).catch(() => {});
+}
 
 export interface SubLayoutResponse {
   layout: FrameNode | null;
@@ -102,6 +110,7 @@ export function useSubWindows() {
       pendingInitData.delete(worktreeId);
       subWindowMap.delete(worktreeId);
       detachedWorktrees.delete(worktreeId);
+      syncDetachedToBackend(worktreeId, false);
     });
 
     // ターミナルデータはサブウィンドウ準備完了後にイベントで送る
@@ -117,6 +126,7 @@ export function useSubWindows() {
 
     subWindowMap.set(worktreeId, win);
     detachedWorktrees.add(worktreeId);
+    syncDetachedToBackend(worktreeId, true);
   }
 
   async function moveToMainWindow(worktreeId: string): Promise<void> {
@@ -154,6 +164,7 @@ export function useSubWindows() {
     }
     worktreeTerminalMap.delete(worktreeId);
     detachedWorktrees.delete(worktreeId);
+    syncDetachedToBackend(worktreeId, false);
   }
 
   async function focusSubWindow(worktreeId: string): Promise<void> {
@@ -171,6 +182,7 @@ export function useSubWindows() {
     }
     worktreeTerminalMap.delete(worktreeId);
     detachedWorktrees.delete(worktreeId);
+    syncDetachedToBackend(worktreeId, false);
   }
 
   function getPendingInitData(worktreeId: string): PendingInitData | undefined {
@@ -226,11 +238,18 @@ export function useSubWindows() {
       try { await win.destroy(); } catch { /* 既に閉じ済み */ }
     }
 
+    // Rust 側 registry を全 ID 分解除（フロントの Set をクリアする前にスナップショット）
+    const detachedSnapshot = Array.from(detachedWorktrees);
+
     subWindowMap.clear();
     pendingInitData.clear();
     terminalSessionMap.clear();
     worktreeTerminalMap.clear();
     detachedWorktrees.clear();
+
+    for (const id of detachedSnapshot) {
+      syncDetachedToBackend(id, false);
+    }
   }
 
   return {

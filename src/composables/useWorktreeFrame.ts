@@ -2,6 +2,7 @@ import { ref, nextTick } from "vue";
 import { useFrameLayout } from "./useFrameLayout";
 import { useTerminalReparenting } from "./useTerminalReparenting";
 import type { SubTerminalEntry } from "../types/terminal";
+import type { FrameLeaf } from "../types/frame";
 import type TerminalView from "../components/TerminalView.vue";
 
 /**
@@ -29,6 +30,8 @@ export function useWorktreeFrame(options: {
     pruneTree,
     findLeafByTerminalId,
     getAllLeafs,
+    findBackgroundLeaf,
+    markLeafBackground,
   } = useFrameLayout();
 
   const lastFocusedLeafId = ref<string>("");
@@ -111,6 +114,15 @@ export function useWorktreeFrame(options: {
       if (term) await term.handleTabActivated();
     }
     return newLeaf;
+  }
+
+  /**
+   * 背景専用ペイン（isBackground）を新規に追加する。
+   * lastFocusedLeafId を更新せずフォアグラウンドのフォーカスを維持する。
+   */
+  function addBackgroundLeaf(direction: "left" | "right" | "top" | "bottom"): FrameLeaf {
+    const targetLeafId = lastFocusedLeafId.value || getAllLeafs()[0]?.id || "";
+    return splitLeaf(targetLeafId, direction, [], true);
   }
 
   function onTabReorder(leafId: string, terminalId: number, insertIndex: number) {
@@ -218,5 +230,8 @@ export function useWorktreeFrame(options: {
     onTabDrop,
     onTabEdgeDrop,
     onTabReorder,
+    findBackgroundLeaf,
+    markLeafBackground,
+    addBackgroundLeaf,
   };
 }

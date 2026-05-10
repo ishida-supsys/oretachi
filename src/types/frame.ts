@@ -4,6 +4,8 @@ export interface FrameLeaf {
   id: string;
   terminalIds: number[];
   activeTerminalId: number | null;
+  /** MCP 等から起動するバックグラウンドコマンド（pnpm dev 等）専用ペイン */
+  isBackground?: boolean;
 }
 
 /** コンテナ: Splitter で子を並べる */

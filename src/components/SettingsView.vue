@@ -498,6 +498,30 @@ function getSoundLabel(sound: string | null | undefined): string {
           @change="(e) => { const v = (e.target as HTMLInputElement).value.trim(); settings.terminal.shell = v || undefined; scheduleSave(); }"
         />
       </div>
+      <div class="row-input row-input--inline mt-8">
+        <span class="inline-label">{{ t('terminal.backgroundPaneSplitDirection') }}</span>
+        <select
+          class="text-input"
+          :value="settings.terminal.backgroundPaneSplitDirection ?? 'bottom'"
+          @change="(e) => { settings.terminal.backgroundPaneSplitDirection = (e.target as HTMLSelectElement).value as 'left' | 'right' | 'top' | 'bottom'; scheduleSave(); }"
+        >
+          <option value="bottom">{{ t('terminal.bgSplit.bottom') }}</option>
+          <option value="right">{{ t('terminal.bgSplit.right') }}</option>
+          <option value="top">{{ t('terminal.bgSplit.top') }}</option>
+          <option value="left">{{ t('terminal.bgSplit.left') }}</option>
+        </select>
+      </div>
+      <div class="row-input row-input--inline mt-8">
+        <input
+          id="use-oretachi-terminal-for-background"
+          type="checkbox"
+          class="toggle-checkbox"
+          :checked="settings.useOretachiTerminalForBackground ?? true"
+          @change="(e) => { settings.useOretachiTerminalForBackground = (e.target as HTMLInputElement).checked; scheduleSave(); }"
+        />
+        <label for="use-oretachi-terminal-for-background" class="inline-label toggle-label">{{ t('terminal.useOretachiTerminalForBackground') }}</label>
+      </div>
+      <p class="field-description">{{ t('terminal.useOretachiTerminalForBackgroundDesc') }}</p>
     </div>
 
     <!-- ワークツリー追加先ディレクトリ -->
@@ -1023,6 +1047,12 @@ function getSoundLabel(sound: string | null | undefined): string {
   color: #6c7086;
 }
 
+.field-description {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #6c7086;
+}
+
 .appearance-acrylic-controls {
   margin-top: 10px;
   display: flex;
@@ -1138,7 +1168,16 @@ function getSoundLabel(sound: string | null | undefined): string {
       "label": "Terminal",
       "fontSize": "Font size",
       "defaultShell": "Default shell",
-      "shellPlaceholder": "Empty = system default"
+      "shellPlaceholder": "Empty = system default",
+      "backgroundPaneSplitDirection": "Background pane split direction",
+      "bgSplit": {
+        "bottom": "Bottom",
+        "right": "Right",
+        "top": "Top",
+        "left": "Left"
+      },
+      "useOretachiTerminalForBackground": "Use oretachi terminal for AI background commands",
+      "useOretachiTerminalForBackgroundDesc": "When OFF, AI agents launch pnpm dev / vite / nodemon etc. via Claude Code's bash run_in_background instead of an oretachi terminal tab."
     },
     "worktreeBaseDir": {
       "label": "Worktree base directory",
@@ -1232,7 +1271,16 @@ function getSoundLabel(sound: string | null | undefined): string {
       "label": "ターミナル",
       "fontSize": "文字サイズ",
       "defaultShell": "デフォルトシェル",
-      "shellPlaceholder": "空欄 = システムデフォルト"
+      "shellPlaceholder": "空欄 = システムデフォルト",
+      "backgroundPaneSplitDirection": "バックグラウンドペイン分割方向",
+      "bgSplit": {
+        "bottom": "下",
+        "right": "右",
+        "top": "上",
+        "left": "左"
+      },
+      "useOretachiTerminalForBackground": "AI からの background コマンドを oretachi ターミナルで起動する",
+      "useOretachiTerminalForBackgroundDesc": "OFF の場合、AI Agent は pnpm dev / vite / nodemon 等を oretachi のターミナルタブではなく Claude Code の bash run_in_background で起動します。"
     },
     "worktreeBaseDir": {
       "label": "ワークツリーの追加先ディレクトリ",

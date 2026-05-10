@@ -1,4 +1,4 @@
-use std::{collections::HashMap, fs, path::PathBuf, sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}}, time::{SystemTime, UNIX_EPOCH}};
+use std::{collections::{HashMap, HashSet}, fs, path::PathBuf, sync::{Arc, Mutex, atomic::{AtomicU64, Ordering}}, time::{SystemTime, UNIX_EPOCH}};
 use tokio::fs as tokio_fs;
 
 use axum::{extract::{Request, State}, http::StatusCode, middleware::{self, Next}, response::Response, routing::post, Json};
@@ -17,6 +17,7 @@ use tauri::{AppHandle, Emitter, Listener, Manager};
 use tokio::sync::{broadcast, oneshot, watch, RwLock};
 
 use crate::git_worktree::get_git_remotes;
+use crate::pty_manager::PtyManager;
 use crate::settings::SettingsManager;
 
 const PORT_FILE: &str = "mcp-port";
@@ -32,6 +33,40 @@ const PEER_NOTIFY_TIMEOUT_SECS: u64 = 5;
 
 /// 接続中のMCPクライアントのPeerを保持するTauri managed state
 pub struct McpPeerRegistry(pub PeerMap);
+
+/// サブウィンドウへ移送中の worktree ID を保持。MCP ツールが silent failure せず
+/// 即座にエラーを返すために、フロント側で detached/attached が変わるたびに更新する。
+#[derive(Default)]
+pub struct DetachedWorktreeRegistry(pub Mutex<HashSet<String>>);
+
+impl DetachedWorktreeRegistry {
+    pub fn is_detached(&self, worktree_id: &str) -> bool {
+        match self.0.lock() {
+            Ok(g) => g.contains(worktree_id),
+            Err(e) => e.into_inner().contains(worktree_id),
+        }
+    }
+}
+
+#[tauri::command]
+pub fn register_detached_worktree(
+    worktree_id: String,
+    registry: tauri::State<'_, DetachedWorktreeRegistry>,
+) {
+    if let Ok(mut g) = registry.0.lock() {
+        g.insert(worktree_id);
+    }
+}
+
+#[tauri::command]
+pub fn unregister_detached_worktree(
+    worktree_id: String,
+    registry: tauri::State<'_, DetachedWorktreeRegistry>,
+) {
+    if let Ok(mut g) = registry.0.lock() {
+        g.remove(&worktree_id);
+    }
+}
 
 static PEER_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -272,6 +307,9 @@ pub struct ListRepositoryParams {}
 pub struct GetWorktreeStatusParams {}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetAppOptionsParams {}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct AddTaskParams {
     #[schemars(description = "タスクのプロンプト (AIに実行させたい作業の説明)")]
     pub prompt: String,
@@ -306,6 +344,61 @@ struct CloseWorktreeEvent {
     merge_to: String,
     delete_branch: bool,
     force_branch: bool,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SpawnTerminalParams {
+    #[schemars(description = "対象ワークツリーの名前")]
+    pub worktree_name: String,
+    #[schemars(description = "ワークツリーID（同名ワークツリーが複数ある場合に指定）")]
+    pub worktree_id: Option<String>,
+    #[schemars(description = "新規ターミナルで実行するコマンド（末尾改行は自動付与）")]
+    pub command: String,
+    #[schemars(description = "ターミナルタブのタイトル（省略時はデフォルト）")]
+    pub title: Option<String>,
+    #[schemars(description = "起動理由のメモ（ログ用、省略可）")]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct SpawnTerminalEvent {
+    worktree_id: String,
+    command: String,
+    title: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListTerminalsParams {
+    #[schemars(description = "絞り込みするワークツリー名（省略時は全ワークツリー横断）")]
+    pub worktree_name: Option<String>,
+    #[schemars(description = "ワークツリーID（同名ワークツリーが複数ある場合に指定）")]
+    pub worktree_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct KillTerminalParams {
+    #[schemars(description = "停止する PTY セッションID（oretachi_list_terminals で取得）")]
+    pub session_id: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ReadTerminalParams {
+    #[schemars(description = "PTY セッションID（oretachi_list_terminals で取得）")]
+    pub session_id: u32,
+    #[schemars(description = "1 回の呼び出しで返す最大バイト数（デフォルト 8192）")]
+    pub max_bytes: Option<usize>,
+    #[schemars(description = "前回呼び出しで返された cursor を渡すと、それ以降の新規出力だけを返す（差分読み）。省略時はバッファ末尾から max_bytes")]
+    pub from_cursor: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct WriteTerminalParams {
+    #[schemars(description = "PTY セッションID（oretachi_list_terminals で取得）")]
+    pub session_id: u32,
+    #[schemars(description = "送信するテキスト")]
+    pub text: String,
+    #[schemars(description = "true なら改行を \\r 正規化＋末尾 \\r 保証してから送信（デフォルト true）。vitest の単一キー入力など改行不要時は false")]
+    pub submit: Option<bool>,
 }
 
 // ─── MCP Service ──────────────────────────────────────────────────────────────
@@ -788,6 +881,24 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    #[tool(description = "AI agent が参照するグローバル app options (background terminal の起動先トグル等) を取得する")]
+    fn oretachi_get_app_options(
+        &self,
+        Parameters(_params): Parameters<GetAppOptionsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+        let json = serde_json::to_string(&serde_json::json!({
+            "useOretachiTerminalForBackground": settings.use_oretachi_terminal_for_background,
+        }))
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        log::info!(
+            "[mcp] oretachi_get_app_options: useOretachiTerminalForBackground={}",
+            settings.use_oretachi_terminal_for_background
+        );
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
     #[tool(description = "List all registered repositories with their names and git remote URLs")]
     async fn oretachi_list_repository(
         &self,
@@ -988,6 +1099,228 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(
             "ワークツリーのクローズリクエストを送信しました。処理は非同期に行われます。",
         )]))
+    }
+
+    #[tool(description = "指定ワークツリーに新しいターミナルタブを追加し、与えられたコマンドを流し込む。pnpm dev / tauri dev / vite / next dev など長時間常駐するバックグラウンドコマンドを oretachi UI 上で起動するために使う")]
+    fn oretachi_spawn_terminal(
+        &self,
+        Parameters(SpawnTerminalParams { worktree_name, worktree_id, command, title, reason }): Parameters<SpawnTerminalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let worktree_name = worktree_name.trim().to_string();
+        if worktree_name.is_empty() {
+            return Err(McpError::invalid_params("worktree_name must not be empty", None));
+        }
+        if command.trim().is_empty() {
+            return Err(McpError::invalid_params("command must not be empty", None));
+        }
+
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+
+        let wt = if let Some(id) = worktree_id.as_deref() {
+            settings.worktrees.iter().find(|w| w.id == id).ok_or_else(|| {
+                McpError::invalid_params(format!("worktree id '{}' not found", id), None)
+            })?
+        } else {
+            let matches: Vec<_> = settings.worktrees.iter().filter(|w| w.name == worktree_name).collect();
+            match matches.len() {
+                0 => {
+                    let names: Vec<&str> = settings.worktrees.iter().map(|w| w.name.as_str()).collect();
+                    return Err(McpError::invalid_params(
+                        format!("worktree '{}' not found. available: [{}]", worktree_name, names.join(", ")),
+                        None,
+                    ));
+                }
+                1 => matches[0],
+                _ => {
+                    let ids: Vec<&str> = matches.iter().map(|w| w.id.as_str()).collect();
+                    return Err(McpError::invalid_params(
+                        format!("multiple worktrees named '{}'. specify worktree_id to disambiguate: [{}]", worktree_name, ids.join(", ")),
+                        None,
+                    ));
+                }
+            }
+        };
+
+        // detached（サブウィンドウ化済み）ワークツリーへの spawn は App.vue 側で
+        // 早期 return されるため、MCP 経由で投入してもユーザに silent failure として
+        // 見えてしまう。事前に検知して明示的なエラーを返す。
+        let detached_registry = self.app_handle.state::<DetachedWorktreeRegistry>();
+        if detached_registry.is_detached(&wt.id) {
+            return Err(McpError::invalid_params(
+                format!(
+                    "worktree '{}' is currently detached (open in a sub-window). MCP spawn into detached worktrees is not supported. Bring the worktree back into the main window first.",
+                    worktree_name
+                ),
+                None,
+            ));
+        }
+
+        let event = SpawnTerminalEvent {
+            worktree_id: wt.id.clone(),
+            command: command.clone(),
+            title: title.clone(),
+        };
+        self.app_handle
+            .emit("mcp-spawn-terminal", &event)
+            .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
+        log::info!(
+            "[mcp] oretachi_spawn_terminal: worktree={} command={:?} title={:?} reason={:?}",
+            worktree_name, command, title, reason
+        );
+        Ok(CallToolResult::success(vec![Content::text(
+            "新規ターミナルの追加リクエストを送信しました。oretachi UI に新しいタブが追加され、コマンドが流し込まれます。",
+        )]))
+    }
+
+    #[tool(description = "現在の PTY セッション一覧を返す。session_id, cwd, isAiAgent, ワークツリー名/ID を含む。oretachi_kill_terminal を呼ぶ前の確認に使う")]
+    fn oretachi_list_terminals(
+        &self,
+        Parameters(ListTerminalsParams { worktree_name, worktree_id }): Parameters<ListTerminalsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let pty = self.app_handle.state::<PtyManager>();
+        let raw = pty.list_sessions();
+
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+
+        let filter_id: Option<String> = if let Some(id) = worktree_id.as_deref() {
+            if !settings.worktrees.iter().any(|w| w.id == id) {
+                return Err(McpError::invalid_params(format!("worktree id '{}' not found", id), None));
+            }
+            Some(id.to_string())
+        } else if let Some(name) = worktree_name.as_deref() {
+            let matches: Vec<_> = settings.worktrees.iter().filter(|w| w.name == name).collect();
+            match matches.len() {
+                0 => {
+                    let names: Vec<&str> = settings.worktrees.iter().map(|w| w.name.as_str()).collect();
+                    return Err(McpError::invalid_params(
+                        format!("worktree '{}' not found. available: [{}]", name, names.join(", ")),
+                        None,
+                    ));
+                }
+                1 => Some(matches[0].id.clone()),
+                _ => {
+                    let ids: Vec<&str> = matches.iter().map(|w| w.id.as_str()).collect();
+                    return Err(McpError::invalid_params(
+                        format!("multiple worktrees named '{}'. specify worktree_id to disambiguate: [{}]", name, ids.join(", ")),
+                        None,
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+
+        let mut items: Vec<serde_json::Value> = Vec::new();
+        for info in raw {
+            let matched_wt = info.cwd.as_deref().and_then(|c| {
+                let cp = std::path::Path::new(c);
+                settings.worktrees.iter().find(|w| {
+                    let wp = std::path::Path::new(&w.path);
+                    cp.starts_with(wp)
+                })
+            });
+            let matched_wt_id = matched_wt.map(|w| w.id.clone());
+            if let Some(ref fid) = filter_id {
+                if matched_wt_id.as_deref() != Some(fid.as_str()) {
+                    continue;
+                }
+            }
+            let status = if info.exit_code.is_some() { "exited" } else { "running" };
+            items.push(serde_json::json!({
+                "sessionId": info.session_id,
+                "cwd": info.cwd,
+                "isAiAgent": info.is_ai_agent,
+                "worktreeId": matched_wt_id,
+                "worktreeName": matched_wt.map(|w| w.name.clone()),
+                "status": status,
+                "exitCode": info.exit_code,
+                "lastCommandExitCode": info.last_command_exit_code,
+            }));
+        }
+
+        let json = serde_json::to_string(&items)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "指定 PTY セッションを停止する。oretachi_list_terminals で取得した session_id を渡す。UI のタブは pty-exit イベント経由で自動的に消える")]
+    fn oretachi_kill_terminal(
+        &self,
+        Parameters(KillTerminalParams { session_id }): Parameters<KillTerminalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let pty = self.app_handle.state::<PtyManager>();
+        if !pty.list_sessions().iter().any(|s| s.session_id == session_id) {
+            return Err(McpError::invalid_params(
+                format!("session_id {} not found", session_id),
+                None,
+            ));
+        }
+        pty.kill(session_id, "mcp-kill-terminal")
+            .map_err(|e| McpError::internal_error(e, None))?;
+        log::info!("[mcp] oretachi_kill_terminal: session_id={}", session_id);
+        Ok(CallToolResult::success(vec![Content::text("killed")]))
+    }
+
+    #[tool(description = "指定 PTY セッションの最近の出力履歴を返す。レスポンスは JSON: { text, cursor, lostBytes }。text は ANSI 除去済み UTF-8。連続ポーリングで重複を避けるには、次回呼び出しの from_cursor に前回の cursor を渡す（差分読み）。lostBytes>0 はリングバッファ溢れで先頭が欠落したことを意味する。先に oretachi_list_terminals で session_id を取得すること")]
+    fn oretachi_read_terminal(
+        &self,
+        Parameters(ReadTerminalParams { session_id, max_bytes, from_cursor }): Parameters<ReadTerminalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let pty = self.app_handle.state::<PtyManager>();
+        let result = pty
+            .read_output_history(session_id, Some(max_bytes.unwrap_or(8192)), from_cursor)
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        let text = crate::pty_manager::strip_ansi(&result.data);
+        log::info!(
+            "[mcp] oretachi_read_terminal: session_id={} bytes={} cursor={} lost_bytes={}",
+            session_id,
+            result.data.len(),
+            result.cursor,
+            result.lost_bytes
+        );
+        let json = serde_json::json!({
+            "text": text,
+            "cursor": result.cursor,
+            "lostBytes": result.lost_bytes,
+        })
+        .to_string();
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "指定 PTY セッションへテキストを送信する。submit=true（デフォルト）なら改行を PowerShell/conpty 互換の \\r へ正規化し末尾にも保証して、コマンド送信扱いにする。submit=false なら raw のまま送る（vitest の単一キー入力など）")]
+    fn oretachi_write_terminal(
+        &self,
+        Parameters(WriteTerminalParams { session_id, text, submit }): Parameters<WriteTerminalParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let pty = self.app_handle.state::<PtyManager>();
+        if !pty.list_sessions().iter().any(|s| s.session_id == session_id) {
+            return Err(McpError::invalid_params(
+                format!("session_id {} not found", session_id),
+                None,
+            ));
+        }
+        let payload = if submit.unwrap_or(true) {
+            let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
+            if normalized.ends_with('\r') {
+                normalized
+            } else {
+                normalized + "\r"
+            }
+        } else {
+            text
+        };
+        let bytes_len = payload.len();
+        pty.write(session_id, payload.into_bytes())
+            .map_err(|e| McpError::internal_error(e, None))?;
+        log::info!(
+            "[mcp] oretachi_write_terminal: session_id={} bytes={} submit={:?}",
+            session_id,
+            bytes_len,
+            submit
+        );
+        Ok(CallToolResult::success(vec![Content::text("written")]))
     }
 }
 

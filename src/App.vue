@@ -36,7 +36,7 @@ import { useTaskExecution } from "./composables/useTaskExecution";
 import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
 import { useAutoApprovalPrompt } from "./composables/useAutoApprovalPrompt";
 import type { FrameNode } from "./types/frame";
-import { useWorktreeFrameBundles } from "./composables/useWorktreeFrameBundles";
+import { useWorktreeFrameBundles, type WorktreeFrameBundle } from "./composables/useWorktreeFrameBundles";
 import { useCodeReviewChatListener } from "./composables/useCodeReviewLineChat";
 import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
 import { useWorktreeRemove } from "./composables/useWorktreeRemove";
@@ -173,8 +173,12 @@ const { setup: setupCodeReviewChatListener } = useCodeReviewChatListener({
 // terminalId → サムネイル data URL
 const thumbnailUrls = reactive(new Map<number, string>());
 
-// worktreeId → 実行待ちスクリプトコマンド文字列
-const pendingScripts = new Map<string, string>();
+// terminalId → 実行待ちスクリプトコマンド文字列
+// onAddTerminal がターミナルを採番した直後に terminalId キーで pending を結びつける（atomic）。
+// onTerminalReady でその terminalId 専用の command を取得して書き込む。
+// worktree 粒度の FIFO ではないため、同じ worktree で別由来（ユーザー Ctrl+T 等）のタブが
+// 立ち上がっても誤投入されない。多重 spawn の race も terminalId 単位で完全分離される。
+const pendingByTerminal = new Map<number, string>();
 
 // terminalId → 復元スナップショット（起動時セッション復元用）
 const pendingSnapshots = new Map<number, string>();
@@ -252,7 +256,6 @@ const { executeAddWorktree, executeAgentWorktree, resolveShell, buildPendingComm
     onAddTerminal,
     onMoveToSubWindow,
     loadingWorktrees,
-    pendingScripts,
     autoApprovalMap,
     onWebSessionDetected: (terminalId, info) => {
       terminalWebSessions.set(terminalId, info);
@@ -354,9 +357,9 @@ async function onTerminalReady(worktreeId: string, terminalId: number) {
   }
   pendingSnapshots.delete(terminalId);
   pendingSessionAttach.delete(terminalId);
-  const command = pendingScripts.get(worktreeId);
-  if (command) {
-    pendingScripts.delete(worktreeId);
+  const command = pendingByTerminal.get(terminalId);
+  if (command !== undefined) {
+    pendingByTerminal.delete(terminalId);
     const ref = getTerminalRef(terminalId);
     await ref?.write(command);
   }
@@ -435,9 +438,37 @@ async function closeWindow() {
   await getCurrentWindow().close();
 }
 
-async function onAddTerminal(worktreeId: string) {
+/**
+ * バックグラウンド専用リーフ（pnpm dev 等を MCP 経由で投入する用）の id を返す。
+ * - 既存の背景リーフがあれば再利用
+ * - ターミナル未配置の単一リーフが存在すれば、それを背景化して再利用
+ * - それ以外は設定の分割方向で last-focused から新リーフを切り出す
+ */
+function getOrCreateBackgroundLeafId(bundle: WorktreeFrameBundle): string {
+  const existing = bundle.frame.findBackgroundLeaf();
+  if (existing) return existing.id;
+
+  const allLeafs = bundle.frame.getAllLeafs();
+  const noTerminalsAtAll = allLeafs.every((l) => l.terminalIds.length === 0);
+  if (noTerminalsAtAll && allLeafs.length === 1) {
+    bundle.frame.markLeafBackground(allLeafs[0].id, true);
+    return allLeafs[0].id;
+  }
+
+  const dir = (settings.value.terminal.backgroundPaneSplitDirection ?? "bottom") as
+    "left" | "right" | "top" | "bottom";
+  const newLeaf = bundle.frame.addBackgroundLeaf(dir);
+  return newLeaf.id;
+}
+
+async function onAddTerminal(
+  worktreeId: string,
+  options?: { background?: boolean; pendingCommand?: string },
+) {
+  const background = options?.background === true;
   clearNotification(worktreeId);
   if (isDetached(worktreeId)) {
+    // detached worktree は handleSubAddTerminalRequest 経由で処理し、pendingCommand 連携は未対応。
     await handleSubAddTerminalRequest(worktreeId);
     return;
   }
@@ -445,7 +476,12 @@ async function onAddTerminal(worktreeId: string) {
   const terminal = addTerminal(worktreeId);
   pendingManualStart.add(terminal.id);
   terminalWorktreeMap.set(terminal.id, worktreeId);
-  debug(`[Terminal] onAddTerminal worktreeId=${worktreeId} terminalId=${terminal.id}`);
+  // ターミナル採番の直後に pendingCommand を結びつけることで、後続の onTerminalReady が
+  // この terminalId に対応する command を確実に取り出す。worktree 粒度でなく terminalId 粒度。
+  if (options?.pendingCommand !== undefined) {
+    pendingByTerminal.set(terminal.id, options.pendingCommand);
+  }
+  debug(`[Terminal] onAddTerminal worktreeId=${worktreeId} terminalId=${terminal.id} background=${background}`);
 
   // バンドルがなければ作成（ワークツリー追加直後など）
   if (!worktreeFrameBundles.has(worktreeId)) {
@@ -455,19 +491,25 @@ async function onAddTerminal(worktreeId: string) {
   const bundle = worktreeFrameBundles.get(worktreeId)!;
   bundle.terminalEntries.set(terminal.id, { id: terminal.id, title: terminal.title, sessionId: 0, snapshot: "" });
 
-  const leafId = bundle.frame.lastFocusedLeafId.value || bundle.frame.getAllLeafs()[0]?.id;
-  debug(`[Terminal] onAddTerminal leafId=${leafId ?? "null"} terminalId=${terminal.id}`);
-  if (leafId) {
+  const targetLeafId = background
+    ? getOrCreateBackgroundLeafId(bundle)
+    : (bundle.frame.lastFocusedLeafId.value || bundle.frame.getAllLeafs()[0]?.id);
+  debug(`[Terminal] onAddTerminal leafId=${targetLeafId ?? "null"} terminalId=${terminal.id}`);
+  if (targetLeafId) {
     bundle.frame.returnAllToOffscreen();
-    bundle.frame.addTerminalToLeaf(leafId, terminal.id);
-    bundle.frame.lastFocusedLeafId.value = leafId;
+    bundle.frame.addTerminalToLeaf(targetLeafId, terminal.id);
+    if (!background) {
+      bundle.frame.lastFocusedLeafId.value = targetLeafId;
+    }
   } else {
     bundle.frame.initLayout([terminal.id]);
     bundle.frame.lastFocusedLeafId.value = bundle.frame.getAllLeafs()[0]?.id ?? "";
   }
 
-  viewMode.value = "terminal";
-  activeWorktreeId.value = worktreeId;
+  if (!background) {
+    viewMode.value = "terminal";
+    activeWorktreeId.value = worktreeId;
+  }
 
   await nextTick();
   debug(`[Terminal] onAddTerminal after nextTick terminalId=${terminal.id}`);
@@ -481,7 +523,9 @@ async function onAddTerminal(worktreeId: string) {
     pendingManualStart.delete(terminal.id);
     await term.startPty();
     debug(`[Terminal] onAddTerminal after startPty terminalId=${terminal.id}`);
-    term.focus();
+    if (!background) {
+      term.focus();
+    }
     // 安全策: flexレイアウト確定が遅延する場合に備えた再fit
     setTimeout(() => {
       debug(`[Terminal] onAddTerminal setTimeout re-fit terminalId=${terminal.id}`);
@@ -605,16 +649,9 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string,
       }
     }
 
-    // パッケージマネージャーinstall・スクリプトをペンディング登録
-    if (repo) {
-      const pending = buildPendingCommand(repo, entry);
-      if (pending) {
-        pendingScripts.set(entry.id, pending);
-      }
-    }
-
-    // ワークツリー作成後、自動でターミナルを1つ追加
-    await onAddTerminal(entry.id);
+    // パッケージマネージャーinstall・スクリプトを最初のターミナルに紐付けて起動
+    const pending = repo ? buildPendingCommand(repo, entry) : null;
+    await onAddTerminal(entry.id, pending ? { pendingCommand: pending } : undefined);
 
     // パッケージマネージャーinstall・スクリプトの完了を待つ
     if (repo?.packageManager || repo?.execScript) {
@@ -988,6 +1025,41 @@ onMounted(async () => {
       forceBranch: force_branch,
     });
   });
+
+  // MCPからの新規ターミナル追加（pnpm dev など長時間バックグラウンドコマンド用）
+  await listen<{ worktree_id: string; command: string; title: string | null }>(
+    "mcp-spawn-terminal",
+    async (event) => {
+      const { worktree_id, command, title } = event.payload;
+      const targetWt = worktrees.value.find((w) => w.id === worktree_id);
+      if (!targetWt) {
+        debug(`[Terminal] mcp-spawn-terminal: worktree ${worktree_id} not found, skipping`);
+        return;
+      }
+      // detached（サブウィンドウ化済み）ワークツリーは onAddTerminal が
+      // handleSubAddTerminalRequest に分岐し pendingCommand を消費しないため未対応
+      if (isDetached(worktree_id)) {
+        debug(`[Terminal] mcp-spawn-terminal: worktree ${worktree_id} is detached, not supported`);
+        return;
+      }
+      const beforeIds = new Set(targetWt.terminals.map((t) => t.id));
+      // PowerShell/conpty は LF だけだとプロンプト継続行扱いになり Enter が発火しない。
+      // FramePane.vue / TerminalView.vue paste と同じく \r に正規化する。
+      const normalized = command.replace(/\r?\n/g, "\r");
+      const cmd = normalized.endsWith("\r") ? normalized : normalized + "\r";
+      try {
+        await onAddTerminal(worktree_id, { background: true, pendingCommand: cmd });
+      } catch (e) {
+        debug(`[Terminal] mcp-spawn-terminal: onAddTerminal failed: ${e}`);
+        return;
+      }
+      if (title) {
+        const wt = worktrees.value.find((w) => w.id === worktree_id);
+        const newTerm = wt?.terminals.find((t) => !beforeIds.has(t.id));
+        if (newTerm) onTerminalTitleChange(worktree_id, newTerm.id, title);
+      }
+    },
+  );
 
   // サブウィンドウ準備完了 → init データをイベントで送信（サブウィンドウ復元より前に登録必須）
   await listen<{ worktreeId: string }>("sub-ready", async (event) => {

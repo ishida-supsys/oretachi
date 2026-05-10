@@ -22,10 +22,12 @@ export function useTaskExecution(deps: {
   tryAutoAssignHotkey: (worktreeId: string) => void;
   terminalAgentStatus: Map<number, boolean>;
   getTerminalRef: (terminalId: number) => InstanceType<typeof TerminalView> | undefined;
-  onAddTerminal: (worktreeId: string) => Promise<void>;
+  onAddTerminal: (
+    worktreeId: string,
+    opts?: { background?: boolean; pendingCommand?: string },
+  ) => Promise<void>;
   onMoveToSubWindow: (worktreeId: string) => Promise<void>;
   loadingWorktrees: Map<string, string>;
-  pendingScripts: Map<string, string>;
   autoApprovalMap: Map<string, boolean>;
   onWebSessionDetected?: (terminalId: number, info: WebSessionInfo) => void;
 }) {
@@ -45,7 +47,6 @@ export function useTaskExecution(deps: {
     onAddTerminal,
     onMoveToSubWindow,
     loadingWorktrees,
-    pendingScripts,
     autoApprovalMap,
     onWebSessionDetected,
   } = deps;
@@ -276,11 +277,7 @@ export function useTaskExecution(deps: {
       }
 
       const pending = buildPendingCommand(repo, entry);
-      if (pending) {
-        pendingScripts.set(entry.id, pending);
-      }
-
-      await onAddTerminal(entry.id);
+      await onAddTerminal(entry.id, pending ? { pendingCommand: pending } : undefined);
       await waitForSessionReady(entry.id);
 
       if (repo.packageManager || repo.execScript) {
