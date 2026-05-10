@@ -67,7 +67,7 @@ oretachi UI に新しいタブが追加され、`pnpm dev` がそのターミナ
 - `exitCode`: シェル本体の exit code（`status: "exited"` のときのみ非 null）
 - `lastCommandExitCode`: シェル統合が拾った**直近コマンド**の exit code（`pnpm test` の pass/fail 判定などに使える）
 
-直前に追加したセッションが含まれていれば起動成功。`pnpm dev` 等が突然死した場合は `status` が `"exited"` になる。
+直前に追加したセッションが含まれていれば起動成功。シェル本体が `exit` 等で自然終了したセッションは（zombie 化を防ぐため）map から自動的に除去されるので、続けてポーリングすると消える ＝ 終了したと判定できる。**コマンド単位の成否は `lastCommandExitCode` を見るのが基本**で、`pnpm test` のように shell 内で実行したコマンドの結果を観察したい場合に使う。
 
 ### Step 4: 出力ログを参照する
 
