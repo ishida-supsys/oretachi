@@ -237,6 +237,8 @@ impl Default for AppearanceSettings {
 
 fn default_ai_timeout_secs() -> u64 { 120 }
 
+fn default_use_oretachi_terminal_for_background() -> bool { true }
+
 fn default_notification_volume() -> u32 { 80 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -337,6 +339,8 @@ pub struct AppSettings {
     pub ai_timeout_secs: u64,
     #[serde(default, rename = "debugMode")]
     pub debug_mode: bool,
+    #[serde(default = "default_use_oretachi_terminal_for_background", rename = "useOretachiTerminalForBackground")]
+    pub use_oretachi_terminal_for_background: bool,
 }
 
 impl AppSettings {
@@ -371,6 +375,7 @@ impl Default for AppSettings {
             enable_home_cat: false,
             ai_timeout_secs: default_ai_timeout_secs(),
             debug_mode: false,
+            use_oretachi_terminal_for_background: default_use_oretachi_terminal_for_background(),
         }
     }
 }

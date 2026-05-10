@@ -511,6 +511,17 @@ function getSoundLabel(sound: string | null | undefined): string {
           <option value="left">{{ t('terminal.bgSplit.left') }}</option>
         </select>
       </div>
+      <div class="row-input row-input--inline mt-8">
+        <input
+          id="use-oretachi-terminal-for-background"
+          type="checkbox"
+          class="toggle-checkbox"
+          :checked="settings.useOretachiTerminalForBackground ?? true"
+          @change="(e) => { settings.useOretachiTerminalForBackground = (e.target as HTMLInputElement).checked; scheduleSave(); }"
+        />
+        <label for="use-oretachi-terminal-for-background" class="inline-label toggle-label">{{ t('terminal.useOretachiTerminalForBackground') }}</label>
+      </div>
+      <p class="field-description">{{ t('terminal.useOretachiTerminalForBackgroundDesc') }}</p>
     </div>
 
     <!-- ワークツリー追加先ディレクトリ -->
@@ -1036,6 +1047,12 @@ function getSoundLabel(sound: string | null | undefined): string {
   color: #6c7086;
 }
 
+.field-description {
+  margin: 6px 0 0;
+  font-size: 11px;
+  color: #6c7086;
+}
+
 .appearance-acrylic-controls {
   margin-top: 10px;
   display: flex;
@@ -1158,7 +1175,9 @@ function getSoundLabel(sound: string | null | undefined): string {
         "right": "Right",
         "top": "Top",
         "left": "Left"
-      }
+      },
+      "useOretachiTerminalForBackground": "Use oretachi terminal for AI background commands",
+      "useOretachiTerminalForBackgroundDesc": "When OFF, AI agents launch pnpm dev / vite / nodemon etc. via Claude Code's bash run_in_background instead of an oretachi terminal tab."
     },
     "worktreeBaseDir": {
       "label": "Worktree base directory",
@@ -1259,7 +1278,9 @@ function getSoundLabel(sound: string | null | undefined): string {
         "right": "右",
         "top": "上",
         "left": "左"
-      }
+      },
+      "useOretachiTerminalForBackground": "AI からの background コマンドを oretachi ターミナルで起動する",
+      "useOretachiTerminalForBackgroundDesc": "OFF の場合、AI Agent は pnpm dev / vite / nodemon 等を oretachi のターミナルタブではなく Claude Code の bash run_in_background で起動します。"
     },
     "worktreeBaseDir": {
       "label": "ワークツリーの追加先ディレクトリ",

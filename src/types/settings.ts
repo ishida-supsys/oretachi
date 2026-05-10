@@ -114,4 +114,5 @@ export interface AppSettings {
   enableHomeCat?: boolean;
   aiTimeoutSecs?: number; // AIタイムアウト秒数 (デフォルト: 120)
   debugMode?: boolean;
+  useOretachiTerminalForBackground?: boolean; // AI からの background コマンドを oretachi ターミナルで起動するか (デフォルト: true)
 }

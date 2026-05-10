@@ -307,6 +307,9 @@ pub struct ListRepositoryParams {}
 pub struct GetWorktreeStatusParams {}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetAppOptionsParams {}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct AddTaskParams {
     #[schemars(description = "タスクのプロンプト (AIに実行させたい作業の説明)")]
     pub prompt: String,
@@ -875,6 +878,24 @@ impl NotifyService {
         let json = serde_json::to_string_pretty(&results)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         log::info!("[mcp] oretachi_get_worktree_status: {} entries", results.len());
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "AI agent が参照するグローバル app options (background terminal の起動先トグル等) を取得する")]
+    fn oretachi_get_app_options(
+        &self,
+        Parameters(_params): Parameters<GetAppOptionsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+        let json = serde_json::to_string(&serde_json::json!({
+            "useOretachiTerminalForBackground": settings.use_oretachi_terminal_for_background,
+        }))
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        log::info!(
+            "[mcp] oretachi_get_app_options: useOretachiTerminalForBackground={}",
+            settings.use_oretachi_terminal_for_background
+        );
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 

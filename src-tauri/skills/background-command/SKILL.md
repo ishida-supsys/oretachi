@@ -1,7 +1,7 @@
 ---
 name: background-command
 description: pnpm dev / pnpm run tauri dev / next dev / vite / nodemon / cargo watch / docker compose up など長時間常駐する開発サーバ・watcher・background プロセスを起動するときに、bash の run_in_background ではなく oretachi MCP ツール経由で oretachi UI の新しいターミナルタブとして起動するためのスキル。起動後の出力参照・キー入力（vitest の再実行など）にも対応。
-allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_spawn_terminal, mcp__plugin_oretachi_oretachi__oretachi_list_terminals, mcp__plugin_oretachi_oretachi__oretachi_kill_terminal, mcp__plugin_oretachi_oretachi__oretachi_read_terminal, mcp__plugin_oretachi_oretachi__oretachi_write_terminal, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status
+allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_spawn_terminal, mcp__plugin_oretachi_oretachi__oretachi_list_terminals, mcp__plugin_oretachi_oretachi__oretachi_kill_terminal, mcp__plugin_oretachi_oretachi__oretachi_read_terminal, mcp__plugin_oretachi_oretachi__oretachi_write_terminal, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp__plugin_oretachi_oretachi__oretachi_get_app_options
 ---
 
 # background-command スキル
@@ -34,7 +34,23 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_spawn_terminal, mcp__plug
 
 判断基準: **「実行後ずっと起動し続けるか？」**「Yes」ならこのスキル、「No」なら通常の bash。
 
+ただし oretachi 設定の **「AI からの background コマンドを oretachi ターミナルで起動する」が OFF** の場合は、上記判定で「Yes」でも本スキルは使わず Claude Code の bash tool（`run_in_background: true`）でフォールバック起動する。Step 0 で確認する。
+
 ## 手順
+
+### Step 0: グローバル設定を確認する
+
+最初に `oretachi_get_app_options` を呼び、戻り値の `useOretachiTerminalForBackground` を見る。
+
+```
+oretachi_get_app_options({})
+// => { "useOretachiTerminalForBackground": true | false }
+```
+
+- `true`（既定）: Step 1 以降に進む。
+- `false`: 本スキルは使わない。Claude Code の bash tool で `run_in_background: true` を指定して起動する（例: `bash` tool で `pnpm dev` を実行、`run_in_background: true`）。oretachi UI には新タブを作らない。以降の Step もスキップ。
+
+このトグルは oretachi 設定タブ → Terminal セクションの「AI からの background コマンドを oretachi ターミナルで起動する」に対応する。
 
 ### Step 1: ワークツリーを特定する
 
