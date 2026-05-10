@@ -6,6 +6,24 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.20.0] - 2026-05-10
+
+### Added
+- MCP に `oretachi_terminal_spawn` / `oretachi_terminal_list` / `oretachi_terminal_kill` ツールを追加
+- MCP に `oretachi_read_terminal` / `oretachi_write_terminal` ツールを追加 (差分読み・status 取得・OSC 777 通知サポート)
+- MCP 起動ターミナルを背景ペインへ隔離する仕組みを追加
+- AI background コマンドの起動先 (前景/背景) を設定で切替可能に
+- `mcp_server` モジュールを App.vue に統合
+
+### Fixed
+- PowerShell で Enter キーが正しく送信されない問題を修正
+- `pty.kill` / `kill_all` 呼び出しに `source` 引数を追加し、`pty_kill` の発行元をログから特定可能に
+- bug-review 指摘 (#1-#5 および追加3件) を修正
+- review-terminal-flow 指摘 P1 #1, #2 を修正
+
+### Documentation
+- skill: background-command に read/write terminal 手順を追加
+
 ## [0.19.10] - 2026-04-29
 
 ### Fixed
@@ -309,7 +327,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.19.10...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.20.0...HEAD
+[0.20.0]: https://github.com/ishida-supsys/oretachi/compare/0.19.10...0.20.0
 [0.19.10]: https://github.com/ishida-supsys/oretachi/compare/0.19.9...0.19.10
 [0.19.9]: https://github.com/ishida-supsys/oretachi/compare/0.19.8...0.19.9
 [0.19.8]: https://github.com/ishida-supsys/oretachi/compare/0.19.7...0.19.8
