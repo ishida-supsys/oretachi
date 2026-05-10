@@ -382,8 +382,10 @@ pub struct KillTerminalParams {
 pub struct ReadTerminalParams {
     #[schemars(description = "PTY セッションID（oretachi_list_terminals で取得）")]
     pub session_id: u32,
-    #[schemars(description = "末尾から取得する最大バイト数（デフォルト 8192）")]
+    #[schemars(description = "1 回の呼び出しで返す最大バイト数（デフォルト 8192）")]
     pub max_bytes: Option<usize>,
+    #[schemars(description = "前回呼び出しで返された cursor を渡すと、それ以降の新規出力だけを返す（差分読み）。省略時はバッファ末尾から max_bytes")]
+    pub from_cursor: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1190,8 +1192,8 @@ impl NotifyService {
         };
 
         let mut items: Vec<serde_json::Value> = Vec::new();
-        for (session_id, cwd, is_ai_agent) in raw {
-            let matched_wt = cwd.as_deref().and_then(|c| {
+        for info in raw {
+            let matched_wt = info.cwd.as_deref().and_then(|c| {
                 let cp = std::path::Path::new(c);
                 settings.worktrees.iter().find(|w| {
                     let wp = std::path::Path::new(&w.path);
@@ -1204,12 +1206,16 @@ impl NotifyService {
                     continue;
                 }
             }
+            let status = if info.exit_code.is_some() { "exited" } else { "running" };
             items.push(serde_json::json!({
-                "sessionId": session_id,
-                "cwd": cwd,
-                "isAiAgent": is_ai_agent,
+                "sessionId": info.session_id,
+                "cwd": info.cwd,
+                "isAiAgent": info.is_ai_agent,
                 "worktreeId": matched_wt_id,
                 "worktreeName": matched_wt.map(|w| w.name.clone()),
+                "status": status,
+                "exitCode": info.exit_code,
+                "lastCommandExitCode": info.last_command_exit_code,
             }));
         }
 
@@ -1224,7 +1230,7 @@ impl NotifyService {
         Parameters(KillTerminalParams { session_id }): Parameters<KillTerminalParams>,
     ) -> Result<CallToolResult, McpError> {
         let pty = self.app_handle.state::<PtyManager>();
-        if !pty.list_sessions().iter().any(|(id, _, _)| *id == session_id) {
+        if !pty.list_sessions().iter().any(|s| s.session_id == session_id) {
             return Err(McpError::invalid_params(
                 format!("session_id {} not found", session_id),
                 None,
@@ -1236,22 +1242,30 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text("killed")]))
     }
 
-    #[tool(description = "指定 PTY セッションの最近の出力履歴を返す（ANSI 除去済み UTF-8）。pnpm dev のログ確認や vitest の結果参照に使う。max_bytes 省略時は 8192 バイト。先に oretachi_list_terminals で session_id を取得すること")]
+    #[tool(description = "指定 PTY セッションの最近の出力履歴を返す。レスポンスは JSON: { text, cursor, lostBytes }。text は ANSI 除去済み UTF-8。連続ポーリングで重複を避けるには、次回呼び出しの from_cursor に前回の cursor を渡す（差分読み）。lostBytes>0 はリングバッファ溢れで先頭が欠落したことを意味する。先に oretachi_list_terminals で session_id を取得すること")]
     fn oretachi_read_terminal(
         &self,
-        Parameters(ReadTerminalParams { session_id, max_bytes }): Parameters<ReadTerminalParams>,
+        Parameters(ReadTerminalParams { session_id, max_bytes, from_cursor }): Parameters<ReadTerminalParams>,
     ) -> Result<CallToolResult, McpError> {
         let pty = self.app_handle.state::<PtyManager>();
-        let raw = pty
-            .read_output_history(session_id, Some(max_bytes.unwrap_or(8192)))
+        let result = pty
+            .read_output_history(session_id, Some(max_bytes.unwrap_or(8192)), from_cursor)
             .map_err(|e| McpError::invalid_params(e, None))?;
-        let text = crate::pty_manager::strip_ansi(&raw);
+        let text = crate::pty_manager::strip_ansi(&result.data);
         log::info!(
-            "[mcp] oretachi_read_terminal: session_id={} bytes={}",
+            "[mcp] oretachi_read_terminal: session_id={} bytes={} cursor={} lost_bytes={}",
             session_id,
-            raw.len()
+            result.data.len(),
+            result.cursor,
+            result.lost_bytes
         );
-        Ok(CallToolResult::success(vec![Content::text(text)]))
+        let json = serde_json::json!({
+            "text": text,
+            "cursor": result.cursor,
+            "lostBytes": result.lost_bytes,
+        })
+        .to_string();
+        Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
     #[tool(description = "指定 PTY セッションへテキストを送信する。submit=true（デフォルト）なら改行を PowerShell/conpty 互換の \\r へ正規化し末尾にも保証して、コマンド送信扱いにする。submit=false なら raw のまま送る（vitest の単一キー入力など）")]
@@ -1260,7 +1274,7 @@ impl NotifyService {
         Parameters(WriteTerminalParams { session_id, text, submit }): Parameters<WriteTerminalParams>,
     ) -> Result<CallToolResult, McpError> {
         let pty = self.app_handle.state::<PtyManager>();
-        if !pty.list_sessions().iter().any(|(id, _, _)| *id == session_id) {
+        if !pty.list_sessions().iter().any(|s| s.session_id == session_id) {
             return Err(McpError::invalid_params(
                 format!("session_id {} not found", session_id),
                 None,

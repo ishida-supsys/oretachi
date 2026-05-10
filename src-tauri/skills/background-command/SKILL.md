@@ -58,22 +58,50 @@ oretachi_spawn_terminal({
 
 oretachi UI に新しいタブが追加され、`pnpm dev` がそのターミナルで実行される。
 
-### Step 3: 起動確認（必要な場合）
+### Step 3: 起動確認 / ステータス確認
 
-数秒待ってから `oretachi_list_terminals({ worktree_name: "<name>" })` を呼ぶと、`session_id` / `cwd` / `isAiAgent` を含む配列が返る。直前に追加したセッションが含まれていれば起動成功。
+`oretachi_list_terminals({ worktree_name: "<name>" })` を呼ぶと、各セッションの以下を含む配列が返る:
+
+- `sessionId` / `cwd` / `isAiAgent` / `worktreeId` / `worktreeName`
+- `status`: `"running"` か `"exited"`（シェル本体が終了したか）
+- `exitCode`: シェル本体の exit code（`status: "exited"` のときのみ非 null）
+- `lastCommandExitCode`: シェル統合が拾った**直近コマンド**の exit code（`pnpm test` の pass/fail 判定などに使える）
+
+直前に追加したセッションが含まれていれば起動成功。`pnpm dev` 等が突然死した場合は `status` が `"exited"` になる。
 
 ### Step 4: 出力ログを参照する
 
 dev サーバのコンパイルエラー確認、vitest の結果確認などに使う。
 
 ```
+// 初回: バッファ末尾から最大 max_bytes バイト
 oretachi_read_terminal({
   session_id: <値>,
   max_bytes: 8192   // 省略可。デフォルト 8192。長い場合は 32768 等まで増やす
 })
+
+// 連続ポーリング: 前回 cursor 以降の差分のみ取る（推奨）
+oretachi_read_terminal({
+  session_id: <値>,
+  from_cursor: <前回レスポンスの cursor>
+})
 ```
 
-戻り値は **ANSI エスケープ除去済みの UTF-8 文字列**（バッファ末尾から `max_bytes` バイト）。リングバッファは 64KiB で、それを超える出力は古い側から破棄される。
+レスポンスは JSON 文字列:
+
+```
+{
+  "text": "<ANSI 除去済み UTF-8>",
+  "cursor": 12345,
+  "lostBytes": 0
+}
+```
+
+- `text`: バッファ内容を ANSI エスケープ除去した UTF-8。
+- `cursor`: `text` 末尾の累積バイト位置。次回呼び出しで `from_cursor` に渡すと、それ以降の新規出力だけが返ってくる（重複なし）。
+- `lostBytes`: 要求 `from_cursor` がリングバッファ範囲外だった場合の欠落バイト数。`> 0` なら出力が間引かれている（バッファは 64KiB で、それを超える分は古い側から破棄される）。
+
+長期 watch（`pnpm dev` / `vitest --watch`）をポーリングする場合は **必ず `from_cursor` を使う**こと。使わないと毎回末尾 N バイトが返り、AI 側で重複処理が必要になる。
 
 ### Step 5: ターミナルへ入力する
 
@@ -96,6 +124,28 @@ oretachi_write_terminal({
 
 `submit: true` ならコマンド送信扱い（Enter まで押す）。`submit: false` なら raw 送信。
 
+#### Ctrl-C / EOF を送る (raw キー送信)
+
+常駐プロセスを graceful に止めたい時は、Ctrl-C を raw 送信する。
+
+```
+// Ctrl-C: pnpm dev / vitest --watch 等を graceful 停止
+oretachi_write_terminal({
+  session_id: <値>,
+  text: "",   // 0x03 = ETX
+  submit: false
+})
+
+// Ctrl-D / EOF: REPL 終了
+oretachi_write_terminal({
+  session_id: <値>,
+  text: "",   // 0x04 = EOT
+  submit: false
+})
+```
+
+停止後シェルプロンプトに戻ったら、続けて `oretachi_write_terminal` で別コマンドを投入できる。常駐プロセスがそれでも止まらない場合のみ次の `oretachi_kill_terminal` で強制 kill する。
+
 ### Step 6: 停止する場合
 
 `oretachi_list_terminals` で対象の `session_id` を特定してから:
@@ -104,10 +154,7 @@ oretachi_write_terminal({
 oretachi_kill_terminal({ session_id: <値> })  // 強制 kill
 ```
 
-graceful に終了させたい場合（dev サーバの後始末を走らせたい等）は kill ではなく `oretachi_write_terminal` で `Ctrl-C` 相当のシグナルが必要。現状の write は文字列送信のみで `\x03` の効果は限定的なので、安全策としては:
-
-1. まず `oretachi_write_terminal({ text: "exit", submit: true })` を試す（シェルプロンプトに戻った状態の時のみ有効）
-2. それで終わらない常駐プロセスは `oretachi_kill_terminal` で強制 kill
+graceful 終了は Step 5 の Ctrl-C を優先する。プロセスが Ctrl-C ハンドラを持たない / プロセスがハングしている場合のみ `oretachi_kill_terminal` で強制 kill する。
 
 UI のタブは `pty-exit` イベント経由で自動的に消える。
 
@@ -118,4 +165,5 @@ UI のタブは `pty-exit` イベント経由で自動的に消える。
 - 同一ワークツリーに連続して `oretachi_spawn_terminal` を呼んでも、内部的には FIFO キューで管理されるためコマンドは取りこぼされない（先入れ先出しで対応するターミナルに流し込まれる）
 - 対象ワークツリーが**サブウィンドウ化（detached）**されている場合、`oretachi_spawn_terminal` は明示的に invalid_params エラーを返す。エラー本文に従ってメインウィンドウに戻すよう促す
 - 同名ワークツリーが複数あって `worktree_id` を指定しなかった場合は `invalid_params` エラーが返る。エラー本文に候補 ID が含まれているのでそれを使って再試行する
-- `oretachi_read_terminal` の戻り値先頭は、リングバッファ容量超過時にバイト境界調整が走るため UTF-8 マルチバイトや ANSI シーケンスの欠片が落とされる。**末尾側は正確、先頭側は近似**と理解する
+- `oretachi_read_terminal` の `from_cursor` 未指定モード（末尾 N バイト）と `lostBytes > 0` のときは、UTF-8 / ANSI 境界調整のため先頭が落とされる（**末尾側は正確、先頭側は近似**）。`from_cursor` を渡した連続ポーリングで `lostBytes == 0` のときは、cursor は文字境界済みなので欠落なし
+- `lastCommandExitCode` はシェル統合 (bash の `PROMPT_COMMAND` / zsh の `precmd` / pwsh の `prompt`) が出力する OSC 777 を Rust 側 reader が拾う仕組み。シェルプロンプトが新しく描画されるたびに更新される。`pnpm test && echo done` のようなチェーンでは最後のコマンドの結果になる
