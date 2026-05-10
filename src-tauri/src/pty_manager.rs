@@ -5,11 +5,16 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Arc, Mutex,
 };
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 const AI_AGENT_NAMES: &[&str] = &["claude", "gemini", "codex", "cline"];
 const MAX_PTY_SESSIONS: usize = 32;
 const OUTPUT_HISTORY_BYTES: usize = 65_536;
+/// シェル本体が自然終了したセッションを map に残しておく寿命。
+/// この期間内なら MCP クライアントから exit code や最終ログを参照できる。
+/// MAX_PTY_SESSIONS の枠を一時的に圧迫し得るが、TTL 経過後は lazy sweep で除去される。
+const EXITED_SESSION_TTL: Duration = Duration::from_secs(30);
 
 struct PtySession {
     writer: Arc<Mutex<Box<dyn Write + Send>>>,
@@ -27,6 +32,22 @@ struct PtySession {
     exit_status: Arc<Mutex<Option<i64>>>,
     /// 直近コマンドの exit code（シェル統合の OSC 777 を reader thread が拾って保存）。
     last_command_exit_code: Arc<Mutex<Option<i64>>>,
+    /// シェル本体が自然終了した時刻。`Some` ならゾンビ状態（map 上は残っているが死亡）。
+    /// `EXITED_SESSION_TTL` 経過後の lazy sweep で除去される。
+    exited_at: Arc<Mutex<Option<Instant>>>,
+}
+
+/// 寿命の切れた exited セッションを `sessions` map から除去する。
+/// `sessions.lock()` を取った直後の各 path から呼び出すことで、MCP クライアントが
+/// 最大 `EXITED_SESSION_TTL` の間は exit code / 最終ログを参照できる状態を保つ。
+fn sweep_exited(map: &mut HashMap<u32, PtySession>) {
+    map.retain(|_, s| {
+        let exited = s.exited_at.lock().ok().and_then(|g| *g);
+        match exited {
+            None => true,
+            Some(t) => t.elapsed() < EXITED_SESSION_TTL,
+        }
+    });
 }
 
 #[derive(Clone)]
@@ -265,6 +286,7 @@ impl PtyManager {
     /// AIエージェントフラグを明示的にセットする（executeAgentWorktree 用）
     pub fn set_ai_agent(&self, session_id: u32, is_agent: bool) -> Result<(), String> {
         let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+        sweep_exited(&mut sessions);
         if let Some(session) = sessions.get_mut(&session_id) {
             session.is_ai_agent = is_agent;
             Ok(())
@@ -275,7 +297,8 @@ impl PtyManager {
 
     /// AIエージェントフラグを参照する
     pub fn is_ai_agent(&self, session_id: u32) -> Result<bool, String> {
-        let sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+        let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+        sweep_exited(&mut sessions);
         if let Some(session) = sessions.get(&session_id) {
             Ok(session.is_ai_agent)
         } else {
@@ -300,10 +323,11 @@ impl PtyManager {
 
                 // セッション情報を取得
                 let session_pids: Vec<(u32, Option<u32>)> = {
-                    let sessions = match sessions_arc.lock() {
+                    let mut sessions = match sessions_arc.lock() {
                         Ok(s) => s,
                         Err(_) => continue,
                     };
+                    sweep_exited(&mut sessions);
                     sessions.iter().map(|(&id, s)| (id, s.child_pid)).collect()
                 };
 
@@ -391,7 +415,8 @@ impl PtyManager {
     ) -> Result<u32, String> {
         log::debug!("[Terminal] pty_manager::spawn rows={} cols={} shell={:?} cwd={:?}", rows, cols, shell, cwd);
         {
-            let sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            sweep_exited(&mut sessions);
             if sessions.len() >= MAX_PTY_SESSIONS {
                 return Err(format!(
                     "PTYセッション数の上限（{}）に達しています。不要なターミナルを閉じてください",
@@ -514,6 +539,7 @@ impl PtyManager {
         let total_bytes_written: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
         let exit_status: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
         let last_command_exit_code: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
+        let exited_at: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
 
         // child_pid と child_killer を spawn 直後に取得
         let child_pid = child.process_id();
@@ -531,7 +557,7 @@ impl PtyManager {
         let master_watcher = master_arc.clone();
         let child_watcher = child_arc.clone();
         let exit_status_setter = exit_status.clone();
-        let sessions_for_watcher = self.sessions.clone();
+        let exited_at_setter = exited_at.clone();
         let watcher_handle = std::thread::spawn(move || {
             let child_opt = match child_watcher.lock() {
                 Ok(mut g) => g.take(),
@@ -581,12 +607,13 @@ impl PtyManager {
                             Err(e) => { e.into_inner().take(); }
                         }
                     }
-                    // 自然終了したセッションを map から取り除く（exited zombie 防止）。
-                    // MAX_PTY_SESSIONS の枠を圧迫しないため、kill 経由でない自然終了でも remove する。
-                    // フロントは pty-exit イベントで UI タブを消すため整合性は保たれる。
-                    match sessions_for_watcher.lock() {
-                        Ok(mut s) => { s.remove(&session_id); }
-                        Err(e) => { e.into_inner().remove(&session_id); }
+                    // 自然終了したセッションは map に残し、exited_at をセットする。
+                    // MCP クライアントが exit code / 最終ログを参照できるよう EXITED_SESSION_TTL の
+                    // 間は保持し、各 sessions.lock() path の sweep_exited で TTL 切れを除去する。
+                    // UI タブは pty-exit イベントで消える（フロント側の整合性は維持）。
+                    match exited_at_setter.lock() {
+                        Ok(mut g) => *g = Some(Instant::now()),
+                        Err(e) => *e.into_inner() = Some(Instant::now()),
                     }
                 }
             }
@@ -657,6 +684,7 @@ impl PtyManager {
             total_bytes_written,
             exit_status,
             last_command_exit_code,
+            exited_at,
         };
 
         self.sessions.lock().map_err(|e| format!("lock error: {}", e))?.insert(session_id, session);
@@ -668,7 +696,8 @@ impl PtyManager {
     pub fn write(&self, session_id: u32, data: Vec<u8>) -> Result<(), String> {
         // sessions ロックは Arc 取得のみ（瞬時）→ I/O 中は他セッション操作をブロックしない
         let writer_arc = {
-            let sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            sweep_exited(&mut sessions);
             let session = sessions
                 .get(&session_id)
                 .ok_or_else(|| format!("Session {} not found", session_id))?;
@@ -697,7 +726,8 @@ impl PtyManager {
         from_cursor: Option<u64>,
     ) -> Result<ReadHistoryResult, String> {
         let (history_arc, total_arc) = {
-            let sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            sweep_exited(&mut sessions);
             let session = sessions
                 .get(&session_id)
                 .ok_or_else(|| format!("Session {} not found", session_id))?;
@@ -748,7 +778,8 @@ impl PtyManager {
     pub fn resize(&self, session_id: u32, rows: u16, cols: u16) -> Result<(), String> {
         log::debug!("[Terminal] pty_manager::resize session_id={} rows={} cols={}", session_id, rows, cols);
         let master_arc = {
-            let sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            sweep_exited(&mut sessions);
             let session = sessions
                 .get(&session_id)
                 .ok_or_else(|| format!("Session {} not found", session_id))?;
@@ -777,6 +808,7 @@ impl PtyManager {
         // pty_write, pty_resize 等すべてのセッション操作がブロックされる。
         let removed = {
             let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            sweep_exited(&mut sessions);
             if let Some(session) = sessions.remove(&session_id) {
                 // poison でも alive=false を確実にセット（ウォッチャースレッドの停止に必要）
                 match session.alive.lock() {
@@ -810,9 +842,11 @@ impl PtyManager {
     }
 
     pub fn kill_all(&self, source: &str) {
-        let ids: Vec<u32> = self.sessions.lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .keys().cloned().collect();
+        let ids: Vec<u32> = {
+            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            sweep_exited(&mut sessions);
+            sessions.keys().cloned().collect()
+        };
         log::info!("[Terminal] pty_manager::kill_all source={} count={}", source, ids.len());
         for id in ids {
             let _ = self.kill(id, source);
@@ -825,10 +859,11 @@ impl PtyManager {
     pub fn kill_sessions_in_dir(&self, dir: &str) -> usize {
         let target = std::path::Path::new(dir);
         let ids: Vec<u32> = {
-            let sessions = match self.sessions.lock() {
+            let mut sessions = match self.sessions.lock() {
                 Ok(s) => s,
                 Err(e) => e.into_inner(),
             };
+            sweep_exited(&mut sessions);
             sessions
                 .iter()
                 .filter(|(_, s)| {
@@ -850,10 +885,11 @@ impl PtyManager {
     /// `exit_code` は watcher が拾ったプロセス全体（シェル本体）の exit code。
     /// `last_command_exit_code` はシェル統合 OSC 777 が出した直近コマンドの exit code。
     pub fn list_sessions(&self) -> Vec<SessionInfo> {
-        let sessions = match self.sessions.lock() {
+        let mut sessions = match self.sessions.lock() {
             Ok(s) => s,
             Err(e) => e.into_inner(),
         };
+        sweep_exited(&mut sessions);
         sessions
             .iter()
             .map(|(id, s)| SessionInfo {

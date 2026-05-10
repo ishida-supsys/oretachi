@@ -173,37 +173,12 @@ const { setup: setupCodeReviewChatListener } = useCodeReviewChatListener({
 // terminalId → サムネイル data URL
 const thumbnailUrls = reactive(new Map<number, string>());
 
-// worktreeId → 実行待ちスクリプトコマンド文字列の FIFO キュー
-// MCP からの連続 oretachi_spawn_terminal でコマンドを取りこぼさないためにキュー化している。
-// 同じワークツリーで複数ターミナルが立ち上がる順に shift して消費する。
-const pendingScripts = new Map<string, string[]>();
-
-function pushPendingScript(worktreeId: string, command: string): void {
-  const existing = pendingScripts.get(worktreeId);
-  if (existing) {
-    existing.push(command);
-  } else {
-    pendingScripts.set(worktreeId, [command]);
-  }
-}
-
-function shiftPendingScript(worktreeId: string): string | undefined {
-  const queue = pendingScripts.get(worktreeId);
-  if (!queue || queue.length === 0) return undefined;
-  const cmd = queue.shift();
-  if (queue.length === 0) pendingScripts.delete(worktreeId);
-  return cmd;
-}
-
-function dropLastPendingScript(worktreeId: string, expected: string): void {
-  // pushPendingScript の直後に失敗した場合のロールバック用。末尾が expected と一致する時のみ削除。
-  const queue = pendingScripts.get(worktreeId);
-  if (!queue || queue.length === 0) return;
-  if (queue[queue.length - 1] === expected) {
-    queue.pop();
-    if (queue.length === 0) pendingScripts.delete(worktreeId);
-  }
-}
+// terminalId → 実行待ちスクリプトコマンド文字列
+// onAddTerminal がターミナルを採番した直後に terminalId キーで pending を結びつける（atomic）。
+// onTerminalReady でその terminalId 専用の command を取得して書き込む。
+// worktree 粒度の FIFO ではないため、同じ worktree で別由来（ユーザー Ctrl+T 等）のタブが
+// 立ち上がっても誤投入されない。多重 spawn の race も terminalId 単位で完全分離される。
+const pendingByTerminal = new Map<number, string>();
 
 // terminalId → 復元スナップショット（起動時セッション復元用）
 const pendingSnapshots = new Map<number, string>();
@@ -281,7 +256,6 @@ const { executeAddWorktree, executeAgentWorktree, resolveShell, buildPendingComm
     onAddTerminal,
     onMoveToSubWindow,
     loadingWorktrees,
-    pendingScripts,
     autoApprovalMap,
     onWebSessionDetected: (terminalId, info) => {
       terminalWebSessions.set(terminalId, info);
@@ -383,8 +357,9 @@ async function onTerminalReady(worktreeId: string, terminalId: number) {
   }
   pendingSnapshots.delete(terminalId);
   pendingSessionAttach.delete(terminalId);
-  const command = shiftPendingScript(worktreeId);
-  if (command) {
+  const command = pendingByTerminal.get(terminalId);
+  if (command !== undefined) {
+    pendingByTerminal.delete(terminalId);
     const ref = getTerminalRef(terminalId);
     await ref?.write(command);
   }
@@ -486,10 +461,14 @@ function getOrCreateBackgroundLeafId(bundle: WorktreeFrameBundle): string {
   return newLeaf.id;
 }
 
-async function onAddTerminal(worktreeId: string, options?: { background?: boolean }) {
+async function onAddTerminal(
+  worktreeId: string,
+  options?: { background?: boolean; pendingCommand?: string },
+) {
   const background = options?.background === true;
   clearNotification(worktreeId);
   if (isDetached(worktreeId)) {
+    // detached worktree は handleSubAddTerminalRequest 経由で処理し、pendingCommand 連携は未対応。
     await handleSubAddTerminalRequest(worktreeId);
     return;
   }
@@ -497,6 +476,11 @@ async function onAddTerminal(worktreeId: string, options?: { background?: boolea
   const terminal = addTerminal(worktreeId);
   pendingManualStart.add(terminal.id);
   terminalWorktreeMap.set(terminal.id, worktreeId);
+  // ターミナル採番の直後に pendingCommand を結びつけることで、後続の onTerminalReady が
+  // この terminalId に対応する command を確実に取り出す。worktree 粒度でなく terminalId 粒度。
+  if (options?.pendingCommand !== undefined) {
+    pendingByTerminal.set(terminal.id, options.pendingCommand);
+  }
   debug(`[Terminal] onAddTerminal worktreeId=${worktreeId} terminalId=${terminal.id} background=${background}`);
 
   // バンドルがなければ作成（ワークツリー追加直後など）
@@ -665,16 +649,9 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string,
       }
     }
 
-    // パッケージマネージャーinstall・スクリプトをペンディング登録
-    if (repo) {
-      const pending = buildPendingCommand(repo, entry);
-      if (pending) {
-        pushPendingScript(entry.id, pending);
-      }
-    }
-
-    // ワークツリー作成後、自動でターミナルを1つ追加
-    await onAddTerminal(entry.id);
+    // パッケージマネージャーinstall・スクリプトを最初のターミナルに紐付けて起動
+    const pending = repo ? buildPendingCommand(repo, entry) : null;
+    await onAddTerminal(entry.id, pending ? { pendingCommand: pending } : undefined);
 
     // パッケージマネージャーinstall・スクリプトの完了を待つ
     if (repo?.packageManager || repo?.execScript) {
@@ -1060,7 +1037,7 @@ onMounted(async () => {
         return;
       }
       // detached（サブウィンドウ化済み）ワークツリーは onAddTerminal が
-      // handleSubAddTerminalRequest に分岐し pendingScripts を消費しないため未対応
+      // handleSubAddTerminalRequest に分岐し pendingCommand を消費しないため未対応
       if (isDetached(worktree_id)) {
         debug(`[Terminal] mcp-spawn-terminal: worktree ${worktree_id} is detached, not supported`);
         return;
@@ -1070,11 +1047,9 @@ onMounted(async () => {
       // FramePane.vue / TerminalView.vue paste と同じく \r に正規化する。
       const normalized = command.replace(/\r?\n/g, "\r");
       const cmd = normalized.endsWith("\r") ? normalized : normalized + "\r";
-      pushPendingScript(worktree_id, cmd);
       try {
-        await onAddTerminal(worktree_id, { background: true });
+        await onAddTerminal(worktree_id, { background: true, pendingCommand: cmd });
       } catch (e) {
-        dropLastPendingScript(worktree_id, cmd);
         debug(`[Terminal] mcp-spawn-terminal: onAddTerminal failed: ${e}`);
         return;
       }

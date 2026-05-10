@@ -17,7 +17,10 @@ interface UseAppHotkeysDeps {
   isDetached: (id: string) => boolean;
   switchToWorktree: (id: string) => void;
   focusSubWindow: (id: string) => Promise<void>;
-  onAddTerminal: (id: string) => Promise<void>;
+  onAddTerminal: (
+    id: string,
+    opts?: { background?: boolean; pendingCommand?: string },
+  ) => Promise<void>;
   showAddTaskDialog: Ref<boolean>;
   goHome: () => void;
   onTrayButtonClick: () => Promise<void>;
