@@ -1575,7 +1575,7 @@ onMounted(async () => {
               @tab-edge-drop="(sl, tid, tl, dir) => onFrameTabEdgeDrop(wt.id, sl, tid, tl, dir)"
               @tab-reorder="(lid, tid, idx) => onFrameTabReorder(wt.id, lid, tid, idx)"
               @request-add-terminal="(leafId) => onFrameAddTerminal(wt.id, leafId)"
-              @resize-end="() => {}"
+              @resize-end="(nodeId, sizes) => worktreeFrameBundles.get(wt.id)?.frame.updateContainerSizes(nodeId, sizes)"
             />
           </div>
         </div>

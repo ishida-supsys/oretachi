@@ -60,6 +60,7 @@ const {
   switchNextTerminal,
   switchPrevTerminal,
   closeActiveTerminal,
+  updateContainerSizes,
 } = useWorktreeFrame({
   terminalEntries,
   terminalRefs,
@@ -422,7 +423,7 @@ onUnmounted(() => {
         @tab-edge-drop="onTabEdgeDrop"
         @tab-reorder="onTabReorder"
         @request-add-terminal="() => {}"
-        @resize-end="() => {}"
+        @resize-end="updateContainerSizes"
       />
 
       <div v-else-if="initialized" class="flex items-center justify-center h-full text-[#6c7086] text-sm">
