@@ -528,6 +528,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   flex-wrap: wrap;
   gap: 12px;
   align-items: flex-start;
+  justify-content: center;
 }
 
 .masonry-column {
