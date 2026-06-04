@@ -989,6 +989,8 @@ pub fn run() {
             // AIエージェントインジケーター用ポーリング起動
             let pty_manager = app.state::<PtyManager>();
             pty_manager.start_polling(app.handle().clone());
+            // PTY 出力 emit を 16ms 周期でコアレッシング（WebView2 IPC 飽和によるハング対策）
+            pty_manager.start_output_flush(app.handle().clone());
 
             // Webview ハング診断: heartbeat ループ（30秒間隔で ping → pong のラウンドトリップ計測）
             {
