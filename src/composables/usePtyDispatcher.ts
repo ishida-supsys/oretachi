@@ -1,8 +1,9 @@
 import { listen } from "@tauri-apps/api/event";
+import { decodePtyOutput } from "../utils/decodePtyOutput";
 
 interface PtyOutputPayload {
   sessionId: number;
-  data: number[];
+  data: string;
 }
 
 interface PtyExitPayload {
@@ -25,16 +26,17 @@ async function init() {
   await listen<PtyOutputPayload>("pty-output", (event) => {
     const { sessionId, data } = event.payload;
     dirtySessionIds.add(sessionId);
+    const bytes = decodePtyOutput(data);
     const handler = outputHandlers.get(sessionId);
     if (handler) {
-      handler(new Uint8Array(data));
+      handler(bytes);
     } else {
       let buf = pendingBuffers.get(sessionId);
       if (!buf) {
         buf = [];
         pendingBuffers.set(sessionId, buf);
       }
-      buf.push(new Uint8Array(data));
+      buf.push(bytes);
     }
   });
 

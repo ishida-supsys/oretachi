@@ -26,6 +26,9 @@ struct PtySession {
     is_ai_agent: bool,
     cwd: Option<String>,
     output_history: Arc<Mutex<VecDeque<u8>>>,
+    /// flush ループへ渡す未配送バッファ。reader が append し、16ms 周期の flush が
+    /// drain して 1 回にまとめて emit する（チャンク毎 emit による WebView2 飽和を防ぐ）。
+    output_pending: Arc<Mutex<VecDeque<u8>>>,
     /// reader 経由で書き込まれた累積バイト数。MCP の差分読み (cursor) の起点として参照する。
     total_bytes_written: Arc<AtomicU64>,
     /// プロセス全体（PTY が走らせているシェル本体）の exit code。watcher が拾う。
@@ -48,6 +51,41 @@ fn sweep_exited(map: &mut HashMap<u32, PtySession>) {
             Some(t) => t.elapsed() < EXITED_SESSION_TTL,
         }
     });
+}
+
+/// 1 回の flush で emit する保留出力の上限。これを超えた分は次周期へ持ち越す（バックプレッシャ）。
+const MAX_FLUSH_BYTES: usize = 256 * 1024;
+/// 未配送バッファ（`output_pending`）が保持する最大バイト数。
+/// drain 速度（256KB/16ms ≒ 16MB/s）を持続的に上回る出力ではバッファが無制限に増大して
+/// メモリを食い潰すため、上限超過時は最古を捨てる。直近の出力は `output_history`（64KB）が
+/// 別途保持するため MCP の差分読みには影響しない（極端な過負荷時に画面表示の取りこぼしに留まる）。
+const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
+
+/// セッションの保留バッファを最大 `MAX_FLUSH_BYTES` drain し、base64 エンコードして
+/// `pty-output` を 1 回 emit する。保留が空なら何もしない。
+/// flush ループと reader 終了時の最終 flush の双方から呼ばれる。
+///
+/// drain と emit を **同一の lock critical section で行う**。flush ループと reader 最終 flush は
+/// 同じ session の `output_pending` に対して並行に本関数を呼びうるため、drain だけをロックで
+/// 直列化して emit をロック外に出すと「A が先に drain・B が先に emit」となり出力チャンクの
+/// 順序が逆転する／drain 済みだが未 emit のチャンクを残したまま reader が `pty-exit` を
+/// 先行 emit してしまう。lock を emit まで保持すれば FIFO の drain 順 = emit 順が保証され、
+/// reader が `remaining == 0` を観測した時点で全 drain 済みチャンクは emit 済みになる。
+fn flush_session_output(app: &AppHandle, session_id: u32, pending: &Arc<Mutex<VecDeque<u8>>>) {
+    let mut pend = match pending.lock() {
+        Ok(p) => p,
+        Err(e) => e.into_inner(),
+    };
+    if pend.is_empty() {
+        return;
+    }
+    let take = pend.len().min(MAX_FLUSH_BYTES);
+    let chunk: Vec<u8> = pend.drain(..take).collect();
+    use base64::Engine;
+    let data = base64::engine::general_purpose::STANDARD.encode(&chunk);
+    // lock 保持中に emit して drain↔emit を不可分にする（順序保証のため）。
+    // emit はイベントをキューに載せるだけで pty_manager に同期再入しないため、deadlock しない。
+    let _ = app.emit("pty-output", PtyOutputPayload { session_id, data });
 }
 
 #[derive(Clone)]
@@ -77,7 +115,9 @@ pub struct PtyManager {
 pub struct PtyOutputPayload {
     #[serde(rename = "sessionId")]
     pub session_id: u32,
-    pub data: Vec<u8>,
+    /// base64 エンコードした PTY 出力。number[] (Vec<u8>) のままだと巨大な eval 文字列に
+    /// なり WebView2 IPC を飽和させるため、サイズを 1/3〜1/4 に圧縮して送る。
+    pub data: String,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -304,6 +344,40 @@ impl PtyManager {
         } else {
             Err(format!("Session {} not found", session_id))
         }
+    }
+
+    /// 各セッションの保留出力を 16ms 周期でまとめて emit する flush ループを起動する。
+    /// reader スレッドのチャンク毎 emit を置き換え、emit 頻度を出力量と無関係に
+    /// 約 62 回/秒/セッションへ上限化して WebView2 IPC の飽和（ハング）を防ぐ。
+    pub fn start_output_flush(&self, app_handle: AppHandle) {
+        let sessions_arc = self.sessions.clone();
+        let polling_alive = self.polling_alive.clone();
+
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(16));
+
+                if !*polling_alive.lock().unwrap_or_else(|e| e.into_inner()) {
+                    break;
+                }
+
+                // sessions ロックは Arc clone のみ（瞬時）→ flush 中は他セッション操作をブロックしない
+                let pendings: Vec<(u32, Arc<Mutex<VecDeque<u8>>>)> = {
+                    let sessions = match sessions_arc.lock() {
+                        Ok(s) => s,
+                        Err(_) => continue,
+                    };
+                    sessions
+                        .iter()
+                        .map(|(&id, s)| (id, s.output_pending.clone()))
+                        .collect()
+                };
+
+                for (session_id, pending) in pendings {
+                    flush_session_output(&app_handle, session_id, &pending);
+                }
+            }
+        });
     }
 
     /// バックグラウンドでポーリングスレッドを起動し、AIエージェント状態の変化をイベントで通知する
@@ -535,6 +609,9 @@ impl PtyManager {
         let output_history: Arc<Mutex<VecDeque<u8>>> =
             Arc::new(Mutex::new(VecDeque::with_capacity(OUTPUT_HISTORY_BYTES)));
 
+        // flush ループへ渡す未配送バッファ（reader が append し flush が drain して emit）
+        let output_pending: Arc<Mutex<VecDeque<u8>>> = Arc::new(Mutex::new(VecDeque::new()));
+
         // 差分読みのカーソル基点 / プロセス exit / OSC 777 直近コマンド exit
         let total_bytes_written: Arc<AtomicU64> = Arc::new(AtomicU64::new(0));
         let exit_status: Arc<Mutex<Option<i64>>> = Arc::new(Mutex::new(None));
@@ -622,6 +699,7 @@ impl PtyManager {
         // 読み取りスレッド起動
         let app_handle_reader = app_handle.clone();
         let history_for_reader = output_history.clone();
+        let pending_for_reader = output_pending.clone();
         let total_for_reader = total_bytes_written.clone();
         let last_cmd_exit_for_reader = last_command_exit_code.clone();
         std::thread::spawn(move || {
@@ -660,11 +738,31 @@ impl PtyManager {
                             osc_lookback.drain(..drop_n);
                         }
 
-                        let _ = app_handle_reader
-                            .emit("pty-output", PtyOutputPayload { session_id, data });
+                        // チャンク毎 emit はやめ、保留バッファへ append するだけにする。
+                        // 実際の emit は 16ms 周期の flush ループがまとめて行う。
+                        if let Ok(mut pend) = pending_for_reader.lock() {
+                            pend.extend(data.iter().copied());
+                            // 出力が drain 速度を持続的に上回るとき、保留が無制限に増大しないよう最古を捨てる
+                            if pend.len() > MAX_PENDING_BYTES {
+                                let drop_n = pend.len() - MAX_PENDING_BYTES;
+                                pend.drain(..drop_n);
+                            }
+                        }
                     }
                     Err(_) => break,
                 }
+            }
+            // EOF / エラーで reader を抜ける前に、保留分を全て flush し切ってから exit を通知する
+            // （flush ループより先に pty-exit が届いて末尾出力が失われる／順序が乱れるのを防ぐ）。
+            loop {
+                let remaining = pending_for_reader
+                    .lock()
+                    .map(|p| p.len())
+                    .unwrap_or(0);
+                if remaining == 0 {
+                    break;
+                }
+                flush_session_output(&app_handle_reader, session_id, &pending_for_reader);
             }
             let _ = app_handle_reader.emit("pty-exit", PtyExitPayload { session_id });
         });
@@ -681,6 +779,7 @@ impl PtyManager {
             is_ai_agent: false,
             cwd,
             output_history,
+            output_pending,
             total_bytes_written,
             exit_status,
             last_command_exit_code,

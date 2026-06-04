@@ -8,6 +8,7 @@ import type { WorktreeEntry, Repository, AppSettings } from "../types/settings";
 import type { Worktree } from "../types/worktree";
 import type { AddWorktreeTaskCode, AgentWorktreeTaskCode } from "../types/task";
 import type { WebSessionInfo } from "../types/terminal";
+import { decodePtyOutput } from "../utils/decodePtyOutput";
 
 export function useTaskExecution(deps: {
   t: (key: string, values?: Record<string, unknown>) => string;
@@ -139,9 +140,9 @@ export function useTaskExecution(deps: {
       unlistenFn?.();
     }, 30_000);
 
-    listen<{ sessionId: number; data: number[] }>("pty-output", (event) => {
+    listen<{ sessionId: number; data: string }>("pty-output", (event) => {
       if (event.payload.sessionId !== targetSessionId) return;
-      const chunk = new TextDecoder().decode(new Uint8Array(event.payload.data));
+      const chunk = new TextDecoder().decode(decodePtyOutput(event.payload.data));
       // ANSI エスケープシーケンスを除去
       buffer += chunk.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
       // 長くなりすぎたら先頭を切り捨て
@@ -180,9 +181,9 @@ export function useTaskExecution(deps: {
         resolve();
       }, timeoutMs);
 
-      listen<{ sessionId: number; data: number[] }>("pty-output", (event) => {
+      listen<{ sessionId: number; data: string }>("pty-output", (event) => {
         if (event.payload.sessionId !== targetSid) return;
-        const text = new TextDecoder().decode(new Uint8Array(event.payload.data));
+        const text = new TextDecoder().decode(decodePtyOutput(event.payload.data));
         if (/\x1b\]777;exit_code;\d+/.test(text)) {
           clearTimeout(timer);
           unlistenFn?.();
