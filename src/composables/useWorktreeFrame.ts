@@ -32,6 +32,7 @@ export function useWorktreeFrame(options: {
     getAllLeafs,
     findBackgroundLeaf,
     markLeafBackground,
+    updateContainerSizes,
   } = useFrameLayout();
 
   const lastFocusedLeafId = ref<string>("");
@@ -233,5 +234,6 @@ export function useWorktreeFrame(options: {
     findBackgroundLeaf,
     markLeafBackground,
     addBackgroundLeaf,
+    updateContainerSizes,
   };
 }

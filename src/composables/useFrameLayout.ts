@@ -58,6 +58,23 @@ export function useFrameLayout() {
     return null;
   }
 
+  function findContainerById(nodeId: string, node: FrameNode = root.value): FrameContainer | null {
+    if (node.type !== "container") return null;
+    if (node.id === nodeId) return node;
+    for (const child of node.children) {
+      const result = findContainerById(nodeId, child);
+      if (result) return result;
+    }
+    return null;
+  }
+
+  function updateContainerSizes(containerId: string, sizes: number[]) {
+    const container = findContainerById(containerId);
+    if (!container) return;
+    if (container.children.length !== sizes.length) return;
+    container.sizes = [...sizes];
+  }
+
   function findParent(
     nodeId: string,
     node: FrameNode = root.value,
@@ -293,5 +310,6 @@ export function useFrameLayout() {
     getAllLeafs,
     findBackgroundLeaf,
     markLeafBackground,
+    updateContainerSizes,
   };
 }

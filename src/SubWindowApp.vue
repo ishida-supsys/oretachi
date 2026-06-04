@@ -123,6 +123,7 @@ const {
   onTabDrop,
   onTabEdgeDrop,
   onTabReorder,
+  updateContainerSizes,
 } = useWorktreeFrame({
   terminalEntries,
   terminalRefs,
@@ -579,7 +580,7 @@ async function onCancelAiJudging() {
           @tab-edge-drop="onTabEdgeDrop"
           @tab-reorder="onTabReorder"
           @request-add-terminal="requestAddTerminal"
-          @resize-end="() => {}"
+          @resize-end="updateContainerSizes"
         />
       </div>
     </template>
