@@ -115,4 +115,5 @@ export interface AppSettings {
   aiTimeoutSecs?: number; // AIタイムアウト秒数 (デフォルト: 120)
   debugMode?: boolean;
   useOretachiTerminalForBackground?: boolean; // AI からの background コマンドを oretachi ターミナルで起動するか (デフォルト: true)
+  moveToSubWindowOnMcpSpawn?: boolean; // MCP 経由のターミナル追加時にサブウィンドウへ自動移行するか (デフォルト: false)
 }

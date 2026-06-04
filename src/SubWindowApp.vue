@@ -337,10 +337,10 @@ onMounted(async () => {
   ));
 
   // ターミナル追加レスポンス
-  collect(await appWindow.listen<{ terminalId: number; sessionId: number; title: string }>(
+  collect(await appWindow.listen<{ terminalId: number; sessionId: number; title: string; pendingCommand?: string }>(
     "sub-add-terminal-response",
     async (event) => {
-      const { terminalId, sessionId, title } = event.payload;
+      const { terminalId, sessionId, title, pendingCommand } = event.payload;
       terminalEntries.set(terminalId, { id: terminalId, title, sessionId, snapshot: "" });
 
       // lastFocusedLeafId のリーフに追加（なければ root リーフに）
@@ -356,6 +356,16 @@ onMounted(async () => {
       if (term) {
         await term.handleTabActivated();
         term.focus();
+        // MCP からの pendingCommand を流し込む (App.vue 側で末尾 \r 正規化済み)
+        if (pendingCommand) {
+          try {
+            await term.waitForReady();
+            await term.write(pendingCommand);
+          } catch (e) {
+            // 書き込み失敗は無視 (ターミナルがすでに閉じられている等)
+            void e;
+          }
+        }
       }
     }
   ));

@@ -522,6 +522,19 @@ function getSoundLabel(sound: string | null | undefined): string {
         <label for="use-oretachi-terminal-for-background" class="inline-label toggle-label">{{ t('terminal.useOretachiTerminalForBackground') }}</label>
       </div>
       <p class="field-description">{{ t('terminal.useOretachiTerminalForBackgroundDesc') }}</p>
+      <template v-if="settings.useOretachiTerminalForBackground ?? true">
+        <div class="row-input row-input--inline mt-8">
+          <input
+            id="move-to-sub-window-on-mcp-spawn"
+            type="checkbox"
+            class="toggle-checkbox"
+            :checked="settings.moveToSubWindowOnMcpSpawn ?? false"
+            @change="(e) => { settings.moveToSubWindowOnMcpSpawn = (e.target as HTMLInputElement).checked; scheduleSave(); }"
+          />
+          <label for="move-to-sub-window-on-mcp-spawn" class="inline-label toggle-label">{{ t('terminal.moveToSubWindowOnMcpSpawn') }}</label>
+        </div>
+        <p class="field-description">{{ t('terminal.moveToSubWindowOnMcpSpawnDesc') }}</p>
+      </template>
     </div>
 
     <!-- ワークツリー追加先ディレクトリ -->
@@ -1177,7 +1190,9 @@ function getSoundLabel(sound: string | null | undefined): string {
         "left": "Left"
       },
       "useOretachiTerminalForBackground": "Use oretachi terminal for AI background commands",
-      "useOretachiTerminalForBackgroundDesc": "When OFF, AI agents launch pnpm dev / vite / nodemon etc. via Claude Code's bash run_in_background instead of an oretachi terminal tab."
+      "useOretachiTerminalForBackgroundDesc": "When OFF, AI agents launch pnpm dev / vite / nodemon etc. via Claude Code's bash run_in_background instead of an oretachi terminal tab.",
+      "moveToSubWindowOnMcpSpawn": "Move worktree to sub-window when MCP adds a terminal",
+      "moveToSubWindowOnMcpSpawnDesc": "If the worktree is not yet in a sub-window, automatically move it after MCP spawns a terminal. Stabilizes terminal sizing for long-running background commands. All other terminals in the worktree will move together."
     },
     "worktreeBaseDir": {
       "label": "Worktree base directory",
@@ -1280,7 +1295,9 @@ function getSoundLabel(sound: string | null | undefined): string {
         "left": "左"
       },
       "useOretachiTerminalForBackground": "AI からの background コマンドを oretachi ターミナルで起動する",
-      "useOretachiTerminalForBackgroundDesc": "OFF の場合、AI Agent は pnpm dev / vite / nodemon 等を oretachi のターミナルタブではなく Claude Code の bash run_in_background で起動します。"
+      "useOretachiTerminalForBackgroundDesc": "OFF の場合、AI Agent は pnpm dev / vite / nodemon 等を oretachi のターミナルタブではなく Claude Code の bash run_in_background で起動します。",
+      "moveToSubWindowOnMcpSpawn": "MCP からターミナルが追加されたらサブウィンドウへ自動移行する",
+      "moveToSubWindowOnMcpSpawnDesc": "ワークツリーがメインウィンドウにある場合、MCP のターミナル追加直後に自動でサブウィンドウへ移行します。バックグラウンドコマンドの表示サイズを安定させるための設定です。ワークツリー内の他のターミナルも一緒に移動します。"
     },
     "worktreeBaseDir": {
       "label": "ワークツリーの追加先ディレクトリ",
