@@ -180,9 +180,14 @@ const thumbnailUrls = reactive(new Map<number, string>());
 // 立ち上がっても誤投入されない。多重 spawn の race も terminalId 単位で完全分離される。
 const pendingByTerminal = new Map<number, string>();
 
-// terminalId → ready 待ち resolver（mcp-spawn-terminal 後のサブウィンドウ自動移行などで使用）
+// terminalId → ready 済みフラグ。onTerminalReady で add。
+// onTerminalReady は同期的に発火しうる（TerminalView の emit("ready") → @ready ハンドラが同期）ため、
+// waitForTerminalReady を呼ぶ前に既に ready 完了している可能性がある。Set で「過去に ready 済みかどうか」を
+// 記録しておき、waitForTerminalReady 側で即時 resolve できるようにする。
+const readyTerminals = new Set<number>();
 const terminalReadyResolvers = new Map<number, () => void>();
 function waitForTerminalReady(terminalId: number, timeoutMs = 5000): Promise<void> {
+  if (readyTerminals.has(terminalId)) return Promise.resolve();
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       terminalReadyResolvers.delete(terminalId);
@@ -378,6 +383,7 @@ async function onTerminalReady(worktreeId: string, terminalId: number) {
     const ref = getTerminalRef(terminalId);
     await ref?.write(command);
   }
+  readyTerminals.add(terminalId);
   const resolver = terminalReadyResolvers.get(terminalId);
   if (resolver) {
     terminalReadyResolvers.delete(terminalId);
