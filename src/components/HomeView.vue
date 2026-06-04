@@ -258,10 +258,11 @@ const naturalCardWidth = computed(() => {
   const THUMBNAIL_GAP = 8;  // .terminals-row の gap
   const CARD_PADDING = 24;  // .worktree-card の padding 12px × 2
   const MIN_WIDTH = 260;    // ヘッダーボタンが収まる最小幅
+  const MAX_TERMINALS_PER_ROW = 2;  // 1行に表示するターミナルの最大数
 
   let max = MIN_WIDTH;
   for (const wt of props.worktrees) {
-    const n = wt.terminals.length;
+    const n = Math.min(wt.terminals.length, MAX_TERMINALS_PER_ROW);
     if (n <= 0) continue;
     const w = CARD_PADDING + n * THUMBNAIL_W + (n - 1) * THUMBNAIL_GAP;
     if (w > max) max = w;
