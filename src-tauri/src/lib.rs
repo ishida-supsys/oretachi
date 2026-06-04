@@ -995,7 +995,9 @@ pub fn run() {
             // Webview ハング診断: heartbeat ループ（30秒間隔で ping → pong のラウンドトリップ計測）
             {
                 use std::sync::Arc;
-                use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+                // NOTE: ハング自動復旧（reload / WebView 再作成）を一時無効化したため、
+                // AtomicBool（recreate_attempted 用）は未使用となり import から除外している。
+                use std::sync::atomic::{AtomicU64, Ordering};
                 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
                 let last_pong_ms = Arc::new(AtomicU64::new(0));
@@ -1058,15 +1060,15 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     let mut ping_pending_since: Option<u64> = None;
                     let mut unresponsive_logged_until_secs: u64 = 0;
-                    // reload() / 再作成が効いたかを追跡するフラグ。pong 復帰で reset。
-                    // recreate は spawn 内のタスクから書き戻すため AtomicBool。
-                    let mut reload_attempted = false;
-                    let recreate_attempted = Arc::new(AtomicBool::new(false));
-                    // recreate 世代カウンタ。新規 recreate 発火または pong 復帰で +1 し、
-                    // spawn 内のバックオフタイマーが「自分が起動した世代」と一致するときだけ
-                    // フラグをリセットする。これで「タイマーAが残存中にタスクBが新たな
-                    // recreate を spawn → タイマーAがBの状態を上書きして false に戻す」race を防ぐ。
-                    let recreate_generation = Arc::new(AtomicU64::new(0));
+                    // [一時無効化] 自動復旧（reload / WebView 再作成）がハング回復に失敗して
+                    // アプリ全体をクラッシュさせるため、復旧アクションを無効化している。
+                    // それに伴い以下の状態変数も未使用となるためコメントアウト:
+                    //   - reload_attempted    : reload() を試行したか
+                    //   - recreate_attempted  : WebView 再作成を試行したか
+                    //   - recreate_generation : 再作成バックオフタスクの世代カウンタ
+                    // let mut reload_attempted = false;
+                    // let recreate_attempted = Arc::new(AtomicBool::new(false));
+                    // let recreate_generation = Arc::new(AtomicU64::new(0));
                     loop {
                         tokio::time::sleep(Duration::from_secs(30)).await;
                         let now_ms = SystemTime::now()
@@ -1078,10 +1080,10 @@ pub fn run() {
                         if last_pong > 0 && now_ms.saturating_sub(last_pong) < 35_000 {
                             ping_pending_since = None;
                             unresponsive_logged_until_secs = 0;
-                            reload_attempted = false;
-                            recreate_attempted.store(false, Ordering::Relaxed);
-                            // 残存している recreate バックオフタスクを世代カウンタで invalidate
-                            recreate_generation.fetch_add(1, Ordering::Relaxed);
+                            // [一時無効化] 復旧アクション無効化に伴い、復旧フラグの reset も不要。
+                            // reload_attempted = false;
+                            // recreate_attempted.store(false, Ordering::Relaxed);
+                            // recreate_generation.fetch_add(1, Ordering::Relaxed);
                         }
                         // クリアされずに残っている場合のみ本当の未応答と判定
                         if let Some(pending_since) = ping_pending_since {
@@ -1109,6 +1111,10 @@ pub fn run() {
                                     unresponsive_logged_until_secs = 180;
                                 }
                             }
+                            // [一時無効化] 第1段階（30s 未応答）の WebView 強制リロード。
+                            // 自動復旧がハング回復に失敗してアプリをクラッシュさせるため無効化。
+                            // 診断ログ（上の未応答 ERROR ログ）は残し、復旧アクションのみ止める。
+                            /*
                             // 第1段階（30s 未応答）: メインウィンドウの強制リロードを試みる。
                             // eval("location.reload()") は JS タスクキュー経由のため、JS メインスレッド
                             // が詰まっていると実行されない。WebviewWindow::reload() は Tauri runtime
@@ -1127,7 +1133,13 @@ pub fn run() {
                                     }
                                 }
                             }
+                            */
 
+                            // [一時無効化] 第2段階（95s 未応答）の WebView ウィンドウ destroy → 再作成。
+                            // この復旧アクション（特に destroy → rebuild）がハング回復に失敗して
+                            // アプリ全体をクラッシュさせる原因となっているため無効化する。
+                            // 診断ログは残し、復旧アクションのみ止める。
+                            /*
                             // 第2段階（95s 未応答）: reload が効かなかった場合は WebView ウィンドウ
                             // 自体を destroy → tauri.conf.json の設定から再作成する。WebView2 プロセス
                             // 自身が応答不能な場合、reload メッセージが届かずこの段階に到達する。
@@ -1241,6 +1253,7 @@ pub fn run() {
                                     }
                                 });
                             }
+                            */
                         }
                         match ping_handle.emit("__webview-heartbeat-ping", serde_json::json!({ "ts": now_ms })) {
                             Ok(_) => {
