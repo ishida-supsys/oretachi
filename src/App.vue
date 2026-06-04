@@ -724,7 +724,13 @@ async function onDuplicateWorktree(worktreeId: string) {
 
 // ─── ────────────────────────────────────────────────────────────────────────
 
-async function handleSubAddTerminalRequest(worktreeId: string) {
+// サブウィンドウへのターミナル追加。ユーザー由来のリクエスト (sub-add-terminal-request) と
+// MCP 由来の detached spawn の両方で使う。options.title / options.pendingCommand を渡すと
+// MCP のメタデータをサブへ伝搬し、title はメイン側 state にも同期する。
+async function handleSubAddTerminalRequest(
+  worktreeId: string,
+  options?: { title?: string | null; pendingCommand?: string },
+) {
   const worktree = worktrees.value.find((w) => w.id === worktreeId);
   if (!worktree) return;
 
@@ -737,34 +743,21 @@ async function handleSubAddTerminalRequest(worktreeId: string) {
 
   registerTerminalSession(worktreeId, terminal.id, sid);
 
-  await emitTo(`sub-${worktreeId}`, "sub-add-terminal-response", {
+  // MCP から title を渡された場合はメイン側の worktree state にも反映し、
+  // 後でメインへ戻したときにデフォルト名へ巻き戻らないようにする。
+  if (options?.title) {
+    onTerminalTitleChange(worktreeId, terminal.id, options.title);
+  }
+
+  const payload: { terminalId: number; sessionId: number; title: string; pendingCommand?: string } = {
     terminalId: terminal.id,
     sessionId: sid,
-    title: terminal.title,
-  });
-}
-
-// MCP からの detached worktree 向けターミナル追加。
-// handleSubAddTerminalRequest とほぼ同じだが、pendingCommand と title をサブへ伝搬する。
-async function handleDetachedMcpSpawn(worktreeId: string, pendingCommand: string, title: string | null) {
-  const worktree = worktrees.value.find((w) => w.id === worktreeId);
-  if (!worktree) return;
-
-  const terminal = addTerminal(worktreeId);
-  terminalWorktreeMap.set(terminal.id, worktreeId);
-
-  const sid = await invoke<number>("pty_spawn", {
-    rows: 24, cols: 80, shell: resolveShell(worktreeId) ?? null, cwd: worktree.path,
-  });
-
-  registerTerminalSession(worktreeId, terminal.id, sid);
-
-  await emitTo(`sub-${worktreeId}`, "sub-add-terminal-response", {
-    terminalId: terminal.id,
-    sessionId: sid,
-    title: title ?? terminal.title,
-    pendingCommand,
-  });
+    title: options?.title ?? terminal.title,
+  };
+  if (options?.pendingCommand !== undefined) {
+    payload.pendingCommand = options.pendingCommand;
+  }
+  await emitTo(`sub-${worktreeId}`, "sub-add-terminal-response", payload);
 }
 
 async function onMoveToSubWindow(worktreeId: string) {
@@ -1092,9 +1085,9 @@ onMounted(async () => {
       // detached（サブウィンドウ化済み）ワークツリーはサブウィンドウへ pendingCommand 付きでルーティング
       if (isDetached(worktree_id)) {
         try {
-          await handleDetachedMcpSpawn(worktree_id, cmd, title);
+          await handleSubAddTerminalRequest(worktree_id, { title, pendingCommand: cmd });
         } catch (e) {
-          debug(`[Terminal] mcp-spawn-terminal: handleDetachedMcpSpawn failed: ${e}`);
+          debug(`[Terminal] mcp-spawn-terminal: handleSubAddTerminalRequest (detached) failed: ${e}`);
         }
         return;
       }
