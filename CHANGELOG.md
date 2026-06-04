@@ -6,6 +6,16 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.20.2] - 2026-06-05
+
+### Added
+- ホーム画面のワークツリーカードリストを中央寄せに変更 (余った横スペースを左右均等に配分)
+- ワークツリーカードの1行ターミナル表示を最大2つに制限 (3個目以降は flex-wrap で折り返し)
+
+### Fixed
+- 分割リーフの表示サイズが通知ウィンドウとメインで一致しない問題を修正 (Splitter sizes を永続化し送信 layout と保存済み cols/rows を整合)
+- ハング自動復旧の復旧アクション (reload / WebView 再作成) がアプリ全体をクラッシュさせるため一時無効化 (ping/pong 診断ログは維持)
+
 ## [0.20.1] - 2026-06-04
 
 ### Fixed
@@ -334,7 +344,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.20.1...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.20.2...HEAD
+[0.20.2]: https://github.com/ishida-supsys/oretachi/compare/0.20.1...0.20.2
 [0.20.1]: https://github.com/ishida-supsys/oretachi/compare/0.20.0...0.20.1
 [0.20.0]: https://github.com/ishida-supsys/oretachi/compare/0.19.10...0.20.0
 [0.19.10]: https://github.com/ishida-supsys/oretachi/compare/0.19.9...0.19.10
