@@ -6,6 +6,13 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.20.1] - 2026-06-04
+
+### Fixed
+- 複数 AI エージェント同時稼働時に PTY 出力 emit が WebView2 IPC を飽和させメインループが恒久 wedge してアプリがフリーズする問題を修正 (出力 emit を 16ms 周期でコアレッシングし emit 頻度を上限化、pty-output payload を base64 化してサイズを 1/3〜1/4 に削減) (#53)
+- flush ループと reader 最終 flush が同一セッションの保留出力を並走 drain する際に出力チャンクの順序が逆転しうる問題を修正 (drain と emit を同一クリティカルセクションにまとめ FIFO 順を保証)
+- 出力が drain 速度を持続的に上回る際に保留バッファが無制限に増大しメモリを食い潰す問題に対し上限 (8MB) を設定
+
 ## [0.20.0] - 2026-05-10
 
 ### Added
@@ -327,7 +334,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.20.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.20.1...HEAD
+[0.20.1]: https://github.com/ishida-supsys/oretachi/compare/0.20.0...0.20.1
 [0.20.0]: https://github.com/ishida-supsys/oretachi/compare/0.19.10...0.20.0
 [0.19.10]: https://github.com/ishida-supsys/oretachi/compare/0.19.9...0.19.10
 [0.19.9]: https://github.com/ishida-supsys/oretachi/compare/0.19.8...0.19.9
