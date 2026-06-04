@@ -55,24 +55,36 @@ fn sweep_exited(map: &mut HashMap<u32, PtySession>) {
 
 /// 1 回の flush で emit する保留出力の上限。これを超えた分は次周期へ持ち越す（バックプレッシャ）。
 const MAX_FLUSH_BYTES: usize = 256 * 1024;
+/// 未配送バッファ（`output_pending`）が保持する最大バイト数。
+/// drain 速度（256KB/16ms ≒ 16MB/s）を持続的に上回る出力ではバッファが無制限に増大して
+/// メモリを食い潰すため、上限超過時は最古を捨てる。直近の出力は `output_history`（64KB）が
+/// 別途保持するため MCP の差分読みには影響しない（極端な過負荷時に画面表示の取りこぼしに留まる）。
+const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
 
 /// セッションの保留バッファを最大 `MAX_FLUSH_BYTES` drain し、base64 エンコードして
 /// `pty-output` を 1 回 emit する。保留が空なら何もしない。
 /// flush ループと reader 終了時の最終 flush の双方から呼ばれる。
+///
+/// drain と emit を **同一の lock critical section で行う**。flush ループと reader 最終 flush は
+/// 同じ session の `output_pending` に対して並行に本関数を呼びうるため、drain だけをロックで
+/// 直列化して emit をロック外に出すと「A が先に drain・B が先に emit」となり出力チャンクの
+/// 順序が逆転する／drain 済みだが未 emit のチャンクを残したまま reader が `pty-exit` を
+/// 先行 emit してしまう。lock を emit まで保持すれば FIFO の drain 順 = emit 順が保証され、
+/// reader が `remaining == 0` を観測した時点で全 drain 済みチャンクは emit 済みになる。
 fn flush_session_output(app: &AppHandle, session_id: u32, pending: &Arc<Mutex<VecDeque<u8>>>) {
-    let chunk: Vec<u8> = {
-        let mut pend = match pending.lock() {
-            Ok(p) => p,
-            Err(e) => e.into_inner(),
-        };
-        if pend.is_empty() {
-            return;
-        }
-        let take = pend.len().min(MAX_FLUSH_BYTES);
-        pend.drain(..take).collect()
+    let mut pend = match pending.lock() {
+        Ok(p) => p,
+        Err(e) => e.into_inner(),
     };
+    if pend.is_empty() {
+        return;
+    }
+    let take = pend.len().min(MAX_FLUSH_BYTES);
+    let chunk: Vec<u8> = pend.drain(..take).collect();
     use base64::Engine;
     let data = base64::engine::general_purpose::STANDARD.encode(&chunk);
+    // lock 保持中に emit して drain↔emit を不可分にする（順序保証のため）。
+    // emit はイベントをキューに載せるだけで pty_manager に同期再入しないため、deadlock しない。
     let _ = app.emit("pty-output", PtyOutputPayload { session_id, data });
 }
 
@@ -730,6 +742,11 @@ impl PtyManager {
                         // 実際の emit は 16ms 周期の flush ループがまとめて行う。
                         if let Ok(mut pend) = pending_for_reader.lock() {
                             pend.extend(data.iter().copied());
+                            // 出力が drain 速度を持続的に上回るとき、保留が無制限に増大しないよう最古を捨てる
+                            if pend.len() > MAX_PENDING_BYTES {
+                                let drop_n = pend.len() - MAX_PENDING_BYTES;
+                                pend.drain(..drop_n);
+                            }
                         }
                     }
                     Err(_) => break,
