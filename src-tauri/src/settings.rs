@@ -237,7 +237,7 @@ impl Default for AppearanceSettings {
 
 fn default_ai_timeout_secs() -> u64 { 120 }
 
-fn default_use_oretachi_terminal_for_background() -> bool { true }
+fn default_use_oretachi_terminal_for_background() -> bool { false }
 
 fn default_move_to_sub_window_on_mcp_spawn() -> bool { false }
 

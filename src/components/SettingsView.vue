@@ -516,13 +516,13 @@ function getSoundLabel(sound: string | null | undefined): string {
           id="use-oretachi-terminal-for-background"
           type="checkbox"
           class="toggle-checkbox"
-          :checked="settings.useOretachiTerminalForBackground ?? true"
+          :checked="settings.useOretachiTerminalForBackground ?? false"
           @change="(e) => { settings.useOretachiTerminalForBackground = (e.target as HTMLInputElement).checked; scheduleSave(); }"
         />
         <label for="use-oretachi-terminal-for-background" class="inline-label toggle-label">{{ t('terminal.useOretachiTerminalForBackground') }}</label>
       </div>
       <p class="field-description">{{ t('terminal.useOretachiTerminalForBackgroundDesc') }}</p>
-      <template v-if="settings.useOretachiTerminalForBackground ?? true">
+      <template v-if="settings.useOretachiTerminalForBackground ?? false">
         <div class="row-input row-input--inline mt-8">
           <input
             id="move-to-sub-window-on-mcp-spawn"
