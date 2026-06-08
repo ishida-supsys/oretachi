@@ -107,9 +107,7 @@ const terminalList = computed(() =>
       <div class="card-info">
         <span
           class="card-name"
-          :class="{ 'cursor-help': tooltip }"
           draggable="true"
-          v-tooltip.bottom="tooltip ? { value: tooltip, escape: false, showDelay: 300, class: 'task-tooltip-sm' } : undefined"
           @dragstart.stop="$emit('dragStart', worktree.id, $event)"
           @dragend.stop="$emit('dragEnd')"
         >{{ worktree.name }}</span>
@@ -160,6 +158,13 @@ const terminalList = computed(() =>
         :is-active="false"
         @click="onThumbnailClick(item.id)"
       />
+    </div>
+
+    <!-- ホバーで開く description エリア (tooltip: description優先・なければタスク一覧) -->
+    <div v-if="tooltip" class="card-desc-wrap">
+      <div class="card-desc">
+        <div class="card-desc-inner" v-html="tooltip" />
+      </div>
     </div>
 
     <Popover ref="menuRef">
@@ -366,6 +371,32 @@ const terminalList = computed(() =>
   font-size: 12px;
   color: #6c7086;
   padding: 4px 0;
+}
+
+/* ホバーで開く description エリア: grid-template-rows 0fr→1fr で高さauto をアニメーション */
+.card-desc-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.25s ease;
+}
+
+.worktree-card:hover .card-desc-wrap {
+  grid-template-rows: 1fr;
+}
+
+.card-desc {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.card-desc-inner {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #313244;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #a6adc8;
+  word-break: break-word;
 }
 
 .popup-menu {
