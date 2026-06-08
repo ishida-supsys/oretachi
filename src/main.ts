@@ -16,7 +16,10 @@ const mode = params.get("mode");
 async function mountApp() {
   document.addEventListener("contextmenu", (e) => e.preventDefault());
 
-  await attachConsole();
+  // Rust→webview ログ転送リスナーは UI スレッドコストになるため本番では張らない (issue #59)
+  if (import.meta.env.DEV) {
+    await attachConsole();
+  }
 
   // ロケール先読み
   try {

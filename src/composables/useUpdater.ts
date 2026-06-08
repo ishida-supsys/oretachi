@@ -1,7 +1,7 @@
 import { ref } from "vue";
 import { check } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { error as logError, info } from "@tauri-apps/plugin-log";
+import { logError, logInfo } from "../utils/log";
 import { invoke } from "@tauri-apps/api/core";
 
 export function useUpdater() {
@@ -14,11 +14,11 @@ export function useUpdater() {
     try {
       const update = await check();
       if (update) {
-        await info(`アップデート利用可能: ${update.version}`);
+        logInfo(`アップデート利用可能: ${update.version}`);
         return update;
       }
     } catch (e) {
-      await logError(`アップデート確認エラー: ${e}`);
+      logError(`アップデート確認エラー: ${e}`);
     } finally {
       isChecking.value = false;
     }
@@ -33,7 +33,7 @@ export function useUpdater() {
       await invoke("prepare_for_relaunch");
       await relaunch();
     } catch (e) {
-      await logError(`アップデートインストールエラー: ${e}`);
+      logError(`アップデートインストールエラー: ${e}`);
     } finally {
       isDownloading.value = false;
     }

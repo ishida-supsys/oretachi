@@ -18,7 +18,7 @@ import type { TerminalForApproval } from "./utils/autoApproval";
 import { useIdeSelect } from "./composables/useIdeSelect";
 import { useArtifactWindow } from "./composables/useArtifactWindow";
 import { invoke } from "@tauri-apps/api/core";
-import { debug } from "@tauri-apps/plugin-log";
+import { logDebug } from "./utils/log";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import AutoApprovalPromptDialog from "./components/AutoApprovalPromptDialog.vue";
 import type { SubTerminalEntry, WebSessionInfo, AiSessionInfo } from "./types/terminal";
@@ -474,7 +474,7 @@ onMounted(async () => {
     if (event.payload.additionalPrompt !== undefined) {
       additionalPrompt.value = event.payload.additionalPrompt;
     }
-    await debug(`[AutoApproval] sub-try-auto-approve received autoApproval=${autoApproval.value}`);
+    logDebug(`[AutoApproval] sub-try-auto-approve received autoApproval=${autoApproval.value}`);
     if (!autoApproval.value) {
       await emitTo("main", "sub-auto-approve-result", { worktreeId, approved: false });
       return;
@@ -482,11 +482,11 @@ onMounted(async () => {
 
     // 重複防止: 既にAI判定が進行中ならスキップ
     if (aiJudging.value) {
-      await debug(`[AutoApproval] already in progress for sub-window ${worktreeId}, skipping`);
+      logDebug(`[AutoApproval] already in progress for sub-window ${worktreeId}, skipping`);
       return;
     }
 
-    await debug(`[AutoApproval] terminalEntries.size=${terminalEntries.size}`);
+    logDebug(`[AutoApproval] terminalEntries.size=${terminalEntries.size}`);
     aiJudging.value = true;
     let loopResult: { approved: boolean; lastCommand: string | undefined };
     try {
@@ -499,14 +499,14 @@ onMounted(async () => {
     } finally {
       aiJudging.value = false;
     }
-    await debug(`[AutoApproval] sub result: approved=${loopResult.approved} command=${loopResult.lastCommand ?? "none"}`);
+    logDebug(`[AutoApproval] sub result: approved=${loopResult.approved} command=${loopResult.lastCommand ?? "none"}`);
     if (loopResult.lastCommand) lastJudgedCommand.value = loopResult.lastCommand;
     await emitTo("main", "sub-auto-approve-result", { worktreeId, approved: loopResult.approved, command: loopResult.lastCommand });
   }));
 
   // AI判定キャンセル
   collect(await appWindow.listen("sub-cancel-auto-approve", async () => {
-    await debug(`[AutoApproval] sub-cancel-auto-approve received`);
+    logDebug(`[AutoApproval] sub-cancel-auto-approve received`);
     await invoke("cancel_approval", { worktreeId });
     aiJudging.value = false;
   }));

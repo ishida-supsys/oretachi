@@ -758,7 +758,11 @@ pub fn run() {
                 .rotation_strategy(RotationStrategy::KeepAll)
                 .max_file_size(100_000_000) // 100MB
                 .timezone_strategy(TimezoneStrategy::UseLocal)
-                .level(log::LevelFilter::Debug)
+                .level(if cfg!(debug_assertions) {
+                    log::LevelFilter::Debug
+                } else {
+                    log::LevelFilter::Info
+                })
                 .build(),
         )
         .plugin(
