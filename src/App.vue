@@ -277,6 +277,16 @@ const worktreeTaskTooltips = computed(() => {
   return map;
 });
 
+// ホームカードのワークツリー名ツールチップ用: description優先・なければタスクprompt一覧
+const worktreeCardTooltips = computed(() => {
+  const map = new Map<string, string | undefined>();
+  for (const wt of worktrees.value) {
+    const desc = wt.description?.trim();
+    map.set(wt.id, desc ? desc : getWorktreeTaskTooltip(wt.repositoryName, wt.branchName));
+  }
+  return map;
+});
+
 // サイドバー・メインエリア共通: detachedでないワークツリーのみ（毎レンダリングでのfilter()生成を回避）
 const attachedWorktrees = computed(() => worktrees.value.filter(w => !isDetached(w.id)));
 const { showAddTaskDialog, rerunTaskId, rerunPrompt, onAddTaskConfirm, onAddTaskCancel } =
@@ -1016,6 +1026,29 @@ onMounted(async () => {
     onAddTaskConfirm(event.payload.prompt, event.payload.remote_exec);
   });
 
+  // ExitPlanMode フック由来: プランを AI 要約してワークツリーの description にセット
+  await listen<{ worktree: string; plan: string }>("set-worktree-description", async (event) => {
+    const { worktree, plan } = event.payload;
+    const rt = worktrees.value.find((w) => w.name === worktree);
+    if (!rt || !plan?.trim()) return;
+    try {
+      const summary = await invoke<string>("generate_description_from_plan", { worktreeId: rt.id, plan });
+      const trimmed = summary?.trim();
+      if (trimmed) {
+        // ランタイム用 worktrees.value（カード表示用）と
+        // 永続化対象 settings.value.worktrees（loadWorktreesFromSettings でシャローコピー
+        // される別オブジェクト）の両方を更新する
+        rt.description = trimmed;
+        const entry = settings.value.worktrees.find((w) => w.id === rt.id);
+        if (entry) entry.description = trimmed;
+        scheduleSave();
+        debug(`[Description] set for worktree=${worktree}: ${trimmed}`);
+      }
+    } catch (e) {
+      debug(`[Description] generate failed for worktree=${worktree}: ${e}`);
+    }
+  });
+
   // MCPからのワークツリークローズ（アーカイブ）
   await listen<{ worktree_id: string; worktree_name: string; merge_to: string; delete_branch: boolean; force_branch: boolean }>("mcp-close-worktree", async (event) => {
     const { worktree_id, merge_to, delete_branch, force_branch } = event.payload;
@@ -1509,6 +1542,7 @@ onMounted(async () => {
         :cancellable-worktrees="cancellableWorktrees"
         :auto-approvals="autoApprovalMap"
         :ai-judging-worktrees="aiJudgingWorktrees"
+        :card-tooltips="worktreeCardTooltips"
         @select-terminal="switchToTerminal"
         @add-worktree="onShowAddWorktreeDialog"
         @remove-worktree="onRemoveWorktree"

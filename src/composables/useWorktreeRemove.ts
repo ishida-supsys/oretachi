@@ -207,6 +207,7 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
           path: worktree.path,
           branch_name: worktree.branchName,
           archived_at: Date.now(),
+          description: worktree.description ?? null,
         });
       },
       async (worktree) => {

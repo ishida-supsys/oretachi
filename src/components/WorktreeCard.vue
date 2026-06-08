@@ -20,6 +20,7 @@ const props = defineProps<{
   cancellable?: boolean;
   autoApproval?: boolean;
   aiJudging?: boolean;
+  tooltip?: string;
 }>();
 
 const emit = defineEmits<{
@@ -141,6 +142,13 @@ const terminalList = computed(() =>
           :disabled="loading"
           @click="openMenu($event)"
         ><span class="pi pi-ellipsis-v" /></button>
+      </div>
+    </div>
+
+    <!-- ホバーでヘッダー直下に開く description エリア (description優先・なければタスク一覧) -->
+    <div v-if="tooltip" class="card-desc-wrap">
+      <div class="card-desc">
+        <div class="card-desc-inner" v-html="tooltip" />
       </div>
     </div>
 
@@ -363,6 +371,32 @@ const terminalList = computed(() =>
   font-size: 12px;
   color: #6c7086;
   padding: 4px 0;
+}
+
+/* ホバーで開く description エリア: grid-template-rows 0fr→1fr で高さauto をアニメーション */
+.card-desc-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.25s ease;
+}
+
+.worktree-card:hover .card-desc-wrap {
+  grid-template-rows: 1fr;
+}
+
+.card-desc {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.card-desc-inner {
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid #313244;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #a6adc8;
+  word-break: break-word;
 }
 
 .popup-menu {

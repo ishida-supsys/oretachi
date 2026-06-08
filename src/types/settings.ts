@@ -25,6 +25,7 @@ export interface WorktreeEntry {
   hotkeyChar?: string; // Alt+[この文字] でフォーカス
   autoApproval?: boolean;
   autoApprovalPrompt?: string;
+  description?: string; // AIが自動生成する説明（ExitPlanMode hookでプランを要約してセット）
 }
 
 export interface TerminalSettings {

@@ -169,6 +169,7 @@ const props = defineProps<{
   cancellableWorktrees: Set<string>;
   autoApprovals: Map<string, boolean>;
   aiJudgingWorktrees: Set<string>;
+  cardTooltips?: Map<string, string | undefined>;
 }>();
 
 const emit = defineEmits<{
@@ -372,6 +373,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
               :cancellable="cancellableWorktrees.has(worktree.id)"
               :auto-approval="autoApprovals.get(worktree.id) ?? false"
               :ai-judging="aiJudgingWorktrees.has(worktree.id)"
+              :tooltip="cardTooltips?.get(worktree.id)"
               @drag-start="onCardDragStart"
               @drag-end="onDragEnd"
               @select-terminal="emit('selectTerminal', $event)"
