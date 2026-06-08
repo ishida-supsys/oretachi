@@ -23,24 +23,30 @@ export function isVerboseLogging(): boolean {
   return verbose;
 }
 
+// fire-and-forget 送出。戻り値が Promise でない場合（テスト mock 等）でも壊れないよう
+// Promise.resolve でラップしてから握り潰す。
+function fire(p: unknown): void {
+  void Promise.resolve(p).catch(() => {});
+}
+
 /** デバッグログ。本番では IPC を発生させない。 */
 export function logDebug(message: string): void {
   if (!verbose) return;
-  void debug(message).catch(() => {});
+  fire(debug(message));
 }
 
 /** 情報ログ。本番では IPC を発生させない。 */
 export function logInfo(message: string): void {
   if (!verbose) return;
-  void info(message).catch(() => {});
+  fire(info(message));
 }
 
 /** 警告ログ。常に送るが await しない。 */
 export function logWarn(message: string): void {
-  void warn(message).catch(() => {});
+  fire(warn(message));
 }
 
 /** エラーログ。常に送るが await しない。 */
 export function logError(message: string): void {
-  void error(message).catch(() => {});
+  fire(error(message));
 }

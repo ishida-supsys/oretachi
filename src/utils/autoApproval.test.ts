@@ -4,10 +4,10 @@ vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
 }))
 vi.mock('@tauri-apps/plugin-log', () => ({
-  debug: vi.fn(),
-  info: vi.fn(),
-  warn: vi.fn(),
-  error: vi.fn(),
+  debug: vi.fn(() => Promise.resolve()),
+  info: vi.fn(() => Promise.resolve()),
+  warn: vi.fn(() => Promise.resolve()),
+  error: vi.fn(() => Promise.resolve()),
 }))
 
 import { hasApprovalPrompt } from './autoApproval'
