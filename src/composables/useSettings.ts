@@ -1,10 +1,11 @@
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { error } from "@tauri-apps/plugin-log";
 import { platform } from "@tauri-apps/plugin-os";
 import type { AppSettings, HotkeyBinding, HotkeySettings } from "../types/settings";
 import { setLocale } from "../i18n";
+import { setVerboseLogging } from "../utils/log";
 
 const isMac = platform() === "macos";
 
@@ -63,6 +64,15 @@ const settings = ref<AppSettings>({
   hotkeys: defaultHotkeys(),
   alwaysOnTop: false,
 });
+
+// Debug Mode (settings.debugMode) を webview 側の詳細ログ override に連動させる。
+// 起動時のロード・設定タブでのトグル変更の双方でこの watch が発火する。
+// (dev ビルドでは log.ts 側で常に verbose 扱いのため override の値に関わらず詳細ログは出る)
+watch(
+  () => settings.value.debugMode,
+  (enabled) => setVerboseLogging(enabled === true),
+  { immediate: true },
+);
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 

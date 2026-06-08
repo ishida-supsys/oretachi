@@ -1,5 +1,5 @@
 import { markRaw } from "vue";
-import { debug } from "@tauri-apps/plugin-log";
+import { logDebug } from "../utils/log";
 
 interface HasContainerRef {
   containerRef: HTMLElement | null;
@@ -42,7 +42,7 @@ export function useTerminalReparenting<TEntry, TRef extends HasContainerRef>(
       const host = document.getElementById(`terminal-host-${tid}`);
       const hostStatus = host ? `found(${host.clientWidth}x${host.clientHeight})` : "not_found";
       const elStatus = el ? "found" : "not_found";
-      debug(`[Terminal] mountTerminalsToHosts tid=${tid} host=${hostStatus} el=${elStatus}`);
+      logDebug(`[Terminal] mountTerminalsToHosts tid=${tid} host=${hostStatus} el=${elStatus}`);
       if (el && host && el.parentElement !== host) {
         host.appendChild(el);
       }

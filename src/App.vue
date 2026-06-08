@@ -47,7 +47,7 @@ import { useAppHotkeys } from "./composables/useAppHotkeys";
 import { useSubWindowEvents } from "./composables/useSubWindowEvents";
 import { useShutdownGuard } from "./composables/useShutdownGuard";
 import type { ArchiveRow } from "./types/archive";
-import { debug } from "@tauri-apps/plugin-log";
+import { logDebug } from "./utils/log";
 import { consumeMaxBlockedMs, startEventLoopMonitor } from "./utils/eventLoopMonitor";
 import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -376,7 +376,7 @@ async function switchToTerminal(terminalId: number) {
   }
   if (!worktreeId) return;
 
-  debug(`[Terminal] switchToTerminal terminalId=${terminalId} worktreeId=${worktreeId}`);
+  logDebug(`[Terminal] switchToTerminal terminalId=${terminalId} worktreeId=${worktreeId}`);
 
   const bundle = worktreeFrameBundles.get(worktreeId);
   if (bundle) {
@@ -390,23 +390,23 @@ async function switchToTerminal(terminalId: number) {
   viewMode.value = "terminal";
   activeWorktreeId.value = worktreeId;
   await nextTick();
-  debug(`[Terminal] switchToTerminal after nextTick terminalId=${terminalId}`);
+  logDebug(`[Terminal] switchToTerminal after nextTick terminalId=${terminalId}`);
 
   if (bundle) {
     bundle.frame.mountTerminalsToHosts();
-    debug(`[Terminal] switchToTerminal after mountTerminalsToHosts terminalId=${terminalId}`);
+    logDebug(`[Terminal] switchToTerminal after mountTerminalsToHosts terminalId=${terminalId}`);
     const term = bundle.terminalRefs.get(terminalId);
     if (term) {
       await term.handleTabActivated();
-      debug(`[Terminal] switchToTerminal after handleTabActivated terminalId=${terminalId}`);
+      logDebug(`[Terminal] switchToTerminal after handleTabActivated terminalId=${terminalId}`);
       term.focus();
       // 安全策: flexレイアウト確定が遅延する場合に備えた再fit
       setTimeout(() => {
-        debug(`[Terminal] switchToTerminal setTimeout re-fit terminalId=${terminalId}`);
+        logDebug(`[Terminal] switchToTerminal setTimeout re-fit terminalId=${terminalId}`);
         term.handleTabActivated();
       }, 150);
     } else {
-      debug(`[Terminal] switchToTerminal term ref not found terminalId=${terminalId}`);
+      logDebug(`[Terminal] switchToTerminal term ref not found terminalId=${terminalId}`);
     }
   }
 }
@@ -481,7 +481,7 @@ async function onAddTerminal(
   if (options?.pendingCommand !== undefined) {
     pendingByTerminal.set(terminal.id, options.pendingCommand);
   }
-  debug(`[Terminal] onAddTerminal worktreeId=${worktreeId} terminalId=${terminal.id} background=${background}`);
+  logDebug(`[Terminal] onAddTerminal worktreeId=${worktreeId} terminalId=${terminal.id} background=${background}`);
 
   // バンドルがなければ作成（ワークツリー追加直後など）
   if (!worktreeFrameBundles.has(worktreeId)) {
@@ -494,7 +494,7 @@ async function onAddTerminal(
   const targetLeafId = background
     ? getOrCreateBackgroundLeafId(bundle)
     : (bundle.frame.lastFocusedLeafId.value || bundle.frame.getAllLeafs()[0]?.id);
-  debug(`[Terminal] onAddTerminal leafId=${targetLeafId ?? "null"} terminalId=${terminal.id}`);
+  logDebug(`[Terminal] onAddTerminal leafId=${targetLeafId ?? "null"} terminalId=${terminal.id}`);
   if (targetLeafId) {
     bundle.frame.returnAllToOffscreen();
     bundle.frame.addTerminalToLeaf(targetLeafId, terminal.id);
@@ -512,28 +512,28 @@ async function onAddTerminal(
   }
 
   await nextTick();
-  debug(`[Terminal] onAddTerminal after nextTick terminalId=${terminal.id}`);
+  logDebug(`[Terminal] onAddTerminal after nextTick terminalId=${terminal.id}`);
 
   bundle.frame.mountTerminalsToHosts();
-  debug(`[Terminal] onAddTerminal after mountTerminalsToHosts terminalId=${terminal.id}`);
+  logDebug(`[Terminal] onAddTerminal after mountTerminalsToHosts terminalId=${terminal.id}`);
   const term = bundle.terminalRefs.get(terminal.id);
   if (term) {
     await term.handleTabActivated();
-    debug(`[Terminal] onAddTerminal after handleTabActivated terminalId=${terminal.id}`);
+    logDebug(`[Terminal] onAddTerminal after handleTabActivated terminalId=${terminal.id}`);
     pendingManualStart.delete(terminal.id);
     await term.startPty();
-    debug(`[Terminal] onAddTerminal after startPty terminalId=${terminal.id}`);
+    logDebug(`[Terminal] onAddTerminal after startPty terminalId=${terminal.id}`);
     if (!background) {
       term.focus();
     }
     // 安全策: flexレイアウト確定が遅延する場合に備えた再fit
     setTimeout(() => {
-      debug(`[Terminal] onAddTerminal setTimeout re-fit terminalId=${terminal.id}`);
+      logDebug(`[Terminal] onAddTerminal setTimeout re-fit terminalId=${terminal.id}`);
       term.handleTabActivated();
     }, 150);
   } else {
     pendingManualStart.delete(terminal.id);
-    debug(`[Terminal] onAddTerminal term ref not found terminalId=${terminal.id}`);
+    logDebug(`[Terminal] onAddTerminal term ref not found terminalId=${terminal.id}`);
   }
 }
 
@@ -781,7 +781,7 @@ async function onMoveToMainWindow(worktreeId: string) {
     ? await subWindowEvents.getSubWindowLayout(worktreeId)
     : { layout: null, terminals: [] };
 
-  debug(`[MoveToMain] start worktreeId=${worktreeId} savedTerminals=${JSON.stringify(savedTerminals.map(t => ({ id: t.id, sessionId: t.sessionId })))}`);
+  logDebug(`[MoveToMain] start worktreeId=${worktreeId} savedTerminals=${JSON.stringify(savedTerminals.map(t => ({ id: t.id, sessionId: t.sessionId })))}`);
 
   // ★ moveToMainWindow の前にデータを準備（Vue再描画より先にセット）
   // pendingSessionAttach はプレーンMap → Vue再描画をトリガーしない
@@ -793,15 +793,15 @@ async function onMoveToMainWindow(worktreeId: string) {
       terminalAgentStatus.set(t.id, true);
     }
   }
-  debug(`[MoveToMain] pendingSessionAttach set for terminalIds=[${[...pendingSessionAttach.keys()]}]`);
+  logDebug(`[MoveToMain] pendingSessionAttach set for terminalIds=[${[...pendingSessionAttach.keys()]}]`);
 
   // ensureWorktreeFrame は bundles.set() で再描画をトリガーするが、
   // isDetached がまだ true なので TerminalView は作成されない
   ensureWorktreeFrame(worktreeId, savedLayout ?? undefined);
-  debug(`[MoveToMain] ensureWorktreeFrame done, calling moveToMainWindow`);
+  logDebug(`[MoveToMain] ensureWorktreeFrame done, calling moveToMainWindow`);
 
   await moveToMainWindow(worktreeId);
-  debug(`[MoveToMain] moveToMainWindow done, isDetached=${isDetached(worktreeId)}`);
+  logDebug(`[MoveToMain] moveToMainWindow done, isDetached=${isDetached(worktreeId)}`);
 
   subWindowEvents.subWindowFocusMap.delete(worktreeId);
 }
@@ -1033,13 +1033,13 @@ onMounted(async () => {
       const { worktree_id, command, title } = event.payload;
       const targetWt = worktrees.value.find((w) => w.id === worktree_id);
       if (!targetWt) {
-        debug(`[Terminal] mcp-spawn-terminal: worktree ${worktree_id} not found, skipping`);
+        logDebug(`[Terminal] mcp-spawn-terminal: worktree ${worktree_id} not found, skipping`);
         return;
       }
       // detached（サブウィンドウ化済み）ワークツリーは onAddTerminal が
       // handleSubAddTerminalRequest に分岐し pendingCommand を消費しないため未対応
       if (isDetached(worktree_id)) {
-        debug(`[Terminal] mcp-spawn-terminal: worktree ${worktree_id} is detached, not supported`);
+        logDebug(`[Terminal] mcp-spawn-terminal: worktree ${worktree_id} is detached, not supported`);
         return;
       }
       const beforeIds = new Set(targetWt.terminals.map((t) => t.id));
@@ -1050,7 +1050,7 @@ onMounted(async () => {
       try {
         await onAddTerminal(worktree_id, { background: true, pendingCommand: cmd });
       } catch (e) {
-        debug(`[Terminal] mcp-spawn-terminal: onAddTerminal failed: ${e}`);
+        logDebug(`[Terminal] mcp-spawn-terminal: onAddTerminal failed: ${e}`);
         return;
       }
       if (title) {

@@ -1,6 +1,6 @@
 import { reactive } from "vue";
 import { listen, emitTo } from "@tauri-apps/api/event";
-import { debug } from "@tauri-apps/plugin-log";
+import { logDebug } from "../utils/log";
 import { runApprovalLoop, cancelApproval } from "../utils/autoApproval";
 import type { TerminalForApproval } from "../utils/autoApproval";
 import type { Ref } from "vue";
@@ -77,24 +77,24 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
       if (!wt) return;
       if (!autoApprovalMap.get(wt.id)) return;
 
-      debug(
+      logDebug(
         `[AutoApproval] notify-worktree received worktreeName=${worktreeName} resolved=${wt.id} autoApproval=true`
       );
 
       if (aiJudgingWorktrees.has(wt.id)) {
-        debug(`[AutoApproval] already in progress for ${wt.id}, skipping`);
+        logDebug(`[AutoApproval] already in progress for ${wt.id}, skipping`);
         return;
       }
 
       if (deps.isDetached(wt.id)) {
-        debug(`[AutoApproval] delegating to sub-window ${wt.id}`);
+        logDebug(`[AutoApproval] delegating to sub-window ${wt.id}`);
         await emitTo(`sub-${wt.id}`, "sub-try-auto-approve", {
           additionalPrompt: deps.autoApprovalPromptMap.get(wt.id) ?? "",
         });
         return;
       }
 
-      debug(`[AutoApproval] local terminals check, count=${wt.terminals.length}`);
+      logDebug(`[AutoApproval] local terminals check, count=${wt.terminals.length}`);
       aiJudgingWorktrees.add(wt.id);
       let loopResult: { approved: boolean; lastCommand: string | undefined };
       try {
@@ -116,7 +116,7 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
         deps.lastJudgedCommandMap.set(wt.id, loopResult.lastCommand);
       }
       if (!loopResult.approved && !deps.isWorktreeFocused(wt.id)) {
-        await debug(`[AutoApproval] local: not approved → addNotification(${wt.id})`);
+        logDebug(`[AutoApproval] local: not approved → addNotification(${wt.id})`);
         deps.addNotification(wt.id, "approval");
         deps.playSoundForKind("approval");
         await deps.sendOsNotification(wt.name, deps.t("notification.titleApproval"));
@@ -128,7 +128,7 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
       "sub-auto-approve-result",
       async (event) => {
         const { worktreeId: wid, approved, command } = event.payload;
-        await debug(
+        logDebug(
           `[AutoApproval] sub-auto-approve-result worktreeId=${wid} approved=${approved} command=${command ?? "none"}`
         );
         if (command) {

@@ -18,7 +18,7 @@ import { matchesHotkey } from "../composables/useHotkeys";
 import { useTerminalSearch } from "../composables/useTerminalSearch";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useI18n } from "vue-i18n";
-import { debug } from "@tauri-apps/plugin-log";
+import { logDebug } from "../utils/log";
 
 const { t } = useI18n();
 
@@ -173,7 +173,7 @@ function initTerminal() {
     const isOffscreen = !!xtermRef.value?.closest('[data-offscreen]');
     fitAddon.fit();
     const initDims = fitAddon.proposeDimensions();
-    debug(`[Terminal] initTerminal fit offscreen=${isOffscreen} dims=${JSON.stringify(initDims)} parentSize=${xtermRef.value?.parentElement?.clientWidth}x${xtermRef.value?.parentElement?.clientHeight}`);
+    logDebug(`[Terminal] initTerminal fit offscreen=${isOffscreen} dims=${JSON.stringify(initDims)} parentSize=${xtermRef.value?.parentElement?.clientWidth}x${xtermRef.value?.parentElement?.clientHeight}`);
   }
 
   terminal.onTitleChange((title) => {
@@ -237,11 +237,11 @@ function initTerminal() {
     // オフスクリーン div 内にいる場合はスキップ
     const isOffscreen = !!xtermRef.value?.closest('[data-offscreen]');
     if (isOffscreen) {
-      debug(`[Terminal] ResizeObserver skipped (offscreen) sid=${sessionId.value} w=${entry.contentRect.width} h=${entry.contentRect.height}`);
+      logDebug(`[Terminal] ResizeObserver skipped (offscreen) sid=${sessionId.value} w=${entry.contentRect.width} h=${entry.contentRect.height}`);
       return;
     }
     if (props.noResize) return;
-    debug(`[Terminal] ResizeObserver fired sid=${sessionId.value} w=${entry.contentRect.width} h=${entry.contentRect.height}`);
+    logDebug(`[Terminal] ResizeObserver fired sid=${sessionId.value} w=${entry.contentRect.width} h=${entry.contentRect.height}`);
     if (resizeDebounce) clearTimeout(resizeDebounce);
     resizeDebounce = setTimeout(() => {
       if (fitAddon && terminal) {
@@ -249,7 +249,7 @@ function initTerminal() {
         if (!props.noResize) {
           const dims = fitAddon.proposeDimensions();
           if (dims) {
-            debug(`[Terminal] ResizeObserver after fit sid=${sessionId.value} rows=${dims.rows} cols=${dims.cols}`);
+            logDebug(`[Terminal] ResizeObserver after fit sid=${sessionId.value} rows=${dims.rows} cols=${dims.cols}`);
             resize(dims.rows, dims.cols);
           }
         }
@@ -321,10 +321,10 @@ async function handleTabActivated() {
           if (!props.noResize) {
             const dimsBefore = fitAddon.proposeDimensions();
             const parentEl = xtermRef.value?.parentElement;
-            debug(`[Terminal] handleTabActivated before fit sid=${sessionId.value} dims=${JSON.stringify(dimsBefore)} parentSize=${parentEl?.clientWidth}x${parentEl?.clientHeight}`);
+            logDebug(`[Terminal] handleTabActivated before fit sid=${sessionId.value} dims=${JSON.stringify(dimsBefore)} parentSize=${parentEl?.clientWidth}x${parentEl?.clientHeight}`);
             fitAddon.fit();
             const dimsAfter = fitAddon.proposeDimensions();
-            debug(`[Terminal] handleTabActivated after fit sid=${sessionId.value} dims=${JSON.stringify(dimsAfter)}`);
+            logDebug(`[Terminal] handleTabActivated after fit sid=${sessionId.value} dims=${JSON.stringify(dimsAfter)}`);
             if (dimsAfter) {
               resize(dimsAfter.rows, dimsAfter.cols);
             }
@@ -376,13 +376,13 @@ watch(
 onMounted(async () => {
   terminalMountCount++;
   terminalActiveCount++;
-  debug(`[TerminalView] onMounted initialSessionId=${props.initialSessionId} autoStart=${props.autoStart} cwd=${props.cwd}`);
+  logDebug(`[TerminalView] onMounted initialSessionId=${props.initialSessionId} autoStart=${props.autoStart} cwd=${props.cwd}`);
   initTerminal();
   if (props.initialSessionId !== undefined) {
-    debug(`[TerminalView] attaching to session ${props.initialSessionId}`);
+    logDebug(`[TerminalView] attaching to session ${props.initialSessionId}`);
     await attachPty(props.initialSessionId, props.initialSnapshot);
   } else if (props.autoStart) {
-    debug(`[TerminalView] starting new PTY (no initialSessionId)`);
+    logDebug(`[TerminalView] starting new PTY (no initialSessionId)`);
     if (props.restoreSnapshot) {
       terminal?.write(props.restoreSnapshot);
     }
@@ -393,7 +393,7 @@ onMounted(async () => {
 onUnmounted(() => {
   terminalUnmountCount++;
   terminalActiveCount--;
-  debug(`[TerminalView] onUnmounted sessionId=${sessionId.value} cwd=${props.cwd}`);
+  logDebug(`[TerminalView] onUnmounted sessionId=${sessionId.value} cwd=${props.cwd}`);
   if (resizeDebounce) clearTimeout(resizeDebounce);
   resizeObserver?.disconnect();
   batcher.dispose();

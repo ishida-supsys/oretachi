@@ -1,6 +1,6 @@
 import type { Terminal } from "@xterm/xterm";
 import { invoke } from "@tauri-apps/api/core";
-import { debug } from "@tauri-apps/plugin-log";
+import { logDebug } from "./log";
 
 export interface TerminalForApproval {
   id: number;
@@ -52,12 +52,12 @@ export async function analyzeForApproval(
 ): Promise<JudgeResult> {
   const promptFound = hasApprovalPrompt(content);
 
-  await debug(
+  logDebug(
     `[AutoApproval] analyze start worktreeId=${worktreeId} totalLines=${content.split("\n").length} hasApprovalPrompt=${promptFound}`
   );
 
   if (!promptFound) {
-    await debug("[AutoApproval] → skip: no approval prompt detected");
+    logDebug("[AutoApproval] → skip: no approval prompt detected");
     return { safe: false };
   }
 
@@ -69,10 +69,10 @@ export async function analyzeForApproval(
       cwd,
       additionalPrompt: additionalPrompt || null,
     });
-    await debug(`[AutoApproval] AI judgment: ${result.safe ? "safe" : "unsafe"} command=${result.command ?? "none"}`);
+    logDebug(`[AutoApproval] AI judgment: ${result.safe ? "safe" : "unsafe"} command=${result.command ?? "none"}`);
     return result;
   } catch (e) {
-    await debug(`[AutoApproval] AI judgment failed: ${e}`);
+    logDebug(`[AutoApproval] AI judgment failed: ${e}`);
     return { safe: false }; // エラー時は安全側 (承認しない)
   }
 }
@@ -90,7 +90,7 @@ export async function runApprovalLoop(
   for (const termRef of terminals) {
     const terminal = termRef.getTerminal();
     if (!terminal) {
-      await debug(`[AutoApproval] tid=${termRef.id} terminal=null, skip`);
+      logDebug(`[AutoApproval] tid=${termRef.id} terminal=null, skip`);
       continue;
     }
     // 事前に末尾60行でプロンプト判定し、無ければAI判定と200行取得をスキップ。
@@ -101,7 +101,7 @@ export async function runApprovalLoop(
       continue;
     }
     const content = getRecentLines(terminal, 200);
-    await debug(`[AutoApproval] tid=${termRef.id} content(last200)=${content.slice(-200)}`);
+    logDebug(`[AutoApproval] tid=${termRef.id} content(last200)=${content.slice(-200)}`);
     const judgeResult = await analyzeForApproval(worktreeId, content, cwd, additionalPrompt);
     if (judgeResult.command) {
       lastCommand = judgeResult.command;
@@ -110,15 +110,15 @@ export async function runApprovalLoop(
       // バッファ再チェック: AI判定完了後、承認プロンプトがまだあるか確認
       const freshContent = getRecentLines(terminal, 10);
       if (!hasApprovalPrompt(freshContent)) {
-        await debug(`[AutoApproval] tid=${termRef.id} → prompt disappeared, skip Enter`);
+        logDebug(`[AutoApproval] tid=${termRef.id} → prompt disappeared, skip Enter`);
         break;
       }
-      await debug(`[AutoApproval] tid=${termRef.id} → approved, sending Enter`);
+      logDebug(`[AutoApproval] tid=${termRef.id} → approved, sending Enter`);
       await termRef.write("\r");
       approved = true;
       break;
     } else {
-      await debug(`[AutoApproval] tid=${termRef.id} → not approved`);
+      logDebug(`[AutoApproval] tid=${termRef.id} → not approved`);
     }
   }
 
@@ -130,6 +130,6 @@ export async function cancelApproval(worktreeId: string): Promise<void> {
   try {
     await invoke("cancel_approval", { worktreeId });
   } catch (e) {
-    await debug(`[AutoApproval] cancelApproval failed: ${e}`);
+    logDebug(`[AutoApproval] cancelApproval failed: ${e}`);
   }
 }
