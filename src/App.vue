@@ -287,6 +287,20 @@ const worktreeCardTooltips = computed(() => {
   return map;
 });
 
+// DB(worktree_descriptions)から description を読み込み、ランタイムの worktrees に反映する
+async function applyWorktreeDescriptions() {
+  try {
+    const rows = await invoke<{ worktree_id: string; description: string }[]>("list_worktree_descriptions");
+    const byId = new Map(rows.map((r) => [r.worktree_id, r.description]));
+    for (const wt of worktrees.value) {
+      const desc = byId.get(wt.id);
+      if (desc) wt.description = desc;
+    }
+  } catch (e) {
+    debug(`[Description] load failed: ${e}`);
+  }
+}
+
 // サイドバー・メインエリア共通: detachedでないワークツリーのみ（毎レンダリングでのfilter()生成を回避）
 const attachedWorktrees = computed(() => worktrees.value.filter(w => !isDetached(w.id)));
 const { showAddTaskDialog, rerunTaskId, rerunPrompt, onAddTaskConfirm, onAddTaskCancel } =
@@ -987,6 +1001,7 @@ onMounted(async () => {
   await loadSettings();
   await getCurrentWindow().setAlwaysOnTop(settings.value.alwaysOnTop);
   loadWorktreesFromSettings();
+  void applyWorktreeDescriptions();
   restoreAutoApprovalPrompts();
 
   // 保存されたサブウィンドウを復元
@@ -1035,13 +1050,9 @@ onMounted(async () => {
       const summary = await invoke<string>("generate_description_from_plan", { worktreeId: rt.id, plan });
       const trimmed = summary?.trim();
       if (trimmed) {
-        // ランタイム用 worktrees.value（ツールチップ computed 用）と
-        // 永続化対象 settings.value.worktrees（loadWorktreesFromSettings でシャローコピー
-        // される別オブジェクト）の両方を更新する
+        // ランタイム値（カード表示用）を更新し、正本は DB に保存する
         rt.description = trimmed;
-        const entry = settings.value.worktrees.find((w) => w.id === rt.id);
-        if (entry) entry.description = trimmed;
-        scheduleSave();
+        await invoke("set_worktree_description", { worktreeId: rt.id, description: trimmed });
         debug(`[Description] set for worktree=${worktree}: ${trimmed}`);
       }
     } catch (e) {

@@ -46,8 +46,6 @@ pub struct WorktreeEntry {
     pub auto_approval: Option<bool>,
     #[serde(default, rename = "autoApprovalPrompt")]
     pub auto_approval_prompt: Option<String>,
-    #[serde(default, rename = "description")]
-    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
