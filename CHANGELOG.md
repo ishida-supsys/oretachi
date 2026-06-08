@@ -6,6 +6,16 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.20.3] - 2026-06-08
+
+### Fixed
+- ハングの根本原因となっていた webview 発ロギング IPC を源流から除去 (#59)
+- ログ送出を非 Promise 戻り値に対して耐性化 (bug-review 指摘)
+- plugin level 変更を revert し、webview verbose ログを Debug Mode に連動させるよう修正
+
+### Documentation
+- 現行アップデートに合わせて README の機能一覧を更新
+
 ## [0.20.2] - 2026-06-05
 
 ### Added
@@ -344,7 +354,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.20.2...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.20.3...HEAD
+[0.20.3]: https://github.com/ishida-supsys/oretachi/compare/0.20.2...0.20.3
 [0.20.2]: https://github.com/ishida-supsys/oretachi/compare/0.20.1...0.20.2
 [0.20.1]: https://github.com/ishida-supsys/oretachi/compare/0.20.0...0.20.1
 [0.20.0]: https://github.com/ishida-supsys/oretachi/compare/0.19.10...0.20.0
