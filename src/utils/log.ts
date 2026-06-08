@@ -10,17 +10,22 @@ import { debug, info, warn, error } from "@tauri-apps/plugin-log";
 // 対策:
 //   - debug/info は本番ビルドでは呼び出し自体をスキップ (= IPC ゼロ)。
 //   - warn/error は低頻度かつ重要なので常に送るが await しない (fire-and-forget)。
-//   - 再現調査時は setVerboseLogging(true) で詳細ログを復帰可能。
-let verbose = import.meta.env.DEV;
+//   - 設定の Debug Mode (settings.debugMode) を ON にすると本番でも詳細ログを復帰できる。
+//     dev ビルドでは常に verbose (開発時の利便性のため)。
+const isDev = import.meta.env.DEV;
+let verboseOverride = false;
 
-/** 詳細ログ (debug/info) の有効/無効を切り替える。再現調査用。 */
+/**
+ * 詳細ログ (debug/info) の override を設定する。
+ * 設定タブの Debug Mode と連動させる想定。dev ビルドでは override に関わらず常に有効。
+ */
 export function setVerboseLogging(v: boolean): void {
-  verbose = v;
+  verboseOverride = v;
 }
 
-/** 現在の詳細ログ状態 */
+/** 現在の詳細ログ状態 (dev は常に true) */
 export function isVerboseLogging(): boolean {
-  return verbose;
+  return isDev || verboseOverride;
 }
 
 // fire-and-forget 送出。戻り値が Promise でない場合（テスト mock 等）でも壊れないよう
@@ -29,15 +34,15 @@ function fire(p: unknown): void {
   void Promise.resolve(p).catch(() => {});
 }
 
-/** デバッグログ。本番では IPC を発生させない。 */
+/** デバッグログ。本番(Debug Mode OFF)では IPC を発生させない。 */
 export function logDebug(message: string): void {
-  if (!verbose) return;
+  if (!isVerboseLogging()) return;
   fire(debug(message));
 }
 
-/** 情報ログ。本番では IPC を発生させない。 */
+/** 情報ログ。本番(Debug Mode OFF)では IPC を発生させない。 */
 export function logInfo(message: string): void {
-  if (!verbose) return;
+  if (!isVerboseLogging()) return;
   fire(info(message));
 }
 
