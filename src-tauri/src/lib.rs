@@ -2,7 +2,6 @@ mod ai_commit_message;
 mod ai_description;
 mod ai_judge;
 mod ai_provider;
-mod worktree_desc_db;
 mod archive_db;
 mod claude_plugin;
 mod claude_plugin_skills;
@@ -600,50 +599,6 @@ async fn save_archive(
     archive_db::save(&pool.0, &archive).await
 }
 
-// ─── ワークツリー description DB コマンド（正本は DB） ─────────────────────────
-
-#[tauri::command]
-async fn set_worktree_description(
-    app_handle: tauri::AppHandle,
-    worktree_id: String,
-    description: String,
-) -> Result<(), String> {
-    let pool = app_handle
-        .try_state::<worktree_desc_db::WorktreeDescPool>()
-        .ok_or_else(|| "Worktree description DB not initialized".to_string())?;
-    let trimmed = description.trim();
-    if trimmed.is_empty() {
-        worktree_desc_db::delete(&pool.0, &worktree_id).await
-    } else {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as i64)
-            .unwrap_or(0);
-        worktree_desc_db::upsert(&pool.0, &worktree_id, trimmed, now).await
-    }
-}
-
-#[tauri::command]
-async fn list_worktree_descriptions(
-    app_handle: tauri::AppHandle,
-) -> Result<Vec<worktree_desc_db::WorktreeDescRow>, String> {
-    let pool = app_handle
-        .try_state::<worktree_desc_db::WorktreeDescPool>()
-        .ok_or_else(|| "Worktree description DB not initialized".to_string())?;
-    worktree_desc_db::get_all(&pool.0).await
-}
-
-#[tauri::command]
-async fn delete_worktree_description(
-    app_handle: tauri::AppHandle,
-    worktree_id: String,
-) -> Result<(), String> {
-    let pool = app_handle
-        .try_state::<worktree_desc_db::WorktreeDescPool>()
-        .ok_or_else(|| "Worktree description DB not initialized".to_string())?;
-    worktree_desc_db::delete(&pool.0, &worktree_id).await
-}
-
 /// ワークツリーのアーカイブ（削除）が完了した後にMCPクライアントへ通知する。
 /// git worktree remove の成功確認後にフロントエンドから呼び出す。
 #[tauri::command]
@@ -924,9 +879,6 @@ pub fn run() {
             notify_worktree_added,
             list_archives,
             delete_archive,
-            set_worktree_description,
-            list_worktree_descriptions,
-            delete_worktree_description,
             set_debug_mode,
             get_debug_mode,
         ])
@@ -980,27 +932,6 @@ pub fn run() {
                         }
                         Err(e) => {
                             log::warn!("[ArchiveDB] Failed to initialize: {}", e);
-                        }
-                    }
-                });
-            }
-
-            // ワークツリー description DB を同期的に初期化（description の正本）。
-            // 旧 settings.json に残る description は一度だけ DB へ移行する。
-            {
-                let handle = app.handle().clone();
-                tauri::async_runtime::block_on(async move {
-                    match worktree_desc_db::init_worktree_desc_db(&handle).await {
-                        Ok(pool) => {
-                            if let Ok(dir) = handle.path().app_data_dir() {
-                                let settings_path = dir.join("settings.json");
-                                worktree_desc_db::migrate_from_settings_file(&pool, &settings_path).await;
-                            }
-                            handle.manage(worktree_desc_db::WorktreeDescPool(pool));
-                            log::debug!("[WorktreeDescDB] Initialized successfully");
-                        }
-                        Err(e) => {
-                            log::warn!("[WorktreeDescDB] Failed to initialize: {}", e);
                         }
                     }
                 });

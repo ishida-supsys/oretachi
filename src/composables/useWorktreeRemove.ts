@@ -157,8 +157,6 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
         }
         worktree.terminals.splice(0);
         worktreeFrameBundles.delete(worktreeId);
-        // description の正本(DB)からも削除（アーカイブ時は saveArchive で退避済み）
-        await invoke("delete_worktree_description", { worktreeId }).catch(() => { /* 失敗は無視 */ });
         // git 操作成功後の後処理（MCP通知など）
         if (afterRemove) {
           try { await afterRemove(worktree); } catch { /* 通知失敗はワークツリー削除の成否に影響しない */ }
