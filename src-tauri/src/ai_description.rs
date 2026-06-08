@@ -43,13 +43,22 @@ impl std::ops::Deref for DescriptionManager {
 pub async fn generate_description_from_plan(
     state: State<'_, DescriptionManager>,
     settings_state: State<'_, SettingsManager>,
+    worktree_id: String,
     plan: String,
 ) -> Result<String, String> {
-    // 大きすぎるプランは先頭 20000 文字に切り詰める
-    let plan_content = if plan.trim().is_empty() {
+    // ワークツリー単位で重複実行を防止（複数ワークツリーの並行 ExitPlanMode に対応）
+    if state.is_in_progress(&worktree_id)? {
+        return Err("already in progress".to_string());
+    }
+
+    // 大きすぎるプランは先頭 20000 文字に切り詰める（バイト境界スライスはマルチバイトで
+    // パニックするため文字単位で切る）
+    if plan.trim().is_empty() {
         return Err("plan is empty".to_string());
-    } else if plan.len() > 20000 {
-        format!("{}... (truncated)", &plan[..20000])
+    }
+    let plan_content = if plan.chars().count() > 20000 {
+        let truncated: String = plan.chars().take(20000).collect();
+        format!("{}... (truncated)", truncated)
     } else {
         plan
     };
@@ -71,12 +80,10 @@ pub async fn generate_description_from_plan(
     );
     let worktree_base_dir = settings_state.get().worktree_base_dir.clone();
 
-    // キーは固定（同時実行は1つに制限）
-    let key = "description";
     let stdout = ai_provider::run_ai_command(
         &exec,
         &state,
-        key,
+        &worktree_id,
         &worktree_base_dir,
         settings_state.get().get_ai_timeout_secs(),
     )
@@ -101,10 +108,11 @@ pub async fn generate_description_from_plan(
 #[tauri::command]
 pub async fn cancel_description_generation(
     state: State<'_, DescriptionManager>,
+    worktree_id: String,
 ) -> Result<(), String> {
-    let pid = state.remove("description")?;
+    let pid = state.remove(&worktree_id)?;
     if let Some(pid) = pid {
-        log::debug!("[Description] cancelling PID={}", pid);
+        log::debug!("[Description] cancelling PID={} for worktree_id={}", pid, worktree_id);
         crate::process_utils::kill_process_tree(pid);
     }
     Ok(())

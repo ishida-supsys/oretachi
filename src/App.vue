@@ -1029,13 +1029,18 @@ onMounted(async () => {
   // ExitPlanMode フック由来: プランを AI 要約してワークツリーの description にセット
   await listen<{ worktree: string; plan: string }>("set-worktree-description", async (event) => {
     const { worktree, plan } = event.payload;
-    const wt = worktrees.value.find((w) => w.name === worktree);
-    if (!wt || !plan?.trim()) return;
+    const rt = worktrees.value.find((w) => w.name === worktree);
+    if (!rt || !plan?.trim()) return;
     try {
-      const summary = await invoke<string>("generate_description_from_plan", { plan });
+      const summary = await invoke<string>("generate_description_from_plan", { worktreeId: rt.id, plan });
       const trimmed = summary?.trim();
       if (trimmed) {
-        wt.description = trimmed;
+        // ランタイム用 worktrees.value（ツールチップ computed 用）と
+        // 永続化対象 settings.value.worktrees（loadWorktreesFromSettings でシャローコピー
+        // される別オブジェクト）の両方を更新する
+        rt.description = trimmed;
+        const entry = settings.value.worktrees.find((w) => w.id === rt.id);
+        if (entry) entry.description = trimmed;
         scheduleSave();
         debug(`[Description] set for worktree=${worktree}: ${trimmed}`);
       }
