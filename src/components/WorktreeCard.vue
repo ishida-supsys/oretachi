@@ -145,6 +145,13 @@ const terminalList = computed(() =>
       </div>
     </div>
 
+    <!-- ホバーでヘッダー直下に開く description エリア (description優先・なければタスク一覧) -->
+    <div v-if="tooltip" class="card-desc-wrap">
+      <div class="card-desc">
+        <div class="card-desc-inner" v-html="tooltip" />
+      </div>
+    </div>
+
     <div class="terminals-row">
       <div v-if="terminalList.length === 0" class="empty-terminals">
         {{ t('noTerminals') }}
@@ -158,13 +165,6 @@ const terminalList = computed(() =>
         :is-active="false"
         @click="onThumbnailClick(item.id)"
       />
-    </div>
-
-    <!-- ホバーで開く description エリア (tooltip: description優先・なければタスク一覧) -->
-    <div v-if="tooltip" class="card-desc-wrap">
-      <div class="card-desc">
-        <div class="card-desc-inner" v-html="tooltip" />
-      </div>
     </div>
 
     <Popover ref="menuRef">
@@ -390,9 +390,9 @@ const terminalList = computed(() =>
 }
 
 .card-desc-inner {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid #313244;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid #313244;
   font-size: 11px;
   line-height: 1.5;
   color: #a6adc8;
