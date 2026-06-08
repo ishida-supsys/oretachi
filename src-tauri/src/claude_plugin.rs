@@ -180,6 +180,27 @@ fn build_hooks_json(exe_path: &str) -> serde_json::Value {
             }]),
         );
     }
+
+    // ExitPlanMode フック: プラン確定時に oretachi exe を起動し、プランを AI 要約して
+    // ワークツリーの description にセットする。PostToolUse の matcher "ExitPlanMode" で発火。
+    // 既存の通知用 PostToolUse グループ(matcher "")と共存させるため配列に追記する。
+    let set_desc_command = format!(
+        "\"{}\" --set-description \"${{user_config.worktree_name}}\"",
+        exe_path
+    );
+    let exit_plan_group = serde_json::json!({
+        "matcher": "ExitPlanMode",
+        "hooks": [{ "type": "command", "command": set_desc_command }]
+    });
+    if let Some(arr) = hooks
+        .get_mut("PostToolUse")
+        .and_then(|v| v.as_array_mut())
+    {
+        arr.push(exit_plan_group);
+    } else {
+        hooks.insert("PostToolUse".to_string(), serde_json::json!([exit_plan_group]));
+    }
+
     serde_json::json!({ "hooks": hooks })
 }
 

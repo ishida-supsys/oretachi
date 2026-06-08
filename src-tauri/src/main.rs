@@ -19,6 +19,20 @@ fn main() {
         }
         std::process::exit(0);
     }
+    // ExitPlanMode hook から起動される: stdin の hook JSON を稼働中アプリへ転送し、
+    // プランを AI 要約してワークツリーの description にセットさせる。
+    if let Some(name) = find_set_description_arg(&args) {
+        let hook_json = read_stdin_if_piped();
+        if let Err(e) = oretachi_lib::mcp_server::send_set_description_standalone(
+            &name,
+            hook_json.as_deref(),
+        ) {
+            #[cfg(debug_assertions)]
+            eprintln!("Set description failed: {}", e);
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
     oretachi_lib::run()
 }
 
@@ -45,6 +59,10 @@ fn find_kind_arg(args: &[String]) -> Option<String> {
 
 fn find_agent_arg(args: &[String]) -> Option<String> {
     find_arg(args, "--agent", "-a")
+}
+
+fn find_set_description_arg(args: &[String]) -> Option<String> {
+    find_arg(args, "--set-description", "-d")
 }
 
 /// stdin がパイプ（非 TTY）の場合のみ読み取り、タイムアウト付きで返す。

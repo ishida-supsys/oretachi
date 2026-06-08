@@ -1,4 +1,5 @@
 mod ai_commit_message;
+mod ai_description;
 mod ai_judge;
 mod ai_provider;
 mod archive_db;
@@ -799,6 +800,7 @@ pub fn run() {
         .manage(mcp_server::DetachedWorktreeRegistry::default())
         .manage(ai_judge::ApprovalManager::new())
         .manage(ai_commit_message::CommitMessageManager::new())
+        .manage(ai_description::DescriptionManager::new())
         .manage(task_executor::TaskGenerateManager::new())
         .manage(FsWatcherManager::new())
         // ReportPool は setup() 内で非同期初期化するため、ここでは登録しない
@@ -850,6 +852,8 @@ pub fn run() {
             ai_judge::cancel_approval,
             ai_commit_message::generate_commit_message,
             ai_commit_message::cancel_commit_message_generation,
+            ai_description::generate_description_from_plan,
+            ai_description::cancel_description_generation,
             terminal_session::save_terminal_session,
             terminal_session::load_terminal_session,
             terminal_session::delete_terminal_session,

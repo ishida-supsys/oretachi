@@ -204,6 +204,20 @@ pub struct NotifyPayload {
     pub agent: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct SetDescriptionPayload {
+    pub worktree: String,
+    /// ExitPlanMode フックが stdin で受け取った hook JSON 文字列（生）
+    #[serde(rename = "hookJson")]
+    pub hook_json: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SetWorktreeDescriptionEvent {
+    pub worktree: String,
+    pub plan: String,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NotifyWorktreeParams {
     #[schemars(description = "通知するワークツリー名")]
@@ -1413,6 +1427,73 @@ async fn notify_handler(
     }
 }
 
+// ─── Simple REST endpoint (/set-description) ─────────────────────────────────
+
+/// ExitPlanMode フックの hook JSON からプラン本文を抽出する。
+/// tool_response.plan → tool_input.plan の順で探し、無ければ filePath を読み込む。
+fn extract_plan_from_hook_json(raw: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+
+    // インラインのプラン本文を優先
+    for path in [["tool_response", "plan"], ["tool_input", "plan"]] {
+        if let Some(s) = v
+            .get(path[0])
+            .and_then(|o| o.get(path[1]))
+            .and_then(|p| p.as_str())
+        {
+            if !s.trim().is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+
+    // フォールバック: filePath からプランファイルを読み込む
+    for path in [["tool_response", "filePath"], ["tool_input", "filePath"]] {
+        if let Some(fp) = v
+            .get(path[0])
+            .and_then(|o| o.get(path[1]))
+            .and_then(|p| p.as_str())
+        {
+            if let Ok(content) = std::fs::read_to_string(fp) {
+                if !content.trim().is_empty() {
+                    return Some(content);
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn set_description_handler(
+    State(app_handle): State<AppHandle>,
+    Json(payload): Json<SetDescriptionPayload>,
+) -> StatusCode {
+    let plan = payload
+        .hook_json
+        .as_deref()
+        .and_then(extract_plan_from_hook_json);
+
+    let Some(plan) = plan else {
+        // プランが取れない場合はベストエフォートで握りつぶす（フックをブロックしない）
+        log::info!("[set-description] worktree={} no plan extracted; skipping", payload.worktree);
+        return StatusCode::OK;
+    };
+
+    log::info!("[set-description] worktree={} plan_len={}", payload.worktree, plan.len());
+
+    let event = SetWorktreeDescriptionEvent {
+        worktree: payload.worktree,
+        plan,
+    };
+    match app_handle.emit("set-worktree-description", &event) {
+        Ok(_) => StatusCode::OK,
+        Err(e) => {
+            log::error!("[emit-failed] event=set-worktree-description error={}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
 // ─── API Key Authentication Middleware ───────────────────────────────────────
 
 async fn api_key_auth(
@@ -1817,6 +1898,7 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
         let router = axum::Router::new()
             .nest_service("/mcp", service)
             .route("/notify", post(notify_handler))
+            .route("/set-description", post(set_description_handler))
             .with_state(app_handle.clone())
             .layer(middleware::from_fn(move |mut req: Request, next: Next| {
                 let key = api_key_state.clone();
@@ -1964,6 +2046,51 @@ pub fn send_notification_standalone(worktree_name: &str, kind: Option<&str>, bod
         }
     }
     // タイムアウトや読み取りエラーはベストエフォート成功扱い（フックのブロック防止）
+    Ok(())
+}
+
+pub fn send_set_description_standalone(worktree_name: &str, hook_json: Option<&str>) -> Result<(), String> {
+    let (port, api_key) = read_server_info_standalone()?;
+    let mut payload = serde_json::json!({
+        "worktree": worktree_name,
+    });
+    if let Some(j) = hook_json {
+        payload["hookJson"] = serde_json::Value::String(j.to_string());
+    }
+    let payload_str = payload.to_string();
+    let request = format!(
+        "POST /set-description HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAuthorization: Bearer {api_key}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload_str}",
+        payload_str.len()
+    );
+
+    use std::io::Write;
+    use std::time::Duration;
+
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port)
+        .parse()
+        .map_err(|e| format!("Invalid address: {}", e))?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(3))
+        .map_err(|e| format!("Cannot connect to oretachi MCP server: {}", e))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("Failed to set write timeout: {}", e))?;
+    stream
+        .set_read_timeout(Some(Duration::from_millis(500)))
+        .map_err(|e| format!("Failed to set read timeout: {}", e))?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("Failed to send set-description: {}", e))?;
+    stream
+        .flush()
+        .map_err(|e| format!("Failed to flush: {}", e))?;
+
+    use std::io::{BufRead, BufReader};
+    let reader = BufReader::new(&stream);
+    if let Some(Ok(first_line)) = reader.lines().next() {
+        if first_line.starts_with("HTTP/") && !first_line.contains(" 200 ") {
+            return Err(format!("Server returned unexpected response: {}", first_line));
+        }
+    }
     Ok(())
 }
 

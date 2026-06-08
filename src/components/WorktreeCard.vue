@@ -20,6 +20,7 @@ const props = defineProps<{
   cancellable?: boolean;
   autoApproval?: boolean;
   aiJudging?: boolean;
+  tooltip?: string;
 }>();
 
 const emit = defineEmits<{
@@ -106,7 +107,9 @@ const terminalList = computed(() =>
       <div class="card-info">
         <span
           class="card-name"
+          :class="{ 'cursor-help': tooltip }"
           draggable="true"
+          v-tooltip.bottom="tooltip ? { value: tooltip, escape: false, showDelay: 300, class: 'task-tooltip-sm' } : undefined"
           @dragstart.stop="$emit('dragStart', worktree.id, $event)"
           @dragend.stop="$emit('dragEnd')"
         >{{ worktree.name }}</span>
