@@ -6,6 +6,21 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-06-10
+
+### Added
+- ワークツリーの description をカードホバー時に展開表示するエリアを追加 (旧ツールチップ表示から変更)
+- ExitPlanMode フックでプランを要約し description に自動セットする機能を追加
+- description をアーカイブにも保存するよう拡張 (正本は settings.json を維持)
+
+### Changed
+- MCP 通知を独立サイドカー `oretachi-notify` に分離 (#63)
+
+### Fixed
+- description エリアをヘッダー直下に移動し、上下分離アニメーションに変更
+- ExitPlanMode フックを PostToolUse から PermissionRequest に変更
+- description の永続化漏れなど bug-review 指摘事項を修正
+
 ## [0.20.3] - 2026-06-08
 
 ### Fixed
@@ -354,7 +369,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.20.3...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.21.0...HEAD
+[0.21.0]: https://github.com/ishida-supsys/oretachi/compare/0.20.3...0.21.0
 [0.20.3]: https://github.com/ishida-supsys/oretachi/compare/0.20.2...0.20.3
 [0.20.2]: https://github.com/ishida-supsys/oretachi/compare/0.20.1...0.20.2
 [0.20.1]: https://github.com/ishida-supsys/oretachi/compare/0.20.0...0.20.1
