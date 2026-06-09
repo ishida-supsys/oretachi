@@ -1042,10 +1042,10 @@ onMounted(async () => {
         const entry = settings.value.worktrees.find((w) => w.id === rt.id);
         if (entry) entry.description = trimmed;
         scheduleSave();
-        debug(`[Description] set for worktree=${worktree}: ${trimmed}`);
+        logDebug(`[Description] set for worktree=${worktree}: ${trimmed}`);
       }
     } catch (e) {
-      debug(`[Description] generate failed for worktree=${worktree}: ${e}`);
+      logDebug(`[Description] generate failed for worktree=${worktree}: ${e}`);
     }
   });
 
