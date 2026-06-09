@@ -25,18 +25,24 @@ function hostTargetTriple() {
   return match[1].trim();
 }
 
-const triple = hostTargetTriple();
+// ビルド対象の target triple を解決する。
+// `tauri build [--target <triple>]` 実行時、Tauri は beforeBuildCommand に
+// TAURI_ENV_TARGET_TRIPLE（CLI がビルド中の triple）を渡す。これを最優先で尊重し、
+// クロスコンパイル時にも要求される triple のサイドカーを生成する。
+// 未設定時（例: pnpm install の prepare フック）は host triple にフォールバックする。
+const envTriple = process.env.TAURI_ENV_TARGET_TRIPLE?.trim();
+const triple = envTriple || hostTargetTriple();
 const isWindows = triple.includes("windows");
 const exeExt = isWindows ? ".exe" : "";
 
 console.log(`  building oretachi-notify sidecar for ${triple} ...`);
 execFileSync(
   "cargo",
-  ["build", "--release", "-p", "oretachi-notify"],
+  ["build", "--release", "-p", "oretachi-notify", "--target", triple],
   { cwd: srcTauri, stdio: "inherit" }
 );
 
-const builtPath = path.join(srcTauri, "target", "release", `oretachi-notify${exeExt}`);
+const builtPath = path.join(srcTauri, "target", triple, "release", `oretachi-notify${exeExt}`);
 if (!fs.existsSync(builtPath)) {
   throw new Error(`Built sidecar not found at ${builtPath}`);
 }
