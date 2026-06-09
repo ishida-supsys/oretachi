@@ -360,6 +360,7 @@ mod tests {
             hotkey_char: None,
             auto_approval: None,
             auto_approval_prompt: None,
+            description: None,
         }
     }
 

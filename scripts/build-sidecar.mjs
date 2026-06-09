@@ -1,0 +1,49 @@
+/**
+ * 通知サイドカー (oretachi-notify) をビルドし、Tauri の externalBin が要求する
+ * `src-tauri/binaries/oretachi-notify-<target-triple>[.exe]` へステージングする。
+ *
+ * 実行タイミング:
+ *   - prepare (pnpm install 後) : クリーンクローン直後にサイドカーを用意
+ *   - beforeBuildCommand 経由 (pnpm tauri build) : リリースビルド時に最新版を反映
+ *   - サイドカーのソースを変更したら手動で `pnpm build:sidecar`
+ */
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = fileURLToPath(new URL("..", import.meta.url));
+const srcTauri = path.join(root, "src-tauri");
+
+// host target triple を rustc から取得 (例: x86_64-pc-windows-msvc)
+function hostTargetTriple() {
+  const out = execFileSync("rustc", ["-vV"], { encoding: "utf8" });
+  const match = out.match(/^host:\s*(.+)$/m);
+  if (!match) {
+    throw new Error("Failed to determine host target triple from `rustc -vV`");
+  }
+  return match[1].trim();
+}
+
+const triple = hostTargetTriple();
+const isWindows = triple.includes("windows");
+const exeExt = isWindows ? ".exe" : "";
+
+console.log(`  building oretachi-notify sidecar for ${triple} ...`);
+execFileSync(
+  "cargo",
+  ["build", "--release", "-p", "oretachi-notify"],
+  { cwd: srcTauri, stdio: "inherit" }
+);
+
+const builtPath = path.join(srcTauri, "target", "release", `oretachi-notify${exeExt}`);
+if (!fs.existsSync(builtPath)) {
+  throw new Error(`Built sidecar not found at ${builtPath}`);
+}
+
+const binariesDir = path.join(srcTauri, "binaries");
+fs.mkdirSync(binariesDir, { recursive: true });
+const destPath = path.join(binariesDir, `oretachi-notify-${triple}${exeExt}`);
+fs.copyFileSync(builtPath, destPath);
+
+console.log(`  staged sidecar: src-tauri/binaries/oretachi-notify-${triple}${exeExt}`);
