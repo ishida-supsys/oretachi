@@ -749,7 +749,6 @@ pub fn run() {
     }
     let mut builder = builder
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_cli::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .targets([

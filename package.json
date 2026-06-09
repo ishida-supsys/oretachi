@@ -4,9 +4,10 @@
   "version": "0.20.3",
   "type": "module",
   "scripts": {
-    "prepare": "node scripts/copy-vendor.mjs",
+    "prepare": "node scripts/copy-vendor.mjs && node scripts/build-sidecar.mjs",
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "build:sidecar": "node scripts/build-sidecar.mjs",
     "type-check": "vue-tsc --noEmit",
     "preview": "vite preview",
     "tauri": "tauri",
