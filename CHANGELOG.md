@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.21.1] - 2026-06-10
+
+### Fixed
+- リリースCIを復旧: App.vue で未定義の `debug()` を `logDebug()` に修正し、`vue-tsc --noEmit` の TS2304 ビルド失敗を解消 (#64)
+
 ## [0.21.0] - 2026-06-10
 
 ### Added
@@ -369,7 +374,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.21.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.21.1...HEAD
+[0.21.1]: https://github.com/ishida-supsys/oretachi/compare/0.21.0...0.21.1
 [0.21.0]: https://github.com/ishida-supsys/oretachi/compare/0.20.3...0.21.0
 [0.20.3]: https://github.com/ishida-supsys/oretachi/compare/0.20.2...0.20.3
 [0.20.2]: https://github.com/ishida-supsys/oretachi/compare/0.20.1...0.20.2
