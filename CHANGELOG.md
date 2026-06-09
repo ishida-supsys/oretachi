@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.21.2] - 2026-06-10
+
+### Fixed
+- クロスコンパイル時に target triple でサイドカーをビルドするよう修正 (#65)
+
 ## [0.21.1] - 2026-06-10
 
 ### Fixed
@@ -374,7 +379,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.21.1...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.21.2...HEAD
+[0.21.2]: https://github.com/ishida-supsys/oretachi/compare/0.21.1...0.21.2
 [0.21.1]: https://github.com/ishida-supsys/oretachi/compare/0.21.0...0.21.1
 [0.21.0]: https://github.com/ishida-supsys/oretachi/compare/0.20.3...0.21.0
 [0.20.3]: https://github.com/ishida-supsys/oretachi/compare/0.20.2...0.20.3
