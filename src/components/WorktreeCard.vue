@@ -43,8 +43,29 @@ const emit = defineEmits<{
   toggleDescription: [worktreeId: string];
 }>();
 
+// ドラッグ（カード名のD&D並べ替え）直後に発火しうる click を1回だけ無視するためのフラグ。
+// Chromium は通常 drag 後に click を出さないが、ブラウザ差異に備えてガードする。
+let suppressNextClick = false;
+
+function onNameDragStart(event: DragEvent) {
+  suppressNextClick = true;
+  emit("dragStart", props.worktree.id, event);
+}
+
+function onNameDragEnd() {
+  emit("dragEnd");
+  // click が来なかった場合にフラグが残り続けないよう、次のタスクで解除する
+  setTimeout(() => {
+    suppressNextClick = false;
+  }, 0);
+}
+
 // ボタン類・ターミナルサムネイル領域以外のクリックで description を開閉する
 function onCardClick(event: MouseEvent) {
+  if (suppressNextClick) {
+    suppressNextClick = false;
+    return;
+  }
   const target = event.target as HTMLElement;
   if (target.closest("button, .terminals-row")) return;
   emit("toggleDescription", props.worktree.id);
@@ -117,8 +138,8 @@ const terminalList = computed(() =>
         <span
           class="card-name"
           draggable="true"
-          @dragstart.stop="$emit('dragStart', worktree.id, $event)"
-          @dragend.stop="$emit('dragEnd')"
+          @dragstart.stop="onNameDragStart($event)"
+          @dragend.stop="onNameDragEnd()"
         >{{ worktree.name }}</span>
         <span class="card-branch">{{ worktree.branchName }}</span>
         <span v-if="detached" class="card-detached-badge">{{ t('subWindowBadge') }}</span>
