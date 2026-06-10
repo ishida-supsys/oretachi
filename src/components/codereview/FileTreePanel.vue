@@ -66,8 +66,8 @@ async function loadRoot() {
 }
 
 async function onNodeExpand(node: TreeNode) {
-  // ディレクトリ以外、またはロード済みならスキップ
-  if (node.leaf || Array.isArray(node.children)) return;
+  // ディレクトリ以外、ロード済み、またはロード中ならスキップ（再入による二重フェッチ防止）
+  if (node.leaf || Array.isArray(node.children) || node.loading) return;
   node.loading = true;
   try {
     node.children = await fetchEntries(node.key as string);
