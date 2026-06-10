@@ -68,6 +68,8 @@ function onCardClick(event: MouseEvent) {
   }
   const target = event.target as HTMLElement;
   if (target.closest("button, .terminals-row")) return;
+  // 表示する内容（description / タスク一覧）が無いカードはトグル対象外（無意味な永続化を防ぐ）
+  if (!props.tooltip) return;
   emit("toggleDescription", props.worktree.id);
 }
 
