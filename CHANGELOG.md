@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.21.3] - 2026-06-10
+
+### Fixed
+- PTY 書き込みバッファがオクルージョン時に無制限増大する問題を解消 (#66)
+
 ## [0.21.2] - 2026-06-10
 
 ### Fixed
@@ -379,7 +384,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.21.2...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.21.3...HEAD
+[0.21.3]: https://github.com/ishida-supsys/oretachi/compare/0.21.2...0.21.3
 [0.21.2]: https://github.com/ishida-supsys/oretachi/compare/0.21.1...0.21.2
 [0.21.1]: https://github.com/ishida-supsys/oretachi/compare/0.21.0...0.21.1
 [0.21.0]: https://github.com/ishida-supsys/oretachi/compare/0.20.3...0.21.0
