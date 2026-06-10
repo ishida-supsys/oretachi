@@ -361,6 +361,7 @@ mod tests {
             auto_approval: None,
             auto_approval_prompt: None,
             description: None,
+            description_open: None,
         }
     }
 

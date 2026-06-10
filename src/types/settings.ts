@@ -26,6 +26,7 @@ export interface WorktreeEntry {
   autoApproval?: boolean;
   autoApprovalPrompt?: string;
   description?: string; // AIが自動生成する説明（ExitPlanMode hookでプランを要約してセット）
+  descriptionOpen?: boolean; // ホームカードの description 開閉状態（ワークツリー毎）
 }
 
 export interface TerminalSettings {

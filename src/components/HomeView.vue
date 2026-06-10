@@ -170,7 +170,11 @@ const props = defineProps<{
   autoApprovals: Map<string, boolean>;
   aiJudgingWorktrees: Set<string>;
   cardTooltips?: Map<string, string | undefined>;
+  descriptionOpens?: Map<string, boolean>;
 }>();
+
+// json の開閉状態を一時的に無視して全カードの description を開く（セッション限り・非永続）
+const showAllDescriptions = ref(false);
 
 const emit = defineEmits<{
   selectTerminal: [terminalId: number];
@@ -191,6 +195,7 @@ const emit = defineEmits<{
   cancelAiJudging: [worktreeId: string];
   cancelRemove: [worktreeId: string];
   duplicateWorktree: [worktreeId: string];
+  toggleDescription: [worktreeId: string];
   addTask: [];
   removeTask: [taskId: string];
   rerunTask: [taskId: string];
@@ -295,6 +300,14 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
       </select>
       <div class="header-actions">
         <template v-if="panelMode === 'worktree'">
+          <button
+            class="btn-icon-header"
+            :class="{ 'btn-active': showAllDescriptions }"
+            :title="t('toggleShowAllDescriptions')"
+            @click="showAllDescriptions = !showAllDescriptions"
+          >
+            <i :class="showAllDescriptions ? 'pi pi-eye' : 'pi pi-eye-slash'"></i>
+          </button>
           <button class="btn-icon-header" :title="t('focusAllSubWindows')" @click="emit('focusAllSubWindows')">
             <i class="pi pi-window-maximize"></i>
           </button>
@@ -374,6 +387,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
               :auto-approval="autoApprovals.get(worktree.id) ?? false"
               :ai-judging="aiJudgingWorktrees.has(worktree.id)"
               :tooltip="cardTooltips?.get(worktree.id)"
+              :description-open="showAllDescriptions || (descriptionOpens?.get(worktree.id) ?? false)"
               @drag-start="onCardDragStart"
               @drag-end="onDragEnd"
               @select-terminal="emit('selectTerminal', $event)"
@@ -389,6 +403,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
               @cancel-ai-judging="emit('cancelAiJudging', $event)"
               @cancel-remove="emit('cancelRemove', $event)"
               @duplicate-worktree="emit('duplicateWorktree', $event)"
+              @toggle-description="emit('toggleDescription', $event)"
             />
           </div>
         </div>
@@ -524,6 +539,11 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   background: #313244;
 }
 
+.btn-icon-header.btn-active {
+  color: #cba6f7;
+  background: #313244;
+}
+
 /* ワークツリーパネル（マソンリーレイアウト） */
 .worktree-list {
   display: flex;
@@ -620,6 +640,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   "en": {
     "worktreeTitle": "Worktrees",
     "worktreeEmpty": "No worktrees. Click the + button to create one.",
+    "toggleShowAllDescriptions": "Show all descriptions",
     "focusAllSubWindows": "Bring all sub windows",
     "addWorktreeButton": "Add worktree",
     "taskTitle": "Tasks",
@@ -634,6 +655,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   "ja": {
     "worktreeTitle": "ワークツリー",
     "worktreeEmpty": "ワークツリーがありません。右上の + ボタンで作成してください。",
+    "toggleShowAllDescriptions": "すべての説明を表示",
     "focusAllSubWindows": "すべてのサブウィンドウを呼び出す",
     "addWorktreeButton": "ワークツリー追加",
     "taskTitle": "タスク",
