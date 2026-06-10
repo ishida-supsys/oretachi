@@ -103,6 +103,19 @@ const notificationCounts = computed(() => {
 // ワークツリーごとのアーティファクト数
 const artifactCounts = reactive(new Map<string, number>());
 
+// ホームカードの description 開閉状態（ワークツリー毎・settings.json に永続化）
+const descriptionOpenMap = reactive(new Map<string, boolean>());
+
+function onToggleDescription(worktreeId: string) {
+  const cur = descriptionOpenMap.get(worktreeId) ?? false;
+  descriptionOpenMap.set(worktreeId, !cur);
+  const entry = settings.value.worktrees.find((w) => w.id === worktreeId);
+  if (entry) {
+    entry.descriptionOpen = !cur ? true : undefined; // false は省略して JSON をクリーンに保つ
+    scheduleSave();
+  }
+}
+
 async function refreshArtifactCount(worktreeId: string) {
   try {
     const list = await invoke<unknown[]>("list_artifacts", { worktreeId });
@@ -989,6 +1002,11 @@ onMounted(async () => {
   loadWorktreesFromSettings();
   restoreAutoApprovalPrompts();
 
+  // 保存された description 開閉状態を復元
+  for (const wt of settings.value.worktrees) {
+    if (wt.descriptionOpen === true) descriptionOpenMap.set(wt.id, true);
+  }
+
   // 保存されたサブウィンドウを復元
   const savedDetachedIds = settings.value.detachedWorktreeIds ?? [];
 
@@ -1543,6 +1561,7 @@ onMounted(async () => {
         :auto-approvals="autoApprovalMap"
         :ai-judging-worktrees="aiJudgingWorktrees"
         :card-tooltips="worktreeCardTooltips"
+        :description-opens="descriptionOpenMap"
         @select-terminal="switchToTerminal"
         @add-worktree="onShowAddWorktreeDialog"
         @remove-worktree="onRemoveWorktree"
@@ -1558,6 +1577,7 @@ onMounted(async () => {
         @cancel-ai-judging="onCancelAiJudging"
         @cancel-remove="cancelWorktreeRemove"
         @duplicate-worktree="onDuplicateWorktree"
+        @toggle-description="onToggleDescription"
         @reorder-worktrees="reorderWorktree"
         @commit-reorder="saveWorktreeOrder"
         @cancel-reorder="restoreWorktreeOrder"

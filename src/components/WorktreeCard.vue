@@ -21,6 +21,7 @@ const props = defineProps<{
   autoApproval?: boolean;
   aiJudging?: boolean;
   tooltip?: string;
+  descriptionOpen?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -39,7 +40,38 @@ const emit = defineEmits<{
   cancelAiJudging: [worktreeId: string];
   openArtifacts: [worktreeId: string];
   duplicateWorktree: [worktreeId: string];
+  toggleDescription: [worktreeId: string];
 }>();
+
+// ドラッグ（カード名のD&D並べ替え）直後に発火しうる click を1回だけ無視するためのフラグ。
+// Chromium は通常 drag 後に click を出さないが、ブラウザ差異に備えてガードする。
+let suppressNextClick = false;
+
+function onNameDragStart(event: DragEvent) {
+  suppressNextClick = true;
+  emit("dragStart", props.worktree.id, event);
+}
+
+function onNameDragEnd() {
+  emit("dragEnd");
+  // click が来なかった場合にフラグが残り続けないよう、次のタスクで解除する
+  setTimeout(() => {
+    suppressNextClick = false;
+  }, 0);
+}
+
+// ボタン類・ターミナルサムネイル領域以外のクリックで description を開閉する
+function onCardClick(event: MouseEvent) {
+  if (suppressNextClick) {
+    suppressNextClick = false;
+    return;
+  }
+  const target = event.target as HTMLElement;
+  if (target.closest("button, .terminals-row")) return;
+  // 表示する内容（description / タスク一覧）が無いカードはトグル対象外（無意味な永続化を防ぐ）
+  if (!props.tooltip) return;
+  emit("toggleDescription", props.worktree.id);
+}
 
 const menuRef = ref<InstanceType<typeof Popover> | null>(null);
 
@@ -94,7 +126,7 @@ const terminalList = computed(() =>
 </script>
 
 <template>
-  <div class="worktree-card" :class="{ 'card-detached': detached, 'card-notified': notificationCount && notificationCount > 0 }">
+  <div class="worktree-card" :class="{ 'card-detached': detached, 'card-notified': notificationCount && notificationCount > 0 }" @click="onCardClick">
     <Badge v-if="notificationCount && notificationCount > 0" :value="notificationCount" severity="danger" class="notification-badge" />
     <div v-if="hotkeyChar || (artifactCount && artifactCount > 0)" class="top-left-badges">
       <div v-if="hotkeyChar" class="hotkey-badge">Alt+{{ hotkeyChar }}</div>
@@ -108,8 +140,8 @@ const terminalList = computed(() =>
         <span
           class="card-name"
           draggable="true"
-          @dragstart.stop="$emit('dragStart', worktree.id, $event)"
-          @dragend.stop="$emit('dragEnd')"
+          @dragstart.stop="onNameDragStart($event)"
+          @dragend.stop="onNameDragEnd()"
         >{{ worktree.name }}</span>
         <span class="card-branch">{{ worktree.branchName }}</span>
         <span v-if="detached" class="card-detached-badge">{{ t('subWindowBadge') }}</span>
@@ -145,8 +177,8 @@ const terminalList = computed(() =>
       </div>
     </div>
 
-    <!-- ホバーでヘッダー直下に開く description エリア (description優先・なければタスク一覧) -->
-    <div v-if="tooltip" class="card-desc-wrap">
+    <!-- クリックでヘッダー直下に開く description エリア (description優先・なければタスク一覧) -->
+    <div v-if="tooltip" class="card-desc-wrap" :class="{ 'desc-open': descriptionOpen }">
       <div class="card-desc">
         <div class="card-desc-inner" v-html="tooltip" />
       </div>
@@ -373,14 +405,14 @@ const terminalList = computed(() =>
   padding: 4px 0;
 }
 
-/* ホバーで開く description エリア: grid-template-rows 0fr→1fr で高さauto をアニメーション */
+/* クリックで開く description エリア: grid-template-rows 0fr→1fr で高さauto をアニメーション */
 .card-desc-wrap {
   display: grid;
   grid-template-rows: 0fr;
   transition: grid-template-rows 0.25s ease;
 }
 
-.worktree-card:hover .card-desc-wrap {
+.card-desc-wrap.desc-open {
   grid-template-rows: 1fr;
 }
 
