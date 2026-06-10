@@ -176,6 +176,12 @@ const props = defineProps<{
 // json の開閉状態を一時的に無視して全カードの description を開く（セッション限り・非永続）
 const showAllDescriptions = ref(false);
 
+// 全表示中はカードが強制 open のため、クリックでの個別状態の書き換えを抑止する
+function onCardToggleDescription(worktreeId: string) {
+  if (showAllDescriptions.value) return;
+  emit("toggleDescription", worktreeId);
+}
+
 const emit = defineEmits<{
   selectTerminal: [terminalId: number];
   reorderWorktrees: [fromId: string, toId: string];
@@ -403,7 +409,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
               @cancel-ai-judging="emit('cancelAiJudging', $event)"
               @cancel-remove="emit('cancelRemove', $event)"
               @duplicate-worktree="emit('duplicateWorktree', $event)"
-              @toggle-description="emit('toggleDescription', $event)"
+              @toggle-description="onCardToggleDescription"
             />
           </div>
         </div>
