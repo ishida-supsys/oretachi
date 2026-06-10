@@ -317,7 +317,15 @@ async fn git_worktree_restore(repo_path: String, worktree_path: String, branch_n
 
 #[tauri::command]
 async fn git_list_files(repo_path: String) -> Result<Vec<String>, String> {
-    run_git(move || git_worktree::list_tracked_files(&repo_path)).await
+    run_git(move || git_worktree::list_quick_open_files(&repo_path)).await
+}
+
+#[tauri::command]
+async fn list_dir_entries(
+    repo_path: String,
+    rel_path: String,
+) -> Result<Vec<git_worktree::DirEntry>, String> {
+    run_git(move || git_worktree::list_dir_entries(&repo_path, &rel_path)).await
 }
 
 #[tauri::command]
@@ -829,6 +837,7 @@ pub fn run() {
             git_merge_branch,
             git_delete_branch,
             git_list_files,
+            list_dir_entries,
             git_read_file,
             git_get_merge_message,
             git_get_status,

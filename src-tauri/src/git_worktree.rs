@@ -292,14 +292,104 @@ pub fn delete_branch(repo_path: &str, branch_name: &str, force: bool) -> Result<
 
 // ─── コードレビュー用 Git 関数 ───────────────────────────────────────────────
 
-pub fn list_tracked_files(repo_path: &str) -> Result<Vec<String>, String> {
-    let stdout = run_git_in(repo_path, &["ls-files"])?;
-    let files = stdout
+/// QuickOpen 用のファイル一覧を返す。
+/// 「追跡 + 未追跡（.gitignore 尊重）」に加え、.gitignore に *ファイルとして直接記載* された
+/// ものだけを追加する（例: `.claude/CLAUDE.md`）。`node_modules` 等の ignore ディレクトリ
+/// 配下は含めない。
+pub fn list_quick_open_files(repo_path: &str) -> Result<Vec<String>, String> {
+    let stdout = run_git_in(
+        repo_path,
+        &["ls-files", "--cached", "--others", "--exclude-standard"],
+    )?;
+    let mut files: std::collections::HashSet<String> = stdout
         .lines()
         .map(|l| l.trim().to_string())
         .filter(|l| !l.is_empty())
         .collect();
-    Ok(files)
+
+    // .gitignore に直接記載されたファイル（glob でもディレクトリでもないもの）を追加
+    for entry in read_gitignore(repo_path)? {
+        if entry.contains('*')
+            || entry.contains('?')
+            || entry.contains('[')
+            || entry.ends_with('/')
+            || entry.contains("..")
+        {
+            continue;
+        }
+        let full = std::path::Path::new(repo_path).join(&entry);
+        if full.is_file() {
+            // パス区切りを forward slash に正規化
+            files.insert(entry.replace('\\', "/"));
+        }
+    }
+
+    let mut result: Vec<String> = files.into_iter().collect();
+    result.sort();
+    Ok(result)
+}
+
+/// ディレクトリ内のエントリ（ツリーの遅延読み込み用）
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DirEntry {
+    pub name: String,
+    pub path: String,
+    pub is_dir: bool,
+}
+
+/// 指定ディレクトリ直下のエントリを列挙する。`rel_path` が空文字ならリポジトリルート。
+/// `.git` ディレクトリは除外する。ツリーの遅延読み込みに使用。
+pub fn list_dir_entries(repo_path: &str, rel_path: &str) -> Result<Vec<DirEntry>, String> {
+    // パストラバーサル検証（read_file_content と同じ規則）
+    let normalized = std::path::Path::new(rel_path);
+    for component in normalized.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                return Err("パスに '..' は使用できません".to_string());
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err("絶対パスは使用できません".to_string());
+            }
+            _ => {}
+        }
+    }
+
+    let dir = std::path::Path::new(repo_path).join(rel_path);
+    let read = std::fs::read_dir(&dir).map_err(|e| format!("ディレクトリ読み込みエラー: {}", e))?;
+
+    let mut entries: Vec<DirEntry> = Vec::new();
+    for item in read {
+        let item = match item {
+            Ok(i) => i,
+            Err(_) => continue,
+        };
+        let name = item.file_name().to_string_lossy().into_owned();
+        // .git は除外
+        if name == ".git" {
+            continue;
+        }
+        // シンボリックリンクを辿らずに種別を判定
+        let is_dir = match item.file_type() {
+            Ok(ft) => ft.is_dir(),
+            Err(_) => false,
+        };
+        let path = if rel_path.is_empty() {
+            name.clone()
+        } else {
+            format!("{}/{}", rel_path, name)
+        };
+        entries.push(DirEntry { name, path, is_dir });
+    }
+
+    // ディレクトリ優先 → 名前の大文字小文字無視昇順
+    entries.sort_by(|a, b| match (a.is_dir, b.is_dir) {
+        (true, false) => std::cmp::Ordering::Less,
+        (false, true) => std::cmp::Ordering::Greater,
+        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    });
+
+    Ok(entries)
 }
 
 pub fn read_file_content(
