@@ -6,6 +6,16 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.21.4] - 2026-06-10
+
+### Added
+- ワークツリーカードの description をクリックで開閉でき、状態をワークツリー毎に保存するよう変更 (#68)
+
+### Fixed
+- 全表示ON中はカードクリックで開閉状態を書き換えないよう抑止
+- カード名ドラッグ直後の click による description 誤トグルを抑止
+- 表示内容が無いカードのクリックでは description 状態を保存しないよう修正
+
 ## [0.21.3] - 2026-06-10
 
 ### Fixed
@@ -384,7 +394,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.21.3...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.21.4...HEAD
+[0.21.4]: https://github.com/ishida-supsys/oretachi/compare/0.21.3...0.21.4
 [0.21.3]: https://github.com/ishida-supsys/oretachi/compare/0.21.2...0.21.3
 [0.21.2]: https://github.com/ishida-supsys/oretachi/compare/0.21.1...0.21.2
 [0.21.1]: https://github.com/ishida-supsys/oretachi/compare/0.21.0...0.21.1
