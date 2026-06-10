@@ -17,7 +17,11 @@ const OUTPUT_HISTORY_BYTES: usize = 65_536;
 const EXITED_SESSION_TTL: Duration = Duration::from_secs(30);
 
 struct PtySession {
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// PTY 入力の送信キュー。書き込み本体はセッション毎の writer スレッドが行う。
+    /// ConPTY の入力パイプへの write は子プロセスが stdin を読まないと無期限に
+    /// ブロックしうるため、Tauri コマンド（メインスレッド）からは enqueue のみ行い、
+    /// 実 I/O をメインスレッドから隔離する。全 Sender drop で writer スレッドは終了する。
+    input_tx: std::sync::mpsc::Sender<Vec<u8>>,
     master: Arc<Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>>,
     child_killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     child_pid: Option<u32>,
@@ -105,10 +109,35 @@ pub struct ReadHistoryResult {
     pub lost_bytes: u64,
 }
 
-pub struct PtyManager {
+/// PtyManager の実体。Drop 時に kill_all を行うため、Clone される外殻 (`PtyManager`)
+/// とは分離し、最後の参照が消えたときだけ一度 Drop が走るようにする。
+pub struct PtyManagerCore {
     sessions: Arc<Mutex<HashMap<u32, PtySession>>>,
     next_id: Mutex<u32>,
     polling_alive: Arc<Mutex<bool>>,
+}
+
+/// Tauri の State として管理する PTY マネージャ。
+/// `Arc` の newtype なので clone が安価で、async コマンドから
+/// `tauri::async_runtime::spawn_blocking` へ move して使える ('static 化)。
+#[derive(Clone)]
+pub struct PtyManager(Arc<PtyManagerCore>);
+
+impl PtyManager {
+    pub fn new() -> Self {
+        PtyManager(Arc::new(PtyManagerCore {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            next_id: Mutex::new(1),
+            polling_alive: Arc::new(Mutex::new(true)),
+        }))
+    }
+}
+
+impl std::ops::Deref for PtyManager {
+    type Target = PtyManagerCore;
+    fn deref(&self) -> &PtyManagerCore {
+        &self.0
+    }
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -314,15 +343,7 @@ fn get_claude_session_id_by_pid(pid: u32) -> Option<String> {
     v.get("sessionId")?.as_str().map(|s| s.to_string())
 }
 
-impl PtyManager {
-    pub fn new() -> Self {
-        PtyManager {
-            sessions: Arc::new(Mutex::new(HashMap::new())),
-            next_id: Mutex::new(1),
-            polling_alive: Arc::new(Mutex::new(true)),
-        }
-    }
-
+impl PtyManagerCore {
     /// AIエージェントフラグを明示的にセットする（executeAgentWorktree 用）
     pub fn set_ai_agent(&self, session_id: u32, is_agent: bool) -> Result<(), String> {
         let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
@@ -767,10 +788,28 @@ impl PtyManager {
             let _ = app_handle_reader.emit("pty-exit", PtyExitPayload { session_id });
         });
 
-        let writer = Arc::new(Mutex::new(writer));
+        // writer スレッド: 入力キューを順番に ConPTY 入力パイプへ書き込む。
+        // 子プロセスが stdin を読まずパイプが満杯のときは write_all がブロックするが、
+        // ブロックするのはこのスレッドだけで、enqueue 側 (Tauri コマンド) は影響を受けない。
+        // kill 時は session drop で全 Sender が消え recv が Err になりスレッドが終了する。
+        // ブロック中でも kill が master を drop → ConPTY 破棄で write がエラーになり解ける。
+        let (input_tx, input_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        std::thread::spawn(move || {
+            let mut writer = writer;
+            while let Ok(data) = input_rx.recv() {
+                if let Err(e) = writer.write_all(&data).and_then(|_| writer.flush()) {
+                    log::warn!(
+                        "[Terminal] writer thread exiting on write error session_id={}: {}",
+                        session_id,
+                        e
+                    );
+                    return;
+                }
+            }
+        });
 
         let session = PtySession {
-            writer,
+            input_tx,
             master: master_arc,
             child_killer,
             child_pid,
@@ -792,21 +831,22 @@ impl PtyManager {
         Ok(session_id)
     }
 
+    /// PTY への入力をセッションの writer スレッドへ enqueue する（非ブロッキング）。
+    /// 実 I/O は writer スレッドが行うため、本関数は ConPTY 入力パイプの状態に
+    /// かかわらず即座に返る。I/O エラーは writer スレッド側でログされ、以降の
+    /// send が "input channel closed" で失敗するようになる。
     pub fn write(&self, session_id: u32, data: Vec<u8>) -> Result<(), String> {
-        // sessions ロックは Arc 取得のみ（瞬時）→ I/O 中は他セッション操作をブロックしない
-        let writer_arc = {
+        let tx = {
             let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
             sweep_exited(&mut sessions);
             let session = sessions
                 .get(&session_id)
                 .ok_or_else(|| format!("Session {} not found", session_id))?;
-            session.writer.clone()
+            session.input_tx.clone()
         };
 
-        let mut writer = writer_arc.lock().map_err(|e| format!("writer lock error: {}", e))?;
-        writer.write_all(&data).map_err(|e| format!("Write error: {}", e))?;
-        writer.flush().map_err(|e| format!("Flush error: {}", e))?;
-        Ok(())
+        tx.send(data)
+            .map_err(|_| format!("Write error: input channel closed (session {})", session_id))
     }
 
     /// 指定セッションの出力履歴を取得する。
@@ -914,24 +954,26 @@ impl PtyManager {
                     Ok(mut alive) => *alive = false,
                     Err(e) => *e.into_inner() = false,
                 }
-                // master を取り出して reader に EOF を送る準備
+                // master を取り出して reader に EOF を送る準備。
+                // session の残りフィールド (input_tx 含む) はこのスコープ末尾で drop され、
+                // input_tx の drop により writer スレッドの recv が解けてスレッドが終了する。
                 let master = session.master.lock().ok().and_then(|mut g| g.take());
-                Some((session.child_pid, session.child_killer, master, session.writer, session.watcher_handle))
+                Some((session.child_pid, session.child_killer, master, session.watcher_handle))
             } else {
                 None
             }
         }; // ← sessions ロック解放
 
-        if let Some((child_pid, mut child_killer, master, writer, watcher_handle)) = removed {
+        if let Some((child_pid, mut child_killer, master, watcher_handle)) = removed {
             // ロック外でプロセスkill（taskkillが遅くても他の操作をブロックしない）
             if let Some(pid) = child_pid {
                 crate::process_utils::kill_process_tree(pid);
             }
             // child_killer でバックアップ kill（child が監視スレッドに渡済みでも動作）
             let _ = child_killer.kill();
-            // master / writer を drop して reader に EOF を送る
+            // master を drop して ConPTY を破棄し、reader に EOF を送る
+            // （入力パイプも閉じられ、writer スレッドがブロック中でも write エラーで解ける）
             drop(master);
-            drop(writer);
             // watcher スレッドの終了を待つ（alive=false を検知して必ず終了する）
             if let Some(handle) = watcher_handle {
                 let _ = handle.join();
@@ -1002,7 +1044,7 @@ impl PtyManager {
     }
 }
 
-impl Drop for PtyManager {
+impl Drop for PtyManagerCore {
     fn drop(&mut self) {
         match self.polling_alive.lock() {
             Ok(mut alive) => *alive = false,

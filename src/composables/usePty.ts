@@ -67,10 +67,19 @@ export function usePty() {
     });
   }
 
+  // kill の invoke 解決前に onUnmounted が再入すると sessionId がまだ非 null のため
+  // pty_kill が二重発行される (ログ上 2 連発が観測されている)。killing フラグで抑止する。
+  let killing = false;
+
   async function kill(): Promise<void> {
-    if (sessionId.value === null) return;
-    await invoke("pty_kill", { sessionId: sessionId.value });
-    await cleanup();
+    if (sessionId.value === null || killing) return;
+    killing = true;
+    try {
+      await invoke("pty_kill", { sessionId: sessionId.value });
+      await cleanup();
+    } finally {
+      killing = false;
+    }
   }
 
   async function attachToSession(
