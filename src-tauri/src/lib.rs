@@ -20,6 +20,9 @@ mod terminal_session;
 #[cfg(target_os = "windows")]
 mod acrylic;
 
+#[cfg(target_os = "windows")]
+mod redirection_guard;
+
 use fs_watcher::FsWatcherManager;
 use process_utils::WorktreeRemoveManager;
 use pty_manager::{AiAgentChangedPayload, PtyManager};
@@ -726,6 +729,12 @@ fn get_debug_mode() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Windows: インストーラ起動由来の RedirectionGuard 緩和策 (Enforce=1) を検出したら
+    // explorer.exe 経由でセルフリローンチする (Issue #70)。リローンチ時は exit(0) して戻らない。
+    // この時点ではロガー未初期化のため、結果は setup() に持ち越して記録する。
+    #[cfg(target_os = "windows")]
+    let redirection_guard_outcome = redirection_guard::relaunch_if_guarded();
+
     // Windows: tauri-plugin-notification はパスが \target\release で終わる場合に
     // AUMID を設定しないため、PowerShell として通知が表示される問題を回避する。
     #[cfg(target_os = "windows")]
@@ -918,6 +927,26 @@ pub fn run() {
             // settings.debug_mode は後で読み込まれるため、env var のみで先行設定する。
             if !env_debug {
                 log::set_max_level(log::LevelFilter::Info);
+            }
+
+            #[cfg(target_os = "windows")]
+            match &redirection_guard_outcome {
+                redirection_guard::GuardOutcome::NotGuarded => {}
+                redirection_guard::GuardOutcome::RelaunchedPreviously => {
+                    log::info!(
+                        "[RedirectionGuard] 緩和策 (Enforce=1) を検出したため explorer.exe 経由で再起動した"
+                    );
+                }
+                redirection_guard::GuardOutcome::StillGuarded => {
+                    log::warn!(
+                        "[RedirectionGuard] リローンチ後も緩和策 (Enforce=1) が残っている。ターミナル内のジャンクション操作 (pnpm install 等) が失敗する可能性がある"
+                    );
+                }
+                redirection_guard::GuardOutcome::RelaunchSkipped(reason) => {
+                    log::warn!(
+                        "[RedirectionGuard] 緩和策 (Enforce=1) を検出したが起動を継続: {reason}。ターミナル内のジャンクション操作 (pnpm install 等) が失敗する可能性がある"
+                    );
+                }
             }
 
             // レポート DB を同期的に初期化（ファイル接続のみで高速、起動前に完了させる）
