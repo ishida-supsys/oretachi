@@ -191,7 +191,14 @@ async fn git_worktree_remove(
     worktree_path: String,
 ) -> Result<(), String> {
     // 削除対象ディレクトリをcwdとして掴んでいるPTYセッションを先にkill
-    let killed = pty_manager.kill_sessions_in_dir(&worktree_path);
+    // (taskkill 最大10秒 + watcher join を含むため tokio ワーカーを塞がないよう spawn_blocking)
+    let killed = {
+        let manager = pty_manager.inner().clone();
+        let dir = worktree_path.clone();
+        tauri::async_runtime::spawn_blocking(move || manager.kill_sessions_in_dir(&dir))
+            .await
+            .map_err(|e| format!("spawn_blocking join error: {}", e))?
+    };
     if killed > 0 {
         // プロセスが完全に終了してファイルハンドルを解放するまで待機
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -1298,14 +1305,12 @@ pub fn run() {
             {
                 use std::sync::Arc;
                 use std::sync::atomic::{AtomicU64, Ordering};
-                use std::time::{Duration, SystemTime, UNIX_EPOCH};
+                use std::time::{Duration, Instant};
 
-                fn epoch_ms() -> u64 {
-                    SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_millis() as u64
-                }
+                // SystemTime は NTP 補正等で巻き戻り、blocked の誤検知を生むため、
+                // 単調な Instant 起点の経過 ms で比較する。
+                let watchdog_start = Instant::now();
+                let elapsed_ms = move || watchdog_start.elapsed().as_millis() as u64;
 
                 let main_ack_ms = Arc::new(AtomicU64::new(0));
                 let watchdog_handle = app.handle().clone();
@@ -1314,11 +1319,11 @@ pub fn run() {
                     let mut last_blocked_log_ms: u64 = 0;
                     loop {
                         tokio::time::sleep(Duration::from_secs(15)).await;
-                        let sent = epoch_ms();
+                        let sent = elapsed_ms();
                         let ack = main_ack_ms.clone();
                         if watchdog_handle
                             .run_on_main_thread(move || {
-                                ack.store(epoch_ms(), Ordering::Relaxed);
+                                ack.store(elapsed_ms(), Ordering::Relaxed);
                             })
                             .is_err()
                         {
@@ -1331,16 +1336,16 @@ pub fn run() {
                             if let Some(since) = blocked_since.take() {
                                 log::warn!(
                                     "[main-thread-watchdog] main thread recovered after {}s",
-                                    epoch_ms().saturating_sub(since) / 1000
+                                    elapsed_ms().saturating_sub(since) / 1000
                                 );
                             }
                             last_blocked_log_ms = 0;
                         } else {
                             let since = *blocked_since.get_or_insert(sent);
-                            let blocked_secs = epoch_ms().saturating_sub(since) / 1000;
+                            let blocked_secs = elapsed_ms().saturating_sub(since) / 1000;
                             // 継続ブロック中の連続出力は 55 秒に 1 回へ抑制（初回は即時）
-                            if epoch_ms().saturating_sub(last_blocked_log_ms) >= 55_000 {
-                                last_blocked_log_ms = epoch_ms();
+                            if elapsed_ms().saturating_sub(last_blocked_log_ms) >= 55_000 {
+                                last_blocked_log_ms = elapsed_ms();
                                 log::error!(
                                     "[main-thread-watchdog] tao main thread blocked for {}s (run_on_main_thread closure not executed within 5s)",
                                     blocked_secs
