@@ -1260,7 +1260,7 @@ impl NotifyService {
     }
 
     #[tool(description = "指定 PTY セッションを停止する。oretachi_list_terminals で取得した session_id を渡す。UI のタブは pty-exit イベント経由で自動的に消える")]
-    fn oretachi_kill_terminal(
+    async fn oretachi_kill_terminal(
         &self,
         Parameters(KillTerminalParams { session_id }): Parameters<KillTerminalParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -1271,7 +1271,11 @@ impl NotifyService {
                 None,
             ));
         }
-        pty.kill(session_id, "mcp-kill-terminal")
+        // taskkill 最大10秒 + watcher join を含むため tokio ワーカーを塞がないよう spawn_blocking
+        let manager = pty.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || manager.kill(session_id, "mcp-kill-terminal"))
+            .await
+            .map_err(|e| McpError::internal_error(format!("spawn_blocking join error: {}", e), None))?
             .map_err(|e| McpError::internal_error(e, None))?;
         log::info!("[mcp] oretachi_kill_terminal: session_id={}", session_id);
         Ok(CallToolResult::success(vec![Content::text("killed")]))

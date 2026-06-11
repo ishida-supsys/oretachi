@@ -51,33 +51,49 @@ fn artifacts_dir(
 // ─── PTY コマンド ────────────────────────────────────────────────────────────
 
 #[tauri::command]
-fn pty_spawn(
+async fn pty_spawn(
     app_handle: tauri::AppHandle,
-    state: State<PtyManager>,
+    state: State<'_, PtyManager>,
     rows: u16,
     cols: u16,
     shell: Option<String>,
     cwd: Option<String>,
 ) -> Result<u32, String> {
     log::debug!("[Terminal] cmd::pty_spawn rows={} cols={} shell={:?} cwd={:?}", rows, cols, shell, cwd);
-    state.spawn(app_handle, rows, cols, shell, cwd)
+    // ConPTY 生成 + プロセス spawn はブロッキング I/O のため spawn_blocking で実行し、
+    // 同期コマンドとしてメインスレッド (WebView2 UI スレッド) を塞がないようにする。
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.spawn(app_handle, rows, cols, shell, cwd))
+        .await
+        .map_err(|e| format!("spawn_blocking join error: {}", e))?
 }
 
+// pty_write は enqueue のみで非ブロッキング (実 I/O はセッション毎の writer スレッド)。
+// 同期コマンドのままにすることで、メインスレッド上の実行順 = チャネル投入順となり
+// キー入力の順序が保証される (async 化すると並列実行で順序が壊れうる)。
 #[tauri::command]
 fn pty_write(state: State<PtyManager>, session_id: u32, data: Vec<u8>) -> Result<(), String> {
     state.write(session_id, data)
 }
 
 #[tauri::command]
-fn pty_resize(state: State<PtyManager>, session_id: u32, rows: u16, cols: u16) -> Result<(), String> {
+async fn pty_resize(state: State<'_, PtyManager>, session_id: u32, rows: u16, cols: u16) -> Result<(), String> {
     log::debug!("[Terminal] cmd::pty_resize session_id={} rows={} cols={}", session_id, rows, cols);
-    state.resize(session_id, rows, cols)
+    // ConPTY の resize は conhost への RPC でブロックしうるため spawn_blocking で実行
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.resize(session_id, rows, cols))
+        .await
+        .map_err(|e| format!("spawn_blocking join error: {}", e))?
 }
 
 #[tauri::command]
-fn pty_kill(state: State<PtyManager>, session_id: u32) -> Result<(), String> {
+async fn pty_kill(state: State<'_, PtyManager>, session_id: u32) -> Result<(), String> {
     log::info!("[Terminal] cmd::pty_kill session_id={} source=webview-invoke", session_id);
-    state.kill(session_id, "webview-invoke")
+    // taskkill /F /T は数秒かかることがあるため spawn_blocking で実行
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.kill(session_id, "webview-invoke"))
+        .await
+        .map_err(|e| format!("spawn_blocking join error: {}", e))?
 }
 
 #[tauri::command]
@@ -175,7 +191,14 @@ async fn git_worktree_remove(
     worktree_path: String,
 ) -> Result<(), String> {
     // 削除対象ディレクトリをcwdとして掴んでいるPTYセッションを先にkill
-    let killed = pty_manager.kill_sessions_in_dir(&worktree_path);
+    // (taskkill 最大10秒 + watcher join を含むため tokio ワーカーを塞がないよう spawn_blocking)
+    let killed = {
+        let manager = pty_manager.inner().clone();
+        let dir = worktree_path.clone();
+        tauri::async_runtime::spawn_blocking(move || manager.kill_sessions_in_dir(&dir))
+            .await
+            .map_err(|e| format!("spawn_blocking join error: {}", e))?
+    };
     if killed > 0 {
         // プロセスが完全に終了してファイルハンドルを解放するまで待機
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -1277,6 +1300,65 @@ pub fn run() {
                                 log::error!("[heartbeat] ping emit failed: {}", e);
                                 ping_pending_since = None;
                                 unresponsive_logged_until_secs = 0;
+                            }
+                        }
+                    }
+                });
+            }
+
+            // メインスレッド watchdog: run_on_main_thread に投げた閉包の実行遅延を計測し、
+            // tao メインスレッド (= WebView2 への emit/IPC 配送を担う UI スレッド) の
+            // ブロックを検出する。heartbeat の「webview unresponsive」だけでは
+            // 「JS 側フリーズ」と「Rust メインスレッドブロック」を区別できないため、
+            // ハング時にどちらかをログから切り分けられるようにする診断機構。
+            {
+                use std::sync::Arc;
+                use std::sync::atomic::{AtomicU64, Ordering};
+                use std::time::{Duration, Instant};
+
+                // SystemTime は NTP 補正等で巻き戻り、blocked の誤検知を生むため、
+                // 単調な Instant 起点の経過 ms で比較する。
+                let watchdog_start = Instant::now();
+                let elapsed_ms = move || watchdog_start.elapsed().as_millis() as u64;
+
+                let main_ack_ms = Arc::new(AtomicU64::new(0));
+                let watchdog_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut blocked_since: Option<u64> = None;
+                    let mut last_blocked_log_ms: u64 = 0;
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(15)).await;
+                        let sent = elapsed_ms();
+                        let ack = main_ack_ms.clone();
+                        if watchdog_handle
+                            .run_on_main_thread(move || {
+                                ack.store(elapsed_ms(), Ordering::Relaxed);
+                            })
+                            .is_err()
+                        {
+                            // アプリ終了中など。次周期で再試行する。
+                            continue;
+                        }
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        let acked = main_ack_ms.load(Ordering::Relaxed);
+                        if acked >= sent {
+                            if let Some(since) = blocked_since.take() {
+                                log::warn!(
+                                    "[main-thread-watchdog] main thread recovered after {}s",
+                                    elapsed_ms().saturating_sub(since) / 1000
+                                );
+                            }
+                            last_blocked_log_ms = 0;
+                        } else {
+                            let since = *blocked_since.get_or_insert(sent);
+                            let blocked_secs = elapsed_ms().saturating_sub(since) / 1000;
+                            // 継続ブロック中の連続出力は 55 秒に 1 回へ抑制（初回は即時）
+                            if elapsed_ms().saturating_sub(last_blocked_log_ms) >= 55_000 {
+                                last_blocked_log_ms = elapsed_ms();
+                                log::error!(
+                                    "[main-thread-watchdog] tao main thread blocked for {}s (run_on_main_thread closure not executed within 5s)",
+                                    blocked_secs
+                                );
                             }
                         }
                     }

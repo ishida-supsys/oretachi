@@ -183,12 +183,49 @@ fn merge_paths(base: &str, additions: &str) -> String {
 }
 
 /// プロセスツリーを強制終了する
+///
+/// Windows: `taskkill /F /T` は通常数秒以内に終わるが、システム高負荷や対象プロセスの
+/// 異常状態では応答しないことがある。`.output()` の無期限待ちは呼び出しスレッドを
+/// 永久ブロックしうるため、タイムアウト付きで待機し、超過時は taskkill 自体を kill する。
 pub fn kill_process_tree(pid: u32) {
     #[cfg(target_os = "windows")]
     {
-        let _ = make_command("taskkill")
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+        let child = make_command("taskkill")
             .args(["/F", "/T", "/PID", &pid.to_string()])
-            .output();
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let mut child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("[Terminal] kill_process_tree: taskkill spawn failed pid={}: {}", pid, e);
+                return;
+            }
+        };
+        let deadline = std::time::Instant::now() + TIMEOUT;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        log::warn!(
+                            "[Terminal] kill_process_tree: taskkill timed out after {:?} pid={}",
+                            TIMEOUT,
+                            pid
+                        );
+                        // taskkill 自体を kill して待ちを打ち切る。kill 失敗時は wait しない
+                        // （永久ブロック回避のためデタッチ）。
+                        if child.kill().is_ok() {
+                            let _ = child.wait();
+                        }
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(_) => break,
+            }
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
