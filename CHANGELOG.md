@@ -6,6 +6,15 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.21.5] - 2026-06-11
+
+### Fixed
+- インストーラ/アップデータ経由で起動した際に RedirectionGuard 緩和策が子プロセスへ遺伝し、pnpm install 等のジャンクショントラバースが失敗する問題を修正。起動最初期に検出し explorer.exe 経由で再起動する (#70)
+- 同期 PTY コマンドが tao メインスレッドをブロックし WebView が恒久フリーズしうる問題を解消。pty_write を writer スレッド + キュー化し、pty_spawn/resize/kill を spawn_blocking 化、kill_process_tree にタイムアウトを追加。メインスレッド watchdog も追加
+- ターミナルのロック構造・キュー有界化・resize 順序保証に関するバグレビュー指摘を修正 (入力キューの有界化、kill のロック解放順、resize の直列化、watchdog の時刻基準を Instant に変更)
+- コードレビューのフォルダ展開でロード中の再入により同一ディレクトリが二重フェッチされる問題を防止
+- コードレビューのファイルツリーに gitignore 対象ファイル (.claude/CLAUDE.md 等) が表示されない問題を修正。遅延読み込みに変更し、QuickOpen も .gitignore 記載ファイルを含めるよう変更
+
 ## [0.21.4] - 2026-06-10
 
 ### Added
@@ -394,7 +403,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.21.4...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.21.5...HEAD
+[0.21.5]: https://github.com/ishida-supsys/oretachi/compare/0.21.4...0.21.5
 [0.21.4]: https://github.com/ishida-supsys/oretachi/compare/0.21.3...0.21.4
 [0.21.3]: https://github.com/ishida-supsys/oretachi/compare/0.21.2...0.21.3
 [0.21.2]: https://github.com/ishida-supsys/oretachi/compare/0.21.1...0.21.2
