@@ -48,6 +48,7 @@ import { useSubWindowEvents } from "./composables/useSubWindowEvents";
 import { useShutdownGuard } from "./composables/useShutdownGuard";
 import type { ArchiveRow } from "./types/archive";
 import { logDebug } from "./utils/log";
+import { uiZoomFactor, cssPxToLogical } from "./utils/uiScale";
 import { consumeMaxBlockedMs, startEventLoopMonitor } from "./utils/eventLoopMonitor";
 import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -900,14 +901,16 @@ async function onTrayButtonClick() {
       let mainWindowSize: { width: number; height: number } | undefined;
       // sizeFromContainer: 親コンテナからのフォールバックサイズを使ったかどうか
       let sizeFromContainer = false;
+      // gBCR は CSS px。windowSize は常に論理px (DIP) で渡す契約のためズーム換算する
+      const zoom = uiZoomFactor(settings.value);
       if (rect && rect.width > 0 && rect.height > 0) {
-        mainWindowSize = { width: Math.round(rect.width), height: Math.round(rect.height) };
+        mainWindowSize = { width: cssPxToLogical(rect.width, zoom), height: cssPxToLogical(rect.height, zoom) };
       } else {
         // activeWorktreeId が null（ホーム/設定画面）の場合:
         // メインコンテンツ領域を計測（= WorktreeHeader + フレーム領域と同サイズ）
         const containerRect = mainContentAreaRef.value?.getBoundingClientRect();
         if (containerRect && containerRect.width > 0 && containerRect.height > 0) {
-          mainWindowSize = { width: Math.round(containerRect.width), height: Math.round(containerRect.height) };
+          mainWindowSize = { width: cssPxToLogical(containerRect.width, zoom), height: cssPxToLogical(containerRect.height, zoom) };
           sizeFromContainer = true;
         }
       }

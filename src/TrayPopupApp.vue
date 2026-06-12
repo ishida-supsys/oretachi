@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, onUnmounted, nextTick, computed } from "vue";
-import { emitTo, type UnlistenFn } from "@tauri-apps/api/event";
+import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import TerminalView from "./components/TerminalView.vue";
 import FrameContainer from "./components/FrameContainer.vue";
@@ -16,6 +16,7 @@ import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
 import type { FrameNode } from "./types/frame";
 import type { TrayTerminalEntry } from "./types/terminal";
 import { useI18n } from "vue-i18n";
+import { uiZoomFactor, cssPxToLogical } from "./utils/uiScale";
 import MacTrafficLights from "./components/MacTrafficLights.vue";
 import { isMac } from "./composables/usePlatform";
 
@@ -93,9 +94,11 @@ async function showWorktree(data: TrayWorktreeData) {
   // ウィンドウサイズをサブウィンドウに合わせる
   // isDetached=true: windowSize はサブウィンドウ全体のサイズ → フッターのみ加算
   // isDetached=false: windowSize はメインウィンドウのフレーム領域 → ヘッダー + フッター加算
+  // windowSize は常に論理px (DIP)。offsetHeight は CSS px のためズーム換算してから加算
   const win = getCurrentWindow();
-  const footerH = footerRef.value?.offsetHeight ?? 0;
-  const headerH = data.isDetached ? 0 : (headerRef.value?.offsetHeight ?? 0);
+  const zoom = uiZoomFactor(settings.value);
+  const footerH = cssPxToLogical(footerRef.value?.offsetHeight ?? 0, zoom);
+  const headerH = data.isDetached ? 0 : cssPxToLogical(headerRef.value?.offsetHeight ?? 0, zoom);
   const width = data.windowSize?.width ?? 900;
   const height = (data.windowSize?.height ?? 600) + footerH + headerH;
   await win.setSize(new LogicalSize(width, height));
@@ -290,9 +293,15 @@ useHotkeyListener(() => {
 });
 
 let unlistenInit: UnlistenFn | null = null;
+let unlistenSettings: UnlistenFn | null = null;
 
 onMounted(async () => {
   await loadSettings();
+
+  // トレイ表示中の uiScale / ターミナル設定変更に追従
+  unlistenSettings = await listen("settings-changed", async () => {
+    await loadSettings();
+  });
 
   const appWindow = getCurrentWindow();
 
@@ -315,6 +324,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   unlistenInit?.();
+  unlistenSettings?.();
 });
 </script>
 
