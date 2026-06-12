@@ -16,7 +16,8 @@ import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
 import type { FrameNode } from "./types/frame";
 import type { TrayTerminalEntry } from "./types/terminal";
 import { useI18n } from "vue-i18n";
-import { uiZoomFactor, cssPxToLogical } from "./utils/uiScale";
+import { cssPxToLogical } from "./utils/uiScale";
+import { useUiZoom, applyUiZoom } from "./composables/useUiZoom";
 import MacTrafficLights from "./components/MacTrafficLights.vue";
 import { isMac } from "./composables/usePlatform";
 
@@ -87,21 +88,25 @@ const showAutoApprovalPromptDialog = ref(false);
 // 現在ワークツリーの表示
 // ────────────────────────────────────────────────
 
-async function showWorktree(data: TrayWorktreeData) {
-  terminalEntries.clear();
-  terminalRefs.clear();
-
-  // ウィンドウサイズをサブウィンドウに合わせる
-  // isDetached=true: windowSize はサブウィンドウ全体のサイズ → フッターのみ加算
-  // isDetached=false: windowSize はメインウィンドウのフレーム領域 → ヘッダー + フッター加算
-  // windowSize は常に論理px (DIP)。offsetHeight は CSS px のためズーム換算してから加算
+// ウィンドウサイズをサブウィンドウに合わせる
+// isDetached=true: windowSize はサブウィンドウ全体のサイズ → フッターのみ加算
+// isDetached=false: windowSize はメインウィンドウのフレーム領域 → ヘッダー + フッター加算
+// windowSize は常に論理px (DIP)。offsetHeight は CSS px のため実適用ズームで換算してから加算
+async function applyWindowSize(data: TrayWorktreeData) {
   const win = getCurrentWindow();
-  const zoom = uiZoomFactor(settings.value);
+  const zoom = appliedZoom.value;
   const footerH = cssPxToLogical(footerRef.value?.offsetHeight ?? 0, zoom);
   const headerH = data.isDetached ? 0 : cssPxToLogical(headerRef.value?.offsetHeight ?? 0, zoom);
   const width = data.windowSize?.width ?? 900;
   const height = (data.windowSize?.height ?? 600) + footerH + headerH;
   await win.setSize(new LogicalSize(width, height));
+}
+
+async function showWorktree(data: TrayWorktreeData) {
+  terminalEntries.clear();
+  terminalRefs.clear();
+
+  await applyWindowSize(data);
 
   for (const t of data.terminals) {
     terminalEntries.set(t.id, { ...t });
@@ -270,6 +275,7 @@ async function onCancelAiJudging() {
 // ────────────────────────────────────────────────
 
 const { settings, loadSettings } = useSettings();
+const { appliedZoom } = useUiZoom();
 
 // TrayPopup のホットキーリスナー
 useHotkeyListener(() => {
@@ -301,6 +307,14 @@ onMounted(async () => {
   // トレイ表示中の uiScale / ターミナル設定変更に追従
   unlistenSettings = await listen("settings-changed", async () => {
     await loadSettings();
+    // main.ts のリスナーと順不同でも冪等なズーム適用で appliedZoom を最新化し、
+    // 表示中ワークツリーのウィンドウサイズを新ズームで再計算する
+    await applyUiZoom(settings.value);
+    const wt = currentWorktree.value;
+    if (initialized.value && wt) {
+      await nextTick();
+      await applyWindowSize(wt);
+    }
   });
 
   const appWindow = getCurrentWindow();

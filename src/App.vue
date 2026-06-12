@@ -48,7 +48,8 @@ import { useSubWindowEvents } from "./composables/useSubWindowEvents";
 import { useShutdownGuard } from "./composables/useShutdownGuard";
 import type { ArchiveRow } from "./types/archive";
 import { logDebug } from "./utils/log";
-import { uiZoomFactor, cssPxToLogical } from "./utils/uiScale";
+import { cssPxToLogical } from "./utils/uiScale";
+import { useUiZoom } from "./composables/useUiZoom";
 import { consumeMaxBlockedMs, startEventLoopMonitor } from "./utils/eventLoopMonitor";
 import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -68,6 +69,7 @@ const { checkForUpdate, downloadAndInstall } = useUpdater();
 type ViewMode = "home" | "settings" | "terminal";
 
 const { settings, loadSettings, scheduleSave } = useSettings();
+const { appliedZoom } = useUiZoom();
 const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, reorderWorktree, saveWorktreeOrder, restoreWorktreeOrder, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, registerTerminalSession, closeAllSubWindows } = useSubWindows();
 const { autoApprovalPromptMap, lastJudgedCommandMap, showAutoApprovalPromptDialog, autoApprovalPromptTargetId, restoreFromSettings: restoreAutoApprovalPrompts, onClickAutoApproval, onSaveAutoApprovalPrompt } = useAutoApprovalPrompt(settings, scheduleSave, isDetached);
@@ -901,8 +903,8 @@ async function onTrayButtonClick() {
       let mainWindowSize: { width: number; height: number } | undefined;
       // sizeFromContainer: 親コンテナからのフォールバックサイズを使ったかどうか
       let sizeFromContainer = false;
-      // gBCR は CSS px。windowSize は常に論理px (DIP) で渡す契約のためズーム換算する
-      const zoom = uiZoomFactor(settings.value);
+      // gBCR は CSS px。windowSize は常に論理px (DIP) で渡す契約のため実適用ズームで換算する
+      const zoom = appliedZoom.value;
       if (rect && rect.width > 0 && rect.height > 0) {
         mainWindowSize = { width: cssPxToLogical(rect.width, zoom), height: cssPxToLogical(rect.height, zoom) };
       } else {

@@ -2,7 +2,6 @@
 import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
-import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { open, ask, message } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useSettings } from "../composables/useSettings";
@@ -14,7 +13,7 @@ import { useI18n } from "vue-i18n";
 import { setLocale } from "../i18n";
 import { useToast } from "primevue/usetoast";
 import { playNotificationSound } from "../utils/notificationSound";
-import { uiZoomFactor } from "../utils/uiScale";
+import { applyUiZoom } from "../composables/useUiZoom";
 import type { NotificationKind } from "../composables/useNotifications";
 import SettingsHotkeySection from "./settings/SettingsHotkeySection.vue";
 import SettingsRepositoriesSection from "./settings/SettingsRepositoriesSection.vue";
@@ -38,11 +37,7 @@ async function onUiScaleChange(value: string) {
   scheduleSave();
   // scheduleSave は 500ms デバウンスのため、自ウィンドウは即時反映する
   // (他ウィンドウは settings-changed 経由で main.ts のリスナーが追従)
-  try {
-    await getCurrentWebview().setZoom(uiZoomFactor(settings.value));
-  } catch {
-    // setZoom 失敗時は保存後の settings-changed 再適用に任せる
-  }
+  await applyUiZoom(settings.value);
 }
 
 async function onCheckUpdate() {

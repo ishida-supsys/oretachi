@@ -18,7 +18,7 @@ import { matchesHotkey } from "../composables/useHotkeys";
 import { useTerminalSearch } from "../composables/useTerminalSearch";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useI18n } from "vue-i18n";
-import { uiZoomFactor } from "../utils/uiScale";
+import { useUiZoom } from "../composables/useUiZoom";
 import { logDebug } from "../utils/log";
 
 const { t } = useI18n();
@@ -65,9 +65,11 @@ const batcher = usePtyWriteBatcher(() => terminal);
 const { settings } = useSettings();
 
 // UIスケール (webview ズーム) 下でもターミナルの物理グリフサイズを不変に保つため、
-// xterm には設定値 / ズーム倍率 を渡す (CSS px × ズーム = 物理相当サイズ)
+// xterm には設定値 / ズーム倍率 を渡す (CSS px × ズーム = 物理相当サイズ)。
+// setZoom 失敗時に過縮小しないよう、設定値でなく実適用ズームで割る
+const { appliedZoom } = useUiZoom();
 const effectiveFontSize = computed(
-  () => Math.round((settings.value.terminal.fontSize / uiZoomFactor(settings.value)) * 100) / 100
+  () => Math.round((settings.value.terminal.fontSize / appliedZoom.value) * 100) / 100
 );
 
 async function handlePaste() {
