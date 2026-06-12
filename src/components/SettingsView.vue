@@ -13,6 +13,7 @@ import { useI18n } from "vue-i18n";
 import { setLocale } from "../i18n";
 import { useToast } from "primevue/usetoast";
 import { playNotificationSound } from "../utils/notificationSound";
+import { applyUiZoom } from "../composables/useUiZoom";
 import type { NotificationKind } from "../composables/useNotifications";
 import SettingsHotkeySection from "./settings/SettingsHotkeySection.vue";
 import SettingsRepositoriesSection from "./settings/SettingsRepositoriesSection.vue";
@@ -28,6 +29,15 @@ const appVersion = ref("");
 
 async function onDebugModeChange(enabled: boolean) {
   await invoke("set_debug_mode", { enabled });
+}
+
+async function onUiScaleChange(value: string) {
+  if (!settings.value.appearance) settings.value.appearance = {};
+  settings.value.appearance.uiScale = value === "large" || value === "xlarge" ? value : "normal";
+  scheduleSave();
+  // scheduleSave は 500ms デバウンスのため、自ウィンドウは即時反映する
+  // (他ウィンドウは settings-changed 経由で main.ts のリスナーが追従)
+  await applyUiZoom(settings.value);
 }
 
 async function onCheckUpdate() {
@@ -669,6 +679,18 @@ function getSoundLabel(sound: string | null | undefined): string {
           <option v-for="theme in gamingBorderThemes" :key="theme.value" :value="theme.value">{{ t(theme.labelKey) }}</option>
         </select>
       </div>
+      <div class="row-input mt-8">
+        <label class="row-label">{{ t('appearance.uiScale') }}</label>
+        <select
+          class="text-input select-input"
+          :value="settings.appearance?.uiScale ?? 'normal'"
+          @change="(e) => onUiScaleChange((e.target as HTMLSelectElement).value)"
+        >
+          <option value="normal">{{ t('appearance.uiScaleNormal') }}</option>
+          <option value="large">{{ t('appearance.uiScaleLarge') }}</option>
+          <option value="xlarge">{{ t('appearance.uiScaleXLarge') }}</option>
+        </select>
+      </div>
     </div>
 
     <!-- ターミナル猫 -->
@@ -1205,7 +1227,11 @@ function getSoundLabel(sound: string | null | undefined): string {
       },
       "restartNote": "Enabling/disabling the effect requires restarting the app.",
       "opacity": "Opacity",
-      "color": "Tint color"
+      "color": "Tint color",
+      "uiScale": "UI scale",
+      "uiScaleNormal": "Normal",
+      "uiScaleLarge": "Large",
+      "uiScaleXLarge": "Extra Large"
     },
     "notificationSound": {
       "label": "Notification Sound",
@@ -1308,7 +1334,11 @@ function getSoundLabel(sound: string | null | undefined): string {
       },
       "restartNote": "エフェクトの有効/無効はアプリ再起動後に反映されます。",
       "opacity": "不透明度",
-      "color": "背景色"
+      "color": "背景色",
+      "uiScale": "UIスケール",
+      "uiScaleNormal": "通常",
+      "uiScaleLarge": "大",
+      "uiScaleXLarge": "特大"
     },
     "notificationSound": {
       "label": "通知音",

@@ -84,6 +84,7 @@ export interface AppearanceSettings {
   acrylicColor?: string;   // "#RRGGBB", デフォルト: "#121212"
   enableGamingBorder?: boolean; // デフォルト: false
   gamingBorderTheme?: string;   // デフォルト: 'gaming'
+  uiScale?: 'normal' | 'large' | 'xlarge'; // デフォルト: 'normal'
 }
 
 export interface NotificationSoundSettings {

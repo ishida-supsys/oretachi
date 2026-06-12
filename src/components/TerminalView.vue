@@ -6,7 +6,7 @@ export let terminalActiveCount = 0;
 </script>
 
 <script setup lang="ts">
-import { ref, watch, onMounted, onUnmounted, nextTick } from "vue";
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { WebglAddon } from "@xterm/addon-webgl";
@@ -18,6 +18,7 @@ import { matchesHotkey } from "../composables/useHotkeys";
 import { useTerminalSearch } from "../composables/useTerminalSearch";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useI18n } from "vue-i18n";
+import { useUiZoom } from "../composables/useUiZoom";
 import { logDebug } from "../utils/log";
 
 const { t } = useI18n();
@@ -63,6 +64,14 @@ const { sessionId, spawn, attachToSession, write, resize, kill, isRunning, detac
 const batcher = usePtyWriteBatcher(() => terminal);
 const { settings } = useSettings();
 
+// UIスケール (webview ズーム) 下でもターミナルの物理グリフサイズを不変に保つため、
+// xterm には設定値 / ズーム倍率 を渡す (CSS px × ズーム = 物理相当サイズ)。
+// setZoom 失敗時に過縮小しないよう、設定値でなく実適用ズームで割る
+const { appliedZoom } = useUiZoom();
+const effectiveFontSize = computed(
+  () => Math.round((settings.value.terminal.fontSize / appliedZoom.value) * 100) / 100
+);
+
 async function handlePaste() {
   try {
     const text = await readText();
@@ -94,7 +103,7 @@ function initTerminal() {
     ...(props.initialCols != null && { cols: props.initialCols }),
     ...(props.initialRows != null && { rows: props.initialRows }),
     fontFamily: '"Cascadia Code", Consolas, Menlo, "SF Mono", Monaco, monospace',
-    fontSize: settings.value.terminal.fontSize,
+    fontSize: effectiveFontSize.value,
     theme: {
       background: isTransparent ? "#1e1e2e00" : "#1e1e2e",
       foreground: "#cdd6f4",
@@ -358,7 +367,7 @@ function waitForReady(): Promise<void> {
 }
 
 watch(
-  () => settings.value.terminal.fontSize,
+  effectiveFontSize,
   (newSize) => {
     if (terminal) {
       terminal.options.fontSize = newSize;

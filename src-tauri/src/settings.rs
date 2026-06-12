@@ -231,11 +231,13 @@ pub struct AppearanceSettings {
     pub enable_gaming_border: bool,
     #[serde(default, rename = "gamingBorderTheme")]
     pub gaming_border_theme: Option<String>,
+    #[serde(default, rename = "uiScale")]
+    pub ui_scale: Option<String>,
 }
 
 impl Default for AppearanceSettings {
     fn default() -> Self {
-        AppearanceSettings { enable_acrylic: true, acrylic_opacity: None, acrylic_color: None, enable_gaming_border: false, gaming_border_theme: None }
+        AppearanceSettings { enable_acrylic: true, acrylic_opacity: None, acrylic_color: None, enable_gaming_border: false, gaming_border_theme: None, ui_scale: None }
     }
 }
 

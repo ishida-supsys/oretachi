@@ -17,7 +17,7 @@ export interface TrayWorktreeData {
   isDetached: boolean;
   layout: FrameNode | null;
   terminals: TrayTerminalData[];
-  windowSize?: { width: number; height: number };
+  windowSize?: { width: number; height: number }; // 論理px (DIP)。CSS px 計測値はプロデューサ側でズーム換算済み
   branchName: string;
   repositoryName: string;
   hotkeyChar?: string;
