@@ -16,6 +16,7 @@ import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import HotkeyCharDialog from "./components/HotkeyCharDialog.vue";
 import AutoApprovalPromptDialog from "./components/AutoApprovalPromptDialog.vue";
 import TrayButton from "./components/TrayButton.vue";
+import FirstRunWizard from "./components/wizard/FirstRunWizard.vue";
 import { message } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { useIdeSelect } from "./composables/useIdeSelect";
@@ -68,7 +69,7 @@ const { checkForUpdate, downloadAndInstall } = useUpdater();
 
 type ViewMode = "home" | "settings" | "terminal";
 
-const { settings, loadSettings, scheduleSave } = useSettings();
+const { settings, loadSettings, scheduleSave, flushSave } = useSettings();
 const { appliedZoom } = useUiZoom();
 const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, reorderWorktree, saveWorktreeOrder, restoreWorktreeOrder, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, registerTerminalSession, closeAllSubWindows } = useSubWindows();
@@ -982,6 +983,24 @@ function onHotkeyCharClear(worktreeId: string) {
   showHotkeyCharDialog.value = false;
 }
 
+// ─── 初回起動ウィザード ──────────────────────────────────────────────────────
+
+const showFirstRunWizard = ref(false);
+// ウィザード表示中に保留したアップデート確認を完了後に実行する
+let pendingUpdateCheck: (() => void) | null = null;
+
+async function onWizardFinish() {
+  showFirstRunWizard.value = false;
+  // スキップ含め完了扱いにして次回以降は表示しない
+  settings.value.wizardCompleted = true;
+  await flushSave();
+  if (pendingUpdateCheck) {
+    const run = pendingUpdateCheck;
+    pendingUpdateCheck = null;
+    run();
+  }
+}
+
 // ─── composable instantiation ────────────────────────────────────────────────
 
 const hotkeys = useAppHotkeys({
@@ -998,11 +1017,17 @@ const hotkeys = useAppHotkeys({
   showAddTaskDialog,
   goHome,
   onTrayButtonClick,
+  suppressed: showFirstRunWizard,
 });
 
 
 onMounted(async () => {
   await loadSettings();
+
+  // 初回起動ウィザード (ORETACHI_FORCE_WIZARD=true で毎回表示)
+  const forceWizard = await invoke<boolean>("get_force_wizard").catch(() => false);
+  showFirstRunWizard.value = settings.value.wizardCompleted === false || forceWizard;
+
   await getCurrentWindow().setAlwaysOnTop(settings.value.alwaysOnTop);
   loadWorktreesFromSettings();
   restoreAutoApprovalPrompts();
@@ -1412,8 +1437,9 @@ onMounted(async () => {
     }
   });
 
-  // 起動後にアップデートを確認
-  setTimeout(async () => {
+  // 起動後にアップデートを確認 (ウィザード表示中はネイティブダイアログが
+  // 割り込まないよう完了まで保留する)
+  const runUpdateCheck = async () => {
     const update = await checkForUpdate();
     if (update) {
       const yes = await ask(
@@ -1423,6 +1449,13 @@ onMounted(async () => {
       if (yes) {
         await downloadAndInstall(update);
       }
+    }
+  };
+  setTimeout(() => {
+    if (showFirstRunWizard.value) {
+      pendingUpdateCheck = runUpdateCheck;
+    } else {
+      runUpdateCheck();
     }
   }, 3000);
 
@@ -1740,6 +1773,9 @@ onMounted(async () => {
       :total-count="getTotalNotificationCount()"
       @click="onTrayButtonClick"
     />
+
+    <!-- 初回起動ウィザード -->
+    <FirstRunWizard v-if="showFirstRunWizard" @finish="onWizardFinish" />
 
     <!-- タスク進捗トースト -->
     <Toast position="bottom-right">

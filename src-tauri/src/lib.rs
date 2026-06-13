@@ -727,6 +727,16 @@ fn get_debug_mode() -> bool {
     log::max_level() >= log::LevelFilter::Debug
 }
 
+/// 動作確認用: 初回起動ウィザードを毎回表示するか (.env の ORETACHI_FORCE_WIZARD)。
+/// dotenvy は run() 冒頭でカレントディレクトリの .env を読むだけのため、
+/// インストール済みアプリでは実質常に false になる。
+#[tauri::command]
+fn get_force_wizard() -> bool {
+    std::env::var("ORETACHI_FORCE_WIZARD")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Windows: インストーラ起動由来の RedirectionGuard 緩和策 (Enforce=1) を検出したら
@@ -921,6 +931,7 @@ pub fn run() {
             delete_archive,
             set_debug_mode,
             get_debug_mode,
+            get_force_wizard,
         ])
         .setup(move |app| {
             // env var が false の場合は DB初期化などの起動ログを含め debug! を抑制する。

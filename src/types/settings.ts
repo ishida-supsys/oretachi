@@ -118,4 +118,5 @@ export interface AppSettings {
   aiTimeoutSecs?: number; // AIタイムアウト秒数 (デフォルト: 120)
   debugMode?: boolean;
   useOretachiTerminalForBackground?: boolean; // AI からの background コマンドを oretachi ターミナルで起動するか (デフォルト: true)
+  wizardCompleted?: boolean; // 初回起動ウィザード完了フラグ (Rust 側 init() でシーディング)
 }

@@ -9,6 +9,7 @@ import { useUpdater } from "../composables/useUpdater";
 import ColorPicker from "primevue/colorpicker";
 import Password from "primevue/password";
 import type { AiAgentKind } from "../types/settings";
+import { AI_AGENT_LABELS, ALL_AGENT_KINDS, type AiAgentInfo } from "../constants/aiAgents";
 import { useI18n } from "vue-i18n";
 import { setLocale } from "../i18n";
 import { useToast } from "primevue/usetoast";
@@ -54,21 +55,6 @@ async function onCheckUpdate() {
 }
 
 // ─── AIエージェント ───────────────────────────────────────────────────────────
-
-interface AiAgentInfo {
-  kind: AiAgentKind;
-  name: string;
-  command: string;
-}
-
-const AI_AGENT_LABELS: Record<AiAgentKind, string> = {
-  claudeCode: "Claude Code",
-  geminiCli: "Gemini CLI",
-  codexCli: "Codex CLI",
-  clineCli: "Cline CLI",
-};
-
-const ALL_AGENT_KINDS: AiAgentKind[] = ["claudeCode", "geminiCli", "codexCli", "clineCli"];
 
 const detectedAgents = ref<AiAgentInfo[]>([]);
 
