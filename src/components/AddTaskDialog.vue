@@ -61,6 +61,8 @@ function onKeydown(e: KeyboardEvent) {
   }
   if (e.key === "Escape") {
     e.preventDefault();
+    // 背後のオーバーレイ (ウィザード等) の Esc ハンドラと二重発火しないようにする
+    e.stopPropagation();
     if (showConfirm.value) {
       dismissConfirm();
     } else {

@@ -25,7 +25,12 @@ async function addRepository() {
   }
 }
 
+function hasWorktrees(repoId: string): boolean {
+  return settings.value.worktrees.some((w) => w.repositoryId === repoId);
+}
+
 function removeRepository(id: string) {
+  if (hasWorktrees(id)) return;
   settings.value.repositories = settings.value.repositories.filter((r) => r.id !== id);
   scheduleSave();
 }
@@ -59,7 +64,12 @@ function removeRepository(id: string) {
       <div v-for="repo in settings.repositories" :key="repo.id" class="repo-item">
         <span class="repo-name">{{ repo.name }}</span>
         <span class="repo-path">{{ repo.path }}</span>
-        <button class="btn-remove" @click="removeRepository(repo.id)">&times;</button>
+        <button
+          class="btn-remove"
+          :disabled="hasWorktrees(repo.id)"
+          :title="hasWorktrees(repo.id) ? t('hasWorktrees') : undefined"
+          @click="removeRepository(repo.id)"
+        >&times;</button>
       </div>
     </div>
 
@@ -193,8 +203,13 @@ function removeRepository(id: string) {
   line-height: 1;
 }
 
-.btn-remove:hover {
+.btn-remove:hover:not(:disabled) {
   color: #f38ba8;
+}
+
+.btn-remove:disabled {
+  color: #313244;
+  cursor: not-allowed;
 }
 
 .empty-state {
@@ -223,6 +238,7 @@ function removeRepository(id: string) {
     "repositoriesLabel": "Repositories",
     "addRepository": "+ Add Repository",
     "reposEmpty": "No repositories registered",
+    "hasWorktrees": "Cannot delete: worktrees exist",
     "changeLater": "You can proceed with these empty. Detailed per-repository settings (exec script etc.) are available later in Settings → Repositories.",
     "error": {
       "notARepo": "The selected folder is not a git repository.",
@@ -237,6 +253,7 @@ function removeRepository(id: string) {
     "repositoriesLabel": "リポジトリ",
     "addRepository": "＋ リポジトリを追加",
     "reposEmpty": "リポジトリが登録されていません",
+    "hasWorktrees": "ワークツリーが存在するため削除できません",
     "changeLater": "未設定でも次へ進めます。実行スクリプト等の詳細設定は 設定 → リポジトリ一覧 で後から構成できます。",
     "error": {
       "notARepo": "選択したフォルダは git リポジトリではありません。",

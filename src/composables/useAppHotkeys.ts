@@ -24,6 +24,8 @@ interface UseAppHotkeysDeps {
   showAddTaskDialog: Ref<boolean>;
   goHome: () => void;
   onTrayButtonClick: () => Promise<void>;
+  /** true の間はアプリ内ホットキーを無効化する (初回起動ウィザード表示中など) */
+  suppressed?: Ref<boolean>;
 }
 
 export function useAppHotkeys(deps: UseAppHotkeysDeps) {
@@ -68,6 +70,7 @@ export function useAppHotkeys(deps: UseAppHotkeysDeps) {
 
   // Alt+[char] ワークツリーフォーカス（setup時登録）
   useAltCharKeyListener((char, event) => {
+    if (deps.suppressed?.value) return;
     const homeTabBinding = deps.settings.value.hotkeys?.homeTab;
     if (homeTabBinding) {
       const { alt, key } = homeTabBinding;
@@ -85,6 +88,7 @@ export function useAppHotkeys(deps: UseAppHotkeysDeps) {
 
   // ホットキーリスナー登録（setup時）
   useHotkeyListener(() => {
+    if (deps.suppressed?.value) return [];
     const hk = deps.settings.value.hotkeys;
     if (!hk) return [];
 

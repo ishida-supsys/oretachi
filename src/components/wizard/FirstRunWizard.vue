@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed } from "vue";
 import { useI18n } from "vue-i18n";
 import WizardStepWelcome from "./WizardStepWelcome.vue";
 import WizardStepLanguageAgent from "./WizardStepLanguageAgent.vue";
@@ -30,20 +30,11 @@ function back() {
   if (currentStep.value > 1) currentStep.value--;
 }
 
-// スキップも完了扱い (wizardCompleted=true で次回非表示)
+// スキップも完了扱い (wizardCompleted=true で次回非表示)。
+// Esc での誤スキップ (IME キャンセル等) を避けるためキーボード操作は設けない
 function skip() {
   emit("finish");
 }
-
-function onKeydown(e: KeyboardEvent) {
-  if (e.key === "Escape") {
-    e.preventDefault();
-    skip();
-  }
-}
-
-onMounted(() => window.addEventListener("keydown", onKeydown));
-onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 </script>
 
 <template>
@@ -239,7 +230,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
     "stepTitle3": "Workspace Setup",
     "stepTitle4": "Home Tab",
     "stepTitle5": "Tray Popup",
-    "skip": "Skip (Esc)",
+    "skip": "Skip",
     "back": "← Back",
     "next": "Next →",
     "start": "Get Started →",
@@ -251,7 +242,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
     "stepTitle3": "ワークスペースの設定",
     "stepTitle4": "ホームタブ",
     "stepTitle5": "トレイポップアップ",
-    "skip": "スキップ (Esc)",
+    "skip": "スキップ",
     "back": "← 戻る",
     "next": "次へ →",
     "start": "はじめる →",

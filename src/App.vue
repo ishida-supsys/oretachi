@@ -981,12 +981,19 @@ function onHotkeyCharClear(worktreeId: string) {
 // ─── 初回起動ウィザード ──────────────────────────────────────────────────────
 
 const showFirstRunWizard = ref(false);
+// ウィザード表示中に保留したアップデート確認を完了後に実行する
+let pendingUpdateCheck: (() => void) | null = null;
 
 async function onWizardFinish() {
   showFirstRunWizard.value = false;
   // スキップ含め完了扱いにして次回以降は表示しない
   settings.value.wizardCompleted = true;
   await flushSave();
+  if (pendingUpdateCheck) {
+    const run = pendingUpdateCheck;
+    pendingUpdateCheck = null;
+    run();
+  }
 }
 
 // ─── composable instantiation ────────────────────────────────────────────────
@@ -1005,6 +1012,7 @@ const hotkeys = useAppHotkeys({
   showAddTaskDialog,
   goHome,
   onTrayButtonClick,
+  suppressed: showFirstRunWizard,
 });
 
 
@@ -1424,8 +1432,9 @@ onMounted(async () => {
     }
   });
 
-  // 起動後にアップデートを確認
-  setTimeout(async () => {
+  // 起動後にアップデートを確認 (ウィザード表示中はネイティブダイアログが
+  // 割り込まないよう完了まで保留する)
+  const runUpdateCheck = async () => {
     const update = await checkForUpdate();
     if (update) {
       const yes = await ask(
@@ -1435,6 +1444,13 @@ onMounted(async () => {
       if (yes) {
         await downloadAndInstall(update);
       }
+    }
+  };
+  setTimeout(() => {
+    if (showFirstRunWizard.value) {
+      pendingUpdateCheck = runUpdateCheck;
+    } else {
+      runUpdateCheck();
     }
   }, 3000);
 
