@@ -727,9 +727,10 @@ fn get_debug_mode() -> bool {
     log::max_level() >= log::LevelFilter::Debug
 }
 
-/// 動作確認用: 初回起動ウィザードを毎回表示するか (.env の ORETACHI_FORCE_WIZARD)。
-/// dotenvy は run() 冒頭でカレントディレクトリの .env を読むだけのため、
-/// インストール済みアプリでは実質常に false になる。
+/// 動作確認用: 初回起動ウィザードを毎回表示するか (ORETACHI_FORCE_WIZARD)。
+/// run() 冒頭で .env* 一式 (Vite 規約準拠、.env.development.local が最優先) を読むため、
+/// dev では .env.development.local 等で true にすると毎回表示される。
+/// インストール済みアプリでは .env* が存在しないため実質常に false になる。
 #[tauri::command]
 fn get_force_wizard() -> bool {
     std::env::var("ORETACHI_FORCE_WIZARD")
@@ -756,11 +757,16 @@ pub fn run() {
         }
     }
 
-    // .env 読み込み（Vite の .env 規約に準拠）
-    // builder チェーンより前に読み込む必要があるためここで実施
-    let _ = dotenvy::from_filename(".env");
+    // .env 読み込み（Vite の .env 規約に準拠: 優先度 .{mode}.local > .{mode} > .local > base）
+    // builder チェーンより前に読み込む必要があるためここで実施。
+    // 読み込み順は「低優先 → 高優先」で、後勝ち（override）になるよう並べる。
+    // from_filename(_override) は cwd とその親を探索するため、cwd が src-tauri でも
+    // リポジトリルートの .env* 一式を解決する。
+    let _ = dotenvy::from_filename(".env"); // base（既存のシェル環境変数は上書きしない）
+    let _ = dotenvy::from_filename_override(".env.local"); // 全モード共通のローカル上書き
     if cfg!(debug_assertions) {
         let _ = dotenvy::from_filename_override(".env.development");
+        let _ = dotenvy::from_filename_override(".env.development.local");
     }
 
     // ORETACHI_DEBUG 環境変数でデバッグモードを判定（起動時点で確定）
