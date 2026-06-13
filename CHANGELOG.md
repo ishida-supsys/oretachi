@@ -6,6 +6,16 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-06-13
+
+### Added
+- 初回起動ウィザードを追加。5ステップ (ウェルカム → 言語・AIエージェント選択 → ワークスペース設定 → ホームタブ説明 → トレイポップアップ説明) のオンボーディングを実装。既存ユーザーはアップグレード時に表示されない (#74)
+- UIスケール設定 (通常/大/特大) を追加。webview ズームでターミナル内テキスト以外の全UIを 1.2倍/1.44倍に拡大可能。ターミナルは xterm fontSize を補正し物理グリフサイズを維持 (#73)
+
+### Fixed
+- ウィザード表示中のアプリ内ホットキー無効化、Esc スキップ廃止、アップデート確認の保留など、ウィザードのバグレビュー指摘を修正
+- UIスケールの実適用ズームを共有し、setZoom 失敗時のターミナル縮小やトレイ過大サイズを防止。トレイポップアップ表示中の uiScale 変更にも追従
+
 ## [0.21.5] - 2026-06-11
 
 ### Fixed
@@ -403,7 +413,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.21.5...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.22.0...HEAD
+[0.22.0]: https://github.com/ishida-supsys/oretachi/compare/0.21.5...0.22.0
 [0.21.5]: https://github.com/ishida-supsys/oretachi/compare/0.21.4...0.21.5
 [0.21.4]: https://github.com/ishida-supsys/oretachi/compare/0.21.3...0.21.4
 [0.21.3]: https://github.com/ishida-supsys/oretachi/compare/0.21.2...0.21.3
