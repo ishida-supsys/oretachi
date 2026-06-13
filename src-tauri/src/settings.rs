@@ -345,6 +345,10 @@ pub struct AppSettings {
     pub debug_mode: bool,
     #[serde(default = "default_use_oretachi_terminal_for_background", rename = "useOretachiTerminalForBackground")]
     pub use_oretachi_terminal_for_background: bool,
+    /// 初回起動ウィザード完了フラグ。None = 旧設定ファイル or 未シーディング
+    /// (init() で既存ファイルなら Some(true)、新規なら Some(false) にシーディングする)
+    #[serde(default, rename = "wizardCompleted")]
+    pub wizard_completed: Option<bool>,
 }
 
 impl AppSettings {
@@ -380,6 +384,7 @@ impl Default for AppSettings {
             ai_timeout_secs: default_ai_timeout_secs(),
             debug_mode: false,
             use_oretachi_terminal_for_background: default_use_oretachi_terminal_for_background(),
+            wizard_completed: None,
         }
     }
 }
@@ -410,7 +415,8 @@ impl SettingsManager {
             .expect("app_data_dir not available")
             .join("settings.json");
 
-        let mut settings = if path.exists() {
+        let file_existed = path.exists();
+        let mut settings = if file_existed {
             match std::fs::read_to_string(&path) {
                 Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
                 Err(_) => AppSettings::default(),
@@ -419,9 +425,23 @@ impl SettingsManager {
             AppSettings::default()
         };
 
-        // APIキーが未設定なら自動生成してディスクに保存
+        let mut needs_write = false;
+
+        // APIキーが未設定なら自動生成
         if settings.mcp_api_key.is_empty() {
             settings.mcp_api_key = generate_api_key();
+            needs_write = true;
+        }
+
+        // 初回起動ウィザードフラグのシーディング:
+        // 既存ファイルあり (= アップグレード) → 完了扱いでウィザード非表示、
+        // ファイルなし (= 真の初回起動) → 未完了でウィザード表示
+        if settings.wizard_completed.is_none() {
+            settings.wizard_completed = Some(file_existed);
+            needs_write = true;
+        }
+
+        if needs_write {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
