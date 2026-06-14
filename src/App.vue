@@ -869,6 +869,7 @@ async function onTrayButtonClick() {
         hotkeyChar: hotkeyChars.value.get(worktreeId),
         autoApproval: autoApprovalMap.get(worktreeId) ?? false,
         aiJudging: aiJudgingWorktrees.has(worktreeId),
+        description: worktree.description,
       });
     } else {
       // メインウィンドウのターミナル情報を収集
@@ -933,6 +934,7 @@ async function onTrayButtonClick() {
         aiJudging: aiJudgingWorktrees.has(worktreeId),
         autoApprovalPrompt: autoApprovalPromptMap.get(worktreeId) ?? '',
         lastJudgedCommand: lastJudgedCommandMap.get(worktreeId) ?? '',
+        description: worktree.description,
       });
     }
   }

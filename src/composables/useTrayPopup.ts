@@ -25,6 +25,7 @@ export interface TrayWorktreeData {
   aiJudging: boolean;
   autoApprovalPrompt?: string;
   lastJudgedCommand?: string;
+  description?: string; // ホーム画面と同じ AI 生成説明。トレイの情報バーに表示
 }
 
 let trayWindow: WebviewWindow | null = null;
