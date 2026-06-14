@@ -13,6 +13,7 @@ export interface Repository {
   packageManagerArgs?: string; // install コマンドに追加する引数 (例: --config.node-linker=hoisted)
   notificationHooks?: NotificationHookEntry[]; // Claude Code通知フック設定
   pullBeforeAdd?: boolean; // ワークツリー追加前に git pull を実行するか
+  branchNamePattern?: string; // タスク追加時のブランチ名パターン (例: "{feature|fix}/<task>"、未記入なら "worktree/<task>")
 }
 
 export interface WorktreeEntry {

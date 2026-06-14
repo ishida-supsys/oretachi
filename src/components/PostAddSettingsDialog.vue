@@ -11,10 +11,11 @@ const props = defineProps<{
   currentPackageManagerArgs?: string;
   currentNotificationHooks?: NotificationHookEntry[];
   currentPullBeforeAdd?: boolean;
+  currentBranchNamePattern?: string;
 }>();
 
 const emit = defineEmits<{
-  confirm: [targets: string[], packageManager: string | undefined, packageManagerArgs: string | undefined, notificationHooks: NotificationHookEntry[], pullBeforeAdd: boolean];
+  confirm: [targets: string[], packageManager: string | undefined, packageManagerArgs: string | undefined, notificationHooks: NotificationHookEntry[], pullBeforeAdd: boolean, branchNamePattern: string | undefined];
   cancel: [];
 }>();
 
@@ -27,6 +28,7 @@ const detectedPMs = ref<string[]>([]);
 const selectedPM = ref<string | undefined>(props.currentPackageManager);
 const pmArgs = ref<string>(props.currentPackageManagerArgs ?? "");
 const pullBeforeAdd = ref<boolean>(props.currentPullBeforeAdd ?? false);
+const branchNamePattern = ref<string>(props.currentBranchNamePattern ?? "");
 
 const ALL_PMS = ["npm", "pnpm", "yarn", "bun"];
 
@@ -99,7 +101,7 @@ function onConfirm() {
       hooks.push({ event: ev as NotificationHookEntry["event"], kind: state.kind as NotificationHookEntry["kind"] });
     }
   }
-  emit("confirm", Array.from(selected.value), selectedPM.value || undefined, pmArgs.value.trim() || undefined, hooks, pullBeforeAdd.value);
+  emit("confirm", Array.from(selected.value), selectedPM.value || undefined, pmArgs.value.trim() || undefined, hooks, pullBeforeAdd.value, branchNamePattern.value.trim() || undefined);
 }
 </script>
 
@@ -115,6 +117,16 @@ function onConfirm() {
           <input type="checkbox" v-model="pullBeforeAdd" />
           <span class="entry-text">{{ t("addOptions.pullBeforeAdd") }}</span>
         </label>
+        <div class="branch-pattern-row">
+          <span class="branch-pattern-label">{{ t("addOptions.branchPatternLabel") }}</span>
+          <input
+            class="branch-pattern-input"
+            type="text"
+            v-model="branchNamePattern"
+            :placeholder="t('addOptions.branchPatternPlaceholder')"
+          />
+          <p class="section-description">{{ t("addOptions.branchPatternHint") }}</p>
+        </div>
       </div>
 
       <!-- パッケージマネージャーセクション -->
@@ -326,6 +338,33 @@ function onConfirm() {
   border-color: #cba6f7;
 }
 
+.branch-pattern-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.branch-pattern-label {
+  font-size: 11px;
+  color: #6c7086;
+}
+
+.branch-pattern-input {
+  background: #313244;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: #cdd6f4;
+  outline: none;
+  font-family: monospace;
+}
+
+.branch-pattern-input:focus {
+  border-color: #cba6f7;
+}
+
 .list-header {
   display: flex;
   gap: 8px;
@@ -493,7 +532,10 @@ function onConfirm() {
     "title": "Worktree settings",
     "addOptions": {
       "sectionLabel": "Add options",
-      "pullBeforeAdd": "Run git pull (or fetch) before adding worktree"
+      "pullBeforeAdd": "Run git pull (or fetch) before adding worktree",
+      "branchPatternLabel": "Branch name pattern",
+      "branchPatternPlaceholder": "worktree/<task>",
+      "branchPatternHint": "Pattern used when adding a task. <task> is replaced with a descriptive name; {a|b} lets the AI pick the best fit (e.g. {feature|fix}/<task>). Leave empty for worktree/<task>."
     },
     "pkgManager": {
       "sectionLabel": "Package install",
@@ -522,7 +564,10 @@ function onConfirm() {
     "title": "追加設定",
     "addOptions": {
       "sectionLabel": "追加オプション",
-      "pullBeforeAdd": "ワークツリー追加前に git pull / fetch を実行する"
+      "pullBeforeAdd": "ワークツリー追加前に git pull / fetch を実行する",
+      "branchPatternLabel": "ブランチ名パターン",
+      "branchPatternPlaceholder": "worktree/<task>",
+      "branchPatternHint": "タスク追加時に使うブランチ名パターン。<task> は説明的な名前に置換され、{a|b} は AI がタスク内容に応じて最適な方を選びます（例: {feature|fix}/<task>）。未記入なら worktree/<task> になります。"
     },
     "pkgManager": {
       "sectionLabel": "パッケージインストール",

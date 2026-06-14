@@ -13,6 +13,7 @@ export function usePostAddSettings() {
   const copyDialogCurrentPMArgs = ref<string | undefined>(undefined);
   const copyDialogCurrentHooks = ref<NotificationHookEntry[]>([]);
   const copyDialogCurrentPullBeforeAdd = ref<boolean>(false);
+  const copyDialogCurrentBranchNamePattern = ref<string | undefined>(undefined);
 
   function openCopyDialog(repoId: string) {
     const repo = settings.value.repositories.find((r) => r.id === repoId);
@@ -24,6 +25,7 @@ export function usePostAddSettings() {
     copyDialogCurrentPMArgs.value = repo.packageManagerArgs;
     copyDialogCurrentHooks.value = repo.notificationHooks ?? [];
     copyDialogCurrentPullBeforeAdd.value = repo.pullBeforeAdd ?? false;
+    copyDialogCurrentBranchNamePattern.value = repo.branchNamePattern;
     showCopyDialog.value = true;
   }
 
@@ -33,6 +35,7 @@ export function usePostAddSettings() {
     packageManagerArgs: string | undefined,
     notificationHooks: NotificationHookEntry[],
     pullBeforeAdd: boolean,
+    branchNamePattern: string | undefined,
   ) {
     const repo = settings.value.repositories.find((r) => r.id === copyDialogRepoId.value);
     if (!repo) return;
@@ -41,6 +44,7 @@ export function usePostAddSettings() {
     repo.packageManagerArgs = packageManagerArgs || undefined;
     repo.notificationHooks = notificationHooks.length > 0 ? notificationHooks : undefined;
     repo.pullBeforeAdd = pullBeforeAdd || undefined;
+    repo.branchNamePattern = branchNamePattern || undefined;
     scheduleSave();
     showCopyDialog.value = false;
   }
@@ -60,6 +64,7 @@ export function usePostAddSettings() {
     copyDialogCurrentPMArgs,
     copyDialogCurrentHooks,
     copyDialogCurrentPullBeforeAdd,
+    copyDialogCurrentBranchNamePattern,
     openCopyDialog,
     onDialogConfirm,
     clearCopyTargets,
