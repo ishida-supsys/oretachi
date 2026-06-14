@@ -142,6 +142,14 @@ async function showWorktree(data: TrayWorktreeData) {
       requestAnimationFrame(() => resolve());
     });
   });
+
+  // 情報バーの高さは横幅依存(line-clamp:2 + word-break)。117行目の初回計測は setSize 前の
+  // 旧横幅で行われるため、横幅が確定した今この時点で再計測して高さを補正する
+  // (新横幅で2行に折り返した場合のターミナルのクリップを防ぐ)。description がある時のみ。
+  if (data.description?.trim()) {
+    await applyWindowSize(data);
+  }
+
   mountTerminalsToHosts();
 
   // 全リーフのアクティブターミナルをリサイズ+リフレッシュ
