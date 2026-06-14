@@ -28,6 +28,8 @@ const { getTooltipText: getWorktreeTaskTooltip } = useWorktreeTaskMap();
 const headerRef = ref<HTMLDivElement | null>(null);
 // フッター ref（ウィンドウサイズ補正用）
 const footerRef = ref<HTMLDivElement | null>(null);
+// description 情報バー ref（ウィンドウサイズ補正用）
+const descBarRef = ref<HTMLDivElement | null>(null);
 
 // 全ワークツリーデータ
 const allWorktrees = ref<TrayWorktreeData[]>([]);
@@ -97,8 +99,11 @@ async function applyWindowSize(data: TrayWorktreeData) {
   const zoom = appliedZoom.value;
   const footerH = cssPxToLogical(footerRef.value?.offsetHeight ?? 0, zoom);
   const headerH = data.isDetached ? 0 : cssPxToLogical(headerRef.value?.offsetHeight ?? 0, zoom);
+  // 情報バー(description)分の高さを加算する。トレイはターミナルを縮める権限が無い(no-resize)ため、
+  // コンテンツ領域を削らずウィンドウ外形を伸ばして確保する。description が無ければ 0。
+  const descH = cssPxToLogical(descBarRef.value?.offsetHeight ?? 0, zoom);
   const width = data.windowSize?.width ?? 900;
-  const height = (data.windowSize?.height ?? 600) + footerH + headerH;
+  const height = (data.windowSize?.height ?? 600) + footerH + headerH + descH;
   await win.setSize(new LogicalSize(width, height));
 }
 
@@ -106,6 +111,9 @@ async function showWorktree(data: TrayWorktreeData) {
   terminalEntries.clear();
   terminalRefs.clear();
 
+  // 情報バー(description)が現在の worktree の内容で描画されてから高さを計測する。
+  // currentWorktree (= allWorktrees[currentIndex]) は呼び出し側で更新済みのため nextTick で DOM 反映を待つ。
+  await nextTick();
   await applyWindowSize(data);
 
   for (const t of data.terminals) {
@@ -134,6 +142,14 @@ async function showWorktree(data: TrayWorktreeData) {
       requestAnimationFrame(() => resolve());
     });
   });
+
+  // 情報バーの高さは横幅依存(line-clamp:2 + word-break)。117行目の初回計測は setSize 前の
+  // 旧横幅で行われるため、横幅が確定した今この時点で再計測して高さを補正する
+  // (新横幅で2行に折り返した場合のターミナルのクリップを防ぐ)。description がある時のみ。
+  if (data.description?.trim()) {
+    await applyWindowSize(data);
+  }
+
   mountTerminalsToHosts();
 
   // 全リーフのアクティブターミナルをリサイズ+リフレッシュ
@@ -429,6 +445,18 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <!-- description 情報バー: ある worktree のみ常時表示。高さは applyWindowSize に加算され、
+         ターミナル領域は削られない（トレイは no-resize でターミナルを縮める権限が無いため） -->
+    <div
+      v-if="currentWorktree?.description?.trim()"
+      ref="descBarRef"
+      class="shrink-0 px-4 py-1.5 border-b border-[#313244] text-[11px] leading-relaxed text-[#a6adc8] tray-desc-bar"
+      style="background-color: var(--bg-mantle-translucent)"
+      :title="currentWorktree.description"
+    >
+      {{ currentWorktree.description }}
+    </div>
+
     <!-- コンテンツ -->
     <div class="flex-1 min-h-0 overflow-hidden">
       <div v-if="!initialized" class="flex items-center justify-center h-full text-[#6c7086] text-sm">
@@ -543,3 +571,14 @@ onUnmounted(() => {
   }
 }
 </i18n>
+
+<style scoped>
+/* description 情報バー: 最大2行クランプ（WorktreeCard の .card-desc-inner に準拠） */
+.tray-desc-bar {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  word-break: break-word;
+}
+</style>
