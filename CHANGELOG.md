@@ -6,6 +6,17 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-06-14
+
+### Added
+- タスク追加時のブランチ名パターンをリポジトリ単位で設定可能に (#76)
+- トレイポップアップに description 情報バーを追加 (#77)
+
+### Fixed
+- ブランチ名パターンの構文例を i18n から外し HTML 誤検出を回避
+- description 情報バーの高さを横幅確定後に再計測
+- `ORETACHI_FORCE_WIZARD` が `.env.development.local` で効かない問題を修正
+
 ## [0.22.0] - 2026-06-13
 
 ### Added
@@ -413,7 +424,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.22.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.23.0...HEAD
+[0.23.0]: https://github.com/ishida-supsys/oretachi/compare/0.22.0...0.23.0
 [0.22.0]: https://github.com/ishida-supsys/oretachi/compare/0.21.5...0.22.0
 [0.21.5]: https://github.com/ishida-supsys/oretachi/compare/0.21.4...0.21.5
 [0.21.4]: https://github.com/ishida-supsys/oretachi/compare/0.21.3...0.21.4
