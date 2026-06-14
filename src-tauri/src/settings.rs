@@ -27,6 +27,8 @@ pub struct Repository {
     pub notification_hooks: Option<Vec<NotificationHookEntry>>,
     #[serde(default, rename = "pullBeforeAdd")]
     pub pull_before_add: Option<bool>,
+    #[serde(default, rename = "branchNamePattern")]
+    pub branch_name_pattern: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

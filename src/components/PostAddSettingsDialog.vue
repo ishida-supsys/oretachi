@@ -11,10 +11,11 @@ const props = defineProps<{
   currentPackageManagerArgs?: string;
   currentNotificationHooks?: NotificationHookEntry[];
   currentPullBeforeAdd?: boolean;
+  currentBranchNamePattern?: string;
 }>();
 
 const emit = defineEmits<{
-  confirm: [targets: string[], packageManager: string | undefined, packageManagerArgs: string | undefined, notificationHooks: NotificationHookEntry[], pullBeforeAdd: boolean];
+  confirm: [targets: string[], packageManager: string | undefined, packageManagerArgs: string | undefined, notificationHooks: NotificationHookEntry[], pullBeforeAdd: boolean, branchNamePattern: string | undefined];
   cancel: [];
 }>();
 
@@ -27,6 +28,12 @@ const detectedPMs = ref<string[]>([]);
 const selectedPM = ref<string | undefined>(props.currentPackageManager);
 const pmArgs = ref<string>(props.currentPackageManagerArgs ?? "");
 const pullBeforeAdd = ref<boolean>(props.currentPullBeforeAdd ?? false);
+const branchNamePattern = ref<string>(props.currentBranchNamePattern ?? "");
+
+// ブランチ名パターンの構文例。i18n メッセージに含めると <task> が HTML、{...} が
+// vue-i18n の補間として解釈されてしまうため、静的なバインド文字列として表示する。
+const BRANCH_PATTERN_PLACEHOLDER = "worktree/<task>";
+const BRANCH_PATTERN_EXAMPLES = ["worktree/<task>", "{feature|fix}/<task>"];
 
 const ALL_PMS = ["npm", "pnpm", "yarn", "bun"];
 
@@ -99,7 +106,7 @@ function onConfirm() {
       hooks.push({ event: ev as NotificationHookEntry["event"], kind: state.kind as NotificationHookEntry["kind"] });
     }
   }
-  emit("confirm", Array.from(selected.value), selectedPM.value || undefined, pmArgs.value.trim() || undefined, hooks, pullBeforeAdd.value);
+  emit("confirm", Array.from(selected.value), selectedPM.value || undefined, pmArgs.value.trim() || undefined, hooks, pullBeforeAdd.value, branchNamePattern.value.trim() || undefined);
 }
 </script>
 
@@ -115,6 +122,21 @@ function onConfirm() {
           <input type="checkbox" v-model="pullBeforeAdd" />
           <span class="entry-text">{{ t("addOptions.pullBeforeAdd") }}</span>
         </label>
+        <div class="branch-pattern-row">
+          <span class="branch-pattern-label">{{ t("addOptions.branchPatternLabel") }}</span>
+          <input
+            class="branch-pattern-input"
+            type="text"
+            v-model="branchNamePattern"
+            :placeholder="BRANCH_PATTERN_PLACEHOLDER"
+          />
+          <p class="section-description">
+            {{ t("addOptions.branchPatternHint") }}
+            <span class="branch-pattern-examples">
+              <code v-for="ex in BRANCH_PATTERN_EXAMPLES" :key="ex">{{ ex }}</code>
+            </span>
+          </p>
+        </div>
       </div>
 
       <!-- パッケージマネージャーセクション -->
@@ -326,6 +348,50 @@ function onConfirm() {
   border-color: #cba6f7;
 }
 
+.branch-pattern-row {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.branch-pattern-label {
+  font-size: 11px;
+  color: #6c7086;
+}
+
+.branch-pattern-input {
+  background: #313244;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 12px;
+  color: #cdd6f4;
+  outline: none;
+  font-family: monospace;
+}
+
+.branch-pattern-input:focus {
+  border-color: #cba6f7;
+}
+
+.branch-pattern-examples {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-left: 4px;
+}
+
+.branch-pattern-examples code {
+  background: #313244;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  padding: 1px 6px;
+  font-size: 11px;
+  font-family: monospace;
+  color: #cdd6f4;
+}
+
 .list-header {
   display: flex;
   gap: 8px;
@@ -493,7 +559,9 @@ function onConfirm() {
     "title": "Worktree settings",
     "addOptions": {
       "sectionLabel": "Add options",
-      "pullBeforeAdd": "Run git pull (or fetch) before adding worktree"
+      "pullBeforeAdd": "Run git pull (or fetch) before adding worktree",
+      "branchPatternLabel": "Branch name pattern",
+      "branchPatternHint": "Pattern for the branch name created when adding a task. The task placeholder is replaced with a descriptive name, and a choice group lets the AI pick the best fit. Leave empty to use the default. Examples:"
     },
     "pkgManager": {
       "sectionLabel": "Package install",
@@ -522,7 +590,9 @@ function onConfirm() {
     "title": "追加設定",
     "addOptions": {
       "sectionLabel": "追加オプション",
-      "pullBeforeAdd": "ワークツリー追加前に git pull / fetch を実行する"
+      "pullBeforeAdd": "ワークツリー追加前に git pull / fetch を実行する",
+      "branchPatternLabel": "ブランチ名パターン",
+      "branchPatternHint": "タスク追加時に作成されるブランチ名のパターン。タスクのプレースホルダは説明的な名前に置換され、選択肢グループは AI がタスク内容に応じて最適な方を選びます。未記入なら既定値を使います。例:"
     },
     "pkgManager": {
       "sectionLabel": "パッケージインストール",

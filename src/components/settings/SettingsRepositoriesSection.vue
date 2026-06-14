@@ -16,6 +16,7 @@ const {
   copyDialogCurrentPMArgs,
   copyDialogCurrentHooks,
   copyDialogCurrentPullBeforeAdd,
+  copyDialogCurrentBranchNamePattern,
   openCopyDialog,
   onDialogConfirm,
 } = usePostAddSettings();
@@ -148,6 +149,7 @@ function clearExecScript(repoId: string) {
     :current-package-manager-args="copyDialogCurrentPMArgs"
     :current-notification-hooks="copyDialogCurrentHooks"
     :current-pull-before-add="copyDialogCurrentPullBeforeAdd"
+    :current-branch-name-pattern="copyDialogCurrentBranchNamePattern"
     @confirm="onDialogConfirm"
     @cancel="showCopyDialog = false"
   />

@@ -920,17 +920,25 @@ impl NotifyService {
     ) -> Result<CallToolResult, McpError> {
         let settings_manager = self.app_handle.state::<SettingsManager>();
         let settings = settings_manager.get();
-        let paths: Vec<(String, String)> = settings
+        let paths: Vec<(String, String, Option<String>)> = settings
             .repositories
             .iter()
-            .map(|repo| (repo.name.clone(), repo.path.clone()))
+            .map(|repo| {
+                let pattern = repo
+                    .branch_name_pattern
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string);
+                (repo.name.clone(), repo.path.clone(), pattern)
+            })
             .collect();
         let repos: Vec<serde_json::Value> = tokio::task::spawn_blocking(move || {
             paths
                 .iter()
-                .map(|(name, path)| {
+                .map(|(name, path, pattern)| {
                     let remotes = get_git_remotes(path);
-                    serde_json::json!({ "name": name, "remotes": remotes })
+                    serde_json::json!({ "name": name, "remotes": remotes, "branchNamePattern": pattern })
                 })
                 .collect()
         })

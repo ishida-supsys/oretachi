@@ -75,7 +75,15 @@ request and repositories, and perform appropriate worktree operations.
 - agent_worktree: Launch an AI agent on the worktree's terminal with the given prompt. The worktree must already exist (either pre-existing or created via add_worktree).
 - When you want to add a NEW worktree and launch an agent, output BOTH add_worktree and agent_worktree as separate entries in the code array, in order.
 - When targeting an EXISTING worktree, output only agent_worktree (no add_worktree needed).
-- When no specific branch name is provided, branch names for new worktrees should follow the pattern "worktree/{descriptive-name}".
+- When no specific branch name is provided by the user, generate the branch name from the
+  target repository's branch name pattern:
+  - Each repository in the repository list may include a "branch pattern" (shown as
+    "(branch pattern: ...)" in the embedded list, or the "branchNamePattern" field from
+    oretachi_list_repository). Use the pattern of the repository the task is assigned to.
+  - In the pattern, replace the "<task>" placeholder with a short descriptive name for the task.
+  - "{a|b|c}" means choose exactly ONE of the listed options that best fits the task
+    (e.g. for "{feature|fix}/<task>", use "fix/..." for a bug fix and "feature/..." for a new feature).
+  - If the target repository has NO branch pattern, default to "worktree/<descriptive-name>".
 - Repository names must match exactly what is in the repository list.
 
 ## User Request
@@ -117,10 +125,19 @@ fn build_repo_list_text(settings: &crate::settings::AppSettings) -> String {
                     Some(format!("{}={}", name, url))
                 })
                 .collect();
+            let pattern_suffix = match repo.branch_name_pattern.as_deref() {
+                Some(p) if !p.trim().is_empty() => format!(" (branch pattern: {})", p.trim()),
+                _ => String::new(),
+            };
             if remote_strs.is_empty() {
-                format!("- {} (no remotes)", repo.name)
+                format!("- {} (no remotes){}", repo.name, pattern_suffix)
             } else {
-                format!("- {} (remotes: {})", repo.name, remote_strs.join(", "))
+                format!(
+                    "- {} (remotes: {}){}",
+                    repo.name,
+                    remote_strs.join(", "),
+                    pattern_suffix
+                )
             }
         })
         .collect();
