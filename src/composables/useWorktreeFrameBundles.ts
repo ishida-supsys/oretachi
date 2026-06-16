@@ -76,6 +76,30 @@ export function useWorktreeFrameBundles(options: {
     bundles.set(worktreeId, { frame, terminalEntries: entries, terminalRefs: refs });
   }
 
+  function syncWorktreeTerminalsToFrame(worktreeId: string, bundle: WorktreeFrameBundle) {
+    const wt = worktrees.value.find((w) => w.id === worktreeId);
+    if (!wt) return;
+
+    for (const terminal of wt.terminals) {
+      terminalWorktreeMap.set(terminal.id, worktreeId);
+      if (!bundle.terminalEntries.has(terminal.id)) {
+        bundle.terminalEntries.set(terminal.id, { id: terminal.id, title: terminal.title, sessionId: 0, snapshot: "" });
+      }
+
+      const existingLeaf = bundle.frame.getAllLeafs().find((l) => l.terminalIds.includes(terminal.id));
+      if (existingLeaf) continue;
+
+      const targetLeafId = bundle.frame.resolveLeafId(bundle.frame.lastFocusedLeafId.value, { foregroundOnly: true });
+      if (targetLeafId) {
+        bundle.frame.addTerminalToLeaf(targetLeafId, terminal.id);
+        bundle.frame.lastFocusedLeafId.value = targetLeafId;
+      } else {
+        bundle.frame.initLayout([terminal.id]);
+        bundle.frame.lastFocusedLeafId.value = bundle.frame.getAllLeafs()[0]?.id ?? "";
+      }
+    }
+  }
+
   function getTerminalRef(terminalId: number): InstanceType<typeof TerminalView> | undefined {
     const wid = terminalWorktreeMap.get(terminalId);
     if (!wid) return undefined;
@@ -89,6 +113,8 @@ export function useWorktreeFrameBundles(options: {
     await nextTick();
     const bundle = bundles.get(worktreeId);
     if (bundle) {
+      syncWorktreeTerminalsToFrame(worktreeId, bundle);
+      await nextTick();
       bundle.frame.mountTerminalsToHosts();
       const leafs = bundle.frame.getLeafsWithTerminals();
       if (leafs.length > 0) {
