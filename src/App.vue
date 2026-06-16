@@ -407,7 +407,20 @@ async function switchToTerminal(terminalId: number) {
 
   const bundle = worktreeFrameBundles.get(worktreeId);
   if (bundle) {
-    const leaf = bundle.frame.getAllLeafs().find((l) => l.terminalIds.includes(terminalId));
+    const terminal = worktrees.value
+      .find((w) => w.id === worktreeId)
+      ?.terminals.find((t) => t.id === terminalId);
+    if (terminal && !bundle.terminalEntries.has(terminalId)) {
+      bundle.terminalEntries.set(terminalId, { id: terminal.id, title: terminal.title, sessionId: 0, snapshot: "" });
+    }
+
+    let leaf = bundle.frame.getAllLeafs().find((l) => l.terminalIds.includes(terminalId));
+    if (!leaf && terminal) {
+      const recoveredLeafId = addTerminalToFrameBundle(bundle, terminalId, false);
+      leaf = bundle.frame.getAllLeafs().find((l) => l.id === recoveredLeafId);
+      logDebug(`[Terminal] switchToTerminal recovered missing leaf terminalId=${terminalId} leafId=${recoveredLeafId || "null"}`);
+    }
+
     if (leaf) {
       bundle.frame.setActiveTerminal(leaf.id, terminalId);
       bundle.frame.lastFocusedLeafId.value = leaf.id;
@@ -488,6 +501,27 @@ function getOrCreateBackgroundLeafId(bundle: WorktreeFrameBundle): string {
   return newLeaf.id;
 }
 
+function addTerminalToFrameBundle(bundle: WorktreeFrameBundle, terminalId: number, background: boolean): string {
+  const targetLeafId = background
+    ? getOrCreateBackgroundLeafId(bundle)
+    : bundle.frame.resolveLeafId(bundle.frame.lastFocusedLeafId.value);
+
+  if (targetLeafId) {
+    bundle.frame.returnAllToOffscreen();
+    bundle.frame.addTerminalToLeaf(targetLeafId, terminalId);
+    if (!background) {
+      bundle.frame.lastFocusedLeafId.value = targetLeafId;
+    }
+  } else {
+    bundle.frame.initLayout([terminalId]);
+    const createdLeafId = bundle.frame.getAllLeafs()[0]?.id ?? "";
+    bundle.frame.lastFocusedLeafId.value = createdLeafId;
+    return createdLeafId;
+  }
+
+  return targetLeafId;
+}
+
 async function onAddTerminal(
   worktreeId: string,
   options?: { background?: boolean; pendingCommand?: string },
@@ -518,20 +552,8 @@ async function onAddTerminal(
   const bundle = worktreeFrameBundles.get(worktreeId)!;
   bundle.terminalEntries.set(terminal.id, { id: terminal.id, title: terminal.title, sessionId: 0, snapshot: "" });
 
-  const targetLeafId = background
-    ? getOrCreateBackgroundLeafId(bundle)
-    : (bundle.frame.lastFocusedLeafId.value || bundle.frame.getAllLeafs()[0]?.id);
+  const targetLeafId = addTerminalToFrameBundle(bundle, terminal.id, background);
   logDebug(`[Terminal] onAddTerminal leafId=${targetLeafId ?? "null"} terminalId=${terminal.id}`);
-  if (targetLeafId) {
-    bundle.frame.returnAllToOffscreen();
-    bundle.frame.addTerminalToLeaf(targetLeafId, terminal.id);
-    if (!background) {
-      bundle.frame.lastFocusedLeafId.value = targetLeafId;
-    }
-  } else {
-    bundle.frame.initLayout([terminal.id]);
-    bundle.frame.lastFocusedLeafId.value = bundle.frame.getAllLeafs()[0]?.id ?? "";
-  }
 
   if (!background) {
     viewMode.value = "terminal";

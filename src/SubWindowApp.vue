@@ -119,6 +119,7 @@ const {
   closeActiveTerminal,
   closeTerminal,
   handleTerminalExit,
+  resolveLeafId,
   onSplitRequest,
   onTabDrop,
   onTabEdgeDrop,
@@ -345,7 +346,7 @@ onMounted(async () => {
       terminalEntries.set(terminalId, { id: terminalId, title, sessionId, snapshot: "" });
 
       // lastFocusedLeafId のリーフに追加（なければ root リーフに）
-      const targetLeafId = lastFocusedLeafId.value || getFirstLeafId();
+      const targetLeafId = resolveLeafId(lastFocusedLeafId.value) || getFirstLeafId();
       addTerminalToLeaf(targetLeafId, terminalId);
       lastFocusedLeafId.value = targetLeafId;
 

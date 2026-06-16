@@ -44,6 +44,20 @@ export function useWorktreeFrame(options: {
     return getAllLeafs().filter((l) => l.terminalIds.length > 0);
   }
 
+  function resolveLeafId(preferredLeafId?: string | null): string {
+    const leafs = getAllLeafs();
+    if (preferredLeafId && leafs.some((l) => l.id === preferredLeafId)) {
+      return preferredLeafId;
+    }
+    return leafs[0]?.id ?? "";
+  }
+
+  function normalizeLastFocusedLeaf(): string {
+    const leafId = resolveLeafId(lastFocusedLeafId.value);
+    lastFocusedLeafId.value = leafId;
+    return leafId;
+  }
+
   async function switchTerminal(leafId: string, terminalId: number) {
     setActiveTerminal(leafId, terminalId);
     lastFocusedLeafId.value = leafId;
@@ -75,6 +89,7 @@ export function useWorktreeFrame(options: {
     terminalEntries.delete(terminalId);
     removeTerminalFromLeaf(leafId, terminalId);
     pruneTree();
+    normalizeLastFocusedLeaf();
 
     if (onTerminalClosed) {
       await onTerminalClosed(terminalId);
@@ -122,7 +137,7 @@ export function useWorktreeFrame(options: {
    * lastFocusedLeafId を更新せずフォアグラウンドのフォーカスを維持する。
    */
   function addBackgroundLeaf(direction: "left" | "right" | "top" | "bottom"): FrameLeaf {
-    const targetLeafId = lastFocusedLeafId.value || getAllLeafs()[0]?.id || "";
+    const targetLeafId = normalizeLastFocusedLeaf();
     return splitLeaf(targetLeafId, direction, [], true);
   }
 
@@ -182,7 +197,7 @@ export function useWorktreeFrame(options: {
   }
 
   function switchNextTerminal() {
-    const leafId = lastFocusedLeafId.value;
+    const leafId = normalizeLastFocusedLeaf();
     if (!leafId) return;
     const leaf = getLeafsWithTerminals().find((l) => l.id === leafId);
     if (!leaf || leaf.terminalIds.length === 0) return;
@@ -192,7 +207,7 @@ export function useWorktreeFrame(options: {
   }
 
   function switchPrevTerminal() {
-    const leafId = lastFocusedLeafId.value;
+    const leafId = normalizeLastFocusedLeaf();
     if (!leafId) return;
     const leaf = getLeafsWithTerminals().find((l) => l.id === leafId);
     if (!leaf || leaf.terminalIds.length === 0) return;
@@ -202,7 +217,7 @@ export function useWorktreeFrame(options: {
   }
 
   function closeActiveTerminal() {
-    const leafId = lastFocusedLeafId.value;
+    const leafId = normalizeLastFocusedLeaf();
     if (!leafId) return;
     const leaf = getLeafsWithTerminals().find((l) => l.id === leafId);
     if (leaf?.activeTerminalId != null) {
@@ -216,6 +231,8 @@ export function useWorktreeFrame(options: {
     addTerminalToLeaf,
     setActiveTerminal,
     lastFocusedLeafId,
+    resolveLeafId,
+    normalizeLastFocusedLeaf,
     setTerminalRef,
     returnAllToOffscreen,
     mountTerminalsToHosts,
