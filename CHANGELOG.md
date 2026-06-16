@@ -6,6 +6,16 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.23.1] - 2026-06-17
+
+### Added
+- メインスレッドハングの真因捕捉計装を追加
+
+### Fixed
+- ホーム画面からのターミナル追加で孤児化・タブ不整合を解消
+- フォアグラウンド追加で背景ペインにタブが紛れ込むのを防止
+- cancel_worktree_remove に breadcrumb 計装を追加
+
 ## [0.23.0] - 2026-06-14
 
 ### Added
@@ -424,7 +434,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.23.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.23.1...HEAD
+[0.23.1]: https://github.com/ishida-supsys/oretachi/compare/0.23.0...0.23.1
 [0.23.0]: https://github.com/ishida-supsys/oretachi/compare/0.22.0...0.23.0
 [0.22.0]: https://github.com/ishida-supsys/oretachi/compare/0.21.5...0.22.0
 [0.21.5]: https://github.com/ishida-supsys/oretachi/compare/0.21.4...0.21.5
