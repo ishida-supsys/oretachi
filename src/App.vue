@@ -504,7 +504,7 @@ function getOrCreateBackgroundLeafId(bundle: WorktreeFrameBundle): string {
 function addTerminalToFrameBundle(bundle: WorktreeFrameBundle, terminalId: number, background: boolean): string {
   const targetLeafId = background
     ? getOrCreateBackgroundLeafId(bundle)
-    : bundle.frame.resolveLeafId(bundle.frame.lastFocusedLeafId.value);
+    : bundle.frame.resolveLeafId(bundle.frame.lastFocusedLeafId.value, { foregroundOnly: true });
 
   if (targetLeafId) {
     bundle.frame.returnAllToOffscreen();

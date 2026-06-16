@@ -89,7 +89,7 @@ export function useWorktreeFrameBundles(options: {
       const existingLeaf = bundle.frame.getAllLeafs().find((l) => l.terminalIds.includes(terminal.id));
       if (existingLeaf) continue;
 
-      const targetLeafId = bundle.frame.resolveLeafId(bundle.frame.lastFocusedLeafId.value);
+      const targetLeafId = bundle.frame.resolveLeafId(bundle.frame.lastFocusedLeafId.value, { foregroundOnly: true });
       if (targetLeafId) {
         bundle.frame.addTerminalToLeaf(targetLeafId, terminal.id);
         bundle.frame.lastFocusedLeafId.value = targetLeafId;

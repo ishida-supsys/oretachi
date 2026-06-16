@@ -44,8 +44,13 @@ export function useWorktreeFrame(options: {
     return getAllLeafs().filter((l) => l.terminalIds.length > 0);
   }
 
-  function resolveLeafId(preferredLeafId?: string | null): string {
-    const leafs = getAllLeafs();
+  function resolveLeafId(
+    preferredLeafId?: string | null,
+    options?: { foregroundOnly?: boolean }
+  ): string {
+    const leafs = options?.foregroundOnly
+      ? getAllLeafs().filter((l) => !l.isBackground)
+      : getAllLeafs();
     if (preferredLeafId && leafs.some((l) => l.id === preferredLeafId)) {
       return preferredLeafId;
     }
