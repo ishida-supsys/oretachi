@@ -50,10 +50,11 @@ pub enum Activity {
     SetDebugMode,
     GetDebugMode,
     GetForceWizard,
+    CancelWorktreeRemove,
 }
 
 /// [`Activity`] の discriminant 順に並んだ表示ラベル。enum と順序を一致させること。
-const LABELS: [&str; 23] = [
+const LABELS: [&str; 24] = [
     "idle",
     "run-event",
     "watchdog-probe",
@@ -77,6 +78,7 @@ const LABELS: [&str; 23] = [
     "cmd:set_debug_mode",
     "cmd:get_debug_mode",
     "cmd:get_force_wizard",
+    "cmd:cancel_worktree_remove",
 ];
 
 /// discriminant から表示ラベルを引く。範囲外は `"?"`。
@@ -227,7 +229,7 @@ mod tests {
     #[test]
     fn labels_len_matches_max_discriminant() {
         // 最後の variant の discriminant + 1 が LABELS の長さと一致すること。
-        assert_eq!(LABELS.len(), Activity::GetForceWizard as usize + 1);
+        assert_eq!(LABELS.len(), Activity::CancelWorktreeRemove as usize + 1);
     }
 
     #[test]
@@ -238,6 +240,10 @@ mod tests {
         assert_eq!(name_for(Activity::PtyWrite as u8), "cmd:pty_write");
         assert_eq!(name_for(Activity::SaveSettings as u8), "cmd:save_settings");
         assert_eq!(name_for(Activity::GetForceWizard as u8), "cmd:get_force_wizard");
+        assert_eq!(
+            name_for(Activity::CancelWorktreeRemove as u8),
+            "cmd:cancel_worktree_remove"
+        );
     }
 
     #[test]

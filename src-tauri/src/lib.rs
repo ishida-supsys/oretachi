@@ -255,6 +255,7 @@ fn cancel_worktree_remove(
     remove_manager: State<'_, WorktreeRemoveManager>,
     worktree_path: String,
 ) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::CancelWorktreeRemove);
     if remove_manager.cancel(&worktree_path) {
         Ok(())
     } else {
