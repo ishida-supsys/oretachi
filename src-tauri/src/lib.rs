@@ -8,6 +8,7 @@ mod claude_plugin_skills;
 mod fs_watcher;
 mod git_worktree;
 mod ide_launcher;
+mod main_thread_watch;
 pub mod mcp_server;
 mod process_utils;
 mod pty_manager;
@@ -76,6 +77,7 @@ async fn pty_spawn(
 // キー入力の順序が保証される (async 化すると並列実行で順序が壊れうる)。
 #[tauri::command]
 fn pty_write(state: State<PtyManager>, session_id: u32, data: Vec<u8>) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::PtyWrite);
     state.write(session_id, data)
 }
 
@@ -106,6 +108,7 @@ fn pty_set_ai_agent(
     session_id: u32,
     is_agent: bool,
 ) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::PtySetAiAgent);
     state.set_ai_agent(session_id, is_agent)?;
     let mut sessions = std::collections::HashMap::new();
     sessions.insert(session_id, pty_manager::AiAgentInfo {
@@ -119,6 +122,7 @@ fn pty_set_ai_agent(
 
 #[tauri::command]
 fn pty_is_ai_agent(state: State<PtyManager>, session_id: u32) -> Result<bool, String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::PtyIsAiAgent);
     state.is_ai_agent(session_id)
 }
 
@@ -126,16 +130,19 @@ fn pty_is_ai_agent(state: State<PtyManager>, session_id: u32) -> Result<bool, St
 
 #[tauri::command]
 fn get_settings(state: State<SettingsManager>) -> AppSettings {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::GetSettings);
     state.get()
 }
 
 #[tauri::command]
 fn save_settings(state: State<SettingsManager>, settings: AppSettings) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::SaveSettings);
     state.save(settings)
 }
 
 #[tauri::command]
 fn apply_acrylic_effect(app_handle: tauri::AppHandle, r: u8, g: u8, b: u8, a: u8) {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::ApplyAcrylic);
     #[cfg(target_os = "windows")]
     {
         for (_, window) in app_handle.webview_windows() {
@@ -426,16 +433,19 @@ async fn git_commit(repo_path: String, message: String) -> Result<String, String
 
 #[tauri::command]
 fn detect_ides() -> Vec<ide_launcher::IdeInfo> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::DetectIdes);
     ide_launcher::detect_ides()
 }
 
 #[tauri::command]
 fn detect_ai_agents() -> Vec<ai_provider::AiAgentInfo> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::DetectAiAgents);
     ai_provider::detect_ai_agents()
 }
 
 #[tauri::command]
 fn open_in_ide(command: String, path: String) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::OpenInIde);
     ide_launcher::open_in_ide(&command, &path)
 }
 
@@ -443,6 +453,7 @@ fn open_in_ide(command: String, path: String) -> Result<(), String> {
 
 #[tauri::command]
 fn regenerate_mcp_api_key(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::RegenerateMcpApiKey);
     let settings_manager = app_handle.state::<SettingsManager>();
     let mut settings = settings_manager.get();
     settings.mcp_api_key = settings::generate_api_key();
@@ -453,6 +464,7 @@ fn regenerate_mcp_api_key(app_handle: tauri::AppHandle) -> Result<String, String
 
 #[tauri::command]
 fn get_mcp_status(state: State<mcp_server::McpServerManager>) -> mcp_server::McpStatus {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::GetMcpStatus);
     state.get_status()
 }
 
@@ -617,6 +629,7 @@ async fn delete_task(
 
 #[tauri::command]
 fn path_exists(path: String) -> bool {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::PathExists);
     std::path::Path::new(&path).exists()
 }
 
@@ -642,6 +655,7 @@ fn notify_worktree_archived(
     name: String,
     branch_name: String,
 ) {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::NotifyWorktreeArchived);
     let _ = app_handle.emit("worktree-archived", serde_json::json!({
         "id": id,
         "name": name,
@@ -658,6 +672,7 @@ fn notify_worktree_added(
     name: String,
     branch_name: String,
 ) {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::NotifyWorktreeAdded);
     let _ = app_handle.emit("worktree-added", serde_json::json!({
         "id": id,
         "name": name,
@@ -698,11 +713,13 @@ fn start_fs_watch(
     worktree_id: String,
     worktree_path: String,
 ) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::StartFsWatch);
     state.start_watching(app_handle, worktree_id, worktree_path)
 }
 
 #[tauri::command]
 fn stop_fs_watch(state: State<FsWatcherManager>, worktree_id: String) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::StopFsWatch);
     state.stop_watching(&worktree_id)
 }
 
@@ -714,6 +731,7 @@ fn is_mcp_enabled() -> bool {
 
 #[tauri::command]
 fn set_debug_mode(enabled: bool) {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::SetDebugMode);
     if enabled {
         log::set_max_level(log::LevelFilter::Debug);
     } else {
@@ -724,6 +742,7 @@ fn set_debug_mode(enabled: bool) {
 
 #[tauri::command]
 fn get_debug_mode() -> bool {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::GetDebugMode);
     log::max_level() >= log::LevelFilter::Debug
 }
 
@@ -733,9 +752,69 @@ fn get_debug_mode() -> bool {
 /// インストール済みアプリでは .env* が存在しないため実質常に false になる。
 #[tauri::command]
 fn get_force_wizard() -> bool {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::GetForceWizard);
     std::env::var("ORETACHI_FORCE_WIZARD")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false)
+}
+
+/// メインウィンドウの WebView2 にネイティブ診断イベントを登録する (Windows 限定)。
+///
+/// - `ProcessFailed`: browser/renderer プロセス破綻を ERROR ログ。完全アイドル中のフリーズ
+///   (WebView2Feedback #4141: idle 時 browser プロセス破綻) を **アプリ側ログに初めて残す** 決定打。
+/// - `NewBrowserVersionAvailable`: WebView2 ランタイム自動更新検知を WARN ログ。更新→破綻仮説の裏付け/反証用。
+///
+/// 失敗してもアプリ動作には影響させない (ログのみ)。**回復処理は一切行わない** (記録に徹する)。
+#[cfg(target_os = "windows")]
+fn subscribe_webview2_diagnostics(window: &tauri::WebviewWindow) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2ProcessFailedEventArgs, COREWEBVIEW2_PROCESS_FAILED_KIND,
+    };
+    use webview2_com::{NewBrowserVersionAvailableEventHandler, ProcessFailedEventHandler};
+
+    let result = window.with_webview(|webview| unsafe {
+        // ProcessFailed は ICoreWebView2 直下のイベント。
+        match webview.controller().CoreWebView2() {
+            Ok(core) => {
+                let handler = ProcessFailedEventHandler::create(Box::new(
+                    |_sender, args: Option<ICoreWebView2ProcessFailedEventArgs>| {
+                        let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND(-1);
+                        if let Some(a) = args.as_ref() {
+                            let _ = a.ProcessFailedKind(&mut kind);
+                        }
+                        log::error!(
+                            "[webview2] ProcessFailed kind={} (browser/renderer プロセス破綻; アイドル時フリーズの疑い WebView2Feedback#4141)",
+                            kind.0
+                        );
+                        Ok(())
+                    },
+                ));
+                let mut token: i64 = 0;
+                if let Err(e) = core.add_ProcessFailed(&handler, &mut token) {
+                    log::warn!("[webview2] add_ProcessFailed failed: {}", e);
+                } else {
+                    log::info!("[webview2] ProcessFailed ハンドラ登録完了");
+                }
+            }
+            Err(e) => log::warn!("[webview2] CoreWebView2() 取得失敗: {}", e),
+        }
+
+        // NewBrowserVersionAvailable は ICoreWebView2Environment のイベント。
+        let env = webview.environment();
+        let handler = NewBrowserVersionAvailableEventHandler::create(Box::new(|_env, _args| {
+            log::warn!(
+                "[webview2] NewBrowserVersionAvailable: WebView2 ランタイム自動更新を検知 (更新後のアイドル破綻に注意 WebView2Feedback#4141)"
+            );
+            Ok(())
+        }));
+        let mut token: i64 = 0;
+        if let Err(e) = env.add_NewBrowserVersionAvailable(&handler, &mut token) {
+            log::warn!("[webview2] add_NewBrowserVersionAvailable failed: {}", e);
+        }
+    });
+    if let Err(e) = result {
+        log::warn!("[webview2] with_webview failed (診断イベント未登録): {}", e);
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -756,6 +835,9 @@ pub fn run() {
             let _ = SetCurrentProcessExplicitAppUserModelID(&HSTRING::from("com.ia.oretachi"));
         }
     }
+
+    // メインスレッド・ブレッドクラムの単調時計を初期化する (以降の enter() より前に必須)。
+    main_thread_watch::init();
 
     // .env 読み込み（Vite の .env 規約に準拠: 優先度 .{mode}.local > .{mode} > .local > base）
     // builder チェーンより前に読み込む必要があるためここで実施。
@@ -794,6 +876,7 @@ pub fn run() {
             builder = builder.plugin(
                 tauri::plugin::Builder::<tauri::Wry>::new("acrylic-effect")
                     .on_window_ready(move |window| {
+                        let _bc = main_thread_watch::enter(main_thread_watch::Activity::WindowReady);
                         if let Ok(hwnd) = window.hwnd() {
                             acrylic::setup(hwnd.0, r, g, b, a);
                         }
@@ -1378,6 +1461,9 @@ pub fn run() {
                         let ack = main_ack_ms.clone();
                         if watchdog_handle
                             .run_on_main_thread(move || {
+                                let _bc = main_thread_watch::enter(
+                                    main_thread_watch::Activity::WatchdogProbe,
+                                );
                                 ack.store(elapsed_ms(), Ordering::Relaxed);
                             })
                             .is_err()
@@ -1396,14 +1482,35 @@ pub fn run() {
                             }
                             last_blocked_log_ms = 0;
                         } else {
+                            let first_detection = blocked_since.is_none();
                             let since = *blocked_since.get_or_insert(sent);
                             let blocked_secs = elapsed_ms().saturating_sub(since) / 1000;
+                            // ブロック初検知時のみ: UI スレッド ID をログし、プロセス全体の minidump を
+                            // 1 回だけ書き出す。停止中のネイティブスタック (WebView2/wry/tray) を後で解析できる。
+                            if first_detection {
+                                #[cfg(target_os = "windows")]
+                                {
+                                    log::error!(
+                                        "[main-thread-watchdog] UI thread id={} (minidump 内でこのスレッドのスタックを参照)",
+                                        main_thread_watch::ui_thread_id()
+                                    );
+                                    if let Ok(dir) = watchdog_handle.path().app_log_dir() {
+                                        let _ = std::fs::create_dir_all(&dir);
+                                        let path = dir.join(format!("oretachi-hang-{}.dmp", since));
+                                        main_thread_watch::write_hang_minidump_once(path);
+                                    }
+                                }
+                            }
                             // 継続ブロック中の連続出力は 55 秒に 1 回へ抑制（初回は即時）
                             if elapsed_ms().saturating_sub(last_blocked_log_ms) >= 55_000 {
                                 last_blocked_log_ms = elapsed_ms();
+                                // ブロック中の UI スレッドの「最後のブレッドクラム」を併記する。
+                                // label=="idle" なら停止はネイティブ event loop 側 (WebView2/wry/tray)、
+                                // それ以外なら当該同期コマンド内での停止と切り分けられる。
+                                let bc = main_thread_watch::snapshot();
                                 log::error!(
-                                    "[main-thread-watchdog] tao main thread blocked for {}s (run_on_main_thread closure not executed within 5s)",
-                                    blocked_secs
+                                    "[main-thread-watchdog] tao main thread blocked for {}s; last main-thread activity: {} (running {}ms) (run_on_main_thread closure not executed within 5s)",
+                                    blocked_secs, bc.label, bc.age_ms
                                 );
                             }
                         }
@@ -1421,6 +1528,9 @@ pub fn run() {
             }
 
             if let Some(window) = app.get_webview_window("main") {
+                // WebView2 ネイティブ診断イベント (ProcessFailed / NewBrowserVersionAvailable) を購読する。
+                #[cfg(target_os = "windows")]
+                subscribe_webview2_diagnostics(&window);
                 let _ = window.show();
             }
 
@@ -1430,6 +1540,39 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(move |app_handle, event| {
+        // RunEvent ハンドラは UI スレッドで走る。Guard の Drop で復元するため、ここを抜けると
+        // ブレッドクラムは直前 (通常 idle) に戻る。RunEvent ディスパッチ「中」に停止した場合のみ
+        // ブレッドクラムが run-event のまま残り、イベント待ち「中」の停止 (= idle) と区別できる。
+        let _bc = main_thread_watch::enter(main_thread_watch::Activity::RunEvent);
+
+        // UI スレッド起因のイベントを可視化する (フリーズ直前の操作を追える)。
+        // 高頻度イベント (Moved/Resized/CursorMoved/MainEventsCleared 等) は意図的に除外する:
+        // 無条件 DEBUG ログはログ肥大＋UI スレッドのログ I/O が新たなスタール要因になるため。
+        match &event {
+            tauri::RunEvent::Ready => log::debug!("[run-event] Ready"),
+            tauri::RunEvent::Resumed => log::debug!("[run-event] Resumed"),
+            tauri::RunEvent::ExitRequested { code, .. } => {
+                log::debug!("[run-event] ExitRequested code={:?}", code)
+            }
+            tauri::RunEvent::WindowEvent { label, event, .. } => match event {
+                tauri::WindowEvent::CloseRequested { .. } => {
+                    log::debug!("[run-event] WindowEvent[{}] CloseRequested", label)
+                }
+                tauri::WindowEvent::Destroyed => {
+                    log::debug!("[run-event] WindowEvent[{}] Destroyed", label)
+                }
+                tauri::WindowEvent::Focused(focused) => {
+                    log::debug!("[run-event] WindowEvent[{}] Focused={}", label, focused)
+                }
+                tauri::WindowEvent::ThemeChanged(theme) => {
+                    log::debug!("[run-event] WindowEvent[{}] ThemeChanged={:?}", label, theme)
+                }
+                // Moved/Resized/ScaleFactorChanged/CursorMoved 等の高頻度イベントは除外
+                _ => {}
+            },
+            _ => {}
+        }
+
         if let tauri::RunEvent::Exit = event {
             let pty_manager = app_handle.state::<PtyManager>();
             pty_manager.kill_all("app-exit");
