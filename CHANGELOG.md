@@ -6,6 +6,18 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.24.0] - 2026-06-18
+
+### Added
+- ワークグループ機能を追加。複数のワークツリーをグループとしてまとめて管理できる (#84)
+- `ORETACHI_PLUGIN_OVERWRITE` 環境変数で dev 時の Claude プラグイン上書きを制御できるよう追加 (#85)
+
+### Fixed
+- アプリ終了処理を確実化し、MCP 固定ポートの掴みっぱなしや孤児 WebView2 プロセスを防止
+- Job オブジェクト割当失敗時に Job ハンドルを CloseHandle してリークを防止
+- ホーム画面のワークツリーカードで残留 transform による列ズレ/gap を修正し、FLIP クリーンアップを堅牢化
+- ワークグループの i18n で `{{PROMPT}}` をリテラル補間としてエスケープ
+
 ## [0.23.1] - 2026-06-17
 
 ### Added
@@ -434,7 +446,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.23.1...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.24.0...HEAD
+[0.24.0]: https://github.com/ishida-supsys/oretachi/compare/0.23.1...0.24.0
 [0.23.1]: https://github.com/ishida-supsys/oretachi/compare/0.23.0...0.23.1
 [0.23.0]: https://github.com/ishida-supsys/oretachi/compare/0.22.0...0.23.0
 [0.22.0]: https://github.com/ishida-supsys/oretachi/compare/0.21.5...0.22.0
