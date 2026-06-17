@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.24.1] - 2026-06-18
+
+### Fixed
+- ClaudeCode の Auto モードを `bypassPermissions` ではなく `auto` にマッピング (#86)
+
 ## [0.24.0] - 2026-06-18
 
 ### Added
@@ -446,7 +451,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.24.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.24.1...HEAD
+[0.24.1]: https://github.com/ishida-supsys/oretachi/compare/0.24.0...0.24.1
 [0.24.0]: https://github.com/ishida-supsys/oretachi/compare/0.23.1...0.24.0
 [0.23.1]: https://github.com/ishida-supsys/oretachi/compare/0.23.0...0.23.1
 [0.23.0]: https://github.com/ishida-supsys/oretachi/compare/0.22.0...0.23.0
