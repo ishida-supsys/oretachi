@@ -60,13 +60,17 @@ function animateFlip(oldPositions: Map<string, DOMRect>) {
     el.style.transition = 'transform 0.3s ease';
     el.style.transform = '';
 
-    // transition 完了時に inline style を消す。中断されなければここで残留 transform が確実に除去される
+    // transition 完了時に inline style を消す。中断されなければここで残留 transform が確実に除去される。
+    // transitioncancel（後続アニメーションによる中断）時はリスナー解除のみ行い、
+    // style は後続アニメーションに委ねる（ここで消すと進行中の transform を壊すため）。
     const onEnd = (e: TransitionEvent) => {
       if (e.propertyName !== 'transform') return;
       el.removeEventListener('transitionend', onEnd);
-      clearCardInlineTransform(el);
+      el.removeEventListener('transitioncancel', onEnd);
+      if (e.type === 'transitionend') clearCardInlineTransform(el);
     };
     el.addEventListener('transitionend', onEnd);
+    el.addEventListener('transitioncancel', onEnd);
   }
 }
 
@@ -306,8 +310,10 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
 // FLIP / auto-animate がリサイズ等の列間 DOM 移動で transform を残すと、
 // カードが論理列スロットからずれて描画され gap が生じるのを防ぐ self-healing。
 function resetAllCardTransforms() {
+  // transform が残留している要素のみ掃除する。transform が空で transition のみ残る要素は
+  // FLIP アニメーション進行中（最終値 '' へ遷移中）なので touch せず animateFlip の onEnd に委ねる。
   for (const el of cardElements.values()) {
-    if (el.style.transform || el.style.transition) clearCardInlineTransform(el);
+    if (el.style.transform) clearCardInlineTransform(el);
   }
 }
 
