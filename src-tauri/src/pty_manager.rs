@@ -1012,6 +1012,90 @@ impl PtyManagerCore {
         }
     }
 
+    /// アプリ終了経路専用の高速 kill_all。
+    ///
+    /// 逐次 `kill`（各セッション taskkill 最大10秒 + 無期限 `watcher_handle.join()`）は
+    /// N セッションで最悪 N×10秒 UI スレッドをブロックし、ユーザーの強制終了 → 孤児
+    /// WebView2 / ポート保持を招く。本関数は次の最適化で終了時間を有界化する:
+    /// 1. sessions ロックを最小スコープで全 drain し、ロック外で並列に kill する。
+    /// 2. taskkill は `kill_process_tree_exit`（1.5秒上限）を使う。
+    /// 3. `watcher_handle.join()` は無期限に待たず、合計 deadline まで有界に待つだけ。
+    ///    （プロセス終了時にスレッドも消えるため未 join でも問題ない。取りこぼした
+    ///     子プロセスは起動時に設定する Job Object が OS レベルで回収する。）
+    pub fn kill_all_fast(&self, source: &str) {
+        // (child_pid, child_killer, master(Arc), watcher_handle) を持ち出す。
+        // session 本体（input_tx 含む）はこのスコープ末尾で drop され、writer スレッドが終了する。
+        type Drained = (
+            Option<u32>,
+            Box<dyn portable_pty::ChildKiller + Send + Sync>,
+            Arc<Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>>,
+            Option<std::thread::JoinHandle<()>>,
+        );
+        let drained: Vec<Drained> = {
+            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            sweep_exited(&mut sessions);
+            let ids: Vec<u32> = sessions.keys().cloned().collect();
+            let mut out: Vec<Drained> = Vec::with_capacity(ids.len());
+            for id in ids {
+                if let Some(session) = sessions.remove(&id) {
+                    // ウォッチャースレッド停止のため alive=false を確実にセット（poison でも）。
+                    match session.alive.lock() {
+                        Ok(mut alive) => *alive = false,
+                        Err(e) => *e.into_inner() = false,
+                    }
+                    out.push((
+                        session.child_pid,
+                        session.child_killer,
+                        session.master.clone(),
+                        session.watcher_handle,
+                    ));
+                    // session（残りフィールド: input_tx 等）はここで drop される。
+                }
+            }
+            out
+        }; // ← sessions ロック解放
+
+        let count = drained.len();
+        log::info!("[Terminal] pty_manager::kill_all_fast source={} count={}", source, count);
+        if count == 0 {
+            return;
+        }
+
+        // 各セッションを並列スレッドで kill。1 スレッドが master.lock() でハングしても
+        // 他スレッドと UI スレッドを巻き込まないよう、スレッド内で master take を行う。
+        let remaining = Arc::new(std::sync::atomic::AtomicUsize::new(count));
+        for (child_pid, mut child_killer, master_arc, watcher_handle) in drained {
+            let remaining = remaining.clone();
+            std::thread::spawn(move || {
+                // child_killer でバックアップ kill（即時）
+                let _ = child_killer.kill();
+                // master を take して drop し ConPTY を破棄、reader に EOF を送る
+                let master = master_arc.lock().unwrap_or_else(|e| e.into_inner()).take();
+                drop(master);
+                // プロセスツリーを 1.5 秒上限で kill
+                if let Some(pid) = child_pid {
+                    crate::process_utils::kill_process_tree_exit(pid);
+                }
+                // watcher_handle は join せず drop（detach）。alive=false で自然終了する。
+                drop(watcher_handle);
+                remaining.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+
+        // 合計 deadline（2秒）まで有界に待つ。超過してもブロックを打ち切って終了を進める。
+        let deadline = Instant::now() + Duration::from_millis(2000);
+        while remaining.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let left = remaining.load(Ordering::SeqCst);
+        if left > 0 {
+            log::warn!(
+                "[Terminal] kill_all_fast: {} session(s) not confirmed within deadline (detached)",
+                left
+            );
+        }
+    }
+
     /// 指定ディレクトリ以下をcwdとして持つ全PTYセッションをkillする。
     /// ワークツリー削除前にそのディレクトリを掴んでいる子プロセスを解放するために使用。
     /// 返り値: killしたセッション数（> 0 なら呼び出し側でプロセス終了待機が必要）
