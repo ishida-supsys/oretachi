@@ -4,11 +4,30 @@ import { message } from "@tauri-apps/plugin-dialog";
 import { platform } from "@tauri-apps/plugin-os";
 import type { Ref } from "vue";
 import type TerminalView from "../components/TerminalView.vue";
-import type { WorktreeEntry, Repository, AppSettings } from "../types/settings";
+import type { WorktreeEntry, Repository, AppSettings, ClaudeCodeMode } from "../types/settings";
 import type { Worktree } from "../types/worktree";
 import type { AddWorktreeTaskCode, AgentWorktreeTaskCode } from "../types/task";
 import type { WebSessionInfo } from "../types/terminal";
 import { decodePtyOutput } from "../utils/decodePtyOutput";
+import { useWorkgroups } from "./useWorkgroups";
+
+/** Claude Code モード → permission-mode フラグ */
+function claudeModeFlag(mode?: ClaudeCodeMode): string {
+  switch (mode) {
+    case "manual": return "--permission-mode default";
+    case "acceptEdit": return "--permission-mode acceptEdits";
+    case "auto": return "--permission-mode bypassPermissions";
+    case "plan":
+    default: return "--permission-mode plan";
+  }
+}
+
+/** 実行プロンプトテンプレートの {{PROMPT}} を実プロンプトに置換。未指定なら実プロンプトそのまま */
+function applyExecPrompt(template: string | undefined, prompt: string): string {
+  if (!template || !template.trim()) return prompt;
+  if (template.includes("{{PROMPT}}")) return template.split("{{PROMPT}}").join(prompt);
+  return `${template}\n\n${prompt}`;
+}
 
 export function useTaskExecution(deps: {
   t: (key: string, values?: Record<string, unknown>) => string;
@@ -51,6 +70,8 @@ export function useTaskExecution(deps: {
     autoApprovalMap,
     onWebSessionDetected,
   } = deps;
+
+  const { groupOf, activeWorkgroupId } = useWorkgroups();
 
   function randomSuffix(): string {
     return Math.random().toString(36).slice(2, 6);
@@ -230,6 +251,7 @@ export function useTaskExecution(deps: {
       repositoryName: repo.name,
       path: `${settings.value.worktreeBaseDir}/${worktreeName}`,
       branchName: code.branch,
+      workgroupId: activeWorkgroupId.value || undefined,
     };
 
     addWorktreePlaceholder(entry);
@@ -341,7 +363,9 @@ export function useTaskExecution(deps: {
       return;
     }
 
-    const agentKind = settings.value.aiAgent?.taskAddAgent ?? settings.value.aiAgent?.approvalAgent ?? "claudeCode";
+    // タスク実行エージェント・モード・実行プロンプトは所属ワークグループ単位
+    const group = groupOf(wt);
+    const agentKind = group?.taskAddAgent ?? settings.value.aiAgent?.taskAddAgent ?? settings.value.aiAgent?.approvalAgent ?? "claudeCode";
     const isWindows = platform() === "windows";
     const shell = resolveShell(wt.id);
     const shellLower = (shell ?? "").toLowerCase();
@@ -350,12 +374,14 @@ export function useTaskExecution(deps: {
       shellLower.includes("pwsh") ||
       (shell === undefined && isWindows);
 
-    // 一時ファイルにプロンプトを書き出し
-    const tempPath = await invoke<string>("write_temp_prompt", { content: code.prompt });
+    // 実行プロンプトテンプレート ({{PROMPT}}) を適用してから一時ファイルへ書き出し
+    const finalPrompt = applyExecPrompt(group?.execPrompt, code.prompt);
+    const tempPath = await invoke<string>("write_temp_prompt", { content: finalPrompt });
 
+    const claudeMode = claudeModeFlag(group?.claudeCodeMode);
     let agentCmd: string;
     switch (agentKind) {
-      case "claudeCode": agentCmd = code.remoteExec ? "claude --remote" : "claude --permission-mode plan"; break;
+      case "claudeCode": agentCmd = code.remoteExec ? `claude --remote ${claudeMode}` : `claude ${claudeMode}`; break;
       case "geminiCli":  agentCmd = "gemini"; break;
       case "codexCli":   agentCmd = "codex"; break;
       case "clineCli":   agentCmd = "cline"; break;

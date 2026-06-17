@@ -14,6 +14,9 @@ export default {
     clear: 'Clear',
     notConfigured: 'Not configured',
   },
+  workgroup: {
+    autoName: 'Group ({n})',
+  },
   search: {
     noResults: '0 results',
     results: '{count} results',

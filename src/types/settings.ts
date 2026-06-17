@@ -28,6 +28,20 @@ export interface WorktreeEntry {
   autoApprovalPrompt?: string;
   description?: string; // AIが自動生成する説明（ExitPlanMode hookでプランを要約してセット）
   descriptionOpen?: boolean; // ホームカードの description 開閉状態（ワークツリー毎）
+  workgroupId?: string; // 所属するワークグループのID（未設定は先頭グループにフォールバック）
+}
+
+// Claude Code の起動モード（taskAddAgent が claudeCode のときのみ意味を持つ）
+export type ClaudeCodeMode = 'plan' | 'manual' | 'acceptEdit' | 'auto';
+
+export interface Workgroup {
+  id: string;
+  name?: string;                    // 未指定時は表示時に「グループ(番号)」を生成
+  color?: string;                   // プリセット色。未指定 = 無色
+  autoAssignHotkey?: boolean;       // ホットキー自動割り当て（グループ単位）
+  taskAddAgent?: AiAgentKind;       // タスク実行エージェント（グループ単位）
+  claudeCodeMode?: ClaudeCodeMode;  // Claude Code モード（既定: plan）
+  execPrompt?: string;              // 実行プロンプトテンプレート（置換タグ {{PROMPT}}）
 }
 
 export interface TerminalSettings {
@@ -99,6 +113,8 @@ export interface AppSettings {
   repositories: Repository[];
   worktreeBaseDir: string;
   worktrees: WorktreeEntry[];
+  workgroups?: Workgroup[];
+  activeWorkgroupId?: string; // ホームで選択中のワークグループ
   terminal: TerminalSettings;
   hotkeys: HotkeySettings;
   alwaysOnTop: boolean;

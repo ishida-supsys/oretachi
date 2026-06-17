@@ -12,6 +12,7 @@ import SettingsView from "./components/SettingsView.vue";
 import AddWorktreeDialog from "./components/AddWorktreeDialog.vue";
 import AddTaskDialog from "./components/AddTaskDialog.vue";
 import RemoveWorktreeDialog from "./components/RemoveWorktreeDialog.vue";
+import RemoveWorkgroupDialog from "./components/RemoveWorkgroupDialog.vue";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import HotkeyCharDialog from "./components/HotkeyCharDialog.vue";
 import AutoApprovalPromptDialog from "./components/AutoApprovalPromptDialog.vue";
@@ -43,6 +44,7 @@ import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
 import { useWorktreeRemove } from "./composables/useWorktreeRemove";
 import { useRemoveWorktreeDialog } from "./composables/useRemoveWorktreeDialog";
 import { useAutoHotkey } from "./composables/useAutoHotkey";
+import { useWorkgroups } from "./composables/useWorkgroups";
 import { useAppAutoApproval } from "./composables/useAppAutoApproval";
 import { useAppHotkeys } from "./composables/useAppHotkeys";
 import { useSubWindowEvents } from "./composables/useSubWindowEvents";
@@ -331,7 +333,7 @@ const worktreeRemoveCore = useWorktreeRemove({
   homeViewRef,
   t,
 });
-const { cancellableWorktrees, cancelWorktreeRemove, archiveWorktree } = worktreeRemoveCore;
+const { cancellableWorktrees, cancelWorktreeRemove, archiveWorktree, removeWorktreeNoArchive } = worktreeRemoveCore;
 
 // ワークツリー削除/アーカイブダイアログ
 const {
@@ -344,6 +346,65 @@ const {
   onArchiveWorktreeConfirm,
   dismissDialog: onRemoveWorktreeDismiss,
 } = useRemoveWorktreeDialog(worktreeRemoveCore);
+
+// ワークグループ
+const { activeWorkgroupId, resolvedGroupId, deleteWorkgroupRecord, displayName: workgroupDisplayName } = useWorkgroups();
+
+// タスク追加ダイアログ用: 現在表示中グループのタスク実行エージェント（リモート実行チェックボックスの出し分け）
+const activeTaskExecAgent = computed(() => {
+  const g = settings.value.workgroups?.find((w) => w.id === activeWorkgroupId.value);
+  return g?.taskAddAgent ?? settings.value.aiAgent?.taskAddAgent ?? settings.value.aiAgent?.approvalAgent;
+});
+
+// ワークグループ削除フロー
+const removeWorkgroupId = ref<string | null>(null);
+const removeWorkgroupName = computed(() => {
+  const g = settings.value.workgroups?.find((w) => w.id === removeWorkgroupId.value);
+  return g ? workgroupDisplayName(g) : "";
+});
+const removeWorkgroupMembers = computed(() =>
+  removeWorkgroupId.value
+    ? worktrees.value.filter((w) => resolvedGroupId(w.workgroupId) === removeWorkgroupId.value)
+    : [],
+);
+let removingWorkgroup = false;
+
+function onRemoveWorkgroup(groupId: string) {
+  // 最後の1グループは削除しない（常に1グループ以上を維持する）
+  if ((settings.value.workgroups?.length ?? 0) <= 1) return;
+  removeWorkgroupId.value = groupId;
+}
+
+async function onRemoveWorkgroupConfirm(archive: boolean) {
+  const groupId = removeWorkgroupId.value;
+  if (!groupId || removingWorkgroup) return;
+  removingWorkgroup = true;
+  // 削除対象のスナップショット（削除中に worktrees が変化するため固定）
+  const members = worktrees.value
+    .filter((w) => resolvedGroupId(w.workgroupId) === groupId)
+    .map((w) => w.id);
+  const opts = { mergeTo: "", deleteBranch: true, forceBranch: true };
+  try {
+    for (const id of members) {
+      try {
+        if (archive) await archiveWorktree(id, opts);
+        else await removeWorktreeNoArchive(id, opts);
+      } catch (e) {
+        console.error("グループ内ワークツリー削除に失敗:", e);
+      }
+    }
+  } finally {
+    removingWorkgroup = false;
+    // 所属ワークツリーが残っていなければグループを削除
+    const remaining = worktrees.value.some((w) => resolvedGroupId(w.workgroupId) === groupId);
+    if (!remaining) deleteWorkgroupRecord(groupId);
+    removeWorkgroupId.value = null;
+  }
+}
+
+function onRemoveWorkgroupCancel() {
+  removeWorkgroupId.value = null;
+}
 
 // IDE 選択
 const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect();
@@ -620,6 +681,8 @@ async function onShowAddWorktreeDialog() {
 }
 
 async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string, sessionSourcePath?: string, copyWorkingChangesFrom?: string) {
+  // 現在表示中のワークグループに所属させる（仮追加の前に設定しないとランタイムコピーに反映されない）
+  if (activeWorkgroupId.value) entry.workgroupId = activeWorkgroupId.value;
   // ダイアログを即閉じ、一覧に仮エントリを表示
   showAddDialog.value = false;
   duplicateSourceData.value = null;
@@ -1646,6 +1709,7 @@ onMounted(async () => {
         @add-task="showAddTaskDialog = true"
         @remove-task="removeTask"
         @rerun-task="rerunTaskId = $event"
+        @remove-workgroup="onRemoveWorkgroup"
       />
 
       <!-- 設定ビュー -->
@@ -1729,7 +1793,7 @@ onMounted(async () => {
       v-if="showAddTaskDialog || rerunTaskId"
       :initial-prompt="rerunTaskId ? rerunPrompt : ''"
       :mode="rerunTaskId ? 'rerun' : 'add'"
-      :show-remote-exec="(settings.aiAgent?.taskAddAgent ?? settings.aiAgent?.approvalAgent) === 'claudeCode'"
+      :show-remote-exec="activeTaskExecAgent === 'claudeCode'"
       :initial-remote-exec="settings.aiAgent?.remoteExec ?? false"
       @confirm="(prompt, remoteExec) => onAddTaskConfirm(prompt, remoteExec)"
       @cancel="onAddTaskCancel"
@@ -1758,6 +1822,15 @@ onMounted(async () => {
       @confirm="onRemoveWorktreeConfirm"
       @archive="onArchiveWorktreeConfirm"
       @cancel="onRemoveWorktreeDismiss"
+    />
+
+    <!-- ワークグループ削除ダイアログ -->
+    <RemoveWorkgroupDialog
+      v-if="removeWorkgroupId"
+      :group-name="removeWorkgroupName"
+      :members="removeWorkgroupMembers"
+      @confirm="onRemoveWorkgroupConfirm"
+      @cancel="onRemoveWorkgroupCancel"
     />
 
     <!-- IDE 選択ダイアログ -->

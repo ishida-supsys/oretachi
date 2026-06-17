@@ -14,6 +14,9 @@ export default {
     clear: 'クリア',
     notConfigured: '未設定',
   },
+  workgroup: {
+    autoName: 'グループ({n})',
+  },
   search: {
     noResults: '0件',
     results: '{count}件',

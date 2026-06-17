@@ -7,8 +7,10 @@ import WorktreeCard from "./WorktreeCard.vue";
 import TaskCard from "./TaskCard.vue";
 import ArchiveTable from "./ArchiveTable.vue";
 import HomeCatTerminal from "./HomeCatTerminal.vue";
+import WorkgroupBar from "./WorkgroupBar.vue";
 import { useMasonryLayout } from "../composables/useMasonryLayout";
 import { useSettings } from "../composables/useSettings";
+import { useWorkgroups } from "../composables/useWorkgroups";
 import { useTasks } from "../composables/useTasks";
 import { useTaskPersistence } from "../composables/useTaskPersistence";
 import { useTaskSearch } from "../composables/useTaskSearch";
@@ -224,6 +226,7 @@ const emit = defineEmits<{
   addTask: [];
   removeTask: [taskId: string];
   rerunTask: [taskId: string];
+  removeWorkgroup: [groupId: string];
 }>();
 
 type PanelMode = "worktree" | "task" | "archive";
@@ -280,8 +283,16 @@ watch(panelMode, async (mode, oldMode) => {
   }
 });
 
-const worktreesRef = computed(() => props.worktrees);
+// アクティブなワークグループでワークツリーをフィルタ
+const { activeWorkgroupId, resolvedGroupId, groups: workgroups, moveWorktreeToWorkgroup } = useWorkgroups();
+const worktreesRef = computed(() =>
+  props.worktrees.filter((w) => resolvedGroupId(w.workgroupId) === activeWorkgroupId.value),
+);
 const tasksRef = sortedTasks;
+
+function onMoveToWorkgroup(payload: { worktreeId: string; groupId: string }) {
+  moveWorktreeToWorkgroup(payload.worktreeId, payload.groupId);
+}
 
 // 各ワークツリーカードの自然幅（ターミナルサムネイル幅から計算）をもとに列幅を決定する
 const naturalCardWidth = computed(() => {
@@ -345,6 +356,11 @@ watch(
         <option value="task">{{ t('taskTitle') }}</option>
         <option value="archive">{{ t('archiveTitle') }}</option>
       </select>
+      <WorkgroupBar
+        v-if="panelMode === 'worktree'"
+        class="header-workgroups"
+        @remove-workgroup="emit('removeWorkgroup', $event)"
+      />
       <div class="header-actions">
         <template v-if="panelMode === 'worktree'">
           <button
@@ -435,6 +451,9 @@ watch(
               :ai-judging="aiJudgingWorktrees.has(worktree.id)"
               :tooltip="cardTooltips?.get(worktree.id)"
               :description-open="showAllDescriptions || (descriptionOpens?.get(worktree.id) ?? false)"
+              :workgroups="workgroups"
+              :current-workgroup-id="resolvedGroupId(worktree.workgroupId)"
+              @move-to-workgroup="onMoveToWorkgroup"
               @drag-start="onCardDragStart"
               @drag-end="onDragEnd"
               @select-terminal="emit('selectTerminal', $event)"
@@ -560,10 +579,15 @@ watch(
   font-weight: 600;
 }
 
+.header-workgroups {
+  margin: 0 12px;
+}
+
 .header-actions {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
 }
 
 .btn-icon-header {
