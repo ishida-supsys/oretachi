@@ -39,6 +39,11 @@ function capturePositions(): Map<string, DOMRect> {
   return positions;
 }
 
+function clearCardInlineTransform(el: HTMLElement) {
+  el.style.transform = '';
+  el.style.transition = '';
+}
+
 function animateFlip(oldPositions: Map<string, DOMRect>) {
   for (const [id, el] of cardElements) {
     const oldRect = oldPositions.get(id);
@@ -54,6 +59,14 @@ function animateFlip(oldPositions: Map<string, DOMRect>) {
     el.offsetHeight;
     el.style.transition = 'transform 0.3s ease';
     el.style.transform = '';
+
+    // transition 完了時に inline style を消す。中断されなければここで残留 transform が確実に除去される
+    const onEnd = (e: TransitionEvent) => {
+      if (e.propertyName !== 'transform') return;
+      el.removeEventListener('transitionend', onEnd);
+      clearCardInlineTransform(el);
+    };
+    el.addEventListener('transitionend', onEnd);
   }
 }
 
@@ -122,6 +135,8 @@ watch(draggingId, (id) => {
     if (id) ctrl.disable();
     else ctrl.enable();
   }
+  // ドラッグ完了直後に残留 transform を掃除する
+  if (!id) nextTick(resetAllCardTransforms);
 });
 
 function onCardDragStart(worktreeId: string, event: DragEvent) {
@@ -286,6 +301,26 @@ const TASK_CARD_WIDTH = ref(260);
 
 const { containerRef, columns } = useMasonryLayout(worktreesRef, { minColumnWidth: naturalCardWidth, gap: 12 });
 const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayout(tasksRef, { minColumnWidth: TASK_CARD_WIDTH, gap: 12 });
+
+// 中断されたアニメーションが残した inline transform を一括除去する。
+// FLIP / auto-animate がリサイズ等の列間 DOM 移動で transform を残すと、
+// カードが論理列スロットからずれて描画され gap が生じるのを防ぐ self-healing。
+function resetAllCardTransforms() {
+  for (const el of cardElements.values()) {
+    if (el.style.transform || el.style.transition) clearCardInlineTransform(el);
+  }
+}
+
+// 列構成（順序変化・列数変化のいずれも）が変わったら残留 transform を掃除する。
+// ドラッグ中 / 削除 FLIP 中は transform を意図的に使用中なので除外する。
+watch(
+  () => columns.value.map((c) => c.map((w) => w.id).join(",")).join("|"),
+  () => {
+    if (draggingId.value) return;
+    if (autoAnimateDisableDepth > 0) return;
+    nextTick(resetAllCardTransforms);
+  }
+);
 
 </script>
 
