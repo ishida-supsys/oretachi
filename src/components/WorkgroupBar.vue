@@ -18,6 +18,7 @@ const {
   worktreeCount,
   addWorkgroup,
   updateWorkgroup,
+  reorderWorkgroup,
 } = useWorkgroups();
 
 const editingId = ref<string | null>(null);
@@ -56,17 +57,23 @@ function onRemove() {
   if (id) emit("removeWorkgroup", id);
 }
 
-// 並び替え (D&D)
+// 並び替え (D&D): 並び替えは drop 時に一度だけ確定する
 function onDragStart(id: string, event: DragEvent) {
   draggingId.value = id;
-  event.dataTransfer?.setData("text/plain", id);
+  if (event.dataTransfer) {
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("text/plain", id);
+  }
 }
-function onDragOver(id: string, event: DragEvent) {
+function onDragOver(event: DragEvent) {
   event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+}
+function onDrop(id: string) {
   if (draggingId.value && draggingId.value !== id) {
-    const { reorderWorkgroup } = useWorkgroups();
     reorderWorkgroup(draggingId.value, id);
   }
+  draggingId.value = null;
 }
 function onDragEnd() {
   draggingId.value = null;
@@ -85,7 +92,8 @@ function onDragEnd() {
       :title="t('chipTitle')"
       @click="onChipClick(g.id)"
       @dragstart="onDragStart(g.id, $event)"
-      @dragover="onDragOver(g.id, $event)"
+      @dragover="onDragOver($event)"
+      @drop="onDrop(g.id)"
       @dragend="onDragEnd"
     >
       <span class="wg-name">{{ displayName(g) }}</span>
@@ -102,6 +110,7 @@ function onDragEnd() {
     <WorkgroupEditDialog
       v-if="editingGroup()"
       :group="editingGroup()!"
+      :can-delete="groups.length > 1"
       @save="onSave"
       @remove="onRemove"
       @cancel="editingId = null"

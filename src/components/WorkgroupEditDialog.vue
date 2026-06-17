@@ -8,6 +8,7 @@ const { t } = useI18n();
 
 const props = defineProps<{
   group: Workgroup;
+  canDelete?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -106,7 +107,12 @@ function save() {
       </div>
 
       <div class="dialog-actions">
-        <button class="btn-remove" @click="emit('remove')">{{ t('removeGroup') }}</button>
+        <button
+          v-if="canDelete"
+          class="btn-remove"
+          :title="t('removeGroup')"
+          @click="emit('remove')"
+        >{{ t('removeGroup') }}</button>
         <div class="spacer" />
         <button class="btn-cancel" @click="emit('cancel')">{{ t('common.cancel') }}</button>
         <button class="btn-primary" @click="save">{{ t('saveButton') }}</button>

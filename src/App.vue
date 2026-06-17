@@ -370,6 +370,8 @@ const removeWorkgroupMembers = computed(() =>
 let removingWorkgroup = false;
 
 function onRemoveWorkgroup(groupId: string) {
+  // 最後の1グループは削除しない（常に1グループ以上を維持する）
+  if ((settings.value.workgroups?.length ?? 0) <= 1) return;
   removeWorkgroupId.value = groupId;
 }
 
@@ -679,6 +681,8 @@ async function onShowAddWorktreeDialog() {
 }
 
 async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string, sessionSourcePath?: string, copyWorkingChangesFrom?: string) {
+  // 現在表示中のワークグループに所属させる（仮追加の前に設定しないとランタイムコピーに反映されない）
+  if (activeWorkgroupId.value) entry.workgroupId = activeWorkgroupId.value;
   // ダイアログを即閉じ、一覧に仮エントリを表示
   showAddDialog.value = false;
   duplicateSourceData.value = null;
@@ -692,9 +696,6 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string,
     }
 
     const lfsSkipped = await invokeWorktreeAdd(entry, sourceBranch);
-
-    // 現在表示中のワークグループに所属させる
-    if (activeWorkgroupId.value) entry.workgroupId = activeWorkgroupId.value;
 
     // 成功時: 設定に永続化
     commitWorktree(entry);
