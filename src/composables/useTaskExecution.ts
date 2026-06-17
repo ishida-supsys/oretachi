@@ -16,7 +16,7 @@ function claudeModeFlag(mode?: ClaudeCodeMode): string {
   switch (mode) {
     case "manual": return "--permission-mode default";
     case "acceptEdit": return "--permission-mode acceptEdits";
-    case "auto": return "--permission-mode bypassPermissions";
+    case "auto": return "--permission-mode auto";
     case "plan":
     default: return "--permission-mode plan";
   }
