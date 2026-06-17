@@ -328,8 +328,8 @@ function save() {
     "claudeCodeMode": "Claude Code mode",
     "mode": { "plan": "Plan", "manual": "Manual", "acceptEdit": "AcceptEdit", "auto": "Auto" },
     "execPrompt": "Execution prompt",
-    "execPromptPlaceholder": "e.g. Work on the following task.\n\n{{PROMPT}}",
-    "execPromptHint": "{{PROMPT}} is replaced with the task prompt. Empty = task prompt only.",
+    "execPromptPlaceholder": "e.g. Work on the following task.\n\n{'{{PROMPT}}'}",
+    "execPromptHint": "{'{{PROMPT}}'} is replaced with the task prompt. Empty = task prompt only.",
     "saveButton": "Save",
     "removeGroup": "Delete this group"
   },
@@ -345,8 +345,8 @@ function save() {
     "claudeCodeMode": "Claude Code モード",
     "mode": { "plan": "Plan", "manual": "Manual", "acceptEdit": "AcceptEdit", "auto": "Auto" },
     "execPrompt": "実行プロンプト",
-    "execPromptPlaceholder": "例: 以下のタスクに取り組んでください。\n\n{{PROMPT}}",
-    "execPromptHint": "{{PROMPT}} がタスク実行プロンプトに置換されます。未指定ならプロンプトのみと等価。",
+    "execPromptPlaceholder": "例: 以下のタスクに取り組んでください。\n\n{'{{PROMPT}}'}",
+    "execPromptHint": "{'{{PROMPT}}'} がタスク実行プロンプトに置換されます。未指定ならプロンプトのみと等価。",
     "saveButton": "保存",
     "removeGroup": "このグループを削除"
   }
