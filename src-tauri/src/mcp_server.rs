@@ -1708,8 +1708,13 @@ fn write_server_info_file(app_handle: &AppHandle, port: u16, api_key: &str) {
     }
 
     // プラグインの .mcp.json も同じ値で更新（app_data_dir 取得失敗時は plugin_dir.exists() で早期 return）
-    if let Err(e) = crate::claude_plugin::update_mcp_config(app_handle, effective_port, api_key) {
-        log::warn!("[ClaudePlugin] Failed to update .mcp.json: {}", e);
+    // ORETACHI_PLUGIN_OVERWRITE=false の場合はグローバルプラグインを汚染しないようスキップ。
+    // （mcp-server.json 自体は MCP 接続に必要なため上で常に書き込み済み）
+    if crate::claude_plugin::overwrite_enabled() {
+        if let Err(e) = crate::claude_plugin::update_mcp_config(app_handle, effective_port, api_key)
+        {
+            log::warn!("[ClaudePlugin] Failed to update .mcp.json: {}", e);
+        }
     }
 
     // 後方互換: 旧 mcp-port テキストファイルも書き込む

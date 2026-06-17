@@ -1152,9 +1152,15 @@ pub fn run() {
                 );
             }
 
-            // Claude Code プラグインファイルを生成・更新
-            if let Err(e) = claude_plugin::generate_plugin_files(app.handle()) {
-                log::warn!("[ClaudePlugin] Failed to generate plugin files: {}", e);
+            // Claude Code プラグインファイルを生成・更新（ORETACHI_PLUGIN_OVERWRITE=false で抑止）
+            if claude_plugin::overwrite_enabled() {
+                if let Err(e) = claude_plugin::generate_plugin_files(app.handle()) {
+                    log::warn!("[ClaudePlugin] Failed to generate plugin files: {}", e);
+                }
+            } else {
+                log::info!(
+                    "[ClaudePlugin] ORETACHI_PLUGIN_OVERWRITE=false: プラグイン生成をスキップ"
+                );
             }
 
             // AIエージェントインジケーター用ポーリング起動
