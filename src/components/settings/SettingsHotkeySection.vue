@@ -10,16 +10,7 @@ const { settings, scheduleSave } = useSettings();
 <template>
   <div class="field-group">
     <label class="field-label">{{ t('hotkeys.label') }}</label>
-    <div class="row-input row-input--inline">
-      <input
-        id="auto-assign-hotkey"
-        type="checkbox"
-        class="toggle-checkbox"
-        :checked="settings.autoAssignHotkey"
-        @change="(e) => { settings.autoAssignHotkey = (e.target as HTMLInputElement).checked; scheduleSave(); }"
-      />
-      <label for="auto-assign-hotkey" class="inline-label toggle-label">{{ t('hotkeys.autoAssign') }}</label>
-    </div>
+    <!-- 「ホットキー自動割り当て」はワークグループ単位に移動 -->
     <table v-if="settings.hotkeys" class="hotkey-table">
       <thead>
         <tr>

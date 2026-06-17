@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
 import { error } from "@tauri-apps/plugin-log";
 import { platform } from "@tauri-apps/plugin-os";
-import type { AppSettings, HotkeyBinding, HotkeySettings } from "../types/settings";
+import type { AppSettings, HotkeyBinding, HotkeySettings, Workgroup } from "../types/settings";
 import { setLocale } from "../i18n";
 import { setVerboseLogging } from "../utils/log";
 
@@ -56,6 +56,44 @@ function migrateHotkeys(hotkeys: HotkeySettings): boolean {
   return changed;
 }
 
+/**
+ * ワークグループ移行 (冪等):
+ * 1. グループが無ければデフォルトグループを1件作成し、旧グローバル設定を引き継ぐ
+ * 2. workgroupId 未設定 or 不明なグループを指すワークツリーを先頭グループへ割り当て
+ * 3. activeWorkgroupId を補完
+ * 変更があれば true を返す。
+ */
+function migrateWorkgroups(loaded: AppSettings): boolean {
+  let changed = false;
+
+  if (!loaded.workgroups || loaded.workgroups.length === 0) {
+    const defaultGroup: Workgroup = {
+      id: `wg-default-${Date.now()}`,
+      autoAssignHotkey: loaded.autoAssignHotkey ?? false,
+      taskAddAgent: loaded.aiAgent?.taskAddAgent,
+      claudeCodeMode: "plan",
+    };
+    loaded.workgroups = [defaultGroup];
+    changed = true;
+  }
+
+  const groupIds = new Set(loaded.workgroups.map((g) => g.id));
+  const firstId = loaded.workgroups[0].id;
+  for (const wt of loaded.worktrees) {
+    if (!wt.workgroupId || !groupIds.has(wt.workgroupId)) {
+      wt.workgroupId = firstId;
+      changed = true;
+    }
+  }
+
+  if (!loaded.activeWorkgroupId || !groupIds.has(loaded.activeWorkgroupId)) {
+    loaded.activeWorkgroupId = firstId;
+    changed = true;
+  }
+
+  return changed;
+}
+
 const settings = ref<AppSettings>({
   repositories: [],
   worktreeBaseDir: "",
@@ -92,8 +130,10 @@ async function loadSettings() {
   if (loaded.alwaysOnTop === undefined) {
     loaded.alwaysOnTop = false;
   }
-  // ホットキーマイグレーション (冪等)
-  if (migrateHotkeys(loaded.hotkeys)) {
+  // ホットキー・ワークグループ マイグレーション (冪等)
+  const hotkeyChanged = migrateHotkeys(loaded.hotkeys);
+  const workgroupChanged = migrateWorkgroups(loaded);
+  if (hotkeyChanged || workgroupChanged) {
     try {
       await invoke("save_settings", { settings: loaded });
     } catch (e) {

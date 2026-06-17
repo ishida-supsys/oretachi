@@ -52,6 +52,26 @@ pub struct WorktreeEntry {
     pub description: Option<String>,
     #[serde(default, rename = "descriptionOpen")]
     pub description_open: Option<bool>,
+    #[serde(default, rename = "workgroupId")]
+    pub workgroup_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Workgroup {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub auto_assign_hotkey: Option<bool>,
+    #[serde(default)]
+    pub task_add_agent: Option<AiAgentKind>,
+    #[serde(default)]
+    pub claude_code_mode: Option<String>,
+    #[serde(default)]
+    pub exec_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -310,6 +330,10 @@ pub struct AppSettings {
     pub worktree_base_dir: String,
     pub worktrees: Vec<WorktreeEntry>,
     #[serde(default)]
+    pub workgroups: Vec<Workgroup>,
+    #[serde(default, rename = "activeWorkgroupId")]
+    pub active_workgroup_id: Option<String>,
+    #[serde(default)]
     pub terminal: TerminalSettings,
     #[serde(default)]
     pub hotkeys: HotkeySettings,
@@ -368,6 +392,8 @@ impl Default for AppSettings {
             repositories: Vec::new(),
             worktree_base_dir: String::new(),
             worktrees: Vec::new(),
+            workgroups: Vec::new(),
+            active_workgroup_id: None,
             terminal: TerminalSettings::default(),
             hotkeys: HotkeySettings::default(),
             always_on_top: false,

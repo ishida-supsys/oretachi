@@ -432,27 +432,7 @@ function getSoundLabel(sound: string | null | undefined): string {
           >{{ AI_AGENT_LABELS[kind] }}{{ !isAgentDetected(kind) ? t('autoApproval.notDetected') : '' }}</option>
         </select>
       </div>
-      <div class="row-input row-input--inline mt-8">
-        <span class="inline-label">{{ t('autoApproval.taskAddAgent') }}</span>
-        <select
-          class="text-input select-input"
-          :value="settings.aiAgent?.taskAddAgent ?? ''"
-          @change="(e) => {
-            const v = (e.target as HTMLSelectElement).value;
-            if (!settings.aiAgent) settings.aiAgent = {};
-            settings.aiAgent.taskAddAgent = v ? (v as AiAgentKind) : undefined;
-            scheduleSave();
-          }"
-        >
-          <option value="">{{ t('autoApproval.notSet') }}</option>
-          <option
-            v-for="kind in ALL_AGENT_KINDS"
-            :key="kind"
-            :value="kind"
-            :disabled="!isAgentDetected(kind)"
-          >{{ AI_AGENT_LABELS[kind] }}{{ !isAgentDetected(kind) ? t('autoApproval.notDetected') : '' }}</option>
-        </select>
-      </div>
+      <!-- 「タスク実行エージェント」はワークグループ単位に移動 -->
       <div class="row-input row-input--inline mt-8">
         <span class="inline-label">{{ t('autoApproval.aiTimeout') }}</span>
         <input
