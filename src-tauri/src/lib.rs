@@ -8,6 +8,7 @@ mod claude_plugin_skills;
 mod fs_watcher;
 mod git_worktree;
 mod ide_launcher;
+mod job_object;
 mod main_thread_watch;
 pub mod mcp_server;
 mod process_utils;
@@ -1030,6 +1031,11 @@ pub fn run() {
                 log::set_max_level(log::LevelFilter::Info);
             }
 
+            // 子プロセス（WebView2 等）を Job Object に取り込み、親終了時に OS レベルで
+            // 巻き込み終了させる。MCP サーバ spawn や window.show() より前に割り当てて
+            // 以降生成される全子プロセスを確実に Job 配下に入れる。
+            job_object::assign_current_process_to_job();
+
             #[cfg(target_os = "windows")]
             match &redirection_guard_outcome {
                 redirection_guard::GuardOutcome::NotGuarded => {}
@@ -1575,13 +1581,27 @@ pub fn run() {
         }
 
         if let tauri::RunEvent::Exit = event {
-            let pty_manager = app_handle.state::<PtyManager>();
-            pty_manager.kill_all("app-exit");
-            let mcp_manager = app_handle.state::<mcp_server::McpServerManager>();
-            mcp_manager.stop();
+            // ① MCP を最優先で停止し、ポート解放を有界に待つ。
+            //    stop_and_wait は serve future 完了（= TcpListener drop = ポート解放）まで待つ。
+            //    PTY kill が長引いてもポートは先に確実に解放されるため、再起動時の
+            //    「固定ポートが掴まれたまま bind 失敗 → 停止中」を防ぐ。
+            //    Exit 時点で tokio ランタイムは生存しており block_on は安全（有界 timeout で必ず復帰）。
             if mcp_enabled {
+                let mcp_manager = app_handle.state::<mcp_server::McpServerManager>();
+                let released = tauri::async_runtime::block_on(
+                    mcp_manager.stop_and_wait(std::time::Duration::from_millis(1500)),
+                );
+                if !released {
+                    log::warn!("[exit] MCP stop_and_wait timed out; port may still be held");
+                }
                 mcp_server::cleanup_port_file(app_handle);
             }
+
+            // ② PTY セッションを終了時専用の高速経路で kill（並列 + 有界 deadline）。
+            let pty_manager = app_handle.state::<PtyManager>();
+            pty_manager.kill_all_fast("app-exit");
+
+            // ③ ファイルシステムウォッチャーを停止。
             let fs_watcher = app_handle.state::<FsWatcherManager>();
             fs_watcher.stop_all();
         }

@@ -64,6 +64,6 @@ winreg = "0.52"
 # wry 0.54 / tauri 2.10 が使う版に合わせる (windows 0.61 系・PlatformWebview の controller()/environment() と同一型)。
 webview2-com = "0.38"
 windows = { version = "0.58", features = ["Win32_UI_Shell", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_Graphics_Dwm", "Win32_System_Environment", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug", "Win32_Storage_FileSystem", "Win32_System_Kernel", "Win32_System_Memory"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_Graphics_Dwm", "Win32_System_Environment", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug", "Win32_Storage_FileSystem", "Win32_System_Kernel", "Win32_System_Memory", "Win32_System_JobObjects", "Win32_Security"] }
 windows-version = "0.1"
 
