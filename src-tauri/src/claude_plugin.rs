@@ -33,6 +33,15 @@ fn plugin_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
     marketplace_dir(app_handle).map(|d| d.join(PLUGIN_NAME))
 }
 
+/// グローバルプラグイン（marketplace / .mcp.json）を上書きするか。
+/// 未設定は true（本番インストール済みアプリには .env* が無いため常に上書き＝従来挙動）。
+/// dev では .env.development の ORETACHI_PLUGIN_OVERWRITE=false で抑止できる。
+pub fn overwrite_enabled() -> bool {
+    std::env::var("ORETACHI_PLUGIN_OVERWRITE")
+        .map(|v| v != "false")
+        .unwrap_or(true)
+}
+
 /// 起動時にプラグインファイル群を生成・更新する
 /// - ディレクトリ構造の作成
 /// - marketplace.json: マーケットプレイスルートのカタログ
