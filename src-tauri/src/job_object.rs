@@ -11,7 +11,7 @@
 #[cfg(target_os = "windows")]
 mod imp {
     use std::sync::OnceLock;
-    use windows_sys::Win32::Foundation::HANDLE;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::JobObjects::{
         AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject,
         JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
@@ -49,6 +49,8 @@ mod imp {
             );
             if ok == 0 {
                 log::warn!("[job] SetInformationJobObject failed; child processes may be orphaned on exit");
+                // 割当前なので Job ハンドルを閉じてもプロセスには影響しない（KILL_ON_JOB_CLOSE 未割当）。
+                CloseHandle(job);
                 return;
             }
 
@@ -56,6 +58,8 @@ mod imp {
             let ok = AssignProcessToJobObject(job, GetCurrentProcess());
             if ok == 0 {
                 log::warn!("[job] AssignProcessToJobObject failed; child processes may be orphaned on exit");
+                // 割当に失敗したので Job は空。ここで閉じても自プロセスは巻き込まれない。
+                CloseHandle(job);
                 return;
             }
 
