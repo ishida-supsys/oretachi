@@ -251,7 +251,7 @@ export function useTaskExecution(deps: {
       repositoryName: repo.name,
       path: `${settings.value.worktreeBaseDir}/${worktreeName}`,
       branchName: code.branch,
-      workgroupId: activeWorkgroupId.value || undefined,
+      workgroupId: code.workgroupId ?? (activeWorkgroupId.value || undefined),
     };
 
     addWorktreePlaceholder(entry);

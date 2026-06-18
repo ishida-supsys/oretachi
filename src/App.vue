@@ -45,6 +45,7 @@ import { useWorktreeRemove } from "./composables/useWorktreeRemove";
 import { useRemoveWorktreeDialog } from "./composables/useRemoveWorktreeDialog";
 import { useAutoHotkey } from "./composables/useAutoHotkey";
 import { useWorkgroups } from "./composables/useWorkgroups";
+import { useHomePanel } from "./composables/useHomePanel";
 import { useAppAutoApproval } from "./composables/useAppAutoApproval";
 import { useAppHotkeys } from "./composables/useAppHotkeys";
 import { useSubWindowEvents } from "./composables/useSubWindowEvents";
@@ -355,6 +356,15 @@ const activeTaskExecAgent = computed(() => {
   const g = settings.value.workgroups?.find((w) => w.id === activeWorkgroupId.value);
   return g?.taskAddAgent ?? settings.value.aiAgent?.taskAddAgent ?? settings.value.aiAgent?.approvalAgent;
 });
+
+// タスク追加ダイアログ「追加先」のデフォルト:
+// ホームのパネルが worktree 一覧なら現在選択中グループ、それ以外（task/archive）なら先頭グループ
+const { panelMode } = useHomePanel();
+const taskDialogDefaultWorkgroupId = computed(() =>
+  panelMode.value === "worktree"
+    ? activeWorkgroupId.value
+    : (settings.value.workgroups?.[0]?.id ?? ""),
+);
 
 // ワークグループ削除フロー
 const removeWorkgroupId = ref<string | null>(null);
@@ -1795,7 +1805,8 @@ onMounted(async () => {
       :mode="rerunTaskId ? 'rerun' : 'add'"
       :show-remote-exec="activeTaskExecAgent === 'claudeCode'"
       :initial-remote-exec="settings.aiAgent?.remoteExec ?? false"
-      @confirm="(prompt, remoteExec) => onAddTaskConfirm(prompt, remoteExec)"
+      :initial-workgroup-id="taskDialogDefaultWorkgroupId"
+      @confirm="(prompt, remoteExec, workgroupId) => onAddTaskConfirm(prompt, remoteExec, workgroupId)"
       @cancel="onAddTaskCancel"
     />
 

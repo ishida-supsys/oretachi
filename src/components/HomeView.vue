@@ -11,6 +11,7 @@ import WorkgroupBar from "./WorkgroupBar.vue";
 import { useMasonryLayout } from "../composables/useMasonryLayout";
 import { useSettings } from "../composables/useSettings";
 import { useWorkgroups } from "../composables/useWorkgroups";
+import { useHomePanel } from "../composables/useHomePanel";
 import { useTasks } from "../composables/useTasks";
 import { useTaskPersistence } from "../composables/useTaskPersistence";
 import { useTaskSearch } from "../composables/useTaskSearch";
@@ -229,8 +230,7 @@ const emit = defineEmits<{
   removeWorkgroup: [groupId: string];
 }>();
 
-type PanelMode = "worktree" | "task" | "archive";
-const panelMode = ref<PanelMode>("worktree");
+const { panelMode } = useHomePanel();
 
 const { sortedTasks } = useTasks();
 const { hasMore, isLoading, loadTasks, loadMore, search } = useTaskPersistence();
