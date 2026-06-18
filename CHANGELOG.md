@@ -6,6 +6,15 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.24.2] - 2026-06-18
+
+### Added
+- タスク実行ダイアログに追加先ワークグループ選択を追加
+
+### Fixed
+- relaunch 時に Job の kill-on-close を解除し、アップデート時にインストーラを巻き込んで終了する問題を防止 (#88)
+- タスク生成の MCP 設定に認証ヘッダを追加しタイムアウトを解消 (#87)
+
 ## [0.24.1] - 2026-06-18
 
 ### Fixed
@@ -451,7 +460,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.24.1...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.24.2...HEAD
+[0.24.2]: https://github.com/ishida-supsys/oretachi/compare/0.24.1...0.24.2
 [0.24.1]: https://github.com/ishida-supsys/oretachi/compare/0.24.0...0.24.1
 [0.24.0]: https://github.com/ishida-supsys/oretachi/compare/0.23.1...0.24.0
 [0.23.1]: https://github.com/ishida-supsys/oretachi/compare/0.23.0...0.23.1
