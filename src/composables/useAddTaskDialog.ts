@@ -67,7 +67,7 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
     }
   }
 
-  async function onAddTaskConfirm(prompt: string, remoteExec: boolean = false): Promise<void> {
+  async function onAddTaskConfirm(prompt: string, remoteExec: boolean = false, workgroupId?: string): Promise<void> {
     const trimmed = prompt.trim();
     if (!trimmed) return;
     prompt = trimmed;
@@ -94,6 +94,13 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
         for (const code of taskProcessCode.code) {
           if (code.type === "agent_worktree") {
             code.remoteExec = true;
+          }
+        }
+      }
+      if (workgroupId) {
+        for (const code of taskProcessCode.code) {
+          if (code.type === "add_worktree") {
+            code.workgroupId = workgroupId;
           }
         }
       }

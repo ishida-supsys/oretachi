@@ -190,7 +190,10 @@ pub async fn task_generate(
             "mcpServers": {
                 "oretachi": {
                     "type": "http",
-                    "url": format!("http://127.0.0.1:{}/mcp", port)
+                    "url": format!("http://127.0.0.1:{}/mcp", port),
+                    "headers": {
+                        "Authorization": format!("Bearer {}", settings.mcp_api_key)
+                    }
                 }
             }
         });
@@ -220,6 +223,8 @@ pub async fn task_generate(
             JSON_SCHEMA.to_string(),
             "--mcp-config".to_string(),
             config_path.to_string_lossy().to_string(),
+            // プラグイン側の同名 oretachi サーバとの二重ロードを防ぐ
+            "--strict-mcp-config".to_string(),
         ]);
 
         (prog, a, final_prompt, Some(config_path))
