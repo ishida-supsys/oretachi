@@ -30,6 +30,8 @@ export default {
   update: {
     title: 'oretachi Update',
     available: 'A new version {version} is available. Update now?',
+    checkFailed: 'Failed to check for updates.\n{error}',
+    installFailed: 'Failed to install the update.\n{error}',
   },
   about: {
     label: 'About',

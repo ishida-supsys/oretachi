@@ -67,11 +67,45 @@ mod imp {
             log::info!("[job] assigned current process to kill-on-close job object");
         }
     }
+
+    /// Job の `KILL_ON_JOB_CLOSE` を解除する。
+    ///
+    /// アップデートの relaunch では、updater が起動したインストーラ（msiexec/setup.exe）が
+    /// 子プロセスとして本 Job 配下に入る。このまま自プロセスが終了すると最後の Job ハンドルが
+    /// 閉じられ、KILL_ON_JOB_CLOSE によりインストーラごと巻き込み終了されてしまう
+    /// （昇格プロンプトが出る前に殺され、更新がサイレント失敗する）。
+    /// relaunch 直前に本関数でフラグを外し、インストーラを延命させる。
+    ///
+    /// 注: フラグを外すだけで CloseHandle はしない（割当方針は据え置き）。失敗しても致命にしない。
+    pub fn release_kill_on_close() {
+        let Some(&job) = JOB.get() else {
+            return;
+        };
+        unsafe {
+            // LimitFlags=0 を再適用して KILL_ON_JOB_CLOSE を解除する。
+            let info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+            let ok = SetInformationJobObject(
+                job as HANDLE,
+                JobObjectExtendedLimitInformation,
+                &info as *const _ as *const core::ffi::c_void,
+                std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            );
+            if ok == 0 {
+                log::warn!("[job] failed to clear KILL_ON_JOB_CLOSE; updater installer may be killed on relaunch");
+            } else {
+                log::info!("[job] cleared KILL_ON_JOB_CLOSE for update relaunch");
+            }
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
-pub use imp::assign_current_process_to_job;
+pub use imp::{assign_current_process_to_job, release_kill_on_close};
 
 /// 非 Windows では no-op。
 #[cfg(not(target_os = "windows"))]
 pub fn assign_current_process_to_job() {}
+
+/// 非 Windows では no-op。
+#[cfg(not(target_os = "windows"))]
+pub fn release_kill_on_close() {}

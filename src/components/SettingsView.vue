@@ -42,13 +42,31 @@ async function onUiScaleChange(value: string) {
 }
 
 async function onCheckUpdate() {
-  const update = await checkForUpdate();
+  let update: Awaited<ReturnType<typeof checkForUpdate>>;
+  try {
+    update = await checkForUpdate();
+  } catch (e) {
+    await message(t("update.checkFailed", { error: String(e) }), {
+      title: t("update.title"),
+      kind: "error",
+    });
+    return;
+  }
   if (update) {
     const yes = await ask(
       t("update.available", { version: update.version }),
       { title: t("update.title"), kind: "info" }
     );
-    if (yes) await downloadAndInstall(update);
+    if (yes) {
+      try {
+        await downloadAndInstall(update);
+      } catch (e) {
+        await message(t("update.installFailed", { error: String(e) }), {
+          title: t("update.title"),
+          kind: "error",
+        });
+      }
+    }
   } else {
     await message(t("about.upToDate"), { title: t("update.title"), kind: "info" });
   }
