@@ -30,6 +30,8 @@ export default {
   update: {
     title: 'oretachi アップデート',
     available: '新しいバージョン {version} が利用可能です。今すぐ更新しますか？',
+    checkFailed: 'アップデートの確認に失敗しました。\n{error}',
+    installFailed: 'アップデートのインストールに失敗しました。\n{error}',
   },
   about: {
     label: 'バージョン情報',

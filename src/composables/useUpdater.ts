@@ -8,6 +8,7 @@ export function useUpdater() {
   const isChecking = ref(false);
   const isDownloading = ref(false);
 
+  // 更新なしは null を返す。確認自体に失敗した場合は例外を投げ、呼び出し側で表示する。
   async function checkForUpdate() {
     if (isChecking.value) return null;
     isChecking.value = true;
@@ -17,14 +18,16 @@ export function useUpdater() {
         logInfo(`アップデート利用可能: ${update.version}`);
         return update;
       }
+      return null;
     } catch (e) {
       logError(`アップデート確認エラー: ${e}`);
+      throw e;
     } finally {
       isChecking.value = false;
     }
-    return null;
   }
 
+  // 失敗時は例外を投げ、呼び出し側で表示する（従来は無反応だった）。
   async function downloadAndInstall(update: Awaited<ReturnType<typeof check>>) {
     if (!update) return;
     isDownloading.value = true;
@@ -34,6 +37,7 @@ export function useUpdater() {
       await relaunch();
     } catch (e) {
       logError(`アップデートインストールエラー: ${e}`);
+      throw e;
     } finally {
       isDownloading.value = false;
     }

@@ -501,6 +501,9 @@ async fn prepare_for_relaunch(app_handle: tauri::AppHandle) -> Result<(), String
     if !completed {
         return Err("MCP server did not shut down within timeout".into());
     }
+    // relaunch でプロセス終了すると Job ハンドルが閉じ、KILL_ON_JOB_CLOSE により updater が
+    // 起動したインストーラごと巻き込み終了されてしまう。relaunch 直前にフラグを解除して延命させる。
+    job_object::release_kill_on_close();
     Ok(())
 }
 

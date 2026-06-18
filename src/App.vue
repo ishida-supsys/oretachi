@@ -1537,14 +1537,27 @@ onMounted(async () => {
   // 起動後にアップデートを確認 (ウィザード表示中はネイティブダイアログが
   // 割り込まないよう完了まで保留する)
   const runUpdateCheck = async () => {
-    const update = await checkForUpdate();
+    // 起動時の自動チェック。確認失敗は無音（無反応）にしてユーザーを煩わせない。
+    let update: Awaited<ReturnType<typeof checkForUpdate>>;
+    try {
+      update = await checkForUpdate();
+    } catch {
+      return;
+    }
     if (update) {
       const yes = await ask(
         t("update.available", { version: update.version }),
         { title: t("update.title"), kind: "info" }
       );
       if (yes) {
-        await downloadAndInstall(update);
+        try {
+          await downloadAndInstall(update);
+        } catch (e) {
+          await message(t("update.installFailed", { error: String(e) }), {
+            title: t("update.title"),
+            kind: "error",
+          });
+        }
       }
     }
   };
