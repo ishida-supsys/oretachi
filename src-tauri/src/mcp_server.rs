@@ -1544,7 +1544,17 @@ async fn api_key_auth(
     if authorized {
         Ok(next.run(request).await)
     } else {
-        log::warn!("[mcp] unauthorized request: missing or invalid API key");
+        // 再発時の切り分け用に最小限の差分情報を出す（秘密値そのものは出さない）。
+        let reason = match auth_header {
+            None => "authorization header missing".to_string(),
+            Some(h) if !h.starts_with("Bearer ") => "authorization header is not a Bearer token".to_string(),
+            Some(h) => format!(
+                "key mismatch (provided len={}, expected len={})",
+                h.len().saturating_sub(7),
+                expected_key.len()
+            ),
+        };
+        log::warn!("[mcp] unauthorized request: {}", reason);
         Err(StatusCode::UNAUTHORIZED)
     }
 }

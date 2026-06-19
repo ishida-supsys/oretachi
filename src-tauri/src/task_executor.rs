@@ -33,10 +33,10 @@ request and repositories, and perform appropriate worktree operations.
 3. Generate the task process code and output it as JSON.
 
 ## Task List Generation Rules
-- When an issue URL is specified, compare it with the remote information from
-  oretachi_list_repository to select the repository. Do NOT look into the issue or
-  pull request contents - only compare repository names and remote information. Leave
-  precise matching to later flows.
+- When an issue or pull request URL is specified, compare it with the remote information
+  from oretachi_list_repository to select the repository. Do NOT look into (fetch) the
+  issue or pull request contents - only compare repository names and remote information.
+  Leave precise matching to later flows.
 - The "prompt" field in agent_worktree MUST contain the user's original words verbatim.
   Do NOT rephrase, summarize, elaborate, or make the request more specific.
 - If the request maps to a single task, copy the entire user request as-is into the prompt field.
@@ -46,12 +46,12 @@ request and repositories, and perform appropriate worktree operations.
   splitting only — the downstream AI agent will interpret the prompt.
 - When only an issue URL is provided or context is unclear, pass the full text as-is.
 - By default, each task creates a new worktree (add_worktree + agent_worktree).
-- Use an EXISTING worktree (agent_worktree only, no add_worktree) in these cases:
-  - A pull request URL is provided: fetch the PR's branch name and check if it matches
-    an existing worktree's branch. If it matches, use that worktree.
-  - The user explicitly refers to a previous task (e.g. "continue the task for X"):
-    use the existing worktree only if the repository AND branch/name exactly match.
-    Do not reuse a worktree just because the repository is the same.
+- Use an EXISTING worktree (agent_worktree only, no add_worktree) ONLY when the user
+  explicitly refers to a previous task (e.g. "continue the task for X"): use the existing
+  worktree only if the repository AND branch/name exactly match. Do not reuse a worktree
+  just because the repository is the same.
+  - Do NOT fetch a pull request's branch name to look for a matching worktree. Treat a
+    pull request URL like any other request and create a new worktree by default.
 - When a specific branch name is provided in the request:
   1. First check if any existing worktree uses that exact branch. If yes, use that
      existing worktree (agent_worktree only, no add_worktree).
@@ -169,17 +169,15 @@ pub async fn task_generate(
     let use_mcp =
         agent_kind == AiAgentKind::ClaudeCode && mcp_status.running && mcp_status.port.is_some();
 
-    // For non-MCP agents, embed repo list and worktree list directly in prompt
-    let final_prompt = if use_mcp {
-        full_prompt
-    } else {
-        format!(
-            "{}\n\n{}\n\n{}",
-            full_prompt,
-            build_repo_list_text(&settings),
-            build_worktree_list_text(&settings)
-        )
-    };
+    // repo / worktree 一覧は常にプロンプトへ直接埋め込む。
+    // use_mcp 時も MCP 往復(401等)に依存せず生成できるようにし、ハング→タイムアウトを防ぐ。
+    // MCP 設定(--mcp-config)は最新情報の追加ソースとして残す。
+    let final_prompt = format!(
+        "{}\n\n{}\n\n{}",
+        full_prompt,
+        build_repo_list_text(&settings),
+        build_worktree_list_text(&settings)
+    );
 
     // Build command and args
     // mcp_config_temp_path: Some(path) なら処理完了後に削除する
