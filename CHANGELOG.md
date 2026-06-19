@@ -6,6 +6,15 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.24.4] - 2026-06-19
+
+### Added
+- ホームタブでワークグループを循環切替するホットキーを追加
+
+### Fixed
+- Windows で `on_before_exit` に kill-on-close 解除を移し、アップデートが不発になる問題を解消
+- MCP 停止を install 後に移し、install 失敗時に MCP が停止したまま残る問題を回避
+
 ## [0.24.3] - 2026-06-19
 
 ### Fixed
@@ -469,7 +478,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.24.3...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.24.4...HEAD
+[0.24.4]: https://github.com/ishida-supsys/oretachi/compare/0.24.3...0.24.4
 [0.24.3]: https://github.com/ishida-supsys/oretachi/compare/0.24.2...0.24.3
 [0.24.2]: https://github.com/ishida-supsys/oretachi/compare/0.24.1...0.24.2
 [0.24.1]: https://github.com/ishida-supsys/oretachi/compare/0.24.0...0.24.1
