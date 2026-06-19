@@ -492,19 +492,47 @@ async fn restart_mcp_server(app_handle: tauri::AppHandle) -> Result<mcp_server::
 }
 
 #[tauri::command]
-async fn prepare_for_relaunch(app_handle: tauri::AppHandle) -> Result<(), String> {
-    let mcp_manager = app_handle.state::<mcp_server::McpServerManager>();
-    let _lock = mcp_manager.acquire_restart_lock().await;
-    let completed = mcp_manager
-        .stop_and_wait(std::time::Duration::from_secs(3))
-        .await;
-    if !completed {
-        return Err("MCP server did not shut down within timeout".into());
+async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    // 自前の on_before_exit を設定した Updater を構築する。
+    // プラグイン既定の on_before_exit (cleanup_before_exit) を踏襲しつつ、
+    // KILL_ON_JOB_CLOSE 解除を追加する。これは Windows で ShellExecute による
+    // インストーラ起動と process::exit(0) の「前」に走る (tauri-plugin-updater updater.rs)。
+    // 既存実装は relaunch 後の prepare_for_relaunch で解除していたが、Windows では
+    // downloadAndInstall 内で process::exit(0) され JS に戻らないため解除されず、
+    // インストーラが Job の巻き込み終了で殺されてアップデートが起動しなかった。
+    let app_hook = app.clone();
+    let updater = app
+        .updater_builder()
+        .on_before_exit(move || {
+            app_hook.cleanup_before_exit();
+            job_object::release_kill_on_close();
+        })
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
+        return Ok(()); // 更新なし
+    };
+
+    // 先にダウンロード。成功してから MCP を止める（失敗時はサーバを生かす）。
+    let bytes = update
+        .download(|_, _| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+
+    {
+        let mcp = app.state::<mcp_server::McpServerManager>();
+        let _lock = mcp.acquire_restart_lock().await;
+        mcp.stop_and_wait(std::time::Duration::from_secs(3)).await;
     }
-    // relaunch でプロセス終了すると Job ハンドルが閉じ、KILL_ON_JOB_CLOSE により updater が
-    // 起動したインストーラごと巻き込み終了されてしまう。relaunch 直前にフラグを解除して延命させる。
-    job_object::release_kill_on_close();
-    Ok(())
+
+    // Windows: install() 内で on_before_exit→process::exit(0) され、ここから戻らない。
+    update.install(bytes).map_err(|e| e.to_string())?;
+
+    // 非 Windows（mac 等）はここで明示再起動。restart() は `!` を返す。
+    app.restart();
 }
 
 // ─── アーティファクトコマンド ─────────────────────────────────────────────────
@@ -991,7 +1019,7 @@ pub fn run() {
             regenerate_mcp_api_key,
             mcp_server::register_detached_worktree,
             mcp_server::unregister_detached_worktree,
-            prepare_for_relaunch,
+            download_and_install_update,
             ai_judge::judge_approval,
             ai_judge::cancel_approval,
             ai_commit_message::generate_commit_message,

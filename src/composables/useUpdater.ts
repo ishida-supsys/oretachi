@@ -1,6 +1,5 @@
 import { ref } from "vue";
 import { check } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
 import { logError, logInfo } from "../utils/log";
 import { invoke } from "@tauri-apps/api/core";
 
@@ -32,9 +31,12 @@ export function useUpdater() {
     if (!update) return;
     isDownloading.value = true;
     try {
-      await update.downloadAndInstall();
-      await invoke("prepare_for_relaunch");
-      await relaunch();
+      // チェック・ダウンロード・インストールを Rust 側コマンドで実施する。
+      // Windows ではインストーラ起動直前に Job の KILL_ON_JOB_CLOSE を解除する
+      // 必要があり、プラグインの downloadAndInstall では process::exit され
+      // JS に戻らないためフックを差し込めない（巻き込み終了でアップデート不発）。
+      await invoke("download_and_install_update");
+      // Windows ではプロセスが置き換わるためここに戻らない。
     } catch (e) {
       logError(`アップデートインストールエラー: ${e}`);
       throw e;
