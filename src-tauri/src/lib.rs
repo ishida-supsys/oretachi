@@ -516,22 +516,24 @@ async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), String
         return Ok(()); // 更新なし
     };
 
-    // 先にダウンロード。成功してから MCP を止める（失敗時はサーバを生かす）。
     let bytes = update
         .download(|_, _| {}, || {})
         .await
         .map_err(|e| e.to_string())?;
 
+    // install() は Windows では成功時に on_before_exit→process::exit(0) され戻らない。
+    // 失敗 (extract 失敗等、インストーラ起動前) 時のみ Err を返す。ここで MCP を止めて
+    // しまうと install 失敗時に MCP が落ちたまま残るため、MCP の停止は install 後
+    // （= 非 Windows の成功パスでのみ到達）に行う。
+    update.install(bytes).map_err(|e| e.to_string())?;
+
+    // 非 Windows（mac 等）のみ到達。restart() 前に MCP を停止してポート競合を避け、
+    // その後明示再起動する。restart() は `!` を返す。
     {
         let mcp = app.state::<mcp_server::McpServerManager>();
         let _lock = mcp.acquire_restart_lock().await;
         mcp.stop_and_wait(std::time::Duration::from_secs(3)).await;
     }
-
-    // Windows: install() 内で on_before_exit→process::exit(0) され、ここから戻らない。
-    update.install(bytes).map_err(|e| e.to_string())?;
-
-    // 非 Windows（mac 等）はここで明示再起動。restart() は `!` を返す。
     app.restart();
 }
 
