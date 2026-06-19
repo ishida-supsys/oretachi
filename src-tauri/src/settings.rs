@@ -126,6 +126,14 @@ fn default_add_task() -> HotkeyBinding {
     platform_hotkey(true, false, "n")
 }
 
+fn default_workgroup_next() -> HotkeyBinding {
+    HotkeyBinding { ctrl: true, meta: false, shift: false, alt: false, key: "PageDown".to_string() }
+}
+
+fn default_workgroup_prev() -> HotkeyBinding {
+    HotkeyBinding { ctrl: true, meta: false, shift: false, alt: false, key: "PageUp".to_string() }
+}
+
 fn default_global_tray_popup() -> HotkeyBinding {
     platform_hotkey(true, false, "o")
 }
@@ -168,6 +176,10 @@ pub struct HotkeySettings {
     pub home_tab: HotkeyBinding,
     #[serde(default = "default_add_task", rename = "addTask")]
     pub add_task: HotkeyBinding,
+    #[serde(default = "default_workgroup_next", rename = "workgroupNext")]
+    pub workgroup_next: HotkeyBinding,
+    #[serde(default = "default_workgroup_prev", rename = "workgroupPrev")]
+    pub workgroup_prev: HotkeyBinding,
 }
 
 impl Default for HotkeySettings {
@@ -181,6 +193,8 @@ impl Default for HotkeySettings {
             tray_next: default_tray_next(),
             home_tab: default_home_tab(),
             add_task: default_add_task(),
+            workgroup_next: default_workgroup_next(),
+            workgroup_prev: default_workgroup_prev(),
         }
     }
 }

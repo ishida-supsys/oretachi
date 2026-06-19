@@ -28,6 +28,16 @@ const activeWorkgroupId = computed<string>({
   },
 });
 
+/** アクティブグループを delta だけ循環移動（末尾↔先頭でラップ） */
+function cycleWorkgroup(delta: number): void {
+  const list = groups.value;
+  if (list.length <= 1) return;
+  const idx = list.findIndex((g) => g.id === activeWorkgroupId.value);
+  const base = idx === -1 ? 0 : idx;
+  const next = (base + delta + list.length) % list.length;
+  activeWorkgroupId.value = list[next].id;
+}
+
 /** worktree が実際に属するグループID（未設定/不明なら先頭グループにフォールバック） */
 function resolvedGroupId(workgroupId: string | undefined): string {
   const list = groups.value;
@@ -112,6 +122,7 @@ export function useWorkgroups() {
   return {
     groups,
     activeWorkgroupId,
+    cycleWorkgroup,
     resolvedGroupId,
     groupOf,
     displayName,

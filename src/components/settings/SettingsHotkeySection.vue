@@ -91,6 +91,24 @@ const { settings, scheduleSave } = useSettings();
             />
           </td>
         </tr>
+        <tr>
+          <td class="hotkey-td-label">{{ t('hotkeys.workgroupNext') }}</td>
+          <td class="hotkey-td-input">
+            <HotkeyInput
+              :model-value="settings.hotkeys.workgroupNext"
+              @update:model-value="(v) => { settings.hotkeys.workgroupNext = v; scheduleSave(); }"
+            />
+          </td>
+        </tr>
+        <tr>
+          <td class="hotkey-td-label">{{ t('hotkeys.workgroupPrev') }}</td>
+          <td class="hotkey-td-input">
+            <HotkeyInput
+              :model-value="settings.hotkeys.workgroupPrev"
+              @update:model-value="(v) => { settings.hotkeys.workgroupPrev = v; scheduleSave(); }"
+            />
+          </td>
+        </tr>
       </tbody>
     </table>
   </div>
@@ -111,7 +129,9 @@ const { settings, scheduleSave } = useSettings();
       "terminalClose": "Close terminal",
       "trayNext": "Next notification (tray)",
       "homeTab": "Home tab",
-      "addTask": "Add task"
+      "addTask": "Add task",
+      "workgroupNext": "Switch workgroup: next",
+      "workgroupPrev": "Switch workgroup: prev"
     }
   },
   "ja": {
@@ -127,7 +147,9 @@ const { settings, scheduleSave } = useSettings();
       "terminalClose": "ターミナルを閉じる",
       "trayNext": "次の通知へ (トレイ)",
       "homeTab": "ホームタブへ戻る",
-      "addTask": "タスク追加"
+      "addTask": "タスク追加",
+      "workgroupNext": "ワークグループ切替: 次",
+      "workgroupPrev": "ワークグループ切替: 前"
     }
   }
 }

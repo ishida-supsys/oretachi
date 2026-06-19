@@ -18,6 +18,8 @@ const defaultHotkeys = () => ({
   trayNext: isMac ? { meta: true, key: "n" } : { ctrl: true, key: "n" },
   homeTab: { alt: true, key: "0" },
   addTask: isMac ? { meta: true, shift: true, key: "n" } : { ctrl: true, shift: true, key: "n" },
+  workgroupNext: { ctrl: true, key: "PageDown" },
+  workgroupPrev: { ctrl: true, key: "PageUp" },
 });
 
 function migrateHotkeys(hotkeys: HotkeySettings): boolean {
