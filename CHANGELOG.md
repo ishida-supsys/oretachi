@@ -6,6 +6,15 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.24.3] - 2026-06-19
+
+### Fixed
+- tao #1215 による UI スレッド再入デッドロック（ハング）を解消 (#89)
+- PR URL のブランチ名 fetch をやめ、タスク生成のタイムアウトを解消
+
+### Changed
+- フロント `@tauri-apps` を 2.11 系へ揃える (#90)
+
 ## [0.24.2] - 2026-06-18
 
 ### Added
@@ -460,7 +469,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.24.2...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.24.3...HEAD
+[0.24.3]: https://github.com/ishida-supsys/oretachi/compare/0.24.2...0.24.3
 [0.24.2]: https://github.com/ishida-supsys/oretachi/compare/0.24.1...0.24.2
 [0.24.1]: https://github.com/ishida-supsys/oretachi/compare/0.24.0...0.24.1
 [0.24.0]: https://github.com/ishida-supsys/oretachi/compare/0.23.1...0.24.0
