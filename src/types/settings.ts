@@ -68,6 +68,8 @@ export interface HotkeySettings {
   trayNext: HotkeyBinding;      // デフォルト: { ctrl: true, key: "n" }
   homeTab: HotkeyBinding;         // デフォルト: { alt: true, key: "0" }
   addTask: HotkeyBinding;       // デフォルト: { ctrl: true, shift: true, key: "n" }
+  workgroupNext: HotkeyBinding; // デフォルト: { ctrl: true, key: "PageDown" }
+  workgroupPrev: HotkeyBinding; // デフォルト: { ctrl: true, key: "PageUp" }
 }
 
 export type AiAgentKind = 'claudeCode' | 'geminiCli' | 'codexCli' | 'clineCli';

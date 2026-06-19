@@ -23,6 +23,7 @@ interface UseAppHotkeysDeps {
   ) => Promise<void>;
   showAddTaskDialog: Ref<boolean>;
   goHome: () => void;
+  cycleWorkgroup: (delta: number) => void;
   onTrayButtonClick: () => Promise<void>;
   /** true の間はアプリ内ホットキーを無効化する (初回起動ウィザード表示中など) */
   suppressed?: Ref<boolean>;
@@ -135,6 +136,16 @@ export function useAppHotkeys(deps: UseAppHotkeysDeps) {
           deps.goHome();
         },
       });
+    }
+
+    // ワークグループ切替はホーム表示時のみ有効（非ホーム時はキーを横取りしない）
+    if (deps.viewMode.value === "home") {
+      if (hk.workgroupNext) {
+        actions.push({ binding: hk.workgroupNext, handler: () => deps.cycleWorkgroup(1) });
+      }
+      if (hk.workgroupPrev) {
+        actions.push({ binding: hk.workgroupPrev, handler: () => deps.cycleWorkgroup(-1) });
+      }
     }
 
     return actions;

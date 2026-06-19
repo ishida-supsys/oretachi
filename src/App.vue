@@ -349,7 +349,7 @@ const {
 } = useRemoveWorktreeDialog(worktreeRemoveCore);
 
 // ワークグループ
-const { activeWorkgroupId, resolvedGroupId, deleteWorkgroupRecord, displayName: workgroupDisplayName } = useWorkgroups();
+const { activeWorkgroupId, cycleWorkgroup, resolvedGroupId, deleteWorkgroupRecord, displayName: workgroupDisplayName } = useWorkgroups();
 
 // タスク追加ダイアログ用: 現在表示中グループのタスク実行エージェント（リモート実行チェックボックスの出し分け）
 const activeTaskExecAgent = computed(() => {
@@ -1113,6 +1113,7 @@ const hotkeys = useAppHotkeys({
   onAddTerminal,
   showAddTaskDialog,
   goHome,
+  cycleWorkgroup,
   onTrayButtonClick,
   suppressed: showFirstRunWizard,
 });
