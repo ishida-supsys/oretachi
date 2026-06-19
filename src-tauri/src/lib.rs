@@ -506,6 +506,13 @@ async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), String
     let updater = app
         .updater_builder()
         .on_before_exit(move || {
+            // Windows ではこの後 process::exit(0) され RunEvent::Exit のクリーンアップ
+            // (PtyManager::kill_all_fast 等) が走らない。KILL_ON_JOB_CLOSE を解除すると
+            // Job のセーフティネットも外れるため、解除の「前」に PTY 子プロセス
+            // (ターミナル / AI エージェント) を明示 kill してオーファン化を防ぐ。
+            app_hook
+                .state::<PtyManager>()
+                .kill_all_fast("update-before-exit");
             app_hook.cleanup_before_exit();
             job_object::release_kill_on_close();
         })
