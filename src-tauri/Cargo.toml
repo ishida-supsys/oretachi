@@ -13,6 +13,14 @@ edition = "2021"
 members = ["notify"]
 resolver = "2"
 
+# tao #1215「fix(windows): avoid reentrant input lock deadlocks」(2026-06-10) を取り込む。
+# keyboard/IME 処理が input ロック保持中に PeekMessageW を呼び window proc に再入し、
+# 非再入 parking_lot Mutex を再取得して UI スレッドがデッドロックする問題の修正。
+# まだ未リリース(tao 最新 0.35.3 は未収録)のため修正コミットに git pin している。
+# TODO: tao 0.35.4+(#1215入り)がリリースされ tauri が採用したら、この patch を除去する。
+[patch.crates-io]
+tao = { git = "https://github.com/tauri-apps/tao", rev = "c704261c519c58cfdd0bc2d58ba24e06a0b71c92" }
+
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
 # to make the lib name unique and wouldn't conflict with the bin name.
