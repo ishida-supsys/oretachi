@@ -17,6 +17,27 @@ function loadWorktreesFromSettings() {
   }));
 }
 
+/**
+ * settings.value.worktrees を正としてランタイム worktrees を再同期する。
+ * 既存 id の terminals は温存し、ターミナルセッションを壊さない。
+ * 他ウィンドウ発の settings-changed 受信時に、永続化配列とランタイム配列の
+ * 乖離（カードと件数の分裂）を解消する用途で呼ぶ。
+ */
+function syncWorktreesFromSettings() {
+  const byId = new Map(worktrees.value.map((w) => [w.id, w]));
+  const settingsIds = new Set(settings.value.worktrees.map((w) => w.id));
+  const synced = settings.value.worktrees.map((entry) => {
+    const existing = byId.get(entry.id);
+    return existing
+      ? { ...entry, terminals: existing.terminals }
+      : { ...entry, terminals: [] };
+  });
+  // settings 未登録だがランタイムに存在する worktree（git worktree add 完了前の
+  // 追加中プレースホルダ）は温存する。再同期で一瞬カードが消えるのを防ぐ。
+  const placeholders = worktrees.value.filter((w) => !settingsIds.has(w.id));
+  worktrees.value = [...synced, ...placeholders];
+}
+
 /** ワークツリーを UI 一覧に仮追加（バックエンド処理前） */
 function addWorktreePlaceholder(entry: WorktreeEntry): void {
   const worktree: Worktree = { ...entry, terminals: [] };
@@ -35,6 +56,11 @@ async function invokeWorktreeAdd(entry: WorktreeEntry, sourceBranch?: string): P
 
 /** ワークツリーを設定に永続化（成功時に呼ぶ） */
 function commitWorktree(entry: WorktreeEntry): void {
+  // 再ロード競合などで既に登録済みの場合は二重 push しない（保存だけ実行）
+  if (settings.value.worktrees.some((w) => w.id === entry.id)) {
+    scheduleSave();
+    return;
+  }
   settings.value.worktrees.push(entry);
   scheduleSave();
 }
@@ -259,6 +285,7 @@ export function useWorktrees() {
   return {
     worktrees,
     loadWorktreesFromSettings,
+    syncWorktreesFromSettings,
     addWorktreePlaceholder,
     invokeWorktreeAdd,
     commitWorktree,

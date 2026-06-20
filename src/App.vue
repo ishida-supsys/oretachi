@@ -74,7 +74,7 @@ type ViewMode = "home" | "settings" | "terminal";
 
 const { settings, loadSettings, scheduleSave, flushSave } = useSettings();
 const { appliedZoom } = useUiZoom();
-const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, reorderWorktree, saveWorktreeOrder, restoreWorktreeOrder, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
+const { worktrees, loadWorktreesFromSettings, syncWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, reorderWorktree, saveWorktreeOrder, restoreWorktreeOrder, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, registerTerminalSession, closeAllSubWindows } = useSubWindows();
 const { autoApprovalPromptMap, lastJudgedCommandMap, showAutoApprovalPromptDialog, autoApprovalPromptTargetId, restoreFromSettings: restoreAutoApprovalPrompts, onClickAutoApproval, onSaveAutoApprovalPrompt } = useAutoApprovalPrompt(settings, scheduleSave, isDetached);
 const { notifications, initNotificationListener, addNotification, clearNotification, purgeStaleNotifications, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
@@ -1114,6 +1114,7 @@ const hotkeys = useAppHotkeys({
   showAddTaskDialog,
   goHome,
   cycleWorkgroup,
+  syncWorktreesFromSettings,
   onTrayButtonClick,
   suppressed: showFirstRunWizard,
 });
