@@ -6,6 +6,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.24.5] - 2026-06-20
+
+### Added
+- 通知有りワークツリーを含むワークグループのチップに赤枠を表示
+
+### Fixed
+- 高速切替によるワークツリー分裂を解消
+
 ## [0.24.4] - 2026-06-19
 
 ### Added
@@ -478,7 +486,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.24.4...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.24.5...HEAD
+[0.24.5]: https://github.com/ishida-supsys/oretachi/compare/0.24.4...0.24.5
 [0.24.4]: https://github.com/ishida-supsys/oretachi/compare/0.24.3...0.24.4
 [0.24.3]: https://github.com/ishida-supsys/oretachi/compare/0.24.2...0.24.3
 [0.24.2]: https://github.com/ishida-supsys/oretachi/compare/0.24.1...0.24.2
