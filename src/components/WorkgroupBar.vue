@@ -16,6 +16,7 @@ const {
   activeWorkgroupId,
   displayName,
   worktreeCount,
+  notifiedGroupIds,
   addWorkgroup,
   updateWorkgroup,
   reorderWorkgroup,
@@ -86,7 +87,7 @@ function onDragEnd() {
       v-for="g in groups"
       :key="g.id"
       class="wg-chip"
-      :class="{ active: g.id === activeWorkgroupId }"
+      :class="{ active: g.id === activeWorkgroupId, notified: notifiedGroupIds.has(g.id) }"
       :style="{ borderLeftColor: g.color || '#9399b2', ...(g.id === activeWorkgroupId && g.color ? { background: g.color + '30', borderColor: g.color } : {}) }"
       draggable="true"
       :title="t('chipTitle')"
@@ -153,6 +154,20 @@ function onDragEnd() {
   background: #313244;
   color: #cdd6f4;
   border-color: #585b70;
+}
+
+.wg-chip.notified {
+  box-shadow: 0 0 0 2px #f38ba8;
+  animation: wg-notification-pulse 2s ease-in-out infinite;
+}
+
+@keyframes wg-notification-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 2px rgba(243, 139, 168, 0.6);
+  }
+  50% {
+    box-shadow: 0 0 0 2px rgba(243, 139, 168, 1), 0 0 8px 2px rgba(243, 139, 168, 0.3);
+  }
 }
 
 .wg-count {

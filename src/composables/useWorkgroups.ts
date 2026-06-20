@@ -1,11 +1,13 @@
 import { computed } from "vue";
 import { useSettings } from "./useSettings";
 import { useWorktrees } from "./useWorktrees";
+import { useNotifications } from "./useNotifications";
 import { i18n } from "../i18n";
 import type { Workgroup } from "../types/settings";
 
 const { settings, scheduleSave } = useSettings();
 const { worktrees } = useWorktrees();
+const { notifications } = useNotifications();
 
 function genId(): string {
   return `wg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -54,6 +56,16 @@ function worktreeCount(groupId: string): number {
     (w) => resolvedGroupId(w.workgroupId) === groupId,
   ).length;
 }
+
+/** 通知有りのワークツリーを 1 つ以上含むグループの ID 集合 */
+const notifiedGroupIds = computed<Set<string>>(() => {
+  const set = new Set<string>();
+  for (const id of notifications.keys()) {
+    const wt = settings.value.worktrees.find((w) => w.id === id);
+    if (wt) set.add(resolvedGroupId(wt.workgroupId));
+  }
+  return set;
+});
 
 /** 新しいグループを追加して選択状態にする */
 function addWorkgroup(): Workgroup {
@@ -116,6 +128,7 @@ export function useWorkgroups() {
     groupOf,
     displayName,
     worktreeCount,
+    notifiedGroupIds,
     addWorkgroup,
     updateWorkgroup,
     deleteWorkgroupRecord,
