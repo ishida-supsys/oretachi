@@ -1,6 +1,7 @@
 import { ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { error } from "@tauri-apps/plugin-log";
 import { platform } from "@tauri-apps/plugin-os";
 import type { AppSettings, HotkeyBinding, HotkeySettings, Workgroup } from "../types/settings";
@@ -116,7 +117,7 @@ watch(
 
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
-async function loadSettings() {
+async function loadSettingsOnce() {
   const loaded = await invoke<AppSettings>("get_settings");
   // 古い設定ファイルに hotkeys がない場合のデフォルト補完
   if (!loaded.hotkeys) {
@@ -148,12 +149,40 @@ async function loadSettings() {
   settings.value = loaded;
 }
 
+// 再入防止 (coalescing): 実行中に再度呼ばれたら 1 回だけ追加実行する。
+// settings-changed の連続発火で loadSettings が並行起動し、get_settings の
+// 戻り順前後で古い内容が新しい内容を上書きする競合を構造的に排除する。
+let loadInflight: Promise<void> | null = null;
+let loadRerun = false;
+
+async function loadSettings(): Promise<void> {
+  if (loadInflight) {
+    loadRerun = true;
+    return loadInflight;
+  }
+  loadInflight = (async () => {
+    do {
+      loadRerun = false;
+      try {
+        await loadSettingsOnce();
+      } catch (e) {
+        // get_settings 失敗時も rerun を取りこぼさず、呼び出し側に reject を
+        // 伝播させない（リスナーの後続処理が止まらないようにする）。
+        console.error("設定の読み込みに失敗:", e);
+      }
+    } while (loadRerun);
+  })().finally(() => {
+    loadInflight = null;
+  });
+  return loadInflight;
+}
+
 function scheduleSave() {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
     try {
       await invoke("save_settings", { settings: settings.value });
-      await emit("settings-changed");
+      await emit("settings-changed", { source: getCurrentWindow().label });
     } catch (e) {
       console.error("設定の保存に失敗:", e);
     }
@@ -167,7 +196,7 @@ async function flushSave() {
   }
   try {
     await invoke("save_settings", { settings: settings.value });
-    await emit("settings-changed");
+    await emit("settings-changed", { source: getCurrentWindow().label });
   } catch (e) {
     error(`設定の保存に失敗: ${e}`);
   }

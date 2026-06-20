@@ -24,6 +24,7 @@ interface UseAppHotkeysDeps {
   showAddTaskDialog: Ref<boolean>;
   goHome: () => void;
   cycleWorkgroup: (delta: number) => void;
+  syncWorktreesFromSettings?: () => void;
   onTrayButtonClick: () => Promise<void>;
   /** true の間はアプリ内ホットキーを無効化する (初回起動ウィザード表示中など) */
   suppressed?: Ref<boolean>;
@@ -154,8 +155,13 @@ export function useAppHotkeys(deps: UseAppHotkeysDeps) {
   async function init() {
     await registerGlobalShortcut();
 
-    await listen("settings-changed", async () => {
+    await listen<{ source?: string } | null>("settings-changed", async (event) => {
+      // 自ウィンドウの保存に由来する settings-changed は無視する。
+      // 自分の保存で自分が再ロードすると、in-memory 変更を巻き戻す lost update や
+      // ランタイム配列との乖離（ワークツリー分裂）が起きるため。
+      if (event.payload?.source === getCurrentWindow().label) return;
       await deps.loadSettings();
+      deps.syncWorktreesFromSettings?.();
       await getCurrentWindow().setAlwaysOnTop(deps.settings.value.alwaysOnTop);
       await registerGlobalShortcut();
     });
