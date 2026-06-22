@@ -6,6 +6,12 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.24.6] - 2026-06-23
+
+### Fixed
+- アーティファクト一覧にスクロールバーを追加
+- ワークグループ切替時の auto-animate でカードが重複/漏れする問題を解消
+
 ## [0.24.5] - 2026-06-20
 
 ### Added
@@ -486,7 +492,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.24.5...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.24.6...HEAD
+[0.24.6]: https://github.com/ishida-supsys/oretachi/compare/0.24.5...0.24.6
 [0.24.5]: https://github.com/ishida-supsys/oretachi/compare/0.24.4...0.24.5
 [0.24.4]: https://github.com/ishida-supsys/oretachi/compare/0.24.3...0.24.4
 [0.24.3]: https://github.com/ishida-supsys/oretachi/compare/0.24.2...0.24.3
