@@ -290,6 +290,21 @@ const worktreesRef = computed(() =>
 );
 const tasksRef = sortedTasks;
 
+// ワークグループ切替は一覧の総入れ替え。auto-animate に「追加/削除」と誤認させると
+// 退場アニメ中の旧カード DOM が約250ms 残り、高速連打で DOM 二重化（重複表示）や
+// 旧グループカードの残留（別グループ漏れ）を招く。切替時はアニメを無効化して即時入れ替えにする。
+watch(activeWorkgroupId, () => {
+  for (const ctrl of columnControllers.values()) ctrl.disable();
+  nextTick(() => {
+    resetAllCardTransforms();
+    // 削除（autoAnimateDisableDepth>0）/ drag（draggingId）進行中は、その完了処理に
+    // enable を委ね、ここでは再有効化しない（二重 enable・進行中アニメ破壊を防ぐ）。
+    if (autoAnimateDisableDepth === 0 && !draggingId.value) {
+      for (const ctrl of columnControllers.values()) ctrl.enable();
+    }
+  });
+});
+
 function onMoveToWorkgroup(payload: { worktreeId: string; groupId: string }) {
   moveWorktreeToWorkgroup(payload.worktreeId, payload.groupId);
 }
