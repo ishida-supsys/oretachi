@@ -802,16 +802,20 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string,
     if (lfsSkipped) {
       await message(t("lfsWarning"), { kind: "warning" });
     }
-
-    // 全後続処理が成功した後にMCPクライアントへ追加完了を通知
-    await invoke("notify_worktree_added", {
-      id: entry.id,
-      name: entry.name,
-      branchName: entry.branchName,
-    });
   } catch (e) {
     await message(t("worktreeSetupIncomplete", { error: e }), { kind: "warning" });
   } finally {
+    // ワークツリーは作成済み・永続化済みなので、セットアップ途中失敗でも MCP ピアへは
+    // 必ず追加完了を通知する（カードは残るのに通知だけ飛ばない不整合を防ぐ）。
+    try {
+      await invoke("notify_worktree_added", {
+        id: entry.id,
+        name: entry.name,
+        branchName: entry.branchName,
+      });
+    } catch {
+      // 通知失敗はワークツリー追加の成否に影響しない
+    }
     loadingWorktrees.delete(entry.id);
   }
 }

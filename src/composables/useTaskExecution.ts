@@ -330,7 +330,11 @@ export function useTaskExecution(deps: {
         branchName: entry.branchName,
       });
     } catch (e) {
-      await message(t("worktreeSetupIncomplete", { error: e }), { kind: "warning" });
+      // ワークツリーは作成済み・永続化済みなのでロールバックしない（settings との乖離=
+      // カウントと表示の分裂を防ぐ）。ただし後続タスクステップ（agent_worktree 等）は
+      // セットアップ完了を前提とするため、エラーは伝播させてタスクを中断する。
+      loadingWorktrees.delete(entry.id);
+      throw e;
     }
 
     loadingWorktrees.delete(entry.id);
