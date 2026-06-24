@@ -26,6 +26,7 @@ let resizeObserver: ResizeObserver | null = null;
 let meowTimer: ReturnType<typeof setTimeout> | null = null;
 let reportTimer: ReturnType<typeof setInterval> | null = null;
 let unlistenMetrics: UnlistenFn | null = null;
+let unmounted = false;
 
 function scheduleMeow() {
   const delay = 15000 + Math.random() * 10000; // 15〜25秒
@@ -105,7 +106,10 @@ onMounted(() => {
   // システムメトリクスのポーリングを開始し、更新イベントを購読する
   invoke("system_metrics_start").catch(() => {});
   listen<SystemMetrics>("system-metrics", (e) => setMetrics(e.payload))
-    .then((un) => { unlistenMetrics = un; })
+    .then((un) => {
+      // 購読完了前にアンマウントされていた場合は即座に解除（リスナーリーク防止）
+      if (unmounted) { un(); } else { unlistenMetrics = un; }
+    })
     .catch(() => {});
 
   resizeObserver = new ResizeObserver(() => {
@@ -119,6 +123,7 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  unmounted = true;
   if (meowTimer) { clearTimeout(meowTimer); meowTimer = null; }
   if (reportTimer) { clearInterval(reportTimer); reportTimer = null; }
   if (unlistenMetrics) { unlistenMetrics(); unlistenMetrics = null; }

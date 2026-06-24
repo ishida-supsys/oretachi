@@ -16,8 +16,8 @@ const MAX_QUEUE_SIZE = 20;
 const MAX_SPEECH_WIDTH = 40;      // セリフ1行の最大表示列数
 const MAX_SPEECH_LINES = 3;       // セリフ最大行数
 
-// システムメトリクス（左上表示）
-const METRICS_WIDTH = 16;         // 左上メトリクス領域の幅（列）
+// システムメトリクス（左下表示）
+const METRICS_WIDTH = 16;         // 左下メトリクス領域の幅（列）
 
 export interface SystemMetrics {
   cpu_percent: number;
@@ -120,7 +120,7 @@ export function useCat() {
     terminal.write(seq);
   }
 
-  // ----- システムメトリクス（左上）の描画 -----
+  // ----- システムメトリクス（左下）の描画 -----
 
   // 受信したメトリクスを表示用の行配列へ整形して再描画する
   function setMetrics(m: SystemMetrics) {
@@ -328,7 +328,7 @@ export function useCat() {
       if (speechState === "typing" || speechState === "holding") {
         drawSpeechLines(currentSpeechLines, displayedCharCount);
       }
-      // 左上メトリクス（上書きからの復元）
+      // 左下メトリクス（上書きからの復元）
       drawMetrics();
     }, REDRAW_INTERVAL_MS);
   }
