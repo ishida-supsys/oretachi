@@ -16,6 +16,25 @@ const MAX_QUEUE_SIZE = 20;
 const MAX_SPEECH_WIDTH = 40;      // セリフ1行の最大表示列数
 const MAX_SPEECH_LINES = 3;       // セリフ最大行数
 
+// システムメトリクス（左上表示）
+const METRICS_WIDTH = 16;         // 左上メトリクス領域の幅（列）
+
+export interface SystemMetrics {
+  cpu_percent: number;
+  mem_used: number;   // bytes
+  mem_total: number;  // bytes
+  net_rx_per_sec: number; // bytes/sec
+  net_tx_per_sec: number; // bytes/sec
+}
+
+// バイト数を K/M/G 単位の短い文字列へ整形
+function fmtBytes(n: number): string {
+  if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1)}G`;
+  if (n >= 1024 ** 2) return `${(n / 1024 ** 2).toFixed(1)}M`;
+  if (n >= 1024) return `${(n / 1024).toFixed(1)}K`;
+  return `${n}B`;
+}
+
 const catFrames = {
   normal: [" ∧_∧", "( o.o )", " じしˍ,)ノ"],
   blink: [" ∧_∧", "( -.- )", " じしˍ,)ノ"],
@@ -61,6 +80,11 @@ export function useCat() {
   let blinkScheduleTimer: ReturnType<typeof setTimeout> | null = null;
   let blinkRestoreTimer: ReturnType<typeof setTimeout> | null = null;
 
+  // システムメトリクス（左下表示）。未受信の間は空配列で何も描かない。
+  let metricsLines: string[] = [];
+  // 前回描画したメトリクスの最大行幅（桁数が減ったときの残骸クリア用）
+  let metricsDrawnWidth = 0;
+
   // セリフ状態
   const topics: Topic[] = [];
   let speechState: SpeechState = "idle";
@@ -94,6 +118,39 @@ export function useCat() {
     }
     seq += "\x1b8";
     terminal.write(seq);
+  }
+
+  // ----- システムメトリクス（左上）の描画 -----
+
+  // 受信したメトリクスを表示用の行配列へ整形して再描画する
+  function setMetrics(m: SystemMetrics) {
+    metricsLines = [
+      `CPU ${Math.round(m.cpu_percent)}%`,
+      `MEM ${(m.mem_used / 1024 ** 3).toFixed(1)}/${(m.mem_total / 1024 ** 3).toFixed(0)}G`,
+      `NET ↓${fmtBytes(m.net_rx_per_sec)} ↑${fmtBytes(m.net_tx_per_sec)}`,
+    ];
+    drawMetrics();
+  }
+
+  // 左下（最下行から上方・列1）へ固定位置描画。猫=右下・セリフ=右側上方なので衝突しない。
+  function drawMetrics() {
+    if (!terminal || terminal.rows < 6 || terminal.cols < METRICS_WIDTH || metricsLines.length === 0) return;
+    // 今回の最大行幅と前回描画幅の大きい方をクリア（桁数が減ったときの右側残骸を消す）
+    const curWidth = metricsLines.reduce((m, l) => Math.max(m, measureWidth(l)), 0);
+    const clearWidth = Math.min(terminal.cols, Math.max(curWidth, metricsDrawnWidth));
+    const totalLines = metricsLines.length;
+    let seq = "\x1b7";
+    for (let i = 0; i < totalLines; i++) {
+      // 最終行を最下行に合わせ、上方向に積む
+      const row = terminal.rows - (totalLines - 1 - i);
+      if (row < 1) continue;
+      // クリア→描画（残骸・桁あふれ防止）
+      seq += `\x1b[${row};1H${" ".repeat(clearWidth)}`;
+      seq += `\x1b[${row};1H${metricsLines[i]}`;
+    }
+    seq += "\x1b8";
+    terminal.write(seq);
+    metricsDrawnWidth = curWidth;
   }
 
   // ----- テキスト折り返し -----
@@ -271,6 +328,8 @@ export function useCat() {
       if (speechState === "typing" || speechState === "holding") {
         drawSpeechLines(currentSpeechLines, displayedCharCount);
       }
+      // 左上メトリクス（上書きからの復元）
+      drawMetrics();
     }, REDRAW_INTERVAL_MS);
   }
 
@@ -287,9 +346,10 @@ export function useCat() {
     if (speechState === "typing" || speechState === "holding") {
       drawSpeechLines(currentSpeechLines, displayedCharCount);
     }
+    drawMetrics();
   }
 
   onUnmounted(stop);
 
-  return { start, stop, redraw, topic };
+  return { start, stop, redraw, topic, setMetrics };
 }

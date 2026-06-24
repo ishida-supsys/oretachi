@@ -4,7 +4,8 @@ import { useI18n } from "vue-i18n";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import { invoke } from "@tauri-apps/api/core";
-import { useCat } from "../composables/useCat";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { useCat, type SystemMetrics } from "../composables/useCat";
 
 interface ReportSummary {
   worktree_added: number;
@@ -17,13 +18,14 @@ interface ReportSummary {
 const { t } = useI18n();
 const containerRef = ref<HTMLDivElement | null>(null);
 
-const { start, stop, redraw, topic } = useCat();
+const { start, stop, redraw, topic, setMetrics } = useCat();
 
 let terminal: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let meowTimer: ReturnType<typeof setTimeout> | null = null;
 let reportTimer: ReturnType<typeof setInterval> | null = null;
+let unlistenMetrics: UnlistenFn | null = null;
 
 function scheduleMeow() {
   const delay = 15000 + Math.random() * 10000; // 15〜25秒
@@ -100,6 +102,12 @@ onMounted(() => {
   scheduleMeow();
   reportTimer = setInterval(fetchReport, 60000);
 
+  // システムメトリクスのポーリングを開始し、更新イベントを購読する
+  invoke("system_metrics_start").catch(() => {});
+  listen<SystemMetrics>("system-metrics", (e) => setMetrics(e.payload))
+    .then((un) => { unlistenMetrics = un; })
+    .catch(() => {});
+
   resizeObserver = new ResizeObserver(() => {
     if (containerRef.value && containerRef.value.offsetWidth > 0) {
       fitAddon?.fit();
@@ -113,6 +121,8 @@ onMounted(() => {
 onUnmounted(() => {
   if (meowTimer) { clearTimeout(meowTimer); meowTimer = null; }
   if (reportTimer) { clearInterval(reportTimer); reportTimer = null; }
+  if (unlistenMetrics) { unlistenMetrics(); unlistenMetrics = null; }
+  invoke("system_metrics_stop").catch(() => {});
   stop();
   resizeObserver?.disconnect();
   terminal?.dispose();
