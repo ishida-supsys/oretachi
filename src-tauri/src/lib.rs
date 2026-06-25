@@ -15,6 +15,7 @@ mod process_utils;
 mod pty_manager;
 mod report_db;
 mod settings;
+mod system_metrics;
 mod task_db;
 mod task_executor;
 mod terminal_session;
@@ -29,6 +30,7 @@ use fs_watcher::FsWatcherManager;
 use process_utils::WorktreeRemoveManager;
 use pty_manager::{AiAgentChangedPayload, PtyManager};
 use settings::{AppSettings, SettingsManager};
+use system_metrics::SystemMetricsState;
 use tauri::{Emitter, Listener, Manager, State};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
@@ -800,6 +802,18 @@ fn get_force_wizard() -> bool {
         .unwrap_or(false)
 }
 
+/// 猫ターミナル向けシステムメトリクスのポーリングを開始する。
+#[tauri::command]
+fn system_metrics_start(app_handle: tauri::AppHandle, state: State<SystemMetricsState>) {
+    state.start(app_handle);
+}
+
+/// システムメトリクスのポーリングを停止する。
+#[tauri::command]
+fn system_metrics_stop(state: State<SystemMetricsState>) {
+    state.stop();
+}
+
 /// メインウィンドウの WebView2 にネイティブ診断イベントを登録する (Windows 限定)。
 ///
 /// - `ProcessFailed`: browser/renderer プロセス破綻を ERROR ログ。完全アイドル中のフリーズ
@@ -983,6 +997,7 @@ pub fn run() {
         .manage(ai_description::DescriptionManager::new())
         .manage(task_executor::TaskGenerateManager::new())
         .manage(FsWatcherManager::new())
+        .manage(SystemMetricsState::new())
         // ReportPool は setup() 内で非同期初期化するため、ここでは登録しない
         .invoke_handler(tauri::generate_handler![
             pty_spawn,
@@ -1063,6 +1078,8 @@ pub fn run() {
             set_debug_mode,
             get_debug_mode,
             get_force_wizard,
+            system_metrics_start,
+            system_metrics_stop,
         ])
         .setup(move |app| {
             // env var が false の場合は DB初期化などの起動ログを含め debug! を抑制する。
