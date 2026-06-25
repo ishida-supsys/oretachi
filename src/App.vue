@@ -699,16 +699,30 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string,
   addWorktreePlaceholder(entry);
   loadingWorktrees.set(entry.id, copyWorkingChangesFrom ? t("duplicatingText") : t("creatingText"));
 
+  const repo = settings.value.repositories.find((r) => r.id === entry.repositoryId);
+  let lfsSkipped = false;
+
+  // commit 前（git worktree 作成・永続化まで）。ここでの失敗のみロールバック対象。
+  // この時点では settings に未追加なので、ランタイムのみ削除する rollbackWorktree で整合する。
   try {
-    const repo = settings.value.repositories.find((r) => r.id === entry.repositoryId);
     if (repo?.pullBeforeAdd) {
       await invoke("git_pull", { repoPath: repo.path });
     }
 
-    const lfsSkipped = await invokeWorktreeAdd(entry, sourceBranch);
+    lfsSkipped = await invokeWorktreeAdd(entry, sourceBranch);
 
     // 成功時: 設定に永続化
     commitWorktree(entry);
+  } catch (e) {
+    rollbackWorktree(entry.id);
+    await message(t("worktreeCreateFailed", { error: e }), { kind: "error" });
+    loadingWorktrees.delete(entry.id);
+    return;
+  }
+
+  // commit 後の後続処理。ワークツリーは作成済み・永続化済みのため、ここで失敗しても
+  // ロールバックしない（ランタイムのみ削除すると settings と乖離し、カウントと表示が分裂する）。
+  try {
     tryAutoAssignHotkey(entry.id);
 
     // デフォルト: 自動承認
@@ -788,17 +802,20 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string,
     if (lfsSkipped) {
       await message(t("lfsWarning"), { kind: "warning" });
     }
-
-    // 全後続処理が成功した後にMCPクライアントへ追加完了を通知
-    await invoke("notify_worktree_added", {
-      id: entry.id,
-      name: entry.name,
-      branchName: entry.branchName,
-    });
   } catch (e) {
-    rollbackWorktree(entry.id);
-    await message(t("worktreeCreateFailed", { error: e }), { kind: "error" });
+    await message(t("worktreeSetupIncomplete", { error: e }), { kind: "warning" });
   } finally {
+    // ワークツリーは作成済み・永続化済みなので、セットアップ途中失敗でも MCP ピアへは
+    // 必ず追加完了を通知する（カードは残るのに通知だけ飛ばない不整合を防ぐ）。
+    try {
+      await invoke("notify_worktree_added", {
+        id: entry.id,
+        name: entry.name,
+        branchName: entry.branchName,
+      });
+    } catch {
+      // 通知失敗はワークツリー追加の成否に影響しない
+    }
     loadingWorktrees.delete(entry.id);
   }
 }
@@ -1949,6 +1966,7 @@ onMounted(async () => {
     "copyTargetsFailed": "Some files could not be copied after worktree creation: {error}",
     "claudeHooksFailed": "Failed to write Claude Code notification hooks: {error}",
     "sessionCopyFailed": "Failed to copy Claude Code session data: {error}",
+    "worktreeSetupIncomplete": "Worktree created, but some setup steps failed: {error}",
     "shuttingDown": "Shutting down...",
     "minimize": "Minimize",
     "maximize": "Maximize",
@@ -1980,6 +1998,7 @@ onMounted(async () => {
     "copyTargetsFailed": "ワークツリー追加後のファイルコピーに失敗しました: {error}",
     "claudeHooksFailed": "Claude Code通知フックの書き込みに失敗しました: {error}",
     "sessionCopyFailed": "Claude Codeセッションデータのコピーに失敗しました: {error}",
+    "worktreeSetupIncomplete": "ワークツリーは作成されましたが、一部のセットアップ処理に失敗しました: {error}",
     "shuttingDown": "終了しています...",
     "minimize": "最小化",
     "maximize": "最大化",
