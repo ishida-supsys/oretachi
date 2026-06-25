@@ -6,6 +6,16 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.25.0] - 2026-06-25
+
+### Added
+- 猫ターミナル左下に CPU/メモリ/ネットワーク使用状況を表示
+
+### Fixed
+- メトリクスリスナーのリークを防止
+- ワークグループの追加後続処理が失敗した際にカウントと表示が分裂する問題を解消
+- commit 後の失敗時にタスク中断と MCP 通知の整合性を回復
+
 ## [0.24.6] - 2026-06-23
 
 ### Fixed
@@ -492,7 +502,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.24.6...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.25.0...HEAD
+[0.25.0]: https://github.com/ishida-supsys/oretachi/compare/0.24.6...0.25.0
 [0.24.6]: https://github.com/ishida-supsys/oretachi/compare/0.24.5...0.24.6
 [0.24.5]: https://github.com/ishida-supsys/oretachi/compare/0.24.4...0.24.5
 [0.24.4]: https://github.com/ishida-supsys/oretachi/compare/0.24.3...0.24.4
