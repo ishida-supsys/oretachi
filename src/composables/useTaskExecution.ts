@@ -331,8 +331,19 @@ export function useTaskExecution(deps: {
       });
     } catch (e) {
       // ワークツリーは作成済み・永続化済みなのでロールバックしない（settings との乖離=
-      // カウントと表示の分裂を防ぐ）。ただし後続タスクステップ（agent_worktree 等）は
-      // セットアップ完了を前提とするため、エラーは伝播させてタスクを中断する。
+      // カウントと表示の分裂を防ぐ）。カードは残り続けるため、手動経路が finally で
+      // 通知するのと同様に MCP ピアへも追加を通知しておく（通知漏れの不整合を防ぐ）。
+      try {
+        await invoke("notify_worktree_added", {
+          id: entry.id,
+          name: entry.name,
+          branchName: entry.branchName,
+        });
+      } catch {
+        // 通知失敗はワークツリー追加の成否に影響しない
+      }
+      // 後続タスクステップ（agent_worktree 等）はセットアップ完了を前提とするため、
+      // エラーは伝播させてタスクを中断する。
       loadingWorktrees.delete(entry.id);
       throw e;
     }
