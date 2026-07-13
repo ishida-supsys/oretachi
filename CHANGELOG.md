@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.25.1] - 2026-07-13
+
+### Fixed
+- userConfig 非依存化で CC 2.1.207 の通知 hook フォーマットエラーを解消 (#99)
+
 ## [0.25.0] - 2026-06-25
 
 ### Added
@@ -502,7 +507,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.25.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.25.1...HEAD
+[0.25.1]: https://github.com/ishida-supsys/oretachi/compare/0.25.0...0.25.1
 [0.25.0]: https://github.com/ishida-supsys/oretachi/compare/0.24.6...0.25.0
 [0.24.6]: https://github.com/ishida-supsys/oretachi/compare/0.24.5...0.24.6
 [0.24.5]: https://github.com/ishida-supsys/oretachi/compare/0.24.4...0.24.5
