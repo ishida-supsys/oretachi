@@ -382,6 +382,7 @@ mod tests {
             auto_approval_prompt: None,
             description: None,
             description_open: None,
+            workgroup_id: None,
         }
     }
 

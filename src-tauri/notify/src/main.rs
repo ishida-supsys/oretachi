@@ -6,10 +6,14 @@
 // 同処理を行っていたが、数十MBの GUI バイナリ起動を避けるため独立サイドカーに分離した。
 //
 // 使い方:
-//   oretachi-notify --notify "<worktree>" [--kind <kind>] [--agent <agent>]
-//     (stdin がパイプの場合、その内容を body として /notify へ送信)
-//   oretachi-notify --set-description "<worktree>"
+//   oretachi-notify --notify --project-dir "<dir>" --event "<Event>" [--agent <agent>]
+//     (stdin がパイプの場合、その内容を body として /notify へ送信。
+//      ワークツリー名と kind の解決はサーバー側で project-dir / event から行う)
+//   oretachi-notify --set-description --project-dir "<dir>"
 //     (stdin の ExitPlanMode hook JSON を /set-description へ転送)
+//
+// hook からは userConfig ではなく CC 組み込み変数 ${CLAUDE_PROJECT_DIR} が --project-dir に渡る。
+// 未置換/空の場合はプロセスの current_dir (hook は worktree ディレクトリで実行される) にフォールバック。
 
 // Prevents a console window flash on Windows when spawned by hooks.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
@@ -21,25 +25,13 @@ const SERVER_INFO_FILE: &str = "mcp-server.json";
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
-    // 通知 (--notify): stdin(hook JSON) を body として /notify へ送る
-    if let Some(name) = find_notify_arg(&args) {
-        let kind = find_kind_arg(&args);
-        let agent = find_agent_arg(&args);
-        let body = read_stdin_if_piped();
-        if let Err(e) = send_notification(&name, kind.as_deref(), body.as_deref(), agent.as_deref()) {
-            #[cfg(debug_assertions)]
-            eprintln!("Notification failed: {}", e);
-            let _ = e;
-            std::process::exit(1);
-        }
-        std::process::exit(0);
-    }
-
     // ExitPlanMode フック (--set-description): stdin の hook JSON を /set-description へ転送し、
     // 稼働中アプリにプランを AI 要約させてワークツリーの description にセットさせる。
-    if let Some(name) = find_set_description_arg(&args) {
+    // --notify より先に判定する（両フラグが同時指定されることは無いが順序を明示）。
+    if has_flag(&args, "--set-description", "-d") {
+        let dir = resolve_project_dir(&args);
         let hook_json = read_stdin_if_piped();
-        if let Err(e) = send_set_description(&name, hook_json.as_deref()) {
+        if let Err(e) = send_set_description(&dir, hook_json.as_deref()) {
             #[cfg(debug_assertions)]
             eprintln!("Set description failed: {}", e);
             let _ = e;
@@ -48,8 +40,24 @@ fn main() {
         std::process::exit(0);
     }
 
+    // 通知 (--notify): stdin(hook JSON) を body として /notify へ送る。
+    // ワークツリー名と kind はサーバー側で project-dir / event から解決する。
+    if has_flag(&args, "--notify", "-n") {
+        let dir = resolve_project_dir(&args);
+        let event = find_event_arg(&args);
+        let agent = find_agent_arg(&args);
+        let body = read_stdin_if_piped();
+        if let Err(e) = send_notification(&dir, event.as_deref(), body.as_deref(), agent.as_deref()) {
+            #[cfg(debug_assertions)]
+            eprintln!("Notification failed: {}", e);
+            let _ = e;
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+
     #[cfg(debug_assertions)]
-    eprintln!("Usage: oretachi-notify --notify <worktree> [--kind <kind>] [--agent <agent>]\n       oretachi-notify --set-description <worktree>");
+    eprintln!("Usage: oretachi-notify --notify --project-dir <dir> --event <Event> [--agent <agent>]\n       oretachi-notify --set-description --project-dir <dir>");
     std::process::exit(2);
 }
 
@@ -66,20 +74,33 @@ fn find_arg(args: &[String], long: &str, short: &str) -> Option<String> {
     None
 }
 
-fn find_notify_arg(args: &[String]) -> Option<String> {
-    find_arg(args, "--notify", "-n")
+/// 値を取らないフラグ（--notify / --set-description）の有無を判定する。
+fn has_flag(args: &[String], long: &str, short: &str) -> bool {
+    args.iter().skip(1).any(|a| a == long || a == short)
 }
 
-fn find_kind_arg(args: &[String]) -> Option<String> {
-    find_arg(args, "--kind", "-k")
+fn find_project_dir_arg(args: &[String]) -> Option<String> {
+    find_arg(args, "--project-dir", "-p")
+}
+
+fn find_event_arg(args: &[String]) -> Option<String> {
+    find_arg(args, "--event", "-e")
 }
 
 fn find_agent_arg(args: &[String]) -> Option<String> {
     find_arg(args, "--agent", "-a")
 }
 
-fn find_set_description_arg(args: &[String]) -> Option<String> {
-    find_arg(args, "--set-description", "-d")
+/// --project-dir を解決する。${CLAUDE_PROJECT_DIR} が未置換のまま届いた場合や空/未指定の
+/// 場合は、hook が実行される worktree ディレクトリ = プロセスの current_dir にフォールバック。
+fn resolve_project_dir(args: &[String]) -> String {
+    let raw = find_project_dir_arg(args);
+    match raw {
+        Some(d) if !d.is_empty() && !d.contains("${") => d,
+        _ => std::env::current_dir()
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default(),
+    }
 }
 
 /// stdin がパイプ（非 TTY）の場合のみ読み取り、タイムアウト付きで返す。
@@ -103,16 +124,20 @@ fn read_stdin_if_piped() -> Option<String> {
 }
 
 /// 起動中の oretachi MCP サーバへ通知を送る（AppHandle 不要のスタンドアロン実装）。
+/// ワークツリー名・kind の解決はサーバー側で project_dir / event から行うため、ここでは
+/// 生の project_dir と event を渡す。
 fn send_notification(
-    worktree_name: &str,
-    kind: Option<&str>,
+    project_dir: &str,
+    event: Option<&str>,
     body: Option<&str>,
     agent: Option<&str>,
 ) -> Result<(), String> {
     let mut payload = serde_json::json!({
-        "worktree": worktree_name,
-        "kind": kind.unwrap_or("general"),
+        "projectDir": project_dir,
     });
+    if let Some(e) = event {
+        payload["event"] = serde_json::Value::String(e.to_string());
+    }
     if let Some(b) = body {
         payload["body"] = serde_json::Value::String(b.to_string());
     }
@@ -124,9 +149,10 @@ fn send_notification(
 
 /// ExitPlanMode フックの hook JSON を /set-description へ転送し、
 /// 稼働中アプリにプランの AI 要約と description セットを依頼する。
-fn send_set_description(worktree_name: &str, hook_json: Option<&str>) -> Result<(), String> {
+/// ワークツリーの特定はサーバー側で project_dir から行う。
+fn send_set_description(project_dir: &str, hook_json: Option<&str>) -> Result<(), String> {
     let mut payload = serde_json::json!({
-        "worktree": worktree_name,
+        "projectDir": project_dir,
     });
     if let Some(j) = hook_json {
         payload["hookJson"] = serde_json::Value::String(j.to_string());
@@ -222,75 +248,75 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_find_notify_arg_long_space() {
-        let args = vec!["bin".to_string(), "--notify".to_string(), "myname".to_string()];
-        assert_eq!(find_notify_arg(&args), Some("myname".to_string()));
+    fn test_has_flag_notify() {
+        let args = vec!["bin".to_string(), "--notify".to_string(), "--agent".to_string(), "cc".to_string()];
+        assert!(has_flag(&args, "--notify", "-n"));
+        assert!(!has_flag(&args, "--set-description", "-d"));
     }
 
     #[test]
-    fn test_find_notify_arg_long_eq() {
-        let args = vec!["bin".to_string(), "--notify=myname".to_string()];
-        assert_eq!(find_notify_arg(&args), Some("myname".to_string()));
+    fn test_has_flag_short() {
+        let args = vec!["bin".to_string(), "-d".to_string()];
+        assert!(has_flag(&args, "--set-description", "-d"));
     }
 
     #[test]
-    fn test_find_notify_arg_short() {
-        let args = vec!["bin".to_string(), "-n".to_string(), "myname".to_string()];
-        assert_eq!(find_notify_arg(&args), Some("myname".to_string()));
-    }
-
-    #[test]
-    fn test_find_notify_arg_none() {
+    fn test_has_flag_absent() {
         let args = vec!["bin".to_string(), "--other".to_string()];
-        assert_eq!(find_notify_arg(&args), None);
+        assert!(!has_flag(&args, "--notify", "-n"));
     }
 
     #[test]
-    fn test_find_notify_arg_no_value() {
+    fn test_find_project_dir_long_space() {
+        let args = vec!["bin".to_string(), "--project-dir".to_string(), "X:/wt/foo".to_string()];
+        assert_eq!(find_project_dir_arg(&args), Some("X:/wt/foo".to_string()));
+    }
+
+    #[test]
+    fn test_find_project_dir_long_eq() {
+        let args = vec!["bin".to_string(), "--project-dir=X:/wt/foo".to_string()];
+        assert_eq!(find_project_dir_arg(&args), Some("X:/wt/foo".to_string()));
+    }
+
+    #[test]
+    fn test_find_project_dir_short() {
+        let args = vec!["bin".to_string(), "-p".to_string(), "X:/wt/foo".to_string()];
+        assert_eq!(find_project_dir_arg(&args), Some("X:/wt/foo".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_project_dir_explicit() {
+        let args = vec!["bin".to_string(), "--project-dir".to_string(), "X:/wt/foo".to_string()];
+        assert_eq!(resolve_project_dir(&args), "X:/wt/foo".to_string());
+    }
+
+    #[test]
+    fn test_resolve_project_dir_unsubstituted_falls_back_to_cwd() {
+        // ${CLAUDE_PROJECT_DIR} が未置換のまま届いたら current_dir にフォールバックする
+        let args = vec!["bin".to_string(), "--project-dir".to_string(), "${CLAUDE_PROJECT_DIR}".to_string()];
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        assert_eq!(resolve_project_dir(&args), cwd);
+    }
+
+    #[test]
+    fn test_resolve_project_dir_missing_falls_back_to_cwd() {
         let args = vec!["bin".to_string(), "--notify".to_string()];
-        assert_eq!(find_notify_arg(&args), None);
+        let cwd = std::env::current_dir().unwrap().to_string_lossy().to_string();
+        assert_eq!(resolve_project_dir(&args), cwd);
     }
 
     #[test]
-    fn test_find_notify_arg_empty() {
-        let args: Vec<String> = vec!["bin".to_string()];
-        assert_eq!(find_notify_arg(&args), None);
-    }
-
-    #[test]
-    fn test_find_kind_arg_long_space() {
-        let args = vec!["bin".to_string(), "--kind".to_string(), "approval".to_string()];
-        assert_eq!(find_kind_arg(&args), Some("approval".to_string()));
-    }
-
-    #[test]
-    fn test_find_kind_arg_long_eq() {
-        let args = vec!["bin".to_string(), "--kind=completed".to_string()];
-        assert_eq!(find_kind_arg(&args), Some("completed".to_string()));
-    }
-
-    #[test]
-    fn test_find_kind_arg_short() {
-        let args = vec!["bin".to_string(), "-k".to_string(), "general".to_string()];
-        assert_eq!(find_kind_arg(&args), Some("general".to_string()));
-    }
-
-    #[test]
-    fn test_find_kind_arg_none() {
-        let args = vec!["bin".to_string(), "--notify".to_string(), "myname".to_string()];
-        assert_eq!(find_kind_arg(&args), None);
+    fn test_find_event_arg() {
+        let args = vec!["bin".to_string(), "--event".to_string(), "Stop".to_string()];
+        assert_eq!(find_event_arg(&args), Some("Stop".to_string()));
+        let none = vec!["bin".to_string(), "--notify".to_string()];
+        assert_eq!(find_event_arg(&none), None);
     }
 
     #[test]
     fn test_find_agent_arg_long_space() {
         let args = vec!["bin".to_string(), "--agent".to_string(), "cc".to_string()];
         assert_eq!(find_agent_arg(&args), Some("cc".to_string()));
-    }
-
-    #[test]
-    fn test_find_agent_arg_long_eq() {
-        let args = vec!["bin".to_string(), "--agent=codex".to_string()];
-        assert_eq!(find_agent_arg(&args), Some("codex".to_string()));
     }
 
     #[test]
@@ -301,25 +327,7 @@ mod tests {
 
     #[test]
     fn test_find_agent_arg_none() {
-        let args = vec!["bin".to_string(), "--notify".to_string(), "myname".to_string()];
+        let args = vec!["bin".to_string(), "--notify".to_string(), "--event".to_string(), "Stop".to_string()];
         assert_eq!(find_agent_arg(&args), None);
-    }
-
-    #[test]
-    fn test_find_set_description_arg_long_space() {
-        let args = vec!["bin".to_string(), "--set-description".to_string(), "wt".to_string()];
-        assert_eq!(find_set_description_arg(&args), Some("wt".to_string()));
-    }
-
-    #[test]
-    fn test_find_set_description_arg_short() {
-        let args = vec!["bin".to_string(), "-d".to_string(), "wt".to_string()];
-        assert_eq!(find_set_description_arg(&args), Some("wt".to_string()));
-    }
-
-    #[test]
-    fn test_find_set_description_arg_none() {
-        let args = vec!["bin".to_string(), "--notify".to_string(), "wt".to_string()];
-        assert_eq!(find_set_description_arg(&args), None);
     }
 }

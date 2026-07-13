@@ -18,7 +18,7 @@ use tokio::sync::{broadcast, oneshot, watch, RwLock};
 
 use crate::git_worktree::get_git_remotes;
 use crate::pty_manager::PtyManager;
-use crate::settings::SettingsManager;
+use crate::settings::{AppSettings, SettingsManager, WorktreeEntry};
 
 const PORT_FILE: &str = "mcp-port";
 const SERVER_INFO_FILE: &str = "mcp-server.json";
@@ -198,7 +198,18 @@ impl McpServerManager {
 
 #[derive(Debug, Deserialize)]
 pub struct NotifyPayload {
-    pub worktree: String,
+    /// userConfig 非依存版の hook が送る CC 組み込み変数 ${CLAUDE_PROJECT_DIR}。
+    /// これからワークツリー名を逆引きする。
+    #[serde(default, rename = "projectDir")]
+    pub project_dir: Option<String>,
+    /// ライフサイクルイベント名（"Stop" 等）。これから kind を解決する。
+    #[serde(default)]
+    pub event: Option<String>,
+    /// 後方互換: ワークツリー名を直接指定する旧形式 / MCP 経由。
+    #[serde(default)]
+    pub worktree: Option<String>,
+    /// 後方互換: kind を直接指定する旧形式。
+    #[serde(default)]
     pub kind: Option<String>,
     pub body: Option<String>,
     pub agent: Option<String>,
@@ -206,7 +217,12 @@ pub struct NotifyPayload {
 
 #[derive(Debug, Deserialize)]
 pub struct SetDescriptionPayload {
-    pub worktree: String,
+    /// userConfig 非依存版の hook が送る ${CLAUDE_PROJECT_DIR}。
+    #[serde(default, rename = "projectDir")]
+    pub project_dir: Option<String>,
+    /// 後方互換: ワークツリー名を直接指定する旧形式。
+    #[serde(default)]
+    pub worktree: Option<String>,
     /// ExitPlanMode フックが stdin で受け取った hook JSON 文字列（生）
     #[serde(rename = "hookJson")]
     pub hook_json: Option<String>,
@@ -1383,19 +1399,97 @@ impl ServerHandler for NotifyService {
     }
 }
 
+// ─── worktree / kind の解決（userConfig 非依存 hook 用） ──────────────────────
+
+/// パスを比較用に正規化する（`\`→`/`、末尾 `/` 除去、Windows は小文字化）。
+fn normalize_path_for_match(p: &str) -> String {
+    let mut s = p.replace('\\', "/");
+    while s.len() > 1 && s.ends_with('/') {
+        s.pop();
+    }
+    if cfg!(windows) {
+        s = s.to_lowercase();
+    }
+    s
+}
+
+/// project_dir（${CLAUDE_PROJECT_DIR}）に一致するワークツリーエントリを返す。
+fn resolve_worktree_by_dir<'a>(settings: &'a AppSettings, dir: &str) -> Option<&'a WorktreeEntry> {
+    let target = normalize_path_for_match(dir);
+    settings
+        .worktrees
+        .iter()
+        .find(|w| normalize_path_for_match(&w.path) == target)
+}
+
+/// イベント名の既定 kind。ユーザー設定 (repo.notification_hooks) が無い場合のフォールバック。
+fn default_kind_for_event(event: &str) -> &'static str {
+    match event {
+        "Stop" => "completed",
+        "PermissionRequest" => "approval",
+        _ => "hook",
+    }
+}
+
+/// ワークツリーの所属リポジトリの notification_hooks から event に対応する kind を解決する。
+/// 設定が無ければ default_kind_for_event にフォールバック。
+fn resolve_kind_for_event(settings: &AppSettings, worktree: &WorktreeEntry, event: &str) -> String {
+    settings
+        .repositories
+        .iter()
+        .find(|r| r.id == worktree.repository_id)
+        .and_then(|r| r.notification_hooks.as_ref())
+        .and_then(|hooks| hooks.iter().find(|h| h.event == event))
+        .map(|h| h.kind.clone())
+        .unwrap_or_else(|| default_kind_for_event(event).to_string())
+}
+
 // ─── Simple REST endpoint (/notify) ──────────────────────────────────────────
 
 async fn notify_handler(
     State(app_handle): State<AppHandle>,
     Json(payload): Json<NotifyPayload>,
 ) -> StatusCode {
+    let settings = app_handle.state::<SettingsManager>().get();
+
+    // ワークツリー: project_dir から逆引き。見つからなければ後方互換の worktree 名で解決。
+    let worktree = payload
+        .project_dir
+        .as_deref()
+        .and_then(|d| resolve_worktree_by_dir(&settings, d));
+    let worktree_name = match worktree {
+        Some(w) => w.name.clone(),
+        None => match payload.worktree.clone() {
+            Some(name) => name,
+            None => {
+                log::warn!(
+                    "[notify] could not resolve worktree (projectDir={:?}); dropping",
+                    payload.project_dir
+                );
+                return StatusCode::OK;
+            }
+        },
+    };
+
+    // kind: 明示指定(旧形式/MCP) > event からの解決 > "general"
+    let kind = if let Some(k) = payload.kind.clone() {
+        k
+    } else if let Some(ev) = payload.event.as_deref() {
+        match worktree {
+            Some(w) => resolve_kind_for_event(&settings, w, ev),
+            None => default_kind_for_event(ev).to_string(),
+        }
+    } else {
+        "general".to_string()
+    };
+
     let event = NotifyWorktreeEvent {
-        worktree_name: payload.worktree.clone(),
-        kind: payload.kind.unwrap_or_else(|| "general".to_string()),
+        worktree_name,
+        kind,
         body: payload.body,
         agent: payload.agent,
     };
-    log::info!("[notify] worktree={} kind={}", payload.worktree, event.kind);
+    log::info!("[notify] worktree={} kind={}", event.worktree_name, event.kind);
 
     let manager = app_handle.state::<McpServerManager>();
     // hook: 3秒 / approval: 1秒 で (worktree, kind) 単位に送信制限。
@@ -1480,6 +1574,23 @@ async fn set_description_handler(
     State(app_handle): State<AppHandle>,
     Json(payload): Json<SetDescriptionPayload>,
 ) -> StatusCode {
+    let settings = app_handle.state::<SettingsManager>().get();
+
+    // ワークツリー: project_dir から逆引き。無ければ後方互換の worktree 名。
+    let worktree_name = payload
+        .project_dir
+        .as_deref()
+        .and_then(|d| resolve_worktree_by_dir(&settings, d))
+        .map(|w| w.name.clone())
+        .or_else(|| payload.worktree.clone());
+    let Some(worktree_name) = worktree_name else {
+        log::warn!(
+            "[set-description] could not resolve worktree (projectDir={:?}); skipping",
+            payload.project_dir
+        );
+        return StatusCode::OK;
+    };
+
     let plan = payload
         .hook_json
         .as_deref()
@@ -1487,14 +1598,14 @@ async fn set_description_handler(
 
     let Some(plan) = plan else {
         // プランが取れない場合はベストエフォートで握りつぶす（フックをブロックしない）
-        log::info!("[set-description] worktree={} no plan extracted; skipping", payload.worktree);
+        log::info!("[set-description] worktree={} no plan extracted; skipping", worktree_name);
         return StatusCode::OK;
     };
 
-    log::info!("[set-description] worktree={} plan_len={}", payload.worktree, plan.len());
+    log::info!("[set-description] worktree={} plan_len={}", worktree_name, plan.len());
 
     let event = SetWorktreeDescriptionEvent {
-        worktree: payload.worktree,
+        worktree: worktree_name,
         plan,
     };
     match app_handle.emit("set-worktree-description", &event) {
