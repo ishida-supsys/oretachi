@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import type { IdeInfo } from "../types/ide";
 import { useI18n } from "vue-i18n";
+import { isMac } from "../composables/usePlatform";
 
 const { t } = useI18n();
 
@@ -12,6 +13,15 @@ const emit = defineEmits<{
   select: [ide: IdeInfo];
   cancel: [];
 }>();
+
+function ideName(ide: IdeInfo): string {
+  if (ide.id === "file-explorer") return isMac ? "Finder" : t("fileExplorer");
+  return ide.name;
+}
+
+function ideIcon(ide: IdeInfo): string {
+  return ide.id === "file-explorer" ? "pi pi-folder-open" : "pi pi-desktop";
+}
 </script>
 
 <template>
@@ -26,8 +36,8 @@ const emit = defineEmits<{
           class="ide-btn"
           @click="emit('select', ide)"
         >
-          <span class="pi pi-desktop ide-icon" />
-          <span class="ide-name">{{ ide.name }}</span>
+          <span :class="[ideIcon(ide), 'ide-icon']" />
+          <span class="ide-name">{{ ideName(ide) }}</span>
         </button>
       </div>
 
@@ -124,10 +134,12 @@ const emit = defineEmits<{
 <i18n lang="json">
 {
   "en": {
-    "select": "Select IDE"
+    "select": "Select IDE",
+    "fileExplorer": "File Explorer"
   },
   "ja": {
-    "select": "IDE を選択"
+    "select": "IDE を選択",
+    "fileExplorer": "エクスプローラー"
   }
 }
 </i18n>

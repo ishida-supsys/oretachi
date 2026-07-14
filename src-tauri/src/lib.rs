@@ -453,6 +453,12 @@ fn open_in_ide(command: String, path: String) -> Result<(), String> {
     ide_launcher::open_in_ide(&command, &path)
 }
 
+#[tauri::command]
+fn open_in_file_explorer(path: String) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::OpenInFileExplorer);
+    ide_launcher::open_in_file_explorer(&path)
+}
+
 // ─── MCP コマンド ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1038,6 +1044,7 @@ pub fn run() {
             detect_ides,
             detect_ai_agents,
             open_in_ide,
+            open_in_file_explorer,
             get_mcp_status,
             restart_mcp_server,
             regenerate_mcp_api_key,

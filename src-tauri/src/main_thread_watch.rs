@@ -40,6 +40,7 @@ pub enum Activity {
     DetectIdes,
     DetectAiAgents,
     OpenInIde,
+    OpenInFileExplorer,
     RegenerateMcpApiKey,
     GetMcpStatus,
     PathExists,
@@ -54,7 +55,7 @@ pub enum Activity {
 }
 
 /// [`Activity`] の discriminant 順に並んだ表示ラベル。enum と順序を一致させること。
-const LABELS: [&str; 24] = [
+const LABELS: [&str; 25] = [
     "idle",
     "run-event",
     "watchdog-probe",
@@ -68,6 +69,7 @@ const LABELS: [&str; 24] = [
     "cmd:detect_ides",
     "cmd:detect_ai_agents",
     "cmd:open_in_ide",
+    "cmd:open_in_file_explorer",
     "cmd:regenerate_mcp_api_key",
     "cmd:get_mcp_status",
     "cmd:path_exists",
