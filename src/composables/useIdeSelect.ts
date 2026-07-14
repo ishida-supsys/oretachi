@@ -40,8 +40,8 @@ export function useIdeSelect() {
   async function openInIde(path: string, options: IdeSelectOptions = {}): Promise<void> {
     const ides = await invoke<IdeInfo[]>("detect_ides");
 
-    // 実IDE + ファイルエクスプローラー + Code Reviewer をダイアログで選択させる
-    detectedIdes.value = [...ides, FILE_EXPLORER_IDE, CODE_REVIEWER_IDE];
+    // 実IDE + Code Reviewer + ファイルエクスプローラー（末尾）をダイアログで選択させる
+    detectedIdes.value = [...ides, CODE_REVIEWER_IDE, FILE_EXPLORER_IDE];
     ideTargetPath.value = path;
     ideTargetOptions.value = options;
     showIdeDialog.value = true;
