@@ -6,6 +6,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.25.2] - 2026-07-14
+
+### Added
+- 「IDEで開く」にファイルエクスプローラーの選択肢を追加 (#100)
+
+### Fixed
+- ファイルエクスプローラーの選択肢をダイアログ末尾に移動 (#100)
+
 ## [0.25.1] - 2026-07-13
 
 ### Fixed
@@ -507,7 +515,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.25.1...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.25.2...HEAD
+[0.25.2]: https://github.com/ishida-supsys/oretachi/compare/0.25.1...0.25.2
 [0.25.1]: https://github.com/ishida-supsys/oretachi/compare/0.25.0...0.25.1
 [0.25.0]: https://github.com/ishida-supsys/oretachi/compare/0.24.6...0.25.0
 [0.24.6]: https://github.com/ishida-supsys/oretachi/compare/0.24.5...0.24.6
