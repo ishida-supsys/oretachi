@@ -3,6 +3,12 @@
 export let terminalMountCount = 0;
 export let terminalUnmountCount = 0;
 export let terminalActiveCount = 0;
+
+// WebGL コンテキストはブラウザ全体で上限 (~16) があり、端末数ぶん生成すると
+// コンテキストロスの連鎖や compositor 停止 (webview ハング) を招く。
+// 可視端末のみロードする方針に加え、保険として同時ロード数に上限を設ける。
+const MAX_WEBGL_CONTEXTS = 8;
+let webglContextCount = 0;
 </script>
 
 <script setup lang="ts">
@@ -59,6 +65,11 @@ let fitAddon: FitAddon | null = null;
 let serializeAddon: SerializeAddon | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let resizeDebounce: ReturnType<typeof setTimeout> | null = null;
+let webglAddon: WebglAddon | null = null;
+let webglDisposeTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** オフスクリーン退避後に WebGL を破棄するまでの猶予 (トレイ開閉連打での生成/破棄チャーン回避)。 */
+const WEBGL_DISPOSE_DELAY_MS = 5000;
 
 const { sessionId, spawn, attachToSession, write, resize, kill, isRunning, detach } = usePty();
 const batcher = usePtyWriteBatcher(() => terminal);
@@ -137,22 +148,11 @@ function initTerminal() {
 
   search.loadAddon(terminal);
 
-  // WebGL addon (失敗時は Canvas フォールバック)
-  try {
-    const webglAddon = new WebglAddon();
-    webglAddon.onContextLoss(() => {
-      console.warn("[XTERM] WebGL onContextLoss fired!", { sessionId: sessionId.value });
-      webglAddon.dispose();
-      // dispose 後は xterm.js が自動で Canvas レンダラーにフォールバック。
-      // 明示的に refresh を呼んで Canvas レンダラーで再描画させる。
-      terminal?.refresh(0, terminal.rows - 1);
-    });
-    terminal.loadAddon(webglAddon);
-  } catch {
-    // Canvas renderer を使用
-  }
-
   terminal.open(xtermRef.value);
+
+  // WebGL は可視端末のみロードする (updateVisibility 経由)。
+  // オフスクリーンで open された場合はここではロードされず、可視化時にロードされる。
+  updateVisibility();
 
   // 左クリック: 選択テキストがあればコピー＆選択解除
   // capture フェーズで登録し、xterm.js が選択をクリアする前にテキストを取得する
@@ -314,14 +314,92 @@ async function attachPty(id: number, snapshot?: string) {
 }
 
 function serializeBuffer(scrollback?: number): string {
+  // 抑制中の蓄積分を先に書き込んでから serialize する (取りこぼし防止)
+  batcher.flush();
   return serializeAddon?.serialize(scrollback !== undefined ? { scrollback } : undefined) ?? "";
+}
+
+function detachPty(): void {
+  // detach 後は pty-output ハンドラが外れるため、蓄積分を先に排出する
+  batcher.flush();
+  detach();
 }
 
 function focus() {
   terminal?.focus();
 }
 
+function isOffscreen(): boolean {
+  return !!xtermRef.value?.closest("[data-offscreen]");
+}
+
+function loadWebgl(): void {
+  if (webglAddon || !terminal) return;
+  if (webglContextCount >= MAX_WEBGL_CONTEXTS) {
+    logDebug(`[Terminal] WebGL load skipped (limit ${MAX_WEBGL_CONTEXTS}) sid=${sessionId.value}`);
+    return;
+  }
+  try {
+    const addon = new WebglAddon();
+    addon.onContextLoss(() => {
+      console.warn("[XTERM] WebGL onContextLoss fired!", { sessionId: sessionId.value });
+      disposeWebgl();
+      // dispose 後は xterm.js が自動で DOM レンダラーにフォールバック。
+      // 明示的に refresh を呼んで再描画させる。
+      terminal?.refresh(0, terminal.rows - 1);
+    });
+    terminal.loadAddon(addon);
+    webglAddon = addon;
+    webglContextCount++;
+    logDebug(`[Terminal] WebGL loaded sid=${sessionId.value} count=${webglContextCount}`);
+  } catch {
+    // DOM renderer を使用
+  }
+}
+
+function disposeWebgl(): void {
+  if (!webglAddon) return;
+  try {
+    webglAddon.dispose();
+  } catch {
+    // すでに破棄済み等は無視
+  }
+  webglAddon = null;
+  webglContextCount--;
+  logDebug(`[Terminal] WebGL disposed sid=${sessionId.value} count=${webglContextCount}`);
+}
+
+/**
+ * オフスクリーン ↔ 可視 の状態変化を反映する。
+ * - 可視: WebGL をロード (上限内) し、write 抑制を解除して蓄積分を排出。
+ * - オフスクリーン: write を抑制し、猶予後に WebGL を破棄。
+ * DOM reparenting (useTerminalReparenting) と handleTabActivated から呼ばれる。
+ */
+function updateVisibility(): void {
+  const offscreen = isOffscreen();
+  batcher.setSuspended(offscreen);
+  if (offscreen) {
+    if (webglAddon && webglDisposeTimer === null) {
+      webglDisposeTimer = setTimeout(() => {
+        webglDisposeTimer = null;
+        // 猶予中に再可視化されていたら破棄しない
+        if (isOffscreen()) {
+          disposeWebgl();
+          terminal?.refresh(0, terminal.rows - 1);
+        }
+      }, WEBGL_DISPOSE_DELAY_MS);
+    }
+  } else {
+    if (webglDisposeTimer !== null) {
+      clearTimeout(webglDisposeTimer);
+      webglDisposeTimer = null;
+    }
+    loadWebgl();
+  }
+}
+
 async function handleTabActivated() {
+  updateVisibility();
   await nextTick();
   await new Promise<void>((resolve) => {
     requestAnimationFrame(() => {
@@ -404,9 +482,14 @@ onUnmounted(() => {
   terminalActiveCount--;
   logDebug(`[TerminalView] onUnmounted sessionId=${sessionId.value} cwd=${props.cwd}`);
   if (resizeDebounce) clearTimeout(resizeDebounce);
+  if (webglDisposeTimer !== null) {
+    clearTimeout(webglDisposeTimer);
+    webglDisposeTimer = null;
+  }
   resizeObserver?.disconnect();
   batcher.dispose();
   search.dispose();
+  disposeWebgl(); // terminal.dispose() より前にカウンタを整合させる
   serializeAddon?.dispose();
   terminal?.dispose();
 });
@@ -415,7 +498,7 @@ defineExpose({
   startPty,
   attachPty,
   kill,
-  detach,
+  detach: detachPty,
   focus,
   write,
   getTerminal,
@@ -423,6 +506,7 @@ defineExpose({
   sessionId,
   serializeBuffer,
   handleTabActivated,
+  updateVisibility,
   waitForReady,
   containerRef,
   toggleSearchBar: search.toggleSearchBar,
