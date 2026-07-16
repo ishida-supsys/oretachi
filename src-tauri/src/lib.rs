@@ -928,6 +928,24 @@ pub fn run() {
     let mcp_enabled = is_mcp_enabled();
 
     let mut builder = tauri::Builder::default();
+
+    // 多重起動防止 (重複起動すると同一ログ/settings/SQLite への並行書き込みと
+    // ワークツリー復元による PTY/AI エージェントの重複 spawn が起きる)。
+    // single-instance プラグインは「最初に登録する」ことが公式要件。
+    // dev と本番は識別子 com.ia.oretachi を共有するため、debug ビルドでは登録しない
+    // (本番稼働中に `pnpm run tauri dev` が起動できなくなるのを避ける)。
+    #[cfg(not(debug_assertions))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            log::warn!("[single-instance] 二重起動を検出。既存インスタンスの main ウィンドウを前面化する");
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show(); // トレイ常駐で非表示のケースに対応
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }));
+    }
+
     if acrylic_enabled {
         builder = builder.plugin(tauri_plugin_liquid_glass::init());
 
