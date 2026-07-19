@@ -136,6 +136,7 @@ export interface AppSettings {
   enableHomeCat?: boolean;
   aiTimeoutSecs?: number; // AIタイムアウト秒数 (デフォルト: 120)
   debugMode?: boolean;
-  useOretachiTerminalForBackground?: boolean; // AI からの background コマンドを oretachi ターミナルで起動するか (デフォルト: true)
+  useOretachiTerminalForBackground?: boolean; // AI からの background コマンドを oretachi ターミナルで起動するか (デフォルト: false)
+  moveToSubWindowOnMcpSpawn?: boolean; // MCP 経由のターミナル追加時にサブウィンドウへ自動移行するか (デフォルト: false)
   wizardCompleted?: boolean; // 初回起動ウィザード完了フラグ (Rust 側 init() でシーディング)
 }

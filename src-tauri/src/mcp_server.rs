@@ -1180,20 +1180,8 @@ impl NotifyService {
             }
         };
 
-        // detached（サブウィンドウ化済み）ワークツリーへの spawn は App.vue 側で
-        // 早期 return されるため、MCP 経由で投入してもユーザに silent failure として
-        // 見えてしまう。事前に検知して明示的なエラーを返す。
-        let detached_registry = self.app_handle.state::<DetachedWorktreeRegistry>();
-        if detached_registry.is_detached(&wt.id) {
-            return Err(McpError::invalid_params(
-                format!(
-                    "worktree '{}' is currently detached (open in a sub-window). MCP spawn into detached worktrees is not supported. Bring the worktree back into the main window first.",
-                    worktree_name
-                ),
-                None,
-            ));
-        }
-
+        // detached（サブウィンドウ化済み）ワークツリーへの spawn はフロント側で
+        // handleDetachedMcpSpawn 経由でサブウィンドウへ pendingCommand 付きでルーティングされる。
         let event = SpawnTerminalEvent {
             worktree_id: wt.id.clone(),
             command: command.clone(),

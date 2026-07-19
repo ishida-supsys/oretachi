@@ -47,8 +47,8 @@ oretachi_get_app_options({})
 // => { "useOretachiTerminalForBackground": true | false }
 ```
 
-- `true`（既定）: Step 1 以降に進む。
-- `false`: 本スキルは使わない。Claude Code の bash tool で `run_in_background: true` を指定して起動する（例: `bash` tool で `pnpm dev` を実行、`run_in_background: true`）。oretachi UI には新タブを作らない。以降の Step もスキップ。
+- `true`: Step 1 以降に進む。
+- `false`（既定）: 本スキルは使わない。Claude Code の bash tool で `run_in_background: true` を指定して起動する（例: `bash` tool で `pnpm dev` を実行、`run_in_background: true`）。oretachi UI には新タブを作らない。以降の Step もスキップ。
 
 このトグルは oretachi 設定タブ → Terminal セクションの「AI からの background コマンドを oretachi ターミナルで起動する」に対応する。
 

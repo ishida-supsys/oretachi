@@ -200,6 +200,26 @@ const thumbnailUrls = reactive(new Map<number, string>());
 // 立ち上がっても誤投入されない。多重 spawn の race も terminalId 単位で完全分離される。
 const pendingByTerminal = new Map<number, string>();
 
+// terminalId → ready 済みフラグ。onTerminalReady で add。
+// onTerminalReady は同期的に発火しうる（TerminalView の emit("ready") → @ready ハンドラが同期）ため、
+// waitForTerminalReady を呼ぶ前に既に ready 完了している可能性がある。Set で「過去に ready 済みかどうか」を
+// 記録しておき、waitForTerminalReady 側で即時 resolve できるようにする。
+const readyTerminals = new Set<number>();
+const terminalReadyResolvers = new Map<number, () => void>();
+function waitForTerminalReady(terminalId: number, timeoutMs = 5000): Promise<void> {
+  if (readyTerminals.has(terminalId)) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      terminalReadyResolvers.delete(terminalId);
+      resolve();
+    }, timeoutMs);
+    terminalReadyResolvers.set(terminalId, () => {
+      clearTimeout(timer);
+      resolve();
+    });
+  });
+}
+
 // terminalId → 復元スナップショット（起動時セッション復元用）
 const pendingSnapshots = new Map<number, string>();
 // 新規追加ターミナル: autoStart を抑制して reparenting 後に手動 startPty するための ID セット
@@ -460,6 +480,12 @@ async function onTerminalReady(worktreeId: string, terminalId: number) {
     pendingByTerminal.delete(terminalId);
     const ref = getTerminalRef(terminalId);
     await ref?.write(command);
+  }
+  readyTerminals.add(terminalId);
+  const resolver = terminalReadyResolvers.get(terminalId);
+  if (resolver) {
+    terminalReadyResolvers.delete(terminalId);
+    resolver();
   }
 }
 
@@ -837,7 +863,13 @@ async function onDuplicateWorktree(worktreeId: string) {
 
 // ─── ────────────────────────────────────────────────────────────────────────
 
-async function handleSubAddTerminalRequest(worktreeId: string) {
+// サブウィンドウへのターミナル追加。ユーザー由来のリクエスト (sub-add-terminal-request) と
+// MCP 由来の detached spawn の両方で使う。options.title / options.pendingCommand を渡すと
+// MCP のメタデータをサブへ伝搬し、title はメイン側 state にも同期する。
+async function handleSubAddTerminalRequest(
+  worktreeId: string,
+  options?: { title?: string | null; pendingCommand?: string },
+) {
   const worktree = worktrees.value.find((w) => w.id === worktreeId);
   if (!worktree) return;
 
@@ -850,11 +882,21 @@ async function handleSubAddTerminalRequest(worktreeId: string) {
 
   registerTerminalSession(worktreeId, terminal.id, sid);
 
-  await emitTo(`sub-${worktreeId}`, "sub-add-terminal-response", {
+  // MCP から title を渡された場合はメイン側の worktree state にも反映し、
+  // 後でメインへ戻したときにデフォルト名へ巻き戻らないようにする。
+  if (options?.title) {
+    onTerminalTitleChange(worktreeId, terminal.id, options.title);
+  }
+
+  const payload: { terminalId: number; sessionId: number; title: string; pendingCommand?: string } = {
     terminalId: terminal.id,
     sessionId: sid,
-    title: terminal.title,
-  });
+    title: options?.title ?? terminal.title,
+  };
+  if (options?.pendingCommand !== undefined) {
+    payload.pendingCommand = options.pendingCommand;
+  }
+  await emitTo(`sub-${worktreeId}`, "sub-add-terminal-response", payload);
 }
 
 async function onMoveToSubWindow(worktreeId: string) {
@@ -1233,27 +1275,39 @@ onMounted(async () => {
         logDebug(`[Terminal] mcp-spawn-terminal: worktree ${worktree_id} not found, skipping`);
         return;
       }
-      // detached（サブウィンドウ化済み）ワークツリーは onAddTerminal が
-      // handleSubAddTerminalRequest に分岐し pendingCommand を消費しないため未対応
-      if (isDetached(worktree_id)) {
-        logDebug(`[Terminal] mcp-spawn-terminal: worktree ${worktree_id} is detached, not supported`);
-        return;
-      }
-      const beforeIds = new Set(targetWt.terminals.map((t) => t.id));
       // PowerShell/conpty は LF だけだとプロンプト継続行扱いになり Enter が発火しない。
       // FramePane.vue / TerminalView.vue paste と同じく \r に正規化する。
       const normalized = command.replace(/\r?\n/g, "\r");
       const cmd = normalized.endsWith("\r") ? normalized : normalized + "\r";
+      // detached（サブウィンドウ化済み）ワークツリーはサブウィンドウへ pendingCommand 付きでルーティング
+      if (isDetached(worktree_id)) {
+        try {
+          await handleSubAddTerminalRequest(worktree_id, { title, pendingCommand: cmd });
+        } catch (e) {
+          logDebug(`[Terminal] mcp-spawn-terminal: handleSubAddTerminalRequest (detached) failed: ${e}`);
+        }
+        return;
+      }
+      const beforeIds = new Set(targetWt.terminals.map((t) => t.id));
       try {
         await onAddTerminal(worktree_id, { background: true, pendingCommand: cmd });
       } catch (e) {
         logDebug(`[Terminal] mcp-spawn-terminal: onAddTerminal failed: ${e}`);
         return;
       }
-      if (title) {
-        const wt = worktrees.value.find((w) => w.id === worktree_id);
-        const newTerm = wt?.terminals.find((t) => !beforeIds.has(t.id));
-        if (newTerm) onTerminalTitleChange(worktree_id, newTerm.id, title);
+      const wtAfter = worktrees.value.find((w) => w.id === worktree_id);
+      const newTerm = wtAfter?.terminals.find((t) => !beforeIds.has(t.id));
+      if (title && newTerm) {
+        onTerminalTitleChange(worktree_id, newTerm.id, title);
+      }
+      // 設定が ON のときは新ターミナルの ready を待ってからサブウィンドウへ自動移行
+      if ((settings.value.moveToSubWindowOnMcpSpawn ?? false) && newTerm) {
+        try {
+          await waitForTerminalReady(newTerm.id);
+          await onMoveToSubWindow(worktree_id);
+        } catch (e) {
+          logDebug(`[Terminal] mcp-spawn-terminal: auto move-to-sub-window failed: ${e}`);
+        }
       }
     },
   );
