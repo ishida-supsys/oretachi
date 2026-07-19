@@ -9,10 +9,10 @@ export let terminalActiveCount = 0;
 import { ref, computed, watch, onMounted, onUnmounted, nextTick } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { usePty } from "../composables/usePty";
 import { usePtyWriteBatcher } from "../composables/usePtyWriteBatcher";
+import { useTerminalVisibility } from "../composables/useTerminalVisibility";
 import { useSettings } from "../composables/useSettings";
 import { matchesHotkey } from "../composables/useHotkeys";
 import { useTerminalSearch } from "../composables/useTerminalSearch";
@@ -62,6 +62,12 @@ let resizeDebounce: ReturnType<typeof setTimeout> | null = null;
 
 const { sessionId, spawn, attachToSession, write, resize, kill, isRunning, detach } = usePty();
 const batcher = usePtyWriteBatcher(() => terminal);
+const visibility = useTerminalVisibility({
+  getTerminal: () => terminal,
+  isOffscreen,
+  setWriteSuspended: batcher.setSuspended,
+  getSessionId: () => sessionId.value,
+});
 const { settings } = useSettings();
 
 // UIスケール (webview ズーム) 下でもターミナルの物理グリフサイズを不変に保つため、
@@ -137,22 +143,11 @@ function initTerminal() {
 
   search.loadAddon(terminal);
 
-  // WebGL addon (失敗時は Canvas フォールバック)
-  try {
-    const webglAddon = new WebglAddon();
-    webglAddon.onContextLoss(() => {
-      console.warn("[XTERM] WebGL onContextLoss fired!", { sessionId: sessionId.value });
-      webglAddon.dispose();
-      // dispose 後は xterm.js が自動で Canvas レンダラーにフォールバック。
-      // 明示的に refresh を呼んで Canvas レンダラーで再描画させる。
-      terminal?.refresh(0, terminal.rows - 1);
-    });
-    terminal.loadAddon(webglAddon);
-  } catch {
-    // Canvas renderer を使用
-  }
-
   terminal.open(xtermRef.value);
+
+  // WebGL は可視端末のみロードする (updateVisibility 経由)。
+  // オフスクリーンで open された場合はここではロードされず、可視化時にロードされる。
+  visibility.updateVisibility();
 
   // 左クリック: 選択テキストがあればコピー＆選択解除
   // capture フェーズで登録し、xterm.js が選択をクリアする前にテキストを取得する
@@ -314,14 +309,27 @@ async function attachPty(id: number, snapshot?: string) {
 }
 
 function serializeBuffer(scrollback?: number): string {
+  // 抑制中の蓄積分を先に書き込んでから serialize する (取りこぼし防止)
+  batcher.flush();
   return serializeAddon?.serialize(scrollback !== undefined ? { scrollback } : undefined) ?? "";
+}
+
+function detachPty(): void {
+  // detach 後は pty-output ハンドラが外れるため、蓄積分を先に排出する
+  batcher.flush();
+  detach();
 }
 
 function focus() {
   terminal?.focus();
 }
 
+function isOffscreen(): boolean {
+  return !!xtermRef.value?.closest("[data-offscreen]");
+}
+
 async function handleTabActivated() {
+  visibility.updateVisibility();
   await nextTick();
   await new Promise<void>((resolve) => {
     requestAnimationFrame(() => {
@@ -407,6 +415,7 @@ onUnmounted(() => {
   resizeObserver?.disconnect();
   batcher.dispose();
   search.dispose();
+  visibility.dispose(); // terminal.dispose() より前に WebGL カウンタを整合させる
   serializeAddon?.dispose();
   terminal?.dispose();
 });
@@ -415,7 +424,7 @@ defineExpose({
   startPty,
   attachPty,
   kill,
-  detach,
+  detach: detachPty,
   focus,
   write,
   getTerminal,
@@ -423,6 +432,7 @@ defineExpose({
   sessionId,
   serializeBuffer,
   handleTabActivated,
+  updateVisibility: visibility.updateVisibility,
   waitForReady,
   containerRef,
   toggleSearchBar: search.toggleSearchBar,

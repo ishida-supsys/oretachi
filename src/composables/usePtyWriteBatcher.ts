@@ -18,12 +18,19 @@ const HIGH_WATERMARK_BYTES = 8 * 1024 * 1024;
  * 恒久ブロックする。これを防ぐため次の二段のフォールバックを併用する:
  *   1. setTimeout によるフォールバック排出(rAF が来なくても排出する)。
  *   2. HIGH_WATERMARK_BYTES 超過時の同期即時 flush(タイマ throttle に依存せず上限を保証)。
+ *
+ * さらに setSuspended(true) でオフスクリーン端末の排出を抑制できる。
+ * 抑制中は enqueue のみ行い terminal.write() をスケジュールしない
+ * (多数のオフスクリーン端末が並行して parse/render コストを消費し、
+ * メインスレッドを飽和させる webview ハングの対策)。
+ * HIGH_WATERMARK_BYTES 超過時は抑制中でも flush する (ANSI ストリームは破棄不可のため)。
  */
 export function usePtyWriteBatcher(getTerminal: () => Terminal | null) {
   let chunks: Uint8Array[] = [];
   let totalLength = 0;
   let rafId: number | null = null;
   let timerId: ReturnType<typeof setTimeout> | null = null;
+  let suspended = false;
 
   function clearScheduled(): void {
     if (rafId !== null) {
@@ -42,6 +49,10 @@ export function usePtyWriteBatcher(getTerminal: () => Terminal | null) {
     // 上限超過時はタイマ throttle 非依存でその場排出し、ヒープを上限内に固定する。
     if (totalLength >= HIGH_WATERMARK_BYTES) {
       flush();
+      return;
+    }
+    // 抑制中(オフスクリーン)は蓄積のみ。setSuspended(false) 時にまとめて排出する。
+    if (suspended) {
       return;
     }
     // 前面では rAF が先に発火して滑らかにバッチ。オクルージョン時は rAF が来ないため
@@ -80,10 +91,25 @@ export function usePtyWriteBatcher(getTerminal: () => Terminal | null) {
     totalLength = 0;
   }
 
+  /**
+   * オフスクリーン時の排出抑制を切り替える。
+   * 抑制解除時は蓄積分を即 flush する (可視化直後の fit/refresh が最新内容を描画できるように)。
+   */
+  function setSuspended(value: boolean): void {
+    if (suspended === value) return;
+    suspended = value;
+    if (value) {
+      // スケジュール済みの排出を取り消して蓄積モードへ
+      clearScheduled();
+    } else if (chunks.length > 0) {
+      flush();
+    }
+  }
+
   function dispose(): void {
     clearScheduled();
     flush();
   }
 
-  return { enqueue, dispose };
+  return { enqueue, flush, setSuspended, dispose };
 }
