@@ -3,6 +3,7 @@ export type AddWorktreeTaskCode = {
   repository: string;
   branch: string;
   source_branch?: string;
+  workgroupId?: string;
 };
 
 export type AgentWorktreeTaskCode = {

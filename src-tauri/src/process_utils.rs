@@ -182,17 +182,67 @@ fn merge_paths(base: &str, additions: &str) -> String {
     result.join(":")
 }
 
-/// プロセスツリーを強制終了する
+/// 通常経路（Tauri コマンド等）から使うプロセスツリーの強制終了。
+/// `taskkill /F /T` の待機上限は 10 秒。
 pub fn kill_process_tree(pid: u32) {
+    kill_process_tree_with_timeout(pid, std::time::Duration::from_secs(10));
+}
+
+/// アプリ終了経路から使う高速版。`taskkill /F /T` の待機上限を 1.5 秒に短縮し、
+/// 多数セッションを並列 kill しても UI スレッドのブロックを有界に抑える。
+/// 超過時は taskkill 自体を kill してデタッチする（孤児プロセスは Job Object が回収）。
+pub fn kill_process_tree_exit(pid: u32) {
+    kill_process_tree_with_timeout(pid, std::time::Duration::from_millis(1500));
+}
+
+/// プロセスツリーを強制終了する（待機上限を引数で指定）。
+///
+/// Windows: `taskkill /F /T` は通常数秒以内に終わるが、システム高負荷や対象プロセスの
+/// 異常状態では応答しないことがある。`.output()` の無期限待ちは呼び出しスレッドを
+/// 永久ブロックしうるため、`timeout` 付きで待機し、超過時は taskkill 自体を kill する。
+pub fn kill_process_tree_with_timeout(pid: u32, timeout: std::time::Duration) {
     #[cfg(target_os = "windows")]
     {
-        let _ = make_command("taskkill")
+        let child = make_command("taskkill")
             .args(["/F", "/T", "/PID", &pid.to_string()])
-            .output();
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        let mut child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                log::warn!("[Terminal] kill_process_tree: taskkill spawn failed pid={}: {}", pid, e);
+                return;
+            }
+        };
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        log::warn!(
+                            "[Terminal] kill_process_tree: taskkill timed out after {:?} pid={}",
+                            timeout,
+                            pid
+                        );
+                        // taskkill 自体を kill して待ちを打ち切る。kill 失敗時は wait しない
+                        // （永久ブロック回避のためデタッチ）。
+                        if child.kill().is_ok() {
+                            let _ = child.wait();
+                        }
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                Err(_) => break,
+            }
+        }
     }
 
     #[cfg(not(target_os = "windows"))]
     {
+        let _ = timeout;
         unsafe {
             libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
         }

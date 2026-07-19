@@ -1,11 +1,25 @@
 [package]
 name = "oretachi"
-version = "0.20.1"
+version = "0.25.2"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+# 通知サイドカー (oretachi-notify) を同一ワークスペースのメンバーとして含める。
+# externalBin 用バイナリは scripts/build-sidecar.mjs が target/release から binaries/ へステージングする。
+[workspace]
+members = ["notify"]
+resolver = "2"
+
+# tao #1215「fix(windows): avoid reentrant input lock deadlocks」(2026-06-10) を取り込む。
+# keyboard/IME 処理が input ロック保持中に PeekMessageW を呼び window proc に再入し、
+# 非再入 parking_lot Mutex を再取得して UI スレッドがデッドロックする問題の修正。
+# まだ未リリース(tao 最新 0.35.3 は未収録)のため修正コミットに git pin している。
+# TODO: tao 0.35.4+(#1215入り)がリリースされ tauri が採用したら、この patch を除去する。
+[patch.crates-io]
+tao = { git = "https://github.com/tauri-apps/tao", rev = "c704261c519c58cfdd0bc2d58ba24e06a0b71c92" }
 
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary
@@ -25,12 +39,12 @@ tauri-plugin-opener = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-log = "2"
-tauri-plugin-cli = "2"
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-os = "2"
 tauri-plugin-notification = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 portable-pty = "0.8"
@@ -47,6 +61,7 @@ base64 = "0.22"
 rand = "0.8"
 subtle = "2"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+sysinfo = "0.38"
 tauri-plugin-prevent-default = "4"
 tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp" }
 
@@ -55,7 +70,10 @@ libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 winreg = "0.52"
+# WebView2 ネイティブ診断イベント (ProcessFailed / NewBrowserVersionAvailable) 購読用。
+# wry 0.54 / tauri 2.10 が使う版に合わせる (windows 0.61 系・PlatformWebview の controller()/environment() と同一型)。
+webview2-com = "0.38"
 windows = { version = "0.58", features = ["Win32_UI_Shell", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
-windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_Graphics_Dwm", "Win32_System_Environment", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug"] }
+windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_Graphics_Dwm", "Win32_System_Environment", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug", "Win32_Storage_FileSystem", "Win32_System_Kernel", "Win32_System_Memory", "Win32_System_JobObjects", "Win32_Security"] }
 windows-version = "0.1"
 

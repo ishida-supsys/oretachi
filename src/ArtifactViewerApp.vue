@@ -120,20 +120,22 @@ onUnmounted(() => {
         <span class="pi pi-box sidebar-icon" />
         <span class="sidebar-title">{{ worktreeName }}</span>
       </div>
-      <div v-if="artifacts.length === 0" class="empty-list">
-        {{ t("emptyList") }}
-      </div>
-      <div
-        v-for="artifact in artifacts"
-        :key="artifact.id"
-        class="artifact-item"
-        :class="{ selected: selectedId === artifact.id }"
-        @click="selectArtifact(artifact.id)"
-      >
-        <span :class="`pi ${typeIcon(artifact.content_type)} artifact-icon`" />
-        <div class="artifact-item-info">
-          <span class="artifact-title">{{ artifact.title }}</span>
-          <span class="artifact-meta">{{ formatDate(artifact.updated_at) }}</span>
+      <div class="artifact-list">
+        <div v-if="artifacts.length === 0" class="empty-list">
+          {{ t("emptyList") }}
+        </div>
+        <div
+          v-for="artifact in artifacts"
+          :key="artifact.id"
+          class="artifact-item"
+          :class="{ selected: selectedId === artifact.id }"
+          @click="selectArtifact(artifact.id)"
+        >
+          <span :class="`pi ${typeIcon(artifact.content_type)} artifact-icon`" />
+          <div class="artifact-item-info">
+            <span class="artifact-title">{{ artifact.title }}</span>
+            <span class="artifact-meta">{{ formatDate(artifact.updated_at) }}</span>
+          </div>
         </div>
       </div>
     </div>
@@ -236,6 +238,13 @@ onUnmounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: #cdd6f4;
+}
+
+.artifact-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .empty-list {

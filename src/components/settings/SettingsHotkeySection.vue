@@ -10,16 +10,7 @@ const { settings, scheduleSave } = useSettings();
 <template>
   <div class="field-group">
     <label class="field-label">{{ t('hotkeys.label') }}</label>
-    <div class="row-input row-input--inline">
-      <input
-        id="auto-assign-hotkey"
-        type="checkbox"
-        class="toggle-checkbox"
-        :checked="settings.autoAssignHotkey"
-        @change="(e) => { settings.autoAssignHotkey = (e.target as HTMLInputElement).checked; scheduleSave(); }"
-      />
-      <label for="auto-assign-hotkey" class="inline-label toggle-label">{{ t('hotkeys.autoAssign') }}</label>
-    </div>
+    <!-- 「ホットキー自動割り当て」はワークグループ単位に移動 -->
     <table v-if="settings.hotkeys" class="hotkey-table">
       <thead>
         <tr>
@@ -100,6 +91,24 @@ const { settings, scheduleSave } = useSettings();
             />
           </td>
         </tr>
+        <tr>
+          <td class="hotkey-td-label">{{ t('hotkeys.workgroupNext') }}</td>
+          <td class="hotkey-td-input">
+            <HotkeyInput
+              :model-value="settings.hotkeys.workgroupNext"
+              @update:model-value="(v) => { settings.hotkeys.workgroupNext = v; scheduleSave(); }"
+            />
+          </td>
+        </tr>
+        <tr>
+          <td class="hotkey-td-label">{{ t('hotkeys.workgroupPrev') }}</td>
+          <td class="hotkey-td-input">
+            <HotkeyInput
+              :model-value="settings.hotkeys.workgroupPrev"
+              @update:model-value="(v) => { settings.hotkeys.workgroupPrev = v; scheduleSave(); }"
+            />
+          </td>
+        </tr>
       </tbody>
     </table>
   </div>
@@ -120,7 +129,9 @@ const { settings, scheduleSave } = useSettings();
       "terminalClose": "Close terminal",
       "trayNext": "Next notification (tray)",
       "homeTab": "Home tab",
-      "addTask": "Add task"
+      "addTask": "Add task",
+      "workgroupNext": "Switch workgroup: next",
+      "workgroupPrev": "Switch workgroup: prev"
     }
   },
   "ja": {
@@ -136,7 +147,9 @@ const { settings, scheduleSave } = useSettings();
       "terminalClose": "ターミナルを閉じる",
       "trayNext": "次の通知へ (トレイ)",
       "homeTab": "ホームタブへ戻る",
-      "addTask": "タスク追加"
+      "addTask": "タスク追加",
+      "workgroupNext": "ワークグループ切替: 次",
+      "workgroupPrev": "ワークグループ切替: 前"
     }
   }
 }

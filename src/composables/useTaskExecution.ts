@@ -4,11 +4,30 @@ import { message } from "@tauri-apps/plugin-dialog";
 import { platform } from "@tauri-apps/plugin-os";
 import type { Ref } from "vue";
 import type TerminalView from "../components/TerminalView.vue";
-import type { WorktreeEntry, Repository, AppSettings } from "../types/settings";
+import type { WorktreeEntry, Repository, AppSettings, ClaudeCodeMode } from "../types/settings";
 import type { Worktree } from "../types/worktree";
 import type { AddWorktreeTaskCode, AgentWorktreeTaskCode } from "../types/task";
 import type { WebSessionInfo } from "../types/terminal";
 import { decodePtyOutput } from "../utils/decodePtyOutput";
+import { useWorkgroups } from "./useWorkgroups";
+
+/** Claude Code モード → permission-mode フラグ */
+function claudeModeFlag(mode?: ClaudeCodeMode): string {
+  switch (mode) {
+    case "manual": return "--permission-mode default";
+    case "acceptEdit": return "--permission-mode acceptEdits";
+    case "auto": return "--permission-mode auto";
+    case "plan":
+    default: return "--permission-mode plan";
+  }
+}
+
+/** 実行プロンプトテンプレートの {{PROMPT}} を実プロンプトに置換。未指定なら実プロンプトそのまま */
+function applyExecPrompt(template: string | undefined, prompt: string): string {
+  if (!template || !template.trim()) return prompt;
+  if (template.includes("{{PROMPT}}")) return template.split("{{PROMPT}}").join(prompt);
+  return `${template}\n\n${prompt}`;
+}
 
 export function useTaskExecution(deps: {
   t: (key: string, values?: Record<string, unknown>) => string;
@@ -51,6 +70,8 @@ export function useTaskExecution(deps: {
     autoApprovalMap,
     onWebSessionDetected,
   } = deps;
+
+  const { groupOf, activeWorkgroupId } = useWorkgroups();
 
   function randomSuffix(): string {
     return Math.random().toString(36).slice(2, 6);
@@ -230,11 +251,14 @@ export function useTaskExecution(deps: {
       repositoryName: repo.name,
       path: `${settings.value.worktreeBaseDir}/${worktreeName}`,
       branchName: code.branch,
+      workgroupId: code.workgroupId ?? (activeWorkgroupId.value || undefined),
     };
 
     addWorktreePlaceholder(entry);
     loadingWorktrees.set(entry.id, t("creatingText"));
 
+    // commit 前（git worktree 作成・永続化まで）。ここでの失敗のみロールバック対象。
+    // この時点では settings に未追加なので、ランタイムのみ削除する rollbackWorktree で整合する。
     try {
       if (repo.pullBeforeAdd) {
         await invoke("git_pull", { repoPath: repo.path });
@@ -242,6 +266,15 @@ export function useTaskExecution(deps: {
 
       await invokeWorktreeAdd(entry, code.source_branch);
       commitWorktree(entry);
+    } catch (e) {
+      rollbackWorktree(entry.id);
+      loadingWorktrees.delete(entry.id);
+      throw e;
+    }
+
+    // commit 後の後続処理。ワークツリーは作成済み・永続化済みのため、ここで失敗しても
+    // ロールバックしない（ランタイムのみ削除すると settings と乖離し、カウントと表示が分裂する）。
+    try {
       tryAutoAssignHotkey(entry.id);
 
       // デフォルト: 自動承認
@@ -297,7 +330,20 @@ export function useTaskExecution(deps: {
         branchName: entry.branchName,
       });
     } catch (e) {
-      rollbackWorktree(entry.id);
+      // ワークツリーは作成済み・永続化済みなのでロールバックしない（settings との乖離=
+      // カウントと表示の分裂を防ぐ）。カードは残り続けるため、手動経路が finally で
+      // 通知するのと同様に MCP ピアへも追加を通知しておく（通知漏れの不整合を防ぐ）。
+      try {
+        await invoke("notify_worktree_added", {
+          id: entry.id,
+          name: entry.name,
+          branchName: entry.branchName,
+        });
+      } catch {
+        // 通知失敗はワークツリー追加の成否に影響しない
+      }
+      // 後続タスクステップ（agent_worktree 等）はセットアップ完了を前提とするため、
+      // エラーは伝播させてタスクを中断する。
       loadingWorktrees.delete(entry.id);
       throw e;
     }
@@ -341,7 +387,9 @@ export function useTaskExecution(deps: {
       return;
     }
 
-    const agentKind = settings.value.aiAgent?.taskAddAgent ?? settings.value.aiAgent?.approvalAgent ?? "claudeCode";
+    // タスク実行エージェント・モード・実行プロンプトは所属ワークグループ単位
+    const group = groupOf(wt);
+    const agentKind = group?.taskAddAgent ?? settings.value.aiAgent?.taskAddAgent ?? settings.value.aiAgent?.approvalAgent ?? "claudeCode";
     const isWindows = platform() === "windows";
     const shell = resolveShell(wt.id);
     const shellLower = (shell ?? "").toLowerCase();
@@ -350,12 +398,14 @@ export function useTaskExecution(deps: {
       shellLower.includes("pwsh") ||
       (shell === undefined && isWindows);
 
-    // 一時ファイルにプロンプトを書き出し
-    const tempPath = await invoke<string>("write_temp_prompt", { content: code.prompt });
+    // 実行プロンプトテンプレート ({{PROMPT}}) を適用してから一時ファイルへ書き出し
+    const finalPrompt = applyExecPrompt(group?.execPrompt, code.prompt);
+    const tempPath = await invoke<string>("write_temp_prompt", { content: finalPrompt });
 
+    const claudeMode = claudeModeFlag(group?.claudeCodeMode);
     let agentCmd: string;
     switch (agentKind) {
-      case "claudeCode": agentCmd = code.remoteExec ? "claude --remote" : "claude --permission-mode plan"; break;
+      case "claudeCode": agentCmd = code.remoteExec ? `claude --remote ${claudeMode}` : `claude ${claudeMode}`; break;
       case "geminiCli":  agentCmd = "gemini"; break;
       case "codexCli":   agentCmd = "codex"; break;
       case "clineCli":   agentCmd = "cline"; break;

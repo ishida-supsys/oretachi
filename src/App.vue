@@ -12,10 +12,12 @@ import SettingsView from "./components/SettingsView.vue";
 import AddWorktreeDialog from "./components/AddWorktreeDialog.vue";
 import AddTaskDialog from "./components/AddTaskDialog.vue";
 import RemoveWorktreeDialog from "./components/RemoveWorktreeDialog.vue";
+import RemoveWorkgroupDialog from "./components/RemoveWorkgroupDialog.vue";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import HotkeyCharDialog from "./components/HotkeyCharDialog.vue";
 import AutoApprovalPromptDialog from "./components/AutoApprovalPromptDialog.vue";
 import TrayButton from "./components/TrayButton.vue";
+import FirstRunWizard from "./components/wizard/FirstRunWizard.vue";
 import { message } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { useIdeSelect } from "./composables/useIdeSelect";
@@ -42,12 +44,16 @@ import { saveWindowState, StateFlags } from "@tauri-apps/plugin-window-state";
 import { useWorktreeRemove } from "./composables/useWorktreeRemove";
 import { useRemoveWorktreeDialog } from "./composables/useRemoveWorktreeDialog";
 import { useAutoHotkey } from "./composables/useAutoHotkey";
+import { useWorkgroups } from "./composables/useWorkgroups";
+import { useHomePanel } from "./composables/useHomePanel";
 import { useAppAutoApproval } from "./composables/useAppAutoApproval";
 import { useAppHotkeys } from "./composables/useAppHotkeys";
 import { useSubWindowEvents } from "./composables/useSubWindowEvents";
 import { useShutdownGuard } from "./composables/useShutdownGuard";
 import type { ArchiveRow } from "./types/archive";
-import { debug } from "@tauri-apps/plugin-log";
+import { logDebug } from "./utils/log";
+import { cssPxToLogical } from "./utils/uiScale";
+import { useUiZoom } from "./composables/useUiZoom";
 import { consumeMaxBlockedMs, startEventLoopMonitor } from "./utils/eventLoopMonitor";
 import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
 import { ask } from "@tauri-apps/plugin-dialog";
@@ -66,8 +72,9 @@ const { checkForUpdate, downloadAndInstall } = useUpdater();
 
 type ViewMode = "home" | "settings" | "terminal";
 
-const { settings, loadSettings, scheduleSave } = useSettings();
-const { worktrees, loadWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, reorderWorktree, saveWorktreeOrder, restoreWorktreeOrder, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
+const { settings, loadSettings, scheduleSave, flushSave } = useSettings();
+const { appliedZoom } = useUiZoom();
+const { worktrees, loadWorktreesFromSettings, syncWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, reorderWorktree, saveWorktreeOrder, restoreWorktreeOrder, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, registerTerminalSession, closeAllSubWindows } = useSubWindows();
 const { autoApprovalPromptMap, lastJudgedCommandMap, showAutoApprovalPromptDialog, autoApprovalPromptTargetId, restoreFromSettings: restoreAutoApprovalPrompts, onClickAutoApproval, onSaveAutoApprovalPrompt } = useAutoApprovalPrompt(settings, scheduleSave, isDetached);
 const { notifications, initNotificationListener, addNotification, clearNotification, purgeStaleNotifications, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
@@ -102,6 +109,19 @@ const notificationCounts = computed(() => {
 
 // ワークツリーごとのアーティファクト数
 const artifactCounts = reactive(new Map<string, number>());
+
+// ホームカードの description 開閉状態（ワークツリー毎・settings.json に永続化）
+const descriptionOpenMap = reactive(new Map<string, boolean>());
+
+function onToggleDescription(worktreeId: string) {
+  const cur = descriptionOpenMap.get(worktreeId) ?? false;
+  descriptionOpenMap.set(worktreeId, !cur);
+  const entry = settings.value.worktrees.find((w) => w.id === worktreeId);
+  if (entry) {
+    entry.descriptionOpen = !cur ? true : undefined; // false は省略して JSON をクリーンに保つ
+    scheduleSave();
+  }
+}
 
 async function refreshArtifactCount(worktreeId: string) {
   try {
@@ -297,6 +317,16 @@ const worktreeTaskTooltips = computed(() => {
   return map;
 });
 
+// ホームカードのワークツリー名ツールチップ用: description優先・なければタスクprompt一覧
+const worktreeCardTooltips = computed(() => {
+  const map = new Map<string, string | undefined>();
+  for (const wt of worktrees.value) {
+    const desc = wt.description?.trim();
+    map.set(wt.id, desc ? desc : getWorktreeTaskTooltip(wt.repositoryName, wt.branchName));
+  }
+  return map;
+});
+
 // サイドバー・メインエリア共通: detachedでないワークツリーのみ（毎レンダリングでのfilter()生成を回避）
 const attachedWorktrees = computed(() => worktrees.value.filter(w => !isDetached(w.id)));
 const { showAddTaskDialog, rerunTaskId, rerunPrompt, onAddTaskConfirm, onAddTaskCancel } =
@@ -324,7 +354,7 @@ const worktreeRemoveCore = useWorktreeRemove({
   homeViewRef,
   t,
 });
-const { cancellableWorktrees, cancelWorktreeRemove, archiveWorktree } = worktreeRemoveCore;
+const { cancellableWorktrees, cancelWorktreeRemove, archiveWorktree, removeWorktreeNoArchive } = worktreeRemoveCore;
 
 // ワークツリー削除/アーカイブダイアログ
 const {
@@ -337,6 +367,74 @@ const {
   onArchiveWorktreeConfirm,
   dismissDialog: onRemoveWorktreeDismiss,
 } = useRemoveWorktreeDialog(worktreeRemoveCore);
+
+// ワークグループ
+const { activeWorkgroupId, cycleWorkgroup, resolvedGroupId, deleteWorkgroupRecord, displayName: workgroupDisplayName } = useWorkgroups();
+
+// タスク追加ダイアログ用: 現在表示中グループのタスク実行エージェント（リモート実行チェックボックスの出し分け）
+const activeTaskExecAgent = computed(() => {
+  const g = settings.value.workgroups?.find((w) => w.id === activeWorkgroupId.value);
+  return g?.taskAddAgent ?? settings.value.aiAgent?.taskAddAgent ?? settings.value.aiAgent?.approvalAgent;
+});
+
+// タスク追加ダイアログ「追加先」のデフォルト:
+// ホームのパネルが worktree 一覧なら現在選択中グループ、それ以外（task/archive）なら先頭グループ
+const { panelMode } = useHomePanel();
+const taskDialogDefaultWorkgroupId = computed(() =>
+  panelMode.value === "worktree"
+    ? activeWorkgroupId.value
+    : (settings.value.workgroups?.[0]?.id ?? ""),
+);
+
+// ワークグループ削除フロー
+const removeWorkgroupId = ref<string | null>(null);
+const removeWorkgroupName = computed(() => {
+  const g = settings.value.workgroups?.find((w) => w.id === removeWorkgroupId.value);
+  return g ? workgroupDisplayName(g) : "";
+});
+const removeWorkgroupMembers = computed(() =>
+  removeWorkgroupId.value
+    ? worktrees.value.filter((w) => resolvedGroupId(w.workgroupId) === removeWorkgroupId.value)
+    : [],
+);
+let removingWorkgroup = false;
+
+function onRemoveWorkgroup(groupId: string) {
+  // 最後の1グループは削除しない（常に1グループ以上を維持する）
+  if ((settings.value.workgroups?.length ?? 0) <= 1) return;
+  removeWorkgroupId.value = groupId;
+}
+
+async function onRemoveWorkgroupConfirm(archive: boolean) {
+  const groupId = removeWorkgroupId.value;
+  if (!groupId || removingWorkgroup) return;
+  removingWorkgroup = true;
+  // 削除対象のスナップショット（削除中に worktrees が変化するため固定）
+  const members = worktrees.value
+    .filter((w) => resolvedGroupId(w.workgroupId) === groupId)
+    .map((w) => w.id);
+  const opts = { mergeTo: "", deleteBranch: true, forceBranch: true };
+  try {
+    for (const id of members) {
+      try {
+        if (archive) await archiveWorktree(id, opts);
+        else await removeWorktreeNoArchive(id, opts);
+      } catch (e) {
+        console.error("グループ内ワークツリー削除に失敗:", e);
+      }
+    }
+  } finally {
+    removingWorkgroup = false;
+    // 所属ワークツリーが残っていなければグループを削除
+    const remaining = worktrees.value.some((w) => resolvedGroupId(w.workgroupId) === groupId);
+    if (!remaining) deleteWorkgroupRecord(groupId);
+    removeWorkgroupId.value = null;
+  }
+}
+
+function onRemoveWorkgroupCancel() {
+  removeWorkgroupId.value = null;
+}
 
 // IDE 選択
 const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect();
@@ -402,11 +500,24 @@ async function switchToTerminal(terminalId: number) {
   }
   if (!worktreeId) return;
 
-  debug(`[Terminal] switchToTerminal terminalId=${terminalId} worktreeId=${worktreeId}`);
+  logDebug(`[Terminal] switchToTerminal terminalId=${terminalId} worktreeId=${worktreeId}`);
 
   const bundle = worktreeFrameBundles.get(worktreeId);
   if (bundle) {
-    const leaf = bundle.frame.getAllLeafs().find((l) => l.terminalIds.includes(terminalId));
+    const terminal = worktrees.value
+      .find((w) => w.id === worktreeId)
+      ?.terminals.find((t) => t.id === terminalId);
+    if (terminal && !bundle.terminalEntries.has(terminalId)) {
+      bundle.terminalEntries.set(terminalId, { id: terminal.id, title: terminal.title, sessionId: 0, snapshot: "" });
+    }
+
+    let leaf = bundle.frame.getAllLeafs().find((l) => l.terminalIds.includes(terminalId));
+    if (!leaf && terminal) {
+      const recoveredLeafId = addTerminalToFrameBundle(bundle, terminalId, false);
+      leaf = bundle.frame.getAllLeafs().find((l) => l.id === recoveredLeafId);
+      logDebug(`[Terminal] switchToTerminal recovered missing leaf terminalId=${terminalId} leafId=${recoveredLeafId || "null"}`);
+    }
+
     if (leaf) {
       bundle.frame.setActiveTerminal(leaf.id, terminalId);
       bundle.frame.lastFocusedLeafId.value = leaf.id;
@@ -416,23 +527,23 @@ async function switchToTerminal(terminalId: number) {
   viewMode.value = "terminal";
   activeWorktreeId.value = worktreeId;
   await nextTick();
-  debug(`[Terminal] switchToTerminal after nextTick terminalId=${terminalId}`);
+  logDebug(`[Terminal] switchToTerminal after nextTick terminalId=${terminalId}`);
 
   if (bundle) {
     bundle.frame.mountTerminalsToHosts();
-    debug(`[Terminal] switchToTerminal after mountTerminalsToHosts terminalId=${terminalId}`);
+    logDebug(`[Terminal] switchToTerminal after mountTerminalsToHosts terminalId=${terminalId}`);
     const term = bundle.terminalRefs.get(terminalId);
     if (term) {
       await term.handleTabActivated();
-      debug(`[Terminal] switchToTerminal after handleTabActivated terminalId=${terminalId}`);
+      logDebug(`[Terminal] switchToTerminal after handleTabActivated terminalId=${terminalId}`);
       term.focus();
       // 安全策: flexレイアウト確定が遅延する場合に備えた再fit
       setTimeout(() => {
-        debug(`[Terminal] switchToTerminal setTimeout re-fit terminalId=${terminalId}`);
+        logDebug(`[Terminal] switchToTerminal setTimeout re-fit terminalId=${terminalId}`);
         term.handleTabActivated();
       }, 150);
     } else {
-      debug(`[Terminal] switchToTerminal term ref not found terminalId=${terminalId}`);
+      logDebug(`[Terminal] switchToTerminal term ref not found terminalId=${terminalId}`);
     }
   }
 }
@@ -487,6 +598,27 @@ function getOrCreateBackgroundLeafId(bundle: WorktreeFrameBundle): string {
   return newLeaf.id;
 }
 
+function addTerminalToFrameBundle(bundle: WorktreeFrameBundle, terminalId: number, background: boolean): string {
+  const targetLeafId = background
+    ? getOrCreateBackgroundLeafId(bundle)
+    : bundle.frame.resolveLeafId(bundle.frame.lastFocusedLeafId.value, { foregroundOnly: true });
+
+  if (targetLeafId) {
+    bundle.frame.returnAllToOffscreen();
+    bundle.frame.addTerminalToLeaf(targetLeafId, terminalId);
+    if (!background) {
+      bundle.frame.lastFocusedLeafId.value = targetLeafId;
+    }
+  } else {
+    bundle.frame.initLayout([terminalId]);
+    const createdLeafId = bundle.frame.getAllLeafs()[0]?.id ?? "";
+    bundle.frame.lastFocusedLeafId.value = createdLeafId;
+    return createdLeafId;
+  }
+
+  return targetLeafId;
+}
+
 async function onAddTerminal(
   worktreeId: string,
   options?: { background?: boolean; pendingCommand?: string },
@@ -507,7 +639,7 @@ async function onAddTerminal(
   if (options?.pendingCommand !== undefined) {
     pendingByTerminal.set(terminal.id, options.pendingCommand);
   }
-  debug(`[Terminal] onAddTerminal worktreeId=${worktreeId} terminalId=${terminal.id} background=${background}`);
+  logDebug(`[Terminal] onAddTerminal worktreeId=${worktreeId} terminalId=${terminal.id} background=${background}`);
 
   // バンドルがなければ作成（ワークツリー追加直後など）
   if (!worktreeFrameBundles.has(worktreeId)) {
@@ -517,20 +649,8 @@ async function onAddTerminal(
   const bundle = worktreeFrameBundles.get(worktreeId)!;
   bundle.terminalEntries.set(terminal.id, { id: terminal.id, title: terminal.title, sessionId: 0, snapshot: "" });
 
-  const targetLeafId = background
-    ? getOrCreateBackgroundLeafId(bundle)
-    : (bundle.frame.lastFocusedLeafId.value || bundle.frame.getAllLeafs()[0]?.id);
-  debug(`[Terminal] onAddTerminal leafId=${targetLeafId ?? "null"} terminalId=${terminal.id}`);
-  if (targetLeafId) {
-    bundle.frame.returnAllToOffscreen();
-    bundle.frame.addTerminalToLeaf(targetLeafId, terminal.id);
-    if (!background) {
-      bundle.frame.lastFocusedLeafId.value = targetLeafId;
-    }
-  } else {
-    bundle.frame.initLayout([terminal.id]);
-    bundle.frame.lastFocusedLeafId.value = bundle.frame.getAllLeafs()[0]?.id ?? "";
-  }
+  const targetLeafId = addTerminalToFrameBundle(bundle, terminal.id, background);
+  logDebug(`[Terminal] onAddTerminal leafId=${targetLeafId ?? "null"} terminalId=${terminal.id}`);
 
   if (!background) {
     viewMode.value = "terminal";
@@ -538,28 +658,28 @@ async function onAddTerminal(
   }
 
   await nextTick();
-  debug(`[Terminal] onAddTerminal after nextTick terminalId=${terminal.id}`);
+  logDebug(`[Terminal] onAddTerminal after nextTick terminalId=${terminal.id}`);
 
   bundle.frame.mountTerminalsToHosts();
-  debug(`[Terminal] onAddTerminal after mountTerminalsToHosts terminalId=${terminal.id}`);
+  logDebug(`[Terminal] onAddTerminal after mountTerminalsToHosts terminalId=${terminal.id}`);
   const term = bundle.terminalRefs.get(terminal.id);
   if (term) {
     await term.handleTabActivated();
-    debug(`[Terminal] onAddTerminal after handleTabActivated terminalId=${terminal.id}`);
+    logDebug(`[Terminal] onAddTerminal after handleTabActivated terminalId=${terminal.id}`);
     pendingManualStart.delete(terminal.id);
     await term.startPty();
-    debug(`[Terminal] onAddTerminal after startPty terminalId=${terminal.id}`);
+    logDebug(`[Terminal] onAddTerminal after startPty terminalId=${terminal.id}`);
     if (!background) {
       term.focus();
     }
     // 安全策: flexレイアウト確定が遅延する場合に備えた再fit
     setTimeout(() => {
-      debug(`[Terminal] onAddTerminal setTimeout re-fit terminalId=${terminal.id}`);
+      logDebug(`[Terminal] onAddTerminal setTimeout re-fit terminalId=${terminal.id}`);
       term.handleTabActivated();
     }, 150);
   } else {
     pendingManualStart.delete(terminal.id);
-    debug(`[Terminal] onAddTerminal term ref not found terminalId=${terminal.id}`);
+    logDebug(`[Terminal] onAddTerminal term ref not found terminalId=${terminal.id}`);
   }
 }
 
@@ -597,22 +717,38 @@ async function onShowAddWorktreeDialog() {
 }
 
 async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string, sessionSourcePath?: string, copyWorkingChangesFrom?: string) {
+  // 現在表示中のワークグループに所属させる（仮追加の前に設定しないとランタイムコピーに反映されない）
+  if (activeWorkgroupId.value) entry.workgroupId = activeWorkgroupId.value;
   // ダイアログを即閉じ、一覧に仮エントリを表示
   showAddDialog.value = false;
   duplicateSourceData.value = null;
   addWorktreePlaceholder(entry);
   loadingWorktrees.set(entry.id, copyWorkingChangesFrom ? t("duplicatingText") : t("creatingText"));
 
+  const repo = settings.value.repositories.find((r) => r.id === entry.repositoryId);
+  let lfsSkipped = false;
+
+  // commit 前（git worktree 作成・永続化まで）。ここでの失敗のみロールバック対象。
+  // この時点では settings に未追加なので、ランタイムのみ削除する rollbackWorktree で整合する。
   try {
-    const repo = settings.value.repositories.find((r) => r.id === entry.repositoryId);
     if (repo?.pullBeforeAdd) {
       await invoke("git_pull", { repoPath: repo.path });
     }
 
-    const lfsSkipped = await invokeWorktreeAdd(entry, sourceBranch);
+    lfsSkipped = await invokeWorktreeAdd(entry, sourceBranch);
 
     // 成功時: 設定に永続化
     commitWorktree(entry);
+  } catch (e) {
+    rollbackWorktree(entry.id);
+    await message(t("worktreeCreateFailed", { error: e }), { kind: "error" });
+    loadingWorktrees.delete(entry.id);
+    return;
+  }
+
+  // commit 後の後続処理。ワークツリーは作成済み・永続化済みのため、ここで失敗しても
+  // ロールバックしない（ランタイムのみ削除すると settings と乖離し、カウントと表示が分裂する）。
+  try {
     tryAutoAssignHotkey(entry.id);
 
     // デフォルト: 自動承認
@@ -692,17 +828,20 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string,
     if (lfsSkipped) {
       await message(t("lfsWarning"), { kind: "warning" });
     }
-
-    // 全後続処理が成功した後にMCPクライアントへ追加完了を通知
-    await invoke("notify_worktree_added", {
-      id: entry.id,
-      name: entry.name,
-      branchName: entry.branchName,
-    });
   } catch (e) {
-    rollbackWorktree(entry.id);
-    await message(t("worktreeCreateFailed", { error: e }), { kind: "error" });
+    await message(t("worktreeSetupIncomplete", { error: e }), { kind: "warning" });
   } finally {
+    // ワークツリーは作成済み・永続化済みなので、セットアップ途中失敗でも MCP ピアへは
+    // 必ず追加完了を通知する（カードは残るのに通知だけ飛ばない不整合を防ぐ）。
+    try {
+      await invoke("notify_worktree_added", {
+        id: entry.id,
+        name: entry.name,
+        branchName: entry.branchName,
+      });
+    } catch {
+      // 通知失敗はワークツリー追加の成否に影響しない
+    }
     loadingWorktrees.delete(entry.id);
   }
 }
@@ -823,7 +962,7 @@ async function onMoveToMainWindow(worktreeId: string) {
     ? await subWindowEvents.getSubWindowLayout(worktreeId)
     : { layout: null, terminals: [] };
 
-  debug(`[MoveToMain] start worktreeId=${worktreeId} savedTerminals=${JSON.stringify(savedTerminals.map(t => ({ id: t.id, sessionId: t.sessionId })))}`);
+  logDebug(`[MoveToMain] start worktreeId=${worktreeId} savedTerminals=${JSON.stringify(savedTerminals.map(t => ({ id: t.id, sessionId: t.sessionId })))}`);
 
   // ★ moveToMainWindow の前にデータを準備（Vue再描画より先にセット）
   // pendingSessionAttach はプレーンMap → Vue再描画をトリガーしない
@@ -835,15 +974,15 @@ async function onMoveToMainWindow(worktreeId: string) {
       terminalAgentStatus.set(t.id, true);
     }
   }
-  debug(`[MoveToMain] pendingSessionAttach set for terminalIds=[${[...pendingSessionAttach.keys()]}]`);
+  logDebug(`[MoveToMain] pendingSessionAttach set for terminalIds=[${[...pendingSessionAttach.keys()]}]`);
 
   // ensureWorktreeFrame は bundles.set() で再描画をトリガーするが、
   // isDetached がまだ true なので TerminalView は作成されない
   ensureWorktreeFrame(worktreeId, savedLayout ?? undefined);
-  debug(`[MoveToMain] ensureWorktreeFrame done, calling moveToMainWindow`);
+  logDebug(`[MoveToMain] ensureWorktreeFrame done, calling moveToMainWindow`);
 
   await moveToMainWindow(worktreeId);
-  debug(`[MoveToMain] moveToMainWindow done, isDetached=${isDetached(worktreeId)}`);
+  logDebug(`[MoveToMain] moveToMainWindow done, isDetached=${isDetached(worktreeId)}`);
 
   subWindowEvents.subWindowFocusMap.delete(worktreeId);
 }
@@ -884,6 +1023,7 @@ async function onTrayButtonClick() {
         hotkeyChar: hotkeyChars.value.get(worktreeId),
         autoApproval: autoApprovalMap.get(worktreeId) ?? false,
         aiJudging: aiJudgingWorktrees.has(worktreeId),
+        description: worktree.description,
       });
     } else {
       // メインウィンドウのターミナル情報を収集
@@ -919,14 +1059,16 @@ async function onTrayButtonClick() {
       let mainWindowSize: { width: number; height: number } | undefined;
       // sizeFromContainer: 親コンテナからのフォールバックサイズを使ったかどうか
       let sizeFromContainer = false;
+      // gBCR は CSS px。windowSize は常に論理px (DIP) で渡す契約のため実適用ズームで換算する
+      const zoom = appliedZoom.value;
       if (rect && rect.width > 0 && rect.height > 0) {
-        mainWindowSize = { width: Math.round(rect.width), height: Math.round(rect.height) };
+        mainWindowSize = { width: cssPxToLogical(rect.width, zoom), height: cssPxToLogical(rect.height, zoom) };
       } else {
         // activeWorktreeId が null（ホーム/設定画面）の場合:
         // メインコンテンツ領域を計測（= WorktreeHeader + フレーム領域と同サイズ）
         const containerRect = mainContentAreaRef.value?.getBoundingClientRect();
         if (containerRect && containerRect.width > 0 && containerRect.height > 0) {
-          mainWindowSize = { width: Math.round(containerRect.width), height: Math.round(containerRect.height) };
+          mainWindowSize = { width: cssPxToLogical(containerRect.width, zoom), height: cssPxToLogical(containerRect.height, zoom) };
           sizeFromContainer = true;
         }
       }
@@ -946,6 +1088,7 @@ async function onTrayButtonClick() {
         aiJudging: aiJudgingWorktrees.has(worktreeId),
         autoApprovalPrompt: autoApprovalPromptMap.get(worktreeId) ?? '',
         lastJudgedCommand: lastJudgedCommandMap.get(worktreeId) ?? '',
+        description: worktree.description,
       });
     }
   }
@@ -996,6 +1139,24 @@ function onHotkeyCharClear(worktreeId: string) {
   showHotkeyCharDialog.value = false;
 }
 
+// ─── 初回起動ウィザード ──────────────────────────────────────────────────────
+
+const showFirstRunWizard = ref(false);
+// ウィザード表示中に保留したアップデート確認を完了後に実行する
+let pendingUpdateCheck: (() => void) | null = null;
+
+async function onWizardFinish() {
+  showFirstRunWizard.value = false;
+  // スキップ含め完了扱いにして次回以降は表示しない
+  settings.value.wizardCompleted = true;
+  await flushSave();
+  if (pendingUpdateCheck) {
+    const run = pendingUpdateCheck;
+    pendingUpdateCheck = null;
+    run();
+  }
+}
+
 // ─── composable instantiation ────────────────────────────────────────────────
 
 const hotkeys = useAppHotkeys({
@@ -1011,15 +1172,28 @@ const hotkeys = useAppHotkeys({
   onAddTerminal,
   showAddTaskDialog,
   goHome,
+  cycleWorkgroup,
+  syncWorktreesFromSettings,
   onTrayButtonClick,
+  suppressed: showFirstRunWizard,
 });
 
 
 onMounted(async () => {
   await loadSettings();
+
+  // 初回起動ウィザード (ORETACHI_FORCE_WIZARD=true で毎回表示)
+  const forceWizard = await invoke<boolean>("get_force_wizard").catch(() => false);
+  showFirstRunWizard.value = settings.value.wizardCompleted === false || forceWizard;
+
   await getCurrentWindow().setAlwaysOnTop(settings.value.alwaysOnTop);
   loadWorktreesFromSettings();
   restoreAutoApprovalPrompts();
+
+  // 保存された description 開閉状態を復元
+  for (const wt of settings.value.worktrees) {
+    if (wt.descriptionOpen === true) descriptionOpenMap.set(wt.id, true);
+  }
 
   // 保存されたサブウィンドウを復元
   const savedDetachedIds = settings.value.detachedWorktreeIds ?? [];
@@ -1058,6 +1232,29 @@ onMounted(async () => {
     onAddTaskConfirm(event.payload.prompt, event.payload.remote_exec);
   });
 
+  // ExitPlanMode フック由来: プランを AI 要約してワークツリーの description にセット
+  await listen<{ worktree: string; plan: string }>("set-worktree-description", async (event) => {
+    const { worktree, plan } = event.payload;
+    const rt = worktrees.value.find((w) => w.name === worktree);
+    if (!rt || !plan?.trim()) return;
+    try {
+      const summary = await invoke<string>("generate_description_from_plan", { worktreeId: rt.id, plan });
+      const trimmed = summary?.trim();
+      if (trimmed) {
+        // ランタイム用 worktrees.value（カード表示用）と
+        // 永続化対象 settings.value.worktrees（loadWorktreesFromSettings でシャローコピー
+        // される別オブジェクト）の両方を更新する
+        rt.description = trimmed;
+        const entry = settings.value.worktrees.find((w) => w.id === rt.id);
+        if (entry) entry.description = trimmed;
+        scheduleSave();
+        logDebug(`[Description] set for worktree=${worktree}: ${trimmed}`);
+      }
+    } catch (e) {
+      logDebug(`[Description] generate failed for worktree=${worktree}: ${e}`);
+    }
+  });
+
   // MCPからのワークツリークローズ（アーカイブ）
   await listen<{ worktree_id: string; worktree_name: string; merge_to: string; delete_branch: boolean; force_branch: boolean }>("mcp-close-worktree", async (event) => {
     const { worktree_id, merge_to, delete_branch, force_branch } = event.payload;
@@ -1075,7 +1272,7 @@ onMounted(async () => {
       const { worktree_id, command, title } = event.payload;
       const targetWt = worktrees.value.find((w) => w.id === worktree_id);
       if (!targetWt) {
-        debug(`[Terminal] mcp-spawn-terminal: worktree ${worktree_id} not found, skipping`);
+        logDebug(`[Terminal] mcp-spawn-terminal: worktree ${worktree_id} not found, skipping`);
         return;
       }
       // PowerShell/conpty は LF だけだとプロンプト継続行扱いになり Enter が発火しない。
@@ -1087,7 +1284,7 @@ onMounted(async () => {
         try {
           await handleSubAddTerminalRequest(worktree_id, { title, pendingCommand: cmd });
         } catch (e) {
-          debug(`[Terminal] mcp-spawn-terminal: handleSubAddTerminalRequest (detached) failed: ${e}`);
+          logDebug(`[Terminal] mcp-spawn-terminal: handleSubAddTerminalRequest (detached) failed: ${e}`);
         }
         return;
       }
@@ -1095,7 +1292,7 @@ onMounted(async () => {
       try {
         await onAddTerminal(worktree_id, { background: true, pendingCommand: cmd });
       } catch (e) {
-        debug(`[Terminal] mcp-spawn-terminal: onAddTerminal failed: ${e}`);
+        logDebug(`[Terminal] mcp-spawn-terminal: onAddTerminal failed: ${e}`);
         return;
       }
       const wtAfter = worktrees.value.find((w) => w.id === worktree_id);
@@ -1109,7 +1306,7 @@ onMounted(async () => {
           await waitForTerminalReady(newTerm.id);
           await onMoveToSubWindow(worktree_id);
         } catch (e) {
-          debug(`[Terminal] mcp-spawn-terminal: auto move-to-sub-window failed: ${e}`);
+          logDebug(`[Terminal] mcp-spawn-terminal: auto move-to-sub-window failed: ${e}`);
         }
       }
     },
@@ -1410,17 +1607,38 @@ onMounted(async () => {
     }
   });
 
-  // 起動後にアップデートを確認
-  setTimeout(async () => {
-    const update = await checkForUpdate();
+  // 起動後にアップデートを確認 (ウィザード表示中はネイティブダイアログが
+  // 割り込まないよう完了まで保留する)
+  const runUpdateCheck = async () => {
+    // 起動時の自動チェック。確認失敗は無音（無反応）にしてユーザーを煩わせない。
+    let update: Awaited<ReturnType<typeof checkForUpdate>>;
+    try {
+      update = await checkForUpdate();
+    } catch {
+      return;
+    }
     if (update) {
       const yes = await ask(
         t("update.available", { version: update.version }),
         { title: t("update.title"), kind: "info" }
       );
       if (yes) {
-        await downloadAndInstall(update);
+        try {
+          await downloadAndInstall(update);
+        } catch (e) {
+          await message(t("update.installFailed", { error: String(e) }), {
+            title: t("update.title"),
+            kind: "error",
+          });
+        }
       }
+    }
+  };
+  setTimeout(() => {
+    if (showFirstRunWizard.value) {
+      pendingUpdateCheck = runUpdateCheck;
+    } else {
+      runUpdateCheck();
     }
   }, 3000);
 
@@ -1563,6 +1781,8 @@ onMounted(async () => {
         :cancellable-worktrees="cancellableWorktrees"
         :auto-approvals="autoApprovalMap"
         :ai-judging-worktrees="aiJudgingWorktrees"
+        :card-tooltips="worktreeCardTooltips"
+        :description-opens="descriptionOpenMap"
         @select-terminal="switchToTerminal"
         @add-worktree="onShowAddWorktreeDialog"
         @remove-worktree="onRemoveWorktree"
@@ -1578,12 +1798,14 @@ onMounted(async () => {
         @cancel-ai-judging="onCancelAiJudging"
         @cancel-remove="cancelWorktreeRemove"
         @duplicate-worktree="onDuplicateWorktree"
+        @toggle-description="onToggleDescription"
         @reorder-worktrees="reorderWorktree"
         @commit-reorder="saveWorktreeOrder"
         @cancel-reorder="restoreWorktreeOrder"
         @add-task="showAddTaskDialog = true"
         @remove-task="removeTask"
         @rerun-task="rerunTaskId = $event"
+        @remove-workgroup="onRemoveWorkgroup"
       />
 
       <!-- 設定ビュー -->
@@ -1629,7 +1851,7 @@ onMounted(async () => {
               @tab-edge-drop="(sl, tid, tl, dir) => onFrameTabEdgeDrop(wt.id, sl, tid, tl, dir)"
               @tab-reorder="(lid, tid, idx) => onFrameTabReorder(wt.id, lid, tid, idx)"
               @request-add-terminal="(leafId) => onFrameAddTerminal(wt.id, leafId)"
-              @resize-end="() => {}"
+              @resize-end="(nodeId, sizes) => worktreeFrameBundles.get(wt.id)?.frame.updateContainerSizes(nodeId, sizes)"
             />
           </div>
         </div>
@@ -1667,9 +1889,10 @@ onMounted(async () => {
       v-if="showAddTaskDialog || rerunTaskId"
       :initial-prompt="rerunTaskId ? rerunPrompt : ''"
       :mode="rerunTaskId ? 'rerun' : 'add'"
-      :show-remote-exec="(settings.aiAgent?.taskAddAgent ?? settings.aiAgent?.approvalAgent) === 'claudeCode'"
+      :show-remote-exec="activeTaskExecAgent === 'claudeCode'"
       :initial-remote-exec="settings.aiAgent?.remoteExec ?? false"
-      @confirm="(prompt, remoteExec) => onAddTaskConfirm(prompt, remoteExec)"
+      :initial-workgroup-id="taskDialogDefaultWorkgroupId"
+      @confirm="(prompt, remoteExec, workgroupId) => onAddTaskConfirm(prompt, remoteExec, workgroupId)"
       @cancel="onAddTaskCancel"
     />
 
@@ -1696,6 +1919,15 @@ onMounted(async () => {
       @confirm="onRemoveWorktreeConfirm"
       @archive="onArchiveWorktreeConfirm"
       @cancel="onRemoveWorktreeDismiss"
+    />
+
+    <!-- ワークグループ削除ダイアログ -->
+    <RemoveWorkgroupDialog
+      v-if="removeWorkgroupId"
+      :group-name="removeWorkgroupName"
+      :members="removeWorkgroupMembers"
+      @confirm="onRemoveWorkgroupConfirm"
+      @cancel="onRemoveWorkgroupCancel"
     />
 
     <!-- IDE 選択ダイアログ -->
@@ -1735,6 +1967,9 @@ onMounted(async () => {
       :total-count="getTotalNotificationCount()"
       @click="onTrayButtonClick"
     />
+
+    <!-- 初回起動ウィザード -->
+    <FirstRunWizard v-if="showFirstRunWizard" @finish="onWizardFinish" />
 
     <!-- タスク進捗トースト -->
     <Toast position="bottom-right">
@@ -1785,6 +2020,7 @@ onMounted(async () => {
     "copyTargetsFailed": "Some files could not be copied after worktree creation: {error}",
     "claudeHooksFailed": "Failed to write Claude Code notification hooks: {error}",
     "sessionCopyFailed": "Failed to copy Claude Code session data: {error}",
+    "worktreeSetupIncomplete": "Worktree created, but some setup steps failed: {error}",
     "shuttingDown": "Shutting down...",
     "minimize": "Minimize",
     "maximize": "Maximize",
@@ -1816,6 +2052,7 @@ onMounted(async () => {
     "copyTargetsFailed": "ワークツリー追加後のファイルコピーに失敗しました: {error}",
     "claudeHooksFailed": "Claude Code通知フックの書き込みに失敗しました: {error}",
     "sessionCopyFailed": "Claude Codeセッションデータのコピーに失敗しました: {error}",
+    "worktreeSetupIncomplete": "ワークツリーは作成されましたが、一部のセットアップ処理に失敗しました: {error}",
     "shuttingDown": "終了しています...",
     "minimize": "最小化",
     "maximize": "最大化",

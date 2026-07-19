@@ -14,6 +14,10 @@ pub struct ArchiveRow {
     pub path: String,
     pub branch_name: String,
     pub archived_at: i64,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub workgroup_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -43,11 +47,21 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             repository_name TEXT NOT NULL,
             path            TEXT NOT NULL,
             branch_name     TEXT NOT NULL,
-            archived_at     INTEGER NOT NULL
+            archived_at     INTEGER NOT NULL,
+            description     TEXT,
+            workgroup_id    TEXT
         )"#,
     )
     .execute(pool)
     .await?;
+    // 既存 DB 向けマイグレーション: description カラムが無ければ追加（既にあればエラーを握りつぶす）
+    let _ = sqlx::query("ALTER TABLE archives ADD COLUMN description TEXT")
+        .execute(pool)
+        .await;
+    // 既存 DB 向けマイグレーション: workgroup_id カラム（所属グループの記録・復元用）
+    let _ = sqlx::query("ALTER TABLE archives ADD COLUMN workgroup_id TEXT")
+        .execute(pool)
+        .await;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_archives_archived_at ON archives(archived_at DESC)",
     )
@@ -63,7 +77,7 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 
 pub async fn save(pool: &SqlitePool, archive: &ArchiveRow) -> Result<(), String> {
     sqlx::query(
-        "INSERT OR REPLACE INTO archives (id, name, repository_id, repository_name, path, branch_name, archived_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO archives (id, name, repository_id, repository_name, path, branch_name, archived_at, description, workgroup_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&archive.id)
     .bind(&archive.name)
@@ -72,6 +86,8 @@ pub async fn save(pool: &SqlitePool, archive: &ArchiveRow) -> Result<(), String>
     .bind(&archive.path)
     .bind(&archive.branch_name)
     .bind(archive.archived_at)
+    .bind(&archive.description)
+    .bind(&archive.workgroup_id)
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;

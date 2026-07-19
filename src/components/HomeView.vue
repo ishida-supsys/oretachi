@@ -7,8 +7,11 @@ import WorktreeCard from "./WorktreeCard.vue";
 import TaskCard from "./TaskCard.vue";
 import ArchiveTable from "./ArchiveTable.vue";
 import HomeCatTerminal from "./HomeCatTerminal.vue";
+import WorkgroupBar from "./WorkgroupBar.vue";
 import { useMasonryLayout } from "../composables/useMasonryLayout";
 import { useSettings } from "../composables/useSettings";
+import { useWorkgroups } from "../composables/useWorkgroups";
+import { useHomePanel } from "../composables/useHomePanel";
 import { useTasks } from "../composables/useTasks";
 import { useTaskPersistence } from "../composables/useTaskPersistence";
 import { useTaskSearch } from "../composables/useTaskSearch";
@@ -39,6 +42,11 @@ function capturePositions(): Map<string, DOMRect> {
   return positions;
 }
 
+function clearCardInlineTransform(el: HTMLElement) {
+  el.style.transform = '';
+  el.style.transition = '';
+}
+
 function animateFlip(oldPositions: Map<string, DOMRect>) {
   for (const [id, el] of cardElements) {
     const oldRect = oldPositions.get(id);
@@ -54,6 +62,18 @@ function animateFlip(oldPositions: Map<string, DOMRect>) {
     el.offsetHeight;
     el.style.transition = 'transform 0.3s ease';
     el.style.transform = '';
+
+    // transition 完了時に inline style を消す。中断されなければここで残留 transform が確実に除去される。
+    // transitioncancel（後続アニメーションによる中断）時はリスナー解除のみ行い、
+    // style は後続アニメーションに委ねる（ここで消すと進行中の transform を壊すため）。
+    const onEnd = (e: TransitionEvent) => {
+      if (e.propertyName !== 'transform') return;
+      el.removeEventListener('transitionend', onEnd);
+      el.removeEventListener('transitioncancel', onEnd);
+      if (e.type === 'transitionend') clearCardInlineTransform(el);
+    };
+    el.addEventListener('transitionend', onEnd);
+    el.addEventListener('transitioncancel', onEnd);
   }
 }
 
@@ -122,6 +142,8 @@ watch(draggingId, (id) => {
     if (id) ctrl.disable();
     else ctrl.enable();
   }
+  // ドラッグ完了直後に残留 transform を掃除する
+  if (!id) nextTick(resetAllCardTransforms);
 });
 
 function onCardDragStart(worktreeId: string, event: DragEvent) {
@@ -169,7 +191,18 @@ const props = defineProps<{
   cancellableWorktrees: Set<string>;
   autoApprovals: Map<string, boolean>;
   aiJudgingWorktrees: Set<string>;
+  cardTooltips?: Map<string, string | undefined>;
+  descriptionOpens?: Map<string, boolean>;
 }>();
+
+// json の開閉状態を一時的に無視して全カードの description を開く（セッション限り・非永続）
+const showAllDescriptions = ref(false);
+
+// 全表示中はカードが強制 open のため、クリックでの個別状態の書き換えを抑止する
+function onCardToggleDescription(worktreeId: string) {
+  if (showAllDescriptions.value) return;
+  emit("toggleDescription", worktreeId);
+}
 
 const emit = defineEmits<{
   selectTerminal: [terminalId: number];
@@ -190,13 +223,14 @@ const emit = defineEmits<{
   cancelAiJudging: [worktreeId: string];
   cancelRemove: [worktreeId: string];
   duplicateWorktree: [worktreeId: string];
+  toggleDescription: [worktreeId: string];
   addTask: [];
   removeTask: [taskId: string];
   rerunTask: [taskId: string];
+  removeWorkgroup: [groupId: string];
 }>();
 
-type PanelMode = "worktree" | "task" | "archive";
-const panelMode = ref<PanelMode>("worktree");
+const { panelMode } = useHomePanel();
 
 const { sortedTasks } = useTasks();
 const { hasMore, isLoading, loadTasks, loadMore, search } = useTaskPersistence();
@@ -249,8 +283,31 @@ watch(panelMode, async (mode, oldMode) => {
   }
 });
 
-const worktreesRef = computed(() => props.worktrees);
+// アクティブなワークグループでワークツリーをフィルタ
+const { activeWorkgroupId, resolvedGroupId, groups: workgroups, moveWorktreeToWorkgroup } = useWorkgroups();
+const worktreesRef = computed(() =>
+  props.worktrees.filter((w) => resolvedGroupId(w.workgroupId) === activeWorkgroupId.value),
+);
 const tasksRef = sortedTasks;
+
+// ワークグループ切替は一覧の総入れ替え。auto-animate に「追加/削除」と誤認させると
+// 退場アニメ中の旧カード DOM が約250ms 残り、高速連打で DOM 二重化（重複表示）や
+// 旧グループカードの残留（別グループ漏れ）を招く。切替時はアニメを無効化して即時入れ替えにする。
+watch(activeWorkgroupId, () => {
+  for (const ctrl of columnControllers.values()) ctrl.disable();
+  nextTick(() => {
+    resetAllCardTransforms();
+    // 削除（autoAnimateDisableDepth>0）/ drag（draggingId）進行中は、その完了処理に
+    // enable を委ね、ここでは再有効化しない（二重 enable・進行中アニメ破壊を防ぐ）。
+    if (autoAnimateDisableDepth === 0 && !draggingId.value) {
+      for (const ctrl of columnControllers.values()) ctrl.enable();
+    }
+  });
+});
+
+function onMoveToWorkgroup(payload: { worktreeId: string; groupId: string }) {
+  moveWorktreeToWorkgroup(payload.worktreeId, payload.groupId);
+}
 
 // 各ワークツリーカードの自然幅（ターミナルサムネイル幅から計算）をもとに列幅を決定する
 const naturalCardWidth = computed(() => {
@@ -258,10 +315,11 @@ const naturalCardWidth = computed(() => {
   const THUMBNAIL_GAP = 8;  // .terminals-row の gap
   const CARD_PADDING = 24;  // .worktree-card の padding 12px × 2
   const MIN_WIDTH = 260;    // ヘッダーボタンが収まる最小幅
+  const MAX_TERMINALS_PER_ROW = 2;  // 1行に表示するターミナルの最大数
 
   let max = MIN_WIDTH;
   for (const wt of props.worktrees) {
-    const n = wt.terminals.length;
+    const n = Math.min(wt.terminals.length, MAX_TERMINALS_PER_ROW);
     if (n <= 0) continue;
     const w = CARD_PADDING + n * THUMBNAIL_W + (n - 1) * THUMBNAIL_GAP;
     if (w > max) max = w;
@@ -273,6 +331,28 @@ const TASK_CARD_WIDTH = ref(260);
 
 const { containerRef, columns } = useMasonryLayout(worktreesRef, { minColumnWidth: naturalCardWidth, gap: 12 });
 const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayout(tasksRef, { minColumnWidth: TASK_CARD_WIDTH, gap: 12 });
+
+// 中断されたアニメーションが残した inline transform を一括除去する。
+// FLIP / auto-animate がリサイズ等の列間 DOM 移動で transform を残すと、
+// カードが論理列スロットからずれて描画され gap が生じるのを防ぐ self-healing。
+function resetAllCardTransforms() {
+  // transform が残留している要素のみ掃除する。transform が空で transition のみ残る要素は
+  // FLIP アニメーション進行中（最終値 '' へ遷移中）なので touch せず animateFlip の onEnd に委ねる。
+  for (const el of cardElements.values()) {
+    if (el.style.transform) clearCardInlineTransform(el);
+  }
+}
+
+// 列構成（順序変化・列数変化のいずれも）が変わったら残留 transform を掃除する。
+// ドラッグ中 / 削除 FLIP 中は transform を意図的に使用中なので除外する。
+watch(
+  () => columns.value.map((c) => c.map((w) => w.id).join(",")).join("|"),
+  () => {
+    if (draggingId.value) return;
+    if (autoAnimateDisableDepth > 0) return;
+    nextTick(resetAllCardTransforms);
+  }
+);
 
 </script>
 
@@ -291,8 +371,21 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
         <option value="task">{{ t('taskTitle') }}</option>
         <option value="archive">{{ t('archiveTitle') }}</option>
       </select>
+      <WorkgroupBar
+        v-if="panelMode === 'worktree'"
+        class="header-workgroups"
+        @remove-workgroup="emit('removeWorkgroup', $event)"
+      />
       <div class="header-actions">
         <template v-if="panelMode === 'worktree'">
+          <button
+            class="btn-icon-header"
+            :class="{ 'btn-active': showAllDescriptions }"
+            :title="t('toggleShowAllDescriptions')"
+            @click="showAllDescriptions = !showAllDescriptions"
+          >
+            <i :class="showAllDescriptions ? 'pi pi-eye' : 'pi pi-eye-slash'"></i>
+          </button>
           <button class="btn-icon-header" :title="t('focusAllSubWindows')" @click="emit('focusAllSubWindows')">
             <i class="pi pi-window-maximize"></i>
           </button>
@@ -371,6 +464,11 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
               :cancellable="cancellableWorktrees.has(worktree.id)"
               :auto-approval="autoApprovals.get(worktree.id) ?? false"
               :ai-judging="aiJudgingWorktrees.has(worktree.id)"
+              :tooltip="cardTooltips?.get(worktree.id)"
+              :description-open="showAllDescriptions || (descriptionOpens?.get(worktree.id) ?? false)"
+              :workgroups="workgroups"
+              :current-workgroup-id="resolvedGroupId(worktree.workgroupId)"
+              @move-to-workgroup="onMoveToWorkgroup"
               @drag-start="onCardDragStart"
               @drag-end="onDragEnd"
               @select-terminal="emit('selectTerminal', $event)"
@@ -386,6 +484,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
               @cancel-ai-judging="emit('cancelAiJudging', $event)"
               @cancel-remove="emit('cancelRemove', $event)"
               @duplicate-worktree="emit('duplicateWorktree', $event)"
+              @toggle-description="onCardToggleDescription"
             />
           </div>
         </div>
@@ -495,10 +594,15 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   font-weight: 600;
 }
 
+.header-workgroups {
+  margin: 0 12px;
+}
+
 .header-actions {
   display: flex;
   align-items: center;
   gap: 4px;
+  flex-shrink: 0;
 }
 
 .btn-icon-header {
@@ -521,12 +625,18 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   background: #313244;
 }
 
+.btn-icon-header.btn-active {
+  color: #cba6f7;
+  background: #313244;
+}
+
 /* ワークツリーパネル（マソンリーレイアウト） */
 .worktree-list {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
   align-items: flex-start;
+  justify-content: center;
 }
 
 .masonry-column {
@@ -616,6 +726,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   "en": {
     "worktreeTitle": "Worktrees",
     "worktreeEmpty": "No worktrees. Click the + button to create one.",
+    "toggleShowAllDescriptions": "Show all descriptions",
     "focusAllSubWindows": "Bring all sub windows",
     "addWorktreeButton": "Add worktree",
     "taskTitle": "Tasks",
@@ -630,6 +741,7 @@ const { containerRef: taskContainerRef, columns: taskColumns } = useMasonryLayou
   "ja": {
     "worktreeTitle": "ワークツリー",
     "worktreeEmpty": "ワークツリーがありません。右上の + ボタンで作成してください。",
+    "toggleShowAllDescriptions": "すべての説明を表示",
     "focusAllSubWindows": "すべてのサブウィンドウを呼び出す",
     "addWorktreeButton": "ワークツリー追加",
     "taskTitle": "タスク",

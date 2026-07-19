@@ -1,23 +1,27 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
+import { useWorkgroups } from "../composables/useWorkgroups";
 
 const { t } = useI18n();
+const { groups, displayName } = useWorkgroups();
 
 const props = withDefaults(defineProps<{
   initialPrompt?: string;
   mode?: "add" | "rerun";
   showRemoteExec?: boolean;
   initialRemoteExec?: boolean;
+  initialWorkgroupId?: string;
 }>(), {
   initialPrompt: "",
   mode: "add",
   showRemoteExec: false,
   initialRemoteExec: false,
+  initialWorkgroupId: "",
 });
 
 const emit = defineEmits<{
-  confirm: [prompt: string, remoteExec: boolean];
+  confirm: [prompt: string, remoteExec: boolean, workgroupId: string];
   cancel: [];
 }>();
 
@@ -25,6 +29,7 @@ const promptText = ref(props.initialPrompt);
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 const showConfirm = ref(false);
 const remoteExec = ref(props.initialRemoteExec);
+const selectedWorkgroupId = ref(props.initialWorkgroupId);
 
 const isDirty = computed(() => promptText.value.trim() !== props.initialPrompt.trim());
 
@@ -35,7 +40,7 @@ onMounted(() => {
 function confirm() {
   const trimmed = promptText.value.trim();
   if (!trimmed) return;
-  emit("confirm", trimmed, remoteExec.value);
+  emit("confirm", trimmed, remoteExec.value, selectedWorkgroupId.value);
 }
 
 function tryCancel() {
@@ -61,6 +66,8 @@ function onKeydown(e: KeyboardEvent) {
   }
   if (e.key === "Escape") {
     e.preventDefault();
+    // 背後のオーバーレイ (ウィザード等) の Esc ハンドラと二重発火しないようにする
+    e.stopPropagation();
     if (showConfirm.value) {
       dismissConfirm();
     } else {
@@ -86,6 +93,13 @@ function onKeydown(e: KeyboardEvent) {
           @keydown="onKeydown"
         />
         <p class="hint">{{ t('submitHint') }}</p>
+      </div>
+
+      <div v-if="groups.length > 1" class="field">
+        <label class="label">{{ t('destination') }}</label>
+        <select v-model="selectedWorkgroupId" class="select">
+          <option v-for="g in groups" :key="g.id" :value="g.id">{{ displayName(g) }}</option>
+        </select>
       </div>
 
       <div v-if="showRemoteExec" class="field checkbox-field">
@@ -171,6 +185,24 @@ function onKeydown(e: KeyboardEvent) {
 }
 
 .textarea:focus {
+  border-color: #cba6f7;
+}
+
+.select {
+  width: 100%;
+  background: #313244;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  padding: 8px 10px;
+  font-size: 13px;
+  color: #cdd6f4;
+  outline: none;
+  box-sizing: border-box;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.select:focus {
   border-color: #cba6f7;
 }
 
@@ -302,6 +334,7 @@ function onKeydown(e: KeyboardEvent) {
     "addTitle": "Add Task",
     "rerunTitle": "Rerun Task",
     "prompt": "Prompt",
+    "destination": "Destination",
     "promptPlaceholder": "e.g. Implement https://github.com/owner/repo/issues/123",
     "submitHint": "Ctrl+Enter to submit",
     "remoteExec": "Start in web session",
@@ -315,6 +348,7 @@ function onKeydown(e: KeyboardEvent) {
     "addTitle": "タスクを追加",
     "rerunTitle": "タスクを再実行",
     "prompt": "プロンプト",
+    "destination": "追加先",
     "promptPlaceholder": "例: https://github.com/owner/repo/issues/123 を実装してください",
     "submitHint": "Ctrl+Enter で送信",
     "remoteExec": "Webセッションで開始",

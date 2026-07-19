@@ -7,6 +7,8 @@ export interface ArchiveRow {
   path: string;
   branch_name: string;
   archived_at: number;
+  description?: string | null;
+  workgroup_id?: string | null;
 }
 
 export interface ArchiveListResult {

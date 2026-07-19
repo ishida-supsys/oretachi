@@ -33,6 +33,15 @@ fn plugin_dir(app_handle: &AppHandle) -> Result<PathBuf, String> {
     marketplace_dir(app_handle).map(|d| d.join(PLUGIN_NAME))
 }
 
+/// グローバルプラグイン（marketplace / .mcp.json）を上書きするか。
+/// 未設定は true（本番インストール済みアプリには .env* が無いため常に上書き＝従来挙動）。
+/// dev では .env.development の ORETACHI_PLUGIN_OVERWRITE=false で抑止できる。
+pub fn overwrite_enabled() -> bool {
+    std::env::var("ORETACHI_PLUGIN_OVERWRITE")
+        .map(|v| v != "false")
+        .unwrap_or(true)
+}
+
 /// 起動時にプラグインファイル群を生成・更新する
 /// - ディレクトリ構造の作成
 /// - marketplace.json: マーケットプレイスルートのカタログ
@@ -66,6 +75,7 @@ pub fn generate_plugin_files(app_handle: &AppHandle) -> Result<(), String> {
     let exe_path = std::env::current_exe()
         .map(|p| p.to_string_lossy().replace('\\', "/"))
         .unwrap_or_else(|_| "oretachi".to_string());
+    let sidecar_path = sidecar_path();
 
     // plugin.json
     let plugin_json = build_plugin_json(&exe_path);
@@ -77,8 +87,8 @@ pub fn generate_plugin_files(app_handle: &AppHandle) -> Result<(), String> {
     )
     .map_err(|e| format!("Failed to write plugin.json: {}", e))?;
 
-    // hooks/hooks.json
-    let hooks_json = build_hooks_json(&exe_path);
+    // hooks/hooks.json （通知は GUI 本体ではなく oretachi-notify サイドカーが受ける）
+    let hooks_json = build_hooks_json(&sidecar_path);
     let hooks_json_path = hooks_dir.join("hooks.json");
     std::fs::write(
         &hooks_json_path,
@@ -162,24 +172,76 @@ fn build_plugin_json(exe_path: &str) -> serde_json::Value {
     })
 }
 
-fn build_hooks_json(exe_path: &str) -> serde_json::Value {
-    // exe_path はビルド時に確定した実行ファイルの絶対パスを直接ハードコードする。
-    // ${user_config.XXX} は Claude Code プラグイン仕様のユーザー設定値展開構文。
-    // 各ワークツリーの pluginConfigs.oretachi@oretachi.options から値が注入される。
+/// hooks.json の command が参照する通知サイドカー (oretachi-notify) の絶対パスを返す。
+/// externalBin としてバンドルされたサイドカーは GUI 本体と同じディレクトリに配置される
+/// （dev 時も target/debug 隣に複製される）ため、current_exe と同階層を指す。
+fn sidecar_path() -> String {
+    const SIDECAR_BIN: &str = if cfg!(target_os = "windows") {
+        "oretachi-notify.exe"
+    } else {
+        "oretachi-notify"
+    };
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(SIDECAR_BIN)))
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .unwrap_or_else(|| "oretachi-notify".to_string())
+}
+
+fn build_hooks_json(notifier_path: &str) -> serde_json::Value {
+    // notifier_path は通知サイドカー (oretachi-notify) の絶対パスを直接ハードコードする。
+    //
+    // userConfig 非依存・exec-form で生成する。Claude Code 2.1.207 は
+    //   (a) shell-form の command 内で ${user_config.*} を参照すると拒否し、
+    //   (b) pluginConfigs (${user_config.*} の値) を settings.local.json から読まなくなった
+    // ため、userConfig ベースの旧方式は成立しない。そこで hook からは userConfig ではなく
+    // CC 組み込み変数 ${CLAUDE_PROJECT_DIR}（全バージョンで有効・userConfig ではない）と
+    // イベント名リテラルのみを渡し、「パス→ワークツリー」「イベント→kind」の解決は
+    // oretachi サーバー側 (/notify ハンドラ) で行う。exec-form (args 配列) は shell-form の
+    // ${user_config.*} 拒否チェックの対象外であり、${CLAUDE_PROJECT_DIR} は args 内でも置換される。
     let mut hooks = serde_json::Map::new();
-    for (event, key) in EVENT_CONFIG_KEYS {
-        let command = format!(
-            "\"{}\" --notify \"${{user_config.worktree_name}}\" --kind ${{user_config.{}}} --agent cc",
-            exe_path, key
-        );
+    for (event, _key) in EVENT_CONFIG_KEYS {
         hooks.insert(
             event.to_string(),
             serde_json::json!([{
                 "matcher": "",
-                "hooks": [{ "type": "command", "command": command }]
+                "hooks": [{
+                    "type": "command",
+                    "command": notifier_path,
+                    "args": [
+                        "--notify",
+                        "--project-dir", "${CLAUDE_PROJECT_DIR}",
+                        "--event", event,
+                        "--agent", "cc"
+                    ]
+                }]
             }]),
         );
     }
+
+    // ExitPlanMode フック: プラン確定時に通知サイドカー (oretachi-notify) を起動し、
+    // プランを AI 要約してワークツリーの description にセットさせる。
+    // ExitPlanMode はユーザー操作を伴うツールのため PreToolUse/PostToolUse は発火せず、
+    // PermissionRequest イベントで発火する（matcher "ExitPlanMode"、プラン本文は tool_input.plan）。
+    // 既存の通知用 PermissionRequest グループ(matcher "")と共存させるため配列に追記する。
+    // decision は返さず観測のみ（exit 0）なので通常の承認フローはブロックしない。
+    let exit_plan_group = serde_json::json!({
+        "matcher": "ExitPlanMode",
+        "hooks": [{
+            "type": "command",
+            "command": notifier_path,
+            "args": ["--set-description", "--project-dir", "${CLAUDE_PROJECT_DIR}"]
+        }]
+    });
+    if let Some(arr) = hooks
+        .get_mut("PermissionRequest")
+        .and_then(|v| v.as_array_mut())
+    {
+        arr.push(exit_plan_group);
+    } else {
+        hooks.insert("PermissionRequest".to_string(), serde_json::json!([exit_plan_group]));
+    }
+
     serde_json::json!({ "hooks": hooks })
 }
 

@@ -27,6 +27,8 @@ pub struct Repository {
     pub notification_hooks: Option<Vec<NotificationHookEntry>>,
     #[serde(default, rename = "pullBeforeAdd")]
     pub pull_before_add: Option<bool>,
+    #[serde(default, rename = "branchNamePattern")]
+    pub branch_name_pattern: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,6 +48,30 @@ pub struct WorktreeEntry {
     pub auto_approval: Option<bool>,
     #[serde(default, rename = "autoApprovalPrompt")]
     pub auto_approval_prompt: Option<String>,
+    #[serde(default, rename = "description")]
+    pub description: Option<String>,
+    #[serde(default, rename = "descriptionOpen")]
+    pub description_open: Option<bool>,
+    #[serde(default, rename = "workgroupId")]
+    pub workgroup_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Workgroup {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub color: Option<String>,
+    #[serde(default)]
+    pub auto_assign_hotkey: Option<bool>,
+    #[serde(default)]
+    pub task_add_agent: Option<AiAgentKind>,
+    #[serde(default)]
+    pub claude_code_mode: Option<String>,
+    #[serde(default)]
+    pub exec_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +126,14 @@ fn default_add_task() -> HotkeyBinding {
     platform_hotkey(true, false, "n")
 }
 
+fn default_workgroup_next() -> HotkeyBinding {
+    HotkeyBinding { ctrl: true, meta: false, shift: false, alt: false, key: "PageDown".to_string() }
+}
+
+fn default_workgroup_prev() -> HotkeyBinding {
+    HotkeyBinding { ctrl: true, meta: false, shift: false, alt: false, key: "PageUp".to_string() }
+}
+
 fn default_global_tray_popup() -> HotkeyBinding {
     platform_hotkey(true, false, "o")
 }
@@ -142,6 +176,10 @@ pub struct HotkeySettings {
     pub home_tab: HotkeyBinding,
     #[serde(default = "default_add_task", rename = "addTask")]
     pub add_task: HotkeyBinding,
+    #[serde(default = "default_workgroup_next", rename = "workgroupNext")]
+    pub workgroup_next: HotkeyBinding,
+    #[serde(default = "default_workgroup_prev", rename = "workgroupPrev")]
+    pub workgroup_prev: HotkeyBinding,
 }
 
 impl Default for HotkeySettings {
@@ -155,6 +193,8 @@ impl Default for HotkeySettings {
             tray_next: default_tray_next(),
             home_tab: default_home_tab(),
             add_task: default_add_task(),
+            workgroup_next: default_workgroup_next(),
+            workgroup_prev: default_workgroup_prev(),
         }
     }
 }
@@ -227,11 +267,13 @@ pub struct AppearanceSettings {
     pub enable_gaming_border: bool,
     #[serde(default, rename = "gamingBorderTheme")]
     pub gaming_border_theme: Option<String>,
+    #[serde(default, rename = "uiScale")]
+    pub ui_scale: Option<String>,
 }
 
 impl Default for AppearanceSettings {
     fn default() -> Self {
-        AppearanceSettings { enable_acrylic: true, acrylic_opacity: None, acrylic_color: None, enable_gaming_border: false, gaming_border_theme: None }
+        AppearanceSettings { enable_acrylic: true, acrylic_opacity: None, acrylic_color: None, enable_gaming_border: false, gaming_border_theme: None, ui_scale: None }
     }
 }
 
@@ -304,6 +346,10 @@ pub struct AppSettings {
     pub worktree_base_dir: String,
     pub worktrees: Vec<WorktreeEntry>,
     #[serde(default)]
+    pub workgroups: Vec<Workgroup>,
+    #[serde(default, rename = "activeWorkgroupId")]
+    pub active_workgroup_id: Option<String>,
+    #[serde(default)]
     pub terminal: TerminalSettings,
     #[serde(default)]
     pub hotkeys: HotkeySettings,
@@ -345,6 +391,10 @@ pub struct AppSettings {
     pub use_oretachi_terminal_for_background: bool,
     #[serde(default = "default_move_to_sub_window_on_mcp_spawn", rename = "moveToSubWindowOnMcpSpawn")]
     pub move_to_sub_window_on_mcp_spawn: bool,
+    /// 初回起動ウィザード完了フラグ。None = 旧設定ファイル or 未シーディング
+    /// (init() で既存ファイルなら Some(true)、新規なら Some(false) にシーディングする)
+    #[serde(default, rename = "wizardCompleted")]
+    pub wizard_completed: Option<bool>,
 }
 
 impl AppSettings {
@@ -360,6 +410,8 @@ impl Default for AppSettings {
             repositories: Vec::new(),
             worktree_base_dir: String::new(),
             worktrees: Vec::new(),
+            workgroups: Vec::new(),
+            active_workgroup_id: None,
             terminal: TerminalSettings::default(),
             hotkeys: HotkeySettings::default(),
             always_on_top: false,
@@ -381,6 +433,7 @@ impl Default for AppSettings {
             debug_mode: false,
             use_oretachi_terminal_for_background: default_use_oretachi_terminal_for_background(),
             move_to_sub_window_on_mcp_spawn: default_move_to_sub_window_on_mcp_spawn(),
+            wizard_completed: None,
         }
     }
 }
@@ -411,7 +464,8 @@ impl SettingsManager {
             .expect("app_data_dir not available")
             .join("settings.json");
 
-        let mut settings = if path.exists() {
+        let file_existed = path.exists();
+        let mut settings = if file_existed {
             match std::fs::read_to_string(&path) {
                 Ok(content) => serde_json::from_str(&content).unwrap_or_default(),
                 Err(_) => AppSettings::default(),
@@ -420,9 +474,23 @@ impl SettingsManager {
             AppSettings::default()
         };
 
-        // APIキーが未設定なら自動生成してディスクに保存
+        let mut needs_write = false;
+
+        // APIキーが未設定なら自動生成
         if settings.mcp_api_key.is_empty() {
             settings.mcp_api_key = generate_api_key();
+            needs_write = true;
+        }
+
+        // 初回起動ウィザードフラグのシーディング:
+        // 既存ファイルあり (= アップグレード) → 完了扱いでウィザード非表示、
+        // ファイルなし (= 真の初回起動) → 未完了でウィザード表示
+        if settings.wizard_completed.is_none() {
+            settings.wizard_completed = Some(file_existed);
+            needs_write = true;
+        }
+
+        if needs_write {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }

@@ -59,3 +59,30 @@ pub fn open_in_ide(command: &str, path: &str) -> Result<(), String> {
         .map_err(|e| format!("IDE の起動に失敗しました: {}", e))?;
     Ok(())
 }
+
+pub fn open_in_file_explorer(path: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        // エクスプローラーはパス区切りに `\` を要求するため正規化する
+        let normalized = path.replace('/', "\\");
+        make_command("explorer")
+            .arg(&normalized)
+            .spawn()
+            .map_err(|e| format!("ファイルエクスプローラーの起動に失敗しました: {}", e))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        make_command("open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("ファイルエクスプローラーの起動に失敗しました: {}", e))?;
+    }
+    #[cfg(all(not(target_os = "windows"), not(target_os = "macos")))]
+    {
+        make_command("xdg-open")
+            .arg(path)
+            .spawn()
+            .map_err(|e| format!("ファイルエクスプローラーの起動に失敗しました: {}", e))?;
+    }
+    Ok(())
+}

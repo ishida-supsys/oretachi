@@ -17,7 +17,12 @@ const OUTPUT_HISTORY_BYTES: usize = 65_536;
 const EXITED_SESSION_TTL: Duration = Duration::from_secs(30);
 
 struct PtySession {
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    /// PTY 入力の送信キュー。書き込み本体はセッション毎の writer スレッドが行う。
+    /// ConPTY の入力パイプへの write は子プロセスが stdin を読まないと無期限に
+    /// ブロックしうるため、Tauri コマンド（メインスレッド）からは enqueue のみ行い、
+    /// 実 I/O をメインスレッドから隔離する。全 Sender drop で writer スレッドは終了する。
+    /// 有界 (INPUT_QUEUE_MAX_CHUNKS) で、満杯時の write() は即時エラーになる。
+    input_tx: std::sync::mpsc::SyncSender<Vec<u8>>,
     master: Arc<Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>>,
     child_killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     child_pid: Option<u32>,
@@ -60,6 +65,12 @@ const MAX_FLUSH_BYTES: usize = 256 * 1024;
 /// メモリを食い潰すため、上限超過時は最古を捨てる。直近の出力は `output_history`（64KB）が
 /// 別途保持するため MCP の差分読みには影響しない（極端な過負荷時に画面表示の取りこぼしに留まる）。
 const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
+
+/// PTY 入力キュー（writer スレッドへの sync_channel）の最大チャンク数。
+/// 子プロセスが stdin を読まない場合の無制限なメモリ蓄積を防ぐ。
+/// 満杯時は write() が即時エラーを返す（旧実装の write ブロックに相当する
+/// バックプレッシャをエラーとして可視化する）。
+const INPUT_QUEUE_MAX_CHUNKS: usize = 1024;
 
 /// セッションの保留バッファを最大 `MAX_FLUSH_BYTES` drain し、base64 エンコードして
 /// `pty-output` を 1 回 emit する。保留が空なら何もしない。
@@ -105,10 +116,35 @@ pub struct ReadHistoryResult {
     pub lost_bytes: u64,
 }
 
-pub struct PtyManager {
+/// PtyManager の実体。Drop 時に kill_all を行うため、Clone される外殻 (`PtyManager`)
+/// とは分離し、最後の参照が消えたときだけ一度 Drop が走るようにする。
+pub struct PtyManagerCore {
     sessions: Arc<Mutex<HashMap<u32, PtySession>>>,
     next_id: Mutex<u32>,
     polling_alive: Arc<Mutex<bool>>,
+}
+
+/// Tauri の State として管理する PTY マネージャ。
+/// `Arc` の newtype なので clone が安価で、async コマンドから
+/// `tauri::async_runtime::spawn_blocking` へ move して使える ('static 化)。
+#[derive(Clone)]
+pub struct PtyManager(Arc<PtyManagerCore>);
+
+impl PtyManager {
+    pub fn new() -> Self {
+        PtyManager(Arc::new(PtyManagerCore {
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            next_id: Mutex::new(1),
+            polling_alive: Arc::new(Mutex::new(true)),
+        }))
+    }
+}
+
+impl std::ops::Deref for PtyManager {
+    type Target = PtyManagerCore;
+    fn deref(&self) -> &PtyManagerCore {
+        &self.0
+    }
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -314,15 +350,7 @@ fn get_claude_session_id_by_pid(pid: u32) -> Option<String> {
     v.get("sessionId")?.as_str().map(|s| s.to_string())
 }
 
-impl PtyManager {
-    pub fn new() -> Self {
-        PtyManager {
-            sessions: Arc::new(Mutex::new(HashMap::new())),
-            next_id: Mutex::new(1),
-            polling_alive: Arc::new(Mutex::new(true)),
-        }
-    }
-
+impl PtyManagerCore {
     /// AIエージェントフラグを明示的にセットする（executeAgentWorktree 用）
     pub fn set_ai_agent(&self, session_id: u32, is_agent: bool) -> Result<(), String> {
         let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
@@ -767,10 +795,28 @@ impl PtyManager {
             let _ = app_handle_reader.emit("pty-exit", PtyExitPayload { session_id });
         });
 
-        let writer = Arc::new(Mutex::new(writer));
+        // writer スレッド: 入力キューを順番に ConPTY 入力パイプへ書き込む。
+        // 子プロセスが stdin を読まずパイプが満杯のときは write_all がブロックするが、
+        // ブロックするのはこのスレッドだけで、enqueue 側 (Tauri コマンド) は影響を受けない。
+        // kill 時は session drop で全 Sender が消え recv が Err になりスレッドが終了する。
+        // ブロック中でも kill が master を drop → ConPTY 破棄で write がエラーになり解ける。
+        let (input_tx, input_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(INPUT_QUEUE_MAX_CHUNKS);
+        std::thread::spawn(move || {
+            let mut writer = writer;
+            while let Ok(data) = input_rx.recv() {
+                if let Err(e) = writer.write_all(&data).and_then(|_| writer.flush()) {
+                    log::warn!(
+                        "[Terminal] writer thread exiting on write error session_id={}: {}",
+                        session_id,
+                        e
+                    );
+                    return;
+                }
+            }
+        });
 
         let session = PtySession {
-            writer,
+            input_tx,
             master: master_arc,
             child_killer,
             child_pid,
@@ -792,21 +838,30 @@ impl PtyManager {
         Ok(session_id)
     }
 
+    /// PTY への入力をセッションの writer スレッドへ enqueue する（非ブロッキング）。
+    /// 実 I/O は writer スレッドが行うため、本関数は ConPTY 入力パイプの状態に
+    /// かかわらず即座に返る。I/O エラーは writer スレッド側でログされ、以降の
+    /// send が "input channel closed" で失敗するようになる。キューが満杯
+    /// （子プロセスが stdin を読まず writer がブロック中）の場合も即時エラーを返す。
     pub fn write(&self, session_id: u32, data: Vec<u8>) -> Result<(), String> {
-        // sessions ロックは Arc 取得のみ（瞬時）→ I/O 中は他セッション操作をブロックしない
-        let writer_arc = {
+        let tx = {
             let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
             sweep_exited(&mut sessions);
             let session = sessions
                 .get(&session_id)
                 .ok_or_else(|| format!("Session {} not found", session_id))?;
-            session.writer.clone()
+            session.input_tx.clone()
         };
 
-        let mut writer = writer_arc.lock().map_err(|e| format!("writer lock error: {}", e))?;
-        writer.write_all(&data).map_err(|e| format!("Write error: {}", e))?;
-        writer.flush().map_err(|e| format!("Flush error: {}", e))?;
-        Ok(())
+        tx.try_send(data).map_err(|e| match e {
+            std::sync::mpsc::TrySendError::Full(_) => format!(
+                "Write error: input queue full (session {}; child process not reading stdin?)",
+                session_id
+            ),
+            std::sync::mpsc::TrySendError::Disconnected(_) => {
+                format!("Write error: input channel closed (session {})", session_id)
+            }
+        })
     }
 
     /// 指定セッションの出力履歴を取得する。
@@ -914,24 +969,29 @@ impl PtyManager {
                     Ok(mut alive) => *alive = false,
                     Err(e) => *e.into_inner() = false,
                 }
-                // master を取り出して reader に EOF を送る準備
-                let master = session.master.lock().ok().and_then(|mut g| g.take());
-                Some((session.child_pid, session.child_killer, master, session.writer, session.watcher_handle))
+                // master の take は sessions ロック解放後に行う。resize() が master ロックを
+                // 保持したまま ConPTY RPC でハングしている場合、ここで master.lock() を待つと
+                // sessions ロックを保持し続け、メインスレッド上の pty_write (sessions.lock())
+                // まで巻き込んでフリーズするため、Arc ごと持ち出してロック外で take する。
+                // session の残りフィールド (input_tx 含む) はこのスコープ末尾で drop され、
+                // input_tx の drop により writer スレッドの recv が解けてスレッドが終了する。
+                Some((session.child_pid, session.child_killer, session.master.clone(), session.watcher_handle))
             } else {
                 None
             }
         }; // ← sessions ロック解放
 
-        if let Some((child_pid, mut child_killer, master, writer, watcher_handle)) = removed {
+        if let Some((child_pid, mut child_killer, master_arc, watcher_handle)) = removed {
             // ロック外でプロセスkill（taskkillが遅くても他の操作をブロックしない）
             if let Some(pid) = child_pid {
                 crate::process_utils::kill_process_tree(pid);
             }
             // child_killer でバックアップ kill（child が監視スレッドに渡済みでも動作）
             let _ = child_killer.kill();
-            // master / writer を drop して reader に EOF を送る
+            // master を取り出して drop し ConPTY を破棄、reader に EOF を送る
+            // （入力パイプも閉じられ、writer スレッドがブロック中でも write エラーで解ける）
+            let master = master_arc.lock().unwrap_or_else(|e| e.into_inner()).take();
             drop(master);
-            drop(writer);
             // watcher スレッドの終了を待つ（alive=false を検知して必ず終了する）
             if let Some(handle) = watcher_handle {
                 let _ = handle.join();
@@ -949,6 +1009,90 @@ impl PtyManager {
         log::info!("[Terminal] pty_manager::kill_all source={} count={}", source, ids.len());
         for id in ids {
             let _ = self.kill(id, source);
+        }
+    }
+
+    /// アプリ終了経路専用の高速 kill_all。
+    ///
+    /// 逐次 `kill`（各セッション taskkill 最大10秒 + 無期限 `watcher_handle.join()`）は
+    /// N セッションで最悪 N×10秒 UI スレッドをブロックし、ユーザーの強制終了 → 孤児
+    /// WebView2 / ポート保持を招く。本関数は次の最適化で終了時間を有界化する:
+    /// 1. sessions ロックを最小スコープで全 drain し、ロック外で並列に kill する。
+    /// 2. taskkill は `kill_process_tree_exit`（1.5秒上限）を使う。
+    /// 3. `watcher_handle.join()` は無期限に待たず、合計 deadline まで有界に待つだけ。
+    ///    （プロセス終了時にスレッドも消えるため未 join でも問題ない。取りこぼした
+    ///     子プロセスは起動時に設定する Job Object が OS レベルで回収する。）
+    pub fn kill_all_fast(&self, source: &str) {
+        // (child_pid, child_killer, master(Arc), watcher_handle) を持ち出す。
+        // session 本体（input_tx 含む）はこのスコープ末尾で drop され、writer スレッドが終了する。
+        type Drained = (
+            Option<u32>,
+            Box<dyn portable_pty::ChildKiller + Send + Sync>,
+            Arc<Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>>,
+            Option<std::thread::JoinHandle<()>>,
+        );
+        let drained: Vec<Drained> = {
+            let mut sessions = self.sessions.lock().unwrap_or_else(|e| e.into_inner());
+            sweep_exited(&mut sessions);
+            let ids: Vec<u32> = sessions.keys().cloned().collect();
+            let mut out: Vec<Drained> = Vec::with_capacity(ids.len());
+            for id in ids {
+                if let Some(session) = sessions.remove(&id) {
+                    // ウォッチャースレッド停止のため alive=false を確実にセット（poison でも）。
+                    match session.alive.lock() {
+                        Ok(mut alive) => *alive = false,
+                        Err(e) => *e.into_inner() = false,
+                    }
+                    out.push((
+                        session.child_pid,
+                        session.child_killer,
+                        session.master.clone(),
+                        session.watcher_handle,
+                    ));
+                    // session（残りフィールド: input_tx 等）はここで drop される。
+                }
+            }
+            out
+        }; // ← sessions ロック解放
+
+        let count = drained.len();
+        log::info!("[Terminal] pty_manager::kill_all_fast source={} count={}", source, count);
+        if count == 0 {
+            return;
+        }
+
+        // 各セッションを並列スレッドで kill。1 スレッドが master.lock() でハングしても
+        // 他スレッドと UI スレッドを巻き込まないよう、スレッド内で master take を行う。
+        let remaining = Arc::new(std::sync::atomic::AtomicUsize::new(count));
+        for (child_pid, mut child_killer, master_arc, watcher_handle) in drained {
+            let remaining = remaining.clone();
+            std::thread::spawn(move || {
+                // child_killer でバックアップ kill（即時）
+                let _ = child_killer.kill();
+                // master を take して drop し ConPTY を破棄、reader に EOF を送る
+                let master = master_arc.lock().unwrap_or_else(|e| e.into_inner()).take();
+                drop(master);
+                // プロセスツリーを 1.5 秒上限で kill
+                if let Some(pid) = child_pid {
+                    crate::process_utils::kill_process_tree_exit(pid);
+                }
+                // watcher_handle は join せず drop（detach）。alive=false で自然終了する。
+                drop(watcher_handle);
+                remaining.fetch_sub(1, Ordering::SeqCst);
+            });
+        }
+
+        // 合計 deadline（2秒）まで有界に待つ。超過してもブロックを打ち切って終了を進める。
+        let deadline = Instant::now() + Duration::from_millis(2000);
+        while remaining.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let left = remaining.load(Ordering::SeqCst);
+        if left > 0 {
+            log::warn!(
+                "[Terminal] kill_all_fast: {} session(s) not confirmed within deadline (detached)",
+                left
+            );
         }
     }
 
@@ -1002,7 +1146,7 @@ impl PtyManager {
     }
 }
 
-impl Drop for PtyManager {
+impl Drop for PtyManagerCore {
     fn drop(&mut self) {
         match self.polling_alive.lock() {
             Ok(mut alive) => *alive = false,

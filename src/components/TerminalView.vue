@@ -6,19 +6,20 @@ export let terminalActiveCount = 0;
 </script>
 
 <script setup lang="ts">
-import { ref, watch, onMounted, onUnmounted, nextTick } from "vue";
+import { ref, computed, watch, onMounted, onUnmounted, nextTick } from "vue";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { WebglAddon } from "@xterm/addon-webgl";
 import { SerializeAddon } from "@xterm/addon-serialize";
 import { usePty } from "../composables/usePty";
 import { usePtyWriteBatcher } from "../composables/usePtyWriteBatcher";
+import { useTerminalVisibility } from "../composables/useTerminalVisibility";
 import { useSettings } from "../composables/useSettings";
 import { matchesHotkey } from "../composables/useHotkeys";
 import { useTerminalSearch } from "../composables/useTerminalSearch";
 import { readText, writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useI18n } from "vue-i18n";
-import { debug } from "@tauri-apps/plugin-log";
+import { useUiZoom } from "../composables/useUiZoom";
+import { logDebug } from "../utils/log";
 
 const { t } = useI18n();
 
@@ -61,7 +62,21 @@ let resizeDebounce: ReturnType<typeof setTimeout> | null = null;
 
 const { sessionId, spawn, attachToSession, write, resize, kill, isRunning, detach } = usePty();
 const batcher = usePtyWriteBatcher(() => terminal);
+const visibility = useTerminalVisibility({
+  getTerminal: () => terminal,
+  isOffscreen,
+  setWriteSuspended: batcher.setSuspended,
+  getSessionId: () => sessionId.value,
+});
 const { settings } = useSettings();
+
+// UIスケール (webview ズーム) 下でもターミナルの物理グリフサイズを不変に保つため、
+// xterm には設定値 / ズーム倍率 を渡す (CSS px × ズーム = 物理相当サイズ)。
+// setZoom 失敗時に過縮小しないよう、設定値でなく実適用ズームで割る
+const { appliedZoom } = useUiZoom();
+const effectiveFontSize = computed(
+  () => Math.round((settings.value.terminal.fontSize / appliedZoom.value) * 100) / 100
+);
 
 async function handlePaste() {
   try {
@@ -94,7 +109,7 @@ function initTerminal() {
     ...(props.initialCols != null && { cols: props.initialCols }),
     ...(props.initialRows != null && { rows: props.initialRows }),
     fontFamily: '"Cascadia Code", Consolas, Menlo, "SF Mono", Monaco, monospace',
-    fontSize: settings.value.terminal.fontSize,
+    fontSize: effectiveFontSize.value,
     theme: {
       background: isTransparent ? "#1e1e2e00" : "#1e1e2e",
       foreground: "#cdd6f4",
@@ -128,22 +143,11 @@ function initTerminal() {
 
   search.loadAddon(terminal);
 
-  // WebGL addon (失敗時は Canvas フォールバック)
-  try {
-    const webglAddon = new WebglAddon();
-    webglAddon.onContextLoss(() => {
-      console.warn("[XTERM] WebGL onContextLoss fired!", { sessionId: sessionId.value });
-      webglAddon.dispose();
-      // dispose 後は xterm.js が自動で Canvas レンダラーにフォールバック。
-      // 明示的に refresh を呼んで Canvas レンダラーで再描画させる。
-      terminal?.refresh(0, terminal.rows - 1);
-    });
-    terminal.loadAddon(webglAddon);
-  } catch {
-    // Canvas renderer を使用
-  }
-
   terminal.open(xtermRef.value);
+
+  // WebGL は可視端末のみロードする (updateVisibility 経由)。
+  // オフスクリーンで open された場合はここではロードされず、可視化時にロードされる。
+  visibility.updateVisibility();
 
   // 左クリック: 選択テキストがあればコピー＆選択解除
   // capture フェーズで登録し、xterm.js が選択をクリアする前にテキストを取得する
@@ -173,7 +177,7 @@ function initTerminal() {
     const isOffscreen = !!xtermRef.value?.closest('[data-offscreen]');
     fitAddon.fit();
     const initDims = fitAddon.proposeDimensions();
-    debug(`[Terminal] initTerminal fit offscreen=${isOffscreen} dims=${JSON.stringify(initDims)} parentSize=${xtermRef.value?.parentElement?.clientWidth}x${xtermRef.value?.parentElement?.clientHeight}`);
+    logDebug(`[Terminal] initTerminal fit offscreen=${isOffscreen} dims=${JSON.stringify(initDims)} parentSize=${xtermRef.value?.parentElement?.clientWidth}x${xtermRef.value?.parentElement?.clientHeight}`);
   }
 
   terminal.onTitleChange((title) => {
@@ -237,11 +241,11 @@ function initTerminal() {
     // オフスクリーン div 内にいる場合はスキップ
     const isOffscreen = !!xtermRef.value?.closest('[data-offscreen]');
     if (isOffscreen) {
-      debug(`[Terminal] ResizeObserver skipped (offscreen) sid=${sessionId.value} w=${entry.contentRect.width} h=${entry.contentRect.height}`);
+      logDebug(`[Terminal] ResizeObserver skipped (offscreen) sid=${sessionId.value} w=${entry.contentRect.width} h=${entry.contentRect.height}`);
       return;
     }
     if (props.noResize) return;
-    debug(`[Terminal] ResizeObserver fired sid=${sessionId.value} w=${entry.contentRect.width} h=${entry.contentRect.height}`);
+    logDebug(`[Terminal] ResizeObserver fired sid=${sessionId.value} w=${entry.contentRect.width} h=${entry.contentRect.height}`);
     if (resizeDebounce) clearTimeout(resizeDebounce);
     resizeDebounce = setTimeout(() => {
       if (fitAddon && terminal) {
@@ -249,7 +253,7 @@ function initTerminal() {
         if (!props.noResize) {
           const dims = fitAddon.proposeDimensions();
           if (dims) {
-            debug(`[Terminal] ResizeObserver after fit sid=${sessionId.value} rows=${dims.rows} cols=${dims.cols}`);
+            logDebug(`[Terminal] ResizeObserver after fit sid=${sessionId.value} rows=${dims.rows} cols=${dims.cols}`);
             resize(dims.rows, dims.cols);
           }
         }
@@ -305,14 +309,27 @@ async function attachPty(id: number, snapshot?: string) {
 }
 
 function serializeBuffer(scrollback?: number): string {
+  // 抑制中の蓄積分を先に書き込んでから serialize する (取りこぼし防止)
+  batcher.flush();
   return serializeAddon?.serialize(scrollback !== undefined ? { scrollback } : undefined) ?? "";
+}
+
+function detachPty(): void {
+  // detach 後は pty-output ハンドラが外れるため、蓄積分を先に排出する
+  batcher.flush();
+  detach();
 }
 
 function focus() {
   terminal?.focus();
 }
 
+function isOffscreen(): boolean {
+  return !!xtermRef.value?.closest("[data-offscreen]");
+}
+
 async function handleTabActivated() {
+  visibility.updateVisibility();
   await nextTick();
   await new Promise<void>((resolve) => {
     requestAnimationFrame(() => {
@@ -321,10 +338,10 @@ async function handleTabActivated() {
           if (!props.noResize) {
             const dimsBefore = fitAddon.proposeDimensions();
             const parentEl = xtermRef.value?.parentElement;
-            debug(`[Terminal] handleTabActivated before fit sid=${sessionId.value} dims=${JSON.stringify(dimsBefore)} parentSize=${parentEl?.clientWidth}x${parentEl?.clientHeight}`);
+            logDebug(`[Terminal] handleTabActivated before fit sid=${sessionId.value} dims=${JSON.stringify(dimsBefore)} parentSize=${parentEl?.clientWidth}x${parentEl?.clientHeight}`);
             fitAddon.fit();
             const dimsAfter = fitAddon.proposeDimensions();
-            debug(`[Terminal] handleTabActivated after fit sid=${sessionId.value} dims=${JSON.stringify(dimsAfter)}`);
+            logDebug(`[Terminal] handleTabActivated after fit sid=${sessionId.value} dims=${JSON.stringify(dimsAfter)}`);
             if (dimsAfter) {
               resize(dimsAfter.rows, dimsAfter.cols);
             }
@@ -358,7 +375,7 @@ function waitForReady(): Promise<void> {
 }
 
 watch(
-  () => settings.value.terminal.fontSize,
+  effectiveFontSize,
   (newSize) => {
     if (terminal) {
       terminal.options.fontSize = newSize;
@@ -376,13 +393,13 @@ watch(
 onMounted(async () => {
   terminalMountCount++;
   terminalActiveCount++;
-  debug(`[TerminalView] onMounted initialSessionId=${props.initialSessionId} autoStart=${props.autoStart} cwd=${props.cwd}`);
+  logDebug(`[TerminalView] onMounted initialSessionId=${props.initialSessionId} autoStart=${props.autoStart} cwd=${props.cwd}`);
   initTerminal();
   if (props.initialSessionId !== undefined) {
-    debug(`[TerminalView] attaching to session ${props.initialSessionId}`);
+    logDebug(`[TerminalView] attaching to session ${props.initialSessionId}`);
     await attachPty(props.initialSessionId, props.initialSnapshot);
   } else if (props.autoStart) {
-    debug(`[TerminalView] starting new PTY (no initialSessionId)`);
+    logDebug(`[TerminalView] starting new PTY (no initialSessionId)`);
     if (props.restoreSnapshot) {
       terminal?.write(props.restoreSnapshot);
     }
@@ -393,11 +410,12 @@ onMounted(async () => {
 onUnmounted(() => {
   terminalUnmountCount++;
   terminalActiveCount--;
-  debug(`[TerminalView] onUnmounted sessionId=${sessionId.value} cwd=${props.cwd}`);
+  logDebug(`[TerminalView] onUnmounted sessionId=${sessionId.value} cwd=${props.cwd}`);
   if (resizeDebounce) clearTimeout(resizeDebounce);
   resizeObserver?.disconnect();
   batcher.dispose();
   search.dispose();
+  visibility.dispose(); // terminal.dispose() より前に WebGL カウンタを整合させる
   serializeAddon?.dispose();
   terminal?.dispose();
 });
@@ -406,7 +424,7 @@ defineExpose({
   startPty,
   attachPty,
   kill,
-  detach,
+  detach: detachPty,
   focus,
   write,
   getTerminal,
@@ -414,6 +432,7 @@ defineExpose({
   sessionId,
   serializeBuffer,
   handleTabActivated,
+  updateVisibility: visibility.updateVisibility,
   waitForReady,
   containerRef,
   toggleSearchBar: search.toggleSearchBar,

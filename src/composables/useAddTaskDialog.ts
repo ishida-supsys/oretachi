@@ -5,6 +5,7 @@ import { useI18n } from "vue-i18n";
 import type { ToastMessageOptions } from "primevue/toast";
 import { useTasks } from "./useTasks";
 import { useSettings } from "./useSettings";
+import { useWorkgroups } from "./useWorkgroups";
 import type { TaskCode, TaskProcessCode } from "../types/task";
 
 type StepExecutor = (code: TaskCode) => Promise<void>;
@@ -15,6 +16,7 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
   const toast = useToast();
   const { t } = useI18n();
   const { settings, scheduleSave } = useSettings();
+  const { activeWorkgroupId } = useWorkgroups();
   const { sortedTasks, addTask, setTaskSteps, updateStepStatus, updateTaskStatus } = useTasks();
 
   const showAddTaskDialog = ref(false);
@@ -67,12 +69,16 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
     }
   }
 
-  async function onAddTaskConfirm(prompt: string, remoteExec: boolean = false): Promise<void> {
+  async function onAddTaskConfirm(prompt: string, remoteExec: boolean = false, workgroupId?: string): Promise<void> {
     const trimmed = prompt.trim();
     if (!trimmed) return;
     prompt = trimmed;
     showAddTaskDialog.value = false;
     rerunTaskId.value = null;
+    // 追加先WGをアクティブにして、作成される worktree が現在のホーム表示に出るようにする
+    if (workgroupId) {
+      activeWorkgroupId.value = workgroupId;
+    }
     if (settings.value.aiAgent) {
       settings.value.aiAgent.remoteExec = remoteExec;
     } else {
@@ -94,6 +100,13 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
         for (const code of taskProcessCode.code) {
           if (code.type === "agent_worktree") {
             code.remoteExec = true;
+          }
+        }
+      }
+      if (workgroupId) {
+        for (const code of taskProcessCode.code) {
+          if (code.type === "add_worktree") {
+            code.workgroupId = workgroupId;
           }
         }
       }

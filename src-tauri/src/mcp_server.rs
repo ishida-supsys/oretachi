@@ -18,7 +18,7 @@ use tokio::sync::{broadcast, oneshot, watch, RwLock};
 
 use crate::git_worktree::get_git_remotes;
 use crate::pty_manager::PtyManager;
-use crate::settings::SettingsManager;
+use crate::settings::{AppSettings, SettingsManager, WorktreeEntry};
 
 const PORT_FILE: &str = "mcp-port";
 const SERVER_INFO_FILE: &str = "mcp-server.json";
@@ -198,10 +198,40 @@ impl McpServerManager {
 
 #[derive(Debug, Deserialize)]
 pub struct NotifyPayload {
-    pub worktree: String,
+    /// userConfig 非依存版の hook が送る CC 組み込み変数 ${CLAUDE_PROJECT_DIR}。
+    /// これからワークツリー名を逆引きする。
+    #[serde(default, rename = "projectDir")]
+    pub project_dir: Option<String>,
+    /// ライフサイクルイベント名（"Stop" 等）。これから kind を解決する。
+    #[serde(default)]
+    pub event: Option<String>,
+    /// 後方互換: ワークツリー名を直接指定する旧形式 / MCP 経由。
+    #[serde(default)]
+    pub worktree: Option<String>,
+    /// 後方互換: kind を直接指定する旧形式。
+    #[serde(default)]
     pub kind: Option<String>,
     pub body: Option<String>,
     pub agent: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetDescriptionPayload {
+    /// userConfig 非依存版の hook が送る ${CLAUDE_PROJECT_DIR}。
+    #[serde(default, rename = "projectDir")]
+    pub project_dir: Option<String>,
+    /// 後方互換: ワークツリー名を直接指定する旧形式。
+    #[serde(default)]
+    pub worktree: Option<String>,
+    /// ExitPlanMode フックが stdin で受け取った hook JSON 文字列（生）
+    #[serde(rename = "hookJson")]
+    pub hook_json: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+pub struct SetWorktreeDescriptionEvent {
+    pub worktree: String,
+    pub plan: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -906,17 +936,25 @@ impl NotifyService {
     ) -> Result<CallToolResult, McpError> {
         let settings_manager = self.app_handle.state::<SettingsManager>();
         let settings = settings_manager.get();
-        let paths: Vec<(String, String)> = settings
+        let paths: Vec<(String, String, Option<String>)> = settings
             .repositories
             .iter()
-            .map(|repo| (repo.name.clone(), repo.path.clone()))
+            .map(|repo| {
+                let pattern = repo
+                    .branch_name_pattern
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string);
+                (repo.name.clone(), repo.path.clone(), pattern)
+            })
             .collect();
         let repos: Vec<serde_json::Value> = tokio::task::spawn_blocking(move || {
             paths
                 .iter()
-                .map(|(name, path)| {
+                .map(|(name, path, pattern)| {
                     let remotes = get_git_remotes(path);
-                    serde_json::json!({ "name": name, "remotes": remotes })
+                    serde_json::json!({ "name": name, "remotes": remotes, "branchNamePattern": pattern })
                 })
                 .collect()
         })
@@ -1234,7 +1272,7 @@ impl NotifyService {
     }
 
     #[tool(description = "指定 PTY セッションを停止する。oretachi_list_terminals で取得した session_id を渡す。UI のタブは pty-exit イベント経由で自動的に消える")]
-    fn oretachi_kill_terminal(
+    async fn oretachi_kill_terminal(
         &self,
         Parameters(KillTerminalParams { session_id }): Parameters<KillTerminalParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -1245,7 +1283,11 @@ impl NotifyService {
                 None,
             ));
         }
-        pty.kill(session_id, "mcp-kill-terminal")
+        // taskkill 最大10秒 + watcher join を含むため tokio ワーカーを塞がないよう spawn_blocking
+        let manager = pty.inner().clone();
+        tauri::async_runtime::spawn_blocking(move || manager.kill(session_id, "mcp-kill-terminal"))
+            .await
+            .map_err(|e| McpError::internal_error(format!("spawn_blocking join error: {}", e), None))?
             .map_err(|e| McpError::internal_error(e, None))?;
         log::info!("[mcp] oretachi_kill_terminal: session_id={}", session_id);
         Ok(CallToolResult::success(vec![Content::text("killed")]))
@@ -1345,19 +1387,97 @@ impl ServerHandler for NotifyService {
     }
 }
 
+// ─── worktree / kind の解決（userConfig 非依存 hook 用） ──────────────────────
+
+/// パスを比較用に正規化する（`\`→`/`、末尾 `/` 除去、Windows は小文字化）。
+fn normalize_path_for_match(p: &str) -> String {
+    let mut s = p.replace('\\', "/");
+    while s.len() > 1 && s.ends_with('/') {
+        s.pop();
+    }
+    if cfg!(windows) {
+        s = s.to_lowercase();
+    }
+    s
+}
+
+/// project_dir（${CLAUDE_PROJECT_DIR}）に一致するワークツリーエントリを返す。
+fn resolve_worktree_by_dir<'a>(settings: &'a AppSettings, dir: &str) -> Option<&'a WorktreeEntry> {
+    let target = normalize_path_for_match(dir);
+    settings
+        .worktrees
+        .iter()
+        .find(|w| normalize_path_for_match(&w.path) == target)
+}
+
+/// イベント名の既定 kind。ユーザー設定 (repo.notification_hooks) が無い場合のフォールバック。
+fn default_kind_for_event(event: &str) -> &'static str {
+    match event {
+        "Stop" => "completed",
+        "PermissionRequest" => "approval",
+        _ => "hook",
+    }
+}
+
+/// ワークツリーの所属リポジトリの notification_hooks から event に対応する kind を解決する。
+/// 設定が無ければ default_kind_for_event にフォールバック。
+fn resolve_kind_for_event(settings: &AppSettings, worktree: &WorktreeEntry, event: &str) -> String {
+    settings
+        .repositories
+        .iter()
+        .find(|r| r.id == worktree.repository_id)
+        .and_then(|r| r.notification_hooks.as_ref())
+        .and_then(|hooks| hooks.iter().find(|h| h.event == event))
+        .map(|h| h.kind.clone())
+        .unwrap_or_else(|| default_kind_for_event(event).to_string())
+}
+
 // ─── Simple REST endpoint (/notify) ──────────────────────────────────────────
 
 async fn notify_handler(
     State(app_handle): State<AppHandle>,
     Json(payload): Json<NotifyPayload>,
 ) -> StatusCode {
+    let settings = app_handle.state::<SettingsManager>().get();
+
+    // ワークツリー: project_dir から逆引き。見つからなければ後方互換の worktree 名で解決。
+    let worktree = payload
+        .project_dir
+        .as_deref()
+        .and_then(|d| resolve_worktree_by_dir(&settings, d));
+    let worktree_name = match worktree {
+        Some(w) => w.name.clone(),
+        None => match payload.worktree.clone() {
+            Some(name) => name,
+            None => {
+                log::warn!(
+                    "[notify] could not resolve worktree (projectDir={:?}); dropping",
+                    payload.project_dir
+                );
+                return StatusCode::OK;
+            }
+        },
+    };
+
+    // kind: 明示指定(旧形式/MCP) > event からの解決 > "general"
+    let kind = if let Some(k) = payload.kind.clone() {
+        k
+    } else if let Some(ev) = payload.event.as_deref() {
+        match worktree {
+            Some(w) => resolve_kind_for_event(&settings, w, ev),
+            None => default_kind_for_event(ev).to_string(),
+        }
+    } else {
+        "general".to_string()
+    };
+
     let event = NotifyWorktreeEvent {
-        worktree_name: payload.worktree.clone(),
-        kind: payload.kind.unwrap_or_else(|| "general".to_string()),
+        worktree_name,
+        kind,
         body: payload.body,
         agent: payload.agent,
     };
-    log::info!("[notify] worktree={} kind={}", payload.worktree, event.kind);
+    log::info!("[notify] worktree={} kind={}", event.worktree_name, event.kind);
 
     let manager = app_handle.state::<McpServerManager>();
     // hook: 3秒 / approval: 1秒 で (worktree, kind) 単位に送信制限。
@@ -1401,6 +1521,90 @@ async fn notify_handler(
     }
 }
 
+// ─── Simple REST endpoint (/set-description) ─────────────────────────────────
+
+/// ExitPlanMode フックの hook JSON からプラン本文を抽出する。
+/// tool_response.plan → tool_input.plan の順で探し、無ければ filePath を読み込む。
+fn extract_plan_from_hook_json(raw: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+
+    // インラインのプラン本文を優先
+    for path in [["tool_response", "plan"], ["tool_input", "plan"]] {
+        if let Some(s) = v
+            .get(path[0])
+            .and_then(|o| o.get(path[1]))
+            .and_then(|p| p.as_str())
+        {
+            if !s.trim().is_empty() {
+                return Some(s.to_string());
+            }
+        }
+    }
+
+    // フォールバック: filePath からプランファイルを読み込む
+    for path in [["tool_response", "filePath"], ["tool_input", "filePath"]] {
+        if let Some(fp) = v
+            .get(path[0])
+            .and_then(|o| o.get(path[1]))
+            .and_then(|p| p.as_str())
+        {
+            if let Ok(content) = std::fs::read_to_string(fp) {
+                if !content.trim().is_empty() {
+                    return Some(content);
+                }
+            }
+        }
+    }
+    None
+}
+
+async fn set_description_handler(
+    State(app_handle): State<AppHandle>,
+    Json(payload): Json<SetDescriptionPayload>,
+) -> StatusCode {
+    let settings = app_handle.state::<SettingsManager>().get();
+
+    // ワークツリー: project_dir から逆引き。無ければ後方互換の worktree 名。
+    let worktree_name = payload
+        .project_dir
+        .as_deref()
+        .and_then(|d| resolve_worktree_by_dir(&settings, d))
+        .map(|w| w.name.clone())
+        .or_else(|| payload.worktree.clone());
+    let Some(worktree_name) = worktree_name else {
+        log::warn!(
+            "[set-description] could not resolve worktree (projectDir={:?}); skipping",
+            payload.project_dir
+        );
+        return StatusCode::OK;
+    };
+
+    let plan = payload
+        .hook_json
+        .as_deref()
+        .and_then(extract_plan_from_hook_json);
+
+    let Some(plan) = plan else {
+        // プランが取れない場合はベストエフォートで握りつぶす（フックをブロックしない）
+        log::info!("[set-description] worktree={} no plan extracted; skipping", worktree_name);
+        return StatusCode::OK;
+    };
+
+    log::info!("[set-description] worktree={} plan_len={}", worktree_name, plan.len());
+
+    let event = SetWorktreeDescriptionEvent {
+        worktree: worktree_name,
+        plan,
+    };
+    match app_handle.emit("set-worktree-description", &event) {
+        Ok(_) => StatusCode::OK,
+        Err(e) => {
+            log::error!("[emit-failed] event=set-worktree-description error={}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    }
+}
+
 // ─── API Key Authentication Middleware ───────────────────────────────────────
 
 async fn api_key_auth(
@@ -1439,7 +1643,17 @@ async fn api_key_auth(
     if authorized {
         Ok(next.run(request).await)
     } else {
-        log::warn!("[mcp] unauthorized request: missing or invalid API key");
+        // 再発時の切り分け用に最小限の差分情報を出す（秘密値そのものは出さない）。
+        let reason = match auth_header {
+            None => "authorization header missing".to_string(),
+            Some(h) if !h.starts_with("Bearer ") => "authorization header is not a Bearer token".to_string(),
+            Some(h) => format!(
+                "key mismatch (provided len={}, expected len={})",
+                h.len().saturating_sub(7),
+                expected_key.len()
+            ),
+        };
+        log::warn!("[mcp] unauthorized request: {}", reason);
         Err(StatusCode::UNAUTHORIZED)
     }
 }
@@ -1603,8 +1817,13 @@ fn write_server_info_file(app_handle: &AppHandle, port: u16, api_key: &str) {
     }
 
     // プラグインの .mcp.json も同じ値で更新（app_data_dir 取得失敗時は plugin_dir.exists() で早期 return）
-    if let Err(e) = crate::claude_plugin::update_mcp_config(app_handle, effective_port, api_key) {
-        log::warn!("[ClaudePlugin] Failed to update .mcp.json: {}", e);
+    // ORETACHI_PLUGIN_OVERWRITE=false の場合はグローバルプラグインを汚染しないようスキップ。
+    // （mcp-server.json 自体は MCP 接続に必要なため上で常に書き込み済み）
+    if crate::claude_plugin::overwrite_enabled() {
+        if let Err(e) = crate::claude_plugin::update_mcp_config(app_handle, effective_port, api_key)
+        {
+            log::warn!("[ClaudePlugin] Failed to update .mcp.json: {}", e);
+        }
     }
 
     // 後方互換: 旧 mcp-port テキストファイルも書き込む
@@ -1805,6 +2024,7 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
         let router = axum::Router::new()
             .nest_service("/mcp", service)
             .route("/notify", post(notify_handler))
+            .route("/set-description", post(set_description_handler))
             .with_state(app_handle.clone())
             .layer(middleware::from_fn(move |mut req: Request, next: Next| {
                 let key = api_key_state.clone();
@@ -1899,95 +2119,4 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
         // 停止完了を通知
         let _ = complete_tx.send(());
     });
-}
-
-// ─── CLI notification sender (standalone, no AppHandle needed) ───────────────
-
-pub fn send_notification_standalone(worktree_name: &str, kind: Option<&str>, body: Option<&str>, agent: Option<&str>) -> Result<(), String> {
-    let (port, api_key) = read_server_info_standalone()?;
-    let mut payload = serde_json::json!({
-        "worktree": worktree_name,
-        "kind": kind.unwrap_or("general"),
-    });
-    if let Some(b) = body {
-        payload["body"] = serde_json::Value::String(b.to_string());
-    }
-    if let Some(a) = agent {
-        payload["agent"] = serde_json::Value::String(a.to_string());
-    }
-    let payload_str = payload.to_string();
-    let request = format!(
-        "POST /notify HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAuthorization: Bearer {api_key}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload_str}",
-        payload_str.len()
-    );
-
-    use std::io::Write;
-    use std::time::Duration;
-
-    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port)
-        .parse()
-        .map_err(|e| format!("Invalid address: {}", e))?;
-    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(3))
-        .map_err(|e| format!("Cannot connect to oretachi MCP server: {}", e))?;
-    stream
-        .set_write_timeout(Some(Duration::from_secs(5)))
-        .map_err(|e| format!("Failed to set write timeout: {}", e))?;
-    // 短い読み取りタイムアウトで応答をチェック（非ブロッキング性を維持しつつ確実な配信失敗を検出）
-    stream
-        .set_read_timeout(Some(Duration::from_millis(500)))
-        .map_err(|e| format!("Failed to set read timeout: {}", e))?;
-    stream
-        .write_all(request.as_bytes())
-        .map_err(|e| format!("Failed to send notification: {}", e))?;
-    stream
-        .flush()
-        .map_err(|e| format!("Failed to flush: {}", e))?;
-
-    // 応答の最初の行だけ読んでステータスを確認する（タイムアウトは無視してベストエフォートとする）
-    use std::io::{BufRead, BufReader};
-    let reader = BufReader::new(&stream);
-    if let Some(Ok(first_line)) = reader.lines().next() {
-        if first_line.starts_with("HTTP/") && !first_line.contains(" 200 ") {
-            return Err(format!("Server returned unexpected response: {}", first_line));
-        }
-    }
-    // タイムアウトや読み取りエラーはベストエフォート成功扱い（フックのブロック防止）
-    Ok(())
-}
-
-fn read_server_info_standalone() -> Result<(u16, String), String> {
-    #[cfg(target_os = "windows")]
-    let base = {
-        let appdata = std::env::var("APPDATA")
-            .map_err(|_| "APPDATA environment variable not set".to_string())?;
-        PathBuf::from(appdata).join("com.ia.oretachi")
-    };
-
-    #[cfg(not(target_os = "windows"))]
-    let base = {
-        let home = std::env::var("HOME")
-            .map_err(|_| "HOME environment variable not set".to_string())?;
-        PathBuf::from(home)
-            .join("Library")
-            .join("Application Support")
-            .join("com.ia.oretachi")
-    };
-
-    // mcp-server.json を優先して読む
-    let json_path = base.join(SERVER_INFO_FILE);
-    if json_path.exists() {
-        let content = fs::read_to_string(&json_path)
-            .map_err(|e| format!("Cannot read server info file: {}", e))?;
-        let info: serde_json::Value = serde_json::from_str(&content)
-            .map_err(|e| format!("Invalid server info JSON: {}", e))?;
-        let port = info["port"].as_u64()
-            .ok_or_else(|| "Missing port in server info".to_string())? as u16;
-        let api_key = info["apiKey"].as_str()
-            .ok_or_else(|| "Missing apiKey in server info".to_string())?
-            .to_string();
-        return Ok((port, api_key));
-    }
-
-    // mcp-server.json が存在しない場合、APIキーが取得できないためエラーとする
-    Err("Cannot read API key: mcp-server.json not found. Please restart oretachi to regenerate the server info file.".to_string())
 }

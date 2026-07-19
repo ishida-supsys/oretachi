@@ -13,6 +13,7 @@ export interface Repository {
   packageManagerArgs?: string; // install コマンドに追加する引数 (例: --config.node-linker=hoisted)
   notificationHooks?: NotificationHookEntry[]; // Claude Code通知フック設定
   pullBeforeAdd?: boolean; // ワークツリー追加前に git pull を実行するか
+  branchNamePattern?: string; // タスク追加時のブランチ名パターン (例: "{feature|fix}/<task>"、未記入なら "worktree/<task>")
 }
 
 export interface WorktreeEntry {
@@ -25,6 +26,22 @@ export interface WorktreeEntry {
   hotkeyChar?: string; // Alt+[この文字] でフォーカス
   autoApproval?: boolean;
   autoApprovalPrompt?: string;
+  description?: string; // AIが自動生成する説明（ExitPlanMode hookでプランを要約してセット）
+  descriptionOpen?: boolean; // ホームカードの description 開閉状態（ワークツリー毎）
+  workgroupId?: string; // 所属するワークグループのID（未設定は先頭グループにフォールバック）
+}
+
+// Claude Code の起動モード（taskAddAgent が claudeCode のときのみ意味を持つ）
+export type ClaudeCodeMode = 'plan' | 'manual' | 'acceptEdit' | 'auto';
+
+export interface Workgroup {
+  id: string;
+  name?: string;                    // 未指定時は表示時に「グループ(番号)」を生成
+  color?: string;                   // プリセット色。未指定 = 無色
+  autoAssignHotkey?: boolean;       // ホットキー自動割り当て（グループ単位）
+  taskAddAgent?: AiAgentKind;       // タスク実行エージェント（グループ単位）
+  claudeCodeMode?: ClaudeCodeMode;  // Claude Code モード（既定: plan）
+  execPrompt?: string;              // 実行プロンプトテンプレート（置換タグ {{PROMPT}}）
 }
 
 export interface TerminalSettings {
@@ -51,6 +68,8 @@ export interface HotkeySettings {
   trayNext: HotkeyBinding;      // デフォルト: { ctrl: true, key: "n" }
   homeTab: HotkeyBinding;         // デフォルト: { alt: true, key: "0" }
   addTask: HotkeyBinding;       // デフォルト: { ctrl: true, shift: true, key: "n" }
+  workgroupNext: HotkeyBinding; // デフォルト: { ctrl: true, key: "PageDown" }
+  workgroupPrev: HotkeyBinding; // デフォルト: { ctrl: true, key: "PageUp" }
 }
 
 export type AiAgentKind = 'claudeCode' | 'geminiCli' | 'codexCli' | 'clineCli';
@@ -82,6 +101,7 @@ export interface AppearanceSettings {
   acrylicColor?: string;   // "#RRGGBB", デフォルト: "#121212"
   enableGamingBorder?: boolean; // デフォルト: false
   gamingBorderTheme?: string;   // デフォルト: 'gaming'
+  uiScale?: 'normal' | 'large' | 'xlarge'; // デフォルト: 'normal'
 }
 
 export interface NotificationSoundSettings {
@@ -95,6 +115,8 @@ export interface AppSettings {
   repositories: Repository[];
   worktreeBaseDir: string;
   worktrees: WorktreeEntry[];
+  workgroups?: Workgroup[];
+  activeWorkgroupId?: string; // ホームで選択中のワークグループ
   terminal: TerminalSettings;
   hotkeys: HotkeySettings;
   alwaysOnTop: boolean;
@@ -116,4 +138,5 @@ export interface AppSettings {
   debugMode?: boolean;
   useOretachiTerminalForBackground?: boolean; // AI からの background コマンドを oretachi ターミナルで起動するか (デフォルト: false)
   moveToSubWindowOnMcpSpawn?: boolean; // MCP 経由のターミナル追加時にサブウィンドウへ自動移行するか (デフォルト: false)
+  wizardCompleted?: boolean; // 初回起動ウィザード完了フラグ (Rust 側 init() でシーディング)
 }

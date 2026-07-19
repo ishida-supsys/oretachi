@@ -6,6 +6,187 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.25.2] - 2026-07-14
+
+### Added
+- 「IDEで開く」にファイルエクスプローラーの選択肢を追加 (#100)
+
+### Fixed
+- ファイルエクスプローラーの選択肢をダイアログ末尾に移動 (#100)
+
+## [0.25.1] - 2026-07-13
+
+### Fixed
+- userConfig 非依存化で CC 2.1.207 の通知 hook フォーマットエラーを解消 (#99)
+
+## [0.25.0] - 2026-06-25
+
+### Added
+- 猫ターミナル左下に CPU/メモリ/ネットワーク使用状況を表示
+
+### Fixed
+- メトリクスリスナーのリークを防止
+- ワークグループの追加後続処理が失敗した際にカウントと表示が分裂する問題を解消
+- commit 後の失敗時にタスク中断と MCP 通知の整合性を回復
+
+## [0.24.6] - 2026-06-23
+
+### Fixed
+- アーティファクト一覧にスクロールバーを追加
+- ワークグループ切替時の auto-animate でカードが重複/漏れする問題を解消
+
+## [0.24.5] - 2026-06-20
+
+### Added
+- 通知有りワークツリーを含むワークグループのチップに赤枠を表示
+
+### Fixed
+- 高速切替によるワークツリー分裂を解消
+
+## [0.24.4] - 2026-06-19
+
+### Added
+- ホームタブでワークグループを循環切替するホットキーを追加
+
+### Fixed
+- Windows で `on_before_exit` に kill-on-close 解除を移し、アップデートが不発になる問題を解消
+- MCP 停止を install 後に移し、install 失敗時に MCP が停止したまま残る問題を回避
+
+## [0.24.3] - 2026-06-19
+
+### Fixed
+- tao #1215 による UI スレッド再入デッドロック（ハング）を解消 (#89)
+- PR URL のブランチ名 fetch をやめ、タスク生成のタイムアウトを解消
+
+### Changed
+- フロント `@tauri-apps` を 2.11 系へ揃える (#90)
+
+## [0.24.2] - 2026-06-18
+
+### Added
+- タスク実行ダイアログに追加先ワークグループ選択を追加
+
+### Fixed
+- relaunch 時に Job の kill-on-close を解除し、アップデート時にインストーラを巻き込んで終了する問題を防止 (#88)
+- タスク生成の MCP 設定に認証ヘッダを追加しタイムアウトを解消 (#87)
+
+## [0.24.1] - 2026-06-18
+
+### Fixed
+- ClaudeCode の Auto モードを `bypassPermissions` ではなく `auto` にマッピング (#86)
+
+## [0.24.0] - 2026-06-18
+
+### Added
+- ワークグループ機能を追加。複数のワークツリーをグループとしてまとめて管理できる (#84)
+- `ORETACHI_PLUGIN_OVERWRITE` 環境変数で dev 時の Claude プラグイン上書きを制御できるよう追加 (#85)
+
+### Fixed
+- アプリ終了処理を確実化し、MCP 固定ポートの掴みっぱなしや孤児 WebView2 プロセスを防止
+- Job オブジェクト割当失敗時に Job ハンドルを CloseHandle してリークを防止
+- ホーム画面のワークツリーカードで残留 transform による列ズレ/gap を修正し、FLIP クリーンアップを堅牢化
+- ワークグループの i18n で `{{PROMPT}}` をリテラル補間としてエスケープ
+
+## [0.23.1] - 2026-06-17
+
+### Added
+- メインスレッドハングの真因捕捉計装を追加
+
+### Fixed
+- ホーム画面からのターミナル追加で孤児化・タブ不整合を解消
+- フォアグラウンド追加で背景ペインにタブが紛れ込むのを防止
+- cancel_worktree_remove に breadcrumb 計装を追加
+
+## [0.23.0] - 2026-06-14
+
+### Added
+- タスク追加時のブランチ名パターンをリポジトリ単位で設定可能に (#76)
+- トレイポップアップに description 情報バーを追加 (#77)
+
+### Fixed
+- ブランチ名パターンの構文例を i18n から外し HTML 誤検出を回避
+- description 情報バーの高さを横幅確定後に再計測
+- `ORETACHI_FORCE_WIZARD` が `.env.development.local` で効かない問題を修正
+
+## [0.22.0] - 2026-06-13
+
+### Added
+- 初回起動ウィザードを追加。5ステップ (ウェルカム → 言語・AIエージェント選択 → ワークスペース設定 → ホームタブ説明 → トレイポップアップ説明) のオンボーディングを実装。既存ユーザーはアップグレード時に表示されない (#74)
+- UIスケール設定 (通常/大/特大) を追加。webview ズームでターミナル内テキスト以外の全UIを 1.2倍/1.44倍に拡大可能。ターミナルは xterm fontSize を補正し物理グリフサイズを維持 (#73)
+
+### Fixed
+- ウィザード表示中のアプリ内ホットキー無効化、Esc スキップ廃止、アップデート確認の保留など、ウィザードのバグレビュー指摘を修正
+- UIスケールの実適用ズームを共有し、setZoom 失敗時のターミナル縮小やトレイ過大サイズを防止。トレイポップアップ表示中の uiScale 変更にも追従
+
+## [0.21.5] - 2026-06-11
+
+### Fixed
+- インストーラ/アップデータ経由で起動した際に RedirectionGuard 緩和策が子プロセスへ遺伝し、pnpm install 等のジャンクショントラバースが失敗する問題を修正。起動最初期に検出し explorer.exe 経由で再起動する (#70)
+- 同期 PTY コマンドが tao メインスレッドをブロックし WebView が恒久フリーズしうる問題を解消。pty_write を writer スレッド + キュー化し、pty_spawn/resize/kill を spawn_blocking 化、kill_process_tree にタイムアウトを追加。メインスレッド watchdog も追加
+- ターミナルのロック構造・キュー有界化・resize 順序保証に関するバグレビュー指摘を修正 (入力キューの有界化、kill のロック解放順、resize の直列化、watchdog の時刻基準を Instant に変更)
+- コードレビューのフォルダ展開でロード中の再入により同一ディレクトリが二重フェッチされる問題を防止
+- コードレビューのファイルツリーに gitignore 対象ファイル (.claude/CLAUDE.md 等) が表示されない問題を修正。遅延読み込みに変更し、QuickOpen も .gitignore 記載ファイルを含めるよう変更
+
+## [0.21.4] - 2026-06-10
+
+### Added
+- ワークツリーカードの description をクリックで開閉でき、状態をワークツリー毎に保存するよう変更 (#68)
+
+### Fixed
+- 全表示ON中はカードクリックで開閉状態を書き換えないよう抑止
+- カード名ドラッグ直後の click による description 誤トグルを抑止
+- 表示内容が無いカードのクリックでは description 状態を保存しないよう修正
+
+## [0.21.3] - 2026-06-10
+
+### Fixed
+- PTY 書き込みバッファがオクルージョン時に無制限増大する問題を解消 (#66)
+
+## [0.21.2] - 2026-06-10
+
+### Fixed
+- クロスコンパイル時に target triple でサイドカーをビルドするよう修正 (#65)
+
+## [0.21.1] - 2026-06-10
+
+### Fixed
+- リリースCIを復旧: App.vue で未定義の `debug()` を `logDebug()` に修正し、`vue-tsc --noEmit` の TS2304 ビルド失敗を解消 (#64)
+
+## [0.21.0] - 2026-06-10
+
+### Added
+- ワークツリーの description をカードホバー時に展開表示するエリアを追加 (旧ツールチップ表示から変更)
+- ExitPlanMode フックでプランを要約し description に自動セットする機能を追加
+- description をアーカイブにも保存するよう拡張 (正本は settings.json を維持)
+
+### Changed
+- MCP 通知を独立サイドカー `oretachi-notify` に分離 (#63)
+
+### Fixed
+- description エリアをヘッダー直下に移動し、上下分離アニメーションに変更
+- ExitPlanMode フックを PostToolUse から PermissionRequest に変更
+- description の永続化漏れなど bug-review 指摘事項を修正
+
+## [0.20.3] - 2026-06-08
+
+### Fixed
+- ハングの根本原因となっていた webview 発ロギング IPC を源流から除去 (#59)
+- ログ送出を非 Promise 戻り値に対して耐性化 (bug-review 指摘)
+- plugin level 変更を revert し、webview verbose ログを Debug Mode に連動させるよう修正
+
+### Documentation
+- 現行アップデートに合わせて README の機能一覧を更新
+
+## [0.20.2] - 2026-06-05
+
+### Added
+- ホーム画面のワークツリーカードリストを中央寄せに変更 (余った横スペースを左右均等に配分)
+- ワークツリーカードの1行ターミナル表示を最大2つに制限 (3個目以降は flex-wrap で折り返し)
+
+### Fixed
+- 分割リーフの表示サイズが通知ウィンドウとメインで一致しない問題を修正 (Splitter sizes を永続化し送信 layout と保存済み cols/rows を整合)
+- ハング自動復旧の復旧アクション (reload / WebView 再作成) がアプリ全体をクラッシュさせるため一時無効化 (ping/pong 診断ログは維持)
+
 ## [0.20.1] - 2026-06-04
 
 ### Fixed
@@ -334,7 +515,28 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.20.1...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.25.2...HEAD
+[0.25.2]: https://github.com/ishida-supsys/oretachi/compare/0.25.1...0.25.2
+[0.25.1]: https://github.com/ishida-supsys/oretachi/compare/0.25.0...0.25.1
+[0.25.0]: https://github.com/ishida-supsys/oretachi/compare/0.24.6...0.25.0
+[0.24.6]: https://github.com/ishida-supsys/oretachi/compare/0.24.5...0.24.6
+[0.24.5]: https://github.com/ishida-supsys/oretachi/compare/0.24.4...0.24.5
+[0.24.4]: https://github.com/ishida-supsys/oretachi/compare/0.24.3...0.24.4
+[0.24.3]: https://github.com/ishida-supsys/oretachi/compare/0.24.2...0.24.3
+[0.24.2]: https://github.com/ishida-supsys/oretachi/compare/0.24.1...0.24.2
+[0.24.1]: https://github.com/ishida-supsys/oretachi/compare/0.24.0...0.24.1
+[0.24.0]: https://github.com/ishida-supsys/oretachi/compare/0.23.1...0.24.0
+[0.23.1]: https://github.com/ishida-supsys/oretachi/compare/0.23.0...0.23.1
+[0.23.0]: https://github.com/ishida-supsys/oretachi/compare/0.22.0...0.23.0
+[0.22.0]: https://github.com/ishida-supsys/oretachi/compare/0.21.5...0.22.0
+[0.21.5]: https://github.com/ishida-supsys/oretachi/compare/0.21.4...0.21.5
+[0.21.4]: https://github.com/ishida-supsys/oretachi/compare/0.21.3...0.21.4
+[0.21.3]: https://github.com/ishida-supsys/oretachi/compare/0.21.2...0.21.3
+[0.21.2]: https://github.com/ishida-supsys/oretachi/compare/0.21.1...0.21.2
+[0.21.1]: https://github.com/ishida-supsys/oretachi/compare/0.21.0...0.21.1
+[0.21.0]: https://github.com/ishida-supsys/oretachi/compare/0.20.3...0.21.0
+[0.20.3]: https://github.com/ishida-supsys/oretachi/compare/0.20.2...0.20.3
+[0.20.2]: https://github.com/ishida-supsys/oretachi/compare/0.20.1...0.20.2
 [0.20.1]: https://github.com/ishida-supsys/oretachi/compare/0.20.0...0.20.1
 [0.20.0]: https://github.com/ishida-supsys/oretachi/compare/0.19.10...0.20.0
 [0.19.10]: https://github.com/ishida-supsys/oretachi/compare/0.19.9...0.19.10

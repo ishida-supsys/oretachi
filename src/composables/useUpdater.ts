@@ -1,39 +1,45 @@
 import { ref } from "vue";
 import { check } from "@tauri-apps/plugin-updater";
-import { relaunch } from "@tauri-apps/plugin-process";
-import { error as logError, info } from "@tauri-apps/plugin-log";
+import { logError, logInfo } from "../utils/log";
 import { invoke } from "@tauri-apps/api/core";
 
 export function useUpdater() {
   const isChecking = ref(false);
   const isDownloading = ref(false);
 
+  // 更新なしは null を返す。確認自体に失敗した場合は例外を投げ、呼び出し側で表示する。
   async function checkForUpdate() {
     if (isChecking.value) return null;
     isChecking.value = true;
     try {
       const update = await check();
       if (update) {
-        await info(`アップデート利用可能: ${update.version}`);
+        logInfo(`アップデート利用可能: ${update.version}`);
         return update;
       }
+      return null;
     } catch (e) {
-      await logError(`アップデート確認エラー: ${e}`);
+      logError(`アップデート確認エラー: ${e}`);
+      throw e;
     } finally {
       isChecking.value = false;
     }
-    return null;
   }
 
+  // 失敗時は例外を投げ、呼び出し側で表示する（従来は無反応だった）。
   async function downloadAndInstall(update: Awaited<ReturnType<typeof check>>) {
     if (!update) return;
     isDownloading.value = true;
     try {
-      await update.downloadAndInstall();
-      await invoke("prepare_for_relaunch");
-      await relaunch();
+      // チェック・ダウンロード・インストールを Rust 側コマンドで実施する。
+      // Windows ではインストーラ起動直前に Job の KILL_ON_JOB_CLOSE を解除する
+      // 必要があり、プラグインの downloadAndInstall では process::exit され
+      // JS に戻らないためフックを差し込めない（巻き込み終了でアップデート不発）。
+      await invoke("download_and_install_update");
+      // Windows ではプロセスが置き換わるためここに戻らない。
     } catch (e) {
-      await logError(`アップデートインストールエラー: ${e}`);
+      logError(`アップデートインストールエラー: ${e}`);
+      throw e;
     } finally {
       isDownloading.value = false;
     }

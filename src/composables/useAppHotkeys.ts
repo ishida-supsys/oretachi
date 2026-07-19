@@ -23,7 +23,11 @@ interface UseAppHotkeysDeps {
   ) => Promise<void>;
   showAddTaskDialog: Ref<boolean>;
   goHome: () => void;
+  cycleWorkgroup: (delta: number) => void;
+  syncWorktreesFromSettings?: () => void;
   onTrayButtonClick: () => Promise<void>;
+  /** true の間はアプリ内ホットキーを無効化する (初回起動ウィザード表示中など) */
+  suppressed?: Ref<boolean>;
 }
 
 export function useAppHotkeys(deps: UseAppHotkeysDeps) {
@@ -68,6 +72,7 @@ export function useAppHotkeys(deps: UseAppHotkeysDeps) {
 
   // Alt+[char] ワークツリーフォーカス（setup時登録）
   useAltCharKeyListener((char, event) => {
+    if (deps.suppressed?.value) return;
     const homeTabBinding = deps.settings.value.hotkeys?.homeTab;
     if (homeTabBinding) {
       const { alt, key } = homeTabBinding;
@@ -85,6 +90,7 @@ export function useAppHotkeys(deps: UseAppHotkeysDeps) {
 
   // ホットキーリスナー登録（setup時）
   useHotkeyListener(() => {
+    if (deps.suppressed?.value) return [];
     const hk = deps.settings.value.hotkeys;
     if (!hk) return [];
 
@@ -133,14 +139,29 @@ export function useAppHotkeys(deps: UseAppHotkeysDeps) {
       });
     }
 
+    // ワークグループ切替はホーム表示時のみ有効（非ホーム時はキーを横取りしない）
+    if (deps.viewMode.value === "home") {
+      if (hk.workgroupNext) {
+        actions.push({ binding: hk.workgroupNext, handler: () => deps.cycleWorkgroup(1) });
+      }
+      if (hk.workgroupPrev) {
+        actions.push({ binding: hk.workgroupPrev, handler: () => deps.cycleWorkgroup(-1) });
+      }
+    }
+
     return actions;
   });
 
   async function init() {
     await registerGlobalShortcut();
 
-    await listen("settings-changed", async () => {
+    await listen<{ source?: string } | null>("settings-changed", async (event) => {
+      // 自ウィンドウの保存に由来する settings-changed は無視する。
+      // 自分の保存で自分が再ロードすると、in-memory 変更を巻き戻す lost update や
+      // ランタイム配列との乖離（ワークツリー分裂）が起きるため。
+      if (event.payload?.source === getCurrentWindow().label) return;
       await deps.loadSettings();
+      deps.syncWorktreesFromSettings?.();
       await getCurrentWindow().setAlwaysOnTop(deps.settings.value.alwaysOnTop);
       await registerGlobalShortcut();
     });

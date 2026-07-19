@@ -14,6 +14,9 @@ export default {
     clear: 'クリア',
     notConfigured: '未設定',
   },
+  workgroup: {
+    autoName: 'グループ({n})',
+  },
   search: {
     noResults: '0件',
     results: '{count}件',
@@ -27,6 +30,8 @@ export default {
   update: {
     title: 'oretachi アップデート',
     available: '新しいバージョン {version} が利用可能です。今すぐ更新しますか？',
+    checkFailed: 'アップデートの確認に失敗しました。\n{error}',
+    installFailed: 'アップデートのインストールに失敗しました。\n{error}',
   },
   about: {
     label: 'バージョン情報',

@@ -1,9 +1,12 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
 import type { Worktree } from "../types/worktree";
+import type { Workgroup } from "../types/settings";
 import { useI18n } from "vue-i18n";
+import { useWorkgroups } from "../composables/useWorkgroups";
 
 const { t } = useI18n();
+const { displayName: workgroupDisplayName } = useWorkgroups();
 import TerminalThumbnail from "./TerminalThumbnail.vue";
 import Popover from "primevue/popover";
 import Badge from "primevue/badge";
@@ -20,6 +23,10 @@ const props = defineProps<{
   cancellable?: boolean;
   autoApproval?: boolean;
   aiJudging?: boolean;
+  tooltip?: string;
+  descriptionOpen?: boolean;
+  workgroups?: Workgroup[];
+  currentWorkgroupId?: string;
 }>();
 
 const emit = defineEmits<{
@@ -38,12 +45,52 @@ const emit = defineEmits<{
   cancelAiJudging: [worktreeId: string];
   openArtifacts: [worktreeId: string];
   duplicateWorktree: [worktreeId: string];
+  toggleDescription: [worktreeId: string];
+  moveToWorkgroup: [payload: { worktreeId: string; groupId: string }];
 }>();
 
+// ドラッグ（カード名のD&D並べ替え）直後に発火しうる click を1回だけ無視するためのフラグ。
+// Chromium は通常 drag 後に click を出さないが、ブラウザ差異に備えてガードする。
+let suppressNextClick = false;
+
+function onNameDragStart(event: DragEvent) {
+  suppressNextClick = true;
+  emit("dragStart", props.worktree.id, event);
+}
+
+function onNameDragEnd() {
+  emit("dragEnd");
+  // click が来なかった場合にフラグが残り続けないよう、次のタスクで解除する
+  setTimeout(() => {
+    suppressNextClick = false;
+  }, 0);
+}
+
+// ボタン類・ターミナルサムネイル領域以外のクリックで description を開閉する
+function onCardClick(event: MouseEvent) {
+  if (suppressNextClick) {
+    suppressNextClick = false;
+    return;
+  }
+  const target = event.target as HTMLElement;
+  if (target.closest("button, .terminals-row")) return;
+  // 表示する内容（description / タスク一覧）が無いカードはトグル対象外（無意味な永続化を防ぐ）
+  if (!props.tooltip) return;
+  emit("toggleDescription", props.worktree.id);
+}
+
 const menuRef = ref<InstanceType<typeof Popover> | null>(null);
+const showGroupMenu = ref(false);
 
 function openMenu(event: MouseEvent) {
+  showGroupMenu.value = false;
   menuRef.value?.toggle(event);
+}
+
+function onMoveToWorkgroup(groupId: string) {
+  showGroupMenu.value = false;
+  menuRef.value?.hide();
+  emit("moveToWorkgroup", { worktreeId: props.worktree.id, groupId });
 }
 
 function onMoveWindow() {
@@ -93,7 +140,7 @@ const terminalList = computed(() =>
 </script>
 
 <template>
-  <div class="worktree-card" :class="{ 'card-detached': detached, 'card-notified': notificationCount && notificationCount > 0 }">
+  <div class="worktree-card" :class="{ 'card-detached': detached, 'card-notified': notificationCount && notificationCount > 0 }" @click="onCardClick">
     <Badge v-if="notificationCount && notificationCount > 0" :value="notificationCount" severity="danger" class="notification-badge" />
     <div v-if="hotkeyChar || (artifactCount && artifactCount > 0)" class="top-left-badges">
       <div v-if="hotkeyChar" class="hotkey-badge">Alt+{{ hotkeyChar }}</div>
@@ -107,8 +154,8 @@ const terminalList = computed(() =>
         <span
           class="card-name"
           draggable="true"
-          @dragstart.stop="$emit('dragStart', worktree.id, $event)"
-          @dragend.stop="$emit('dragEnd')"
+          @dragstart.stop="onNameDragStart($event)"
+          @dragend.stop="onNameDragEnd()"
         >{{ worktree.name }}</span>
         <span class="card-branch">{{ worktree.branchName }}</span>
         <span v-if="detached" class="card-detached-badge">{{ t('subWindowBadge') }}</span>
@@ -141,6 +188,13 @@ const terminalList = computed(() =>
           :disabled="loading"
           @click="openMenu($event)"
         ><span class="pi pi-ellipsis-v" /></button>
+      </div>
+    </div>
+
+    <!-- クリックでヘッダー直下に開く description エリア (description優先・なければタスク一覧) -->
+    <div v-if="tooltip" class="card-desc-wrap" :class="{ 'desc-open': descriptionOpen }">
+      <div class="card-desc">
+        <div class="card-desc-inner" v-html="tooltip" />
       </div>
     </div>
 
@@ -186,6 +240,28 @@ const terminalList = computed(() =>
           <span class="pi pi-copy" />
           {{ t('menu.duplicate') }}
         </button>
+        <button
+          v-if="workgroups && workgroups.length > 0"
+          class="popup-item"
+          :disabled="loading"
+          @click="showGroupMenu = !showGroupMenu"
+        >
+          <span class="pi pi-folder" />
+          {{ t('menu.moveToWorkgroup') }}
+          <span :class="showGroupMenu ? 'pi pi-angle-down' : 'pi pi-angle-right'" style="margin-left: auto" />
+        </button>
+        <div v-if="showGroupMenu" class="popup-submenu">
+          <button
+            v-for="g in workgroups"
+            :key="g.id"
+            class="popup-item popup-subitem"
+            @click="onMoveToWorkgroup(g.id)"
+          >
+            <span class="group-dot" :style="{ background: g.color || '#9399b2' }" />
+            {{ workgroupDisplayName(g) }}
+            <span v-if="g.id === currentWorkgroupId" class="pi pi-check" style="margin-left: auto; color: var(--p-green-400)" />
+          </button>
+        </div>
         <div class="popup-divider" />
         <button class="popup-item popup-item-danger" :disabled="loading" @click="onDelete">
           <span class="pi pi-trash" />
@@ -365,6 +441,32 @@ const terminalList = computed(() =>
   padding: 4px 0;
 }
 
+/* クリックで開く description エリア: grid-template-rows 0fr→1fr で高さauto をアニメーション */
+.card-desc-wrap {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.25s ease;
+}
+
+.card-desc-wrap.desc-open {
+  grid-template-rows: 1fr;
+}
+
+.card-desc {
+  overflow: hidden;
+  min-height: 0;
+}
+
+.card-desc-inner {
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid #313244;
+  font-size: 11px;
+  line-height: 1.5;
+  color: #a6adc8;
+  word-break: break-word;
+}
+
 .popup-menu {
   display: flex;
   flex-direction: column;
@@ -402,6 +504,27 @@ const terminalList = computed(() =>
   height: 1px;
   background: var(--p-content-border-color);
   margin: 4px 0;
+}
+
+.popup-submenu {
+  display: flex;
+  flex-direction: column;
+  border-left: 2px solid var(--p-content-border-color);
+  margin-left: 10px;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.popup-subitem {
+  font-size: 12px;
+  padding-left: 10px;
+}
+
+.group-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
 }
 
 .loading-overlay {
@@ -462,6 +585,7 @@ const terminalList = computed(() =>
       "moveToSubWindow": "Move to sub window",
       "moveToMainWindow": "Move to main window",
       "duplicate": "Duplicate",
+      "moveToWorkgroup": "Move to group",
       "delete": "Delete"
     }
   },
@@ -482,6 +606,7 @@ const terminalList = computed(() =>
       "moveToSubWindow": "サブウィンドウに移動",
       "moveToMainWindow": "メインウィンドウに戻す",
       "duplicate": "複製",
+      "moveToWorkgroup": "グループ移動",
       "delete": "削除"
     }
   }

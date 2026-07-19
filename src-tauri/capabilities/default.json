@@ -6,6 +6,7 @@
   "permissions": [
     "core:default",
     "core:webview:allow-create-webview-window",
+    "core:webview:allow-set-webview-zoom",
     "core:window:allow-create",
     "core:window:allow-set-focus",
     "core:window:allow-set-always-on-top",
@@ -20,7 +21,6 @@
     "clipboard-manager:allow-read-text",
     "dialog:default",
     "log:default",
-    "cli:default",
     "global-shortcut:allow-register",
     "global-shortcut:allow-unregister",
     "global-shortcut:allow-is-registered",

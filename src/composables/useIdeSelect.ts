@@ -11,6 +11,12 @@ export const CODE_REVIEWER_IDE: IdeInfo = {
   command: "",
 };
 
+export const FILE_EXPLORER_IDE: IdeInfo = {
+  id: "file-explorer",
+  name: "File Explorer", // 実表示は IdeSelectDialog 側で OS 依存に出し分け
+  command: "",
+};
+
 export interface IdeSelectOptions {
   /** worktreeId を渡す（Code Reviewer ウィンドウ識別に使用） */
   worktreeId?: string;
@@ -34,8 +40,8 @@ export function useIdeSelect() {
   async function openInIde(path: string, options: IdeSelectOptions = {}): Promise<void> {
     const ides = await invoke<IdeInfo[]>("detect_ides");
 
-    // 実IDE + Code Reviewer をダイアログで選択させる（Code Reviewer は末尾）
-    detectedIdes.value = [...ides, CODE_REVIEWER_IDE];
+    // 実IDE + Code Reviewer + ファイルエクスプローラー（末尾）をダイアログで選択させる
+    detectedIdes.value = [...ides, CODE_REVIEWER_IDE, FILE_EXPLORER_IDE];
     ideTargetPath.value = path;
     ideTargetOptions.value = options;
     showIdeDialog.value = true;
@@ -51,6 +57,15 @@ export function useIdeSelect() {
         ideTargetPath.value,
         ideTargetOptions.value.origin,
       );
+      return;
+    }
+
+    if (ide.id === "file-explorer") {
+      try {
+        await invoke("open_in_file_explorer", { path: ideTargetPath.value });
+      } catch (e) {
+        await message(`ファイルエクスプローラーの起動に失敗しました: ${e}`, { kind: "error" });
+      }
       return;
     }
 

@@ -9,10 +9,12 @@ import { useUpdater } from "../composables/useUpdater";
 import ColorPicker from "primevue/colorpicker";
 import Password from "primevue/password";
 import type { AiAgentKind } from "../types/settings";
+import { AI_AGENT_LABELS, ALL_AGENT_KINDS, type AiAgentInfo } from "../constants/aiAgents";
 import { useI18n } from "vue-i18n";
 import { setLocale } from "../i18n";
 import { useToast } from "primevue/usetoast";
 import { playNotificationSound } from "../utils/notificationSound";
+import { applyUiZoom } from "../composables/useUiZoom";
 import type { NotificationKind } from "../composables/useNotifications";
 import SettingsHotkeySection from "./settings/SettingsHotkeySection.vue";
 import SettingsRepositoriesSection from "./settings/SettingsRepositoriesSection.vue";
@@ -30,35 +32,47 @@ async function onDebugModeChange(enabled: boolean) {
   await invoke("set_debug_mode", { enabled });
 }
 
+async function onUiScaleChange(value: string) {
+  if (!settings.value.appearance) settings.value.appearance = {};
+  settings.value.appearance.uiScale = value === "large" || value === "xlarge" ? value : "normal";
+  scheduleSave();
+  // scheduleSave は 500ms デバウンスのため、自ウィンドウは即時反映する
+  // (他ウィンドウは settings-changed 経由で main.ts のリスナーが追従)
+  await applyUiZoom(settings.value);
+}
+
 async function onCheckUpdate() {
-  const update = await checkForUpdate();
+  let update: Awaited<ReturnType<typeof checkForUpdate>>;
+  try {
+    update = await checkForUpdate();
+  } catch (e) {
+    await message(t("update.checkFailed", { error: String(e) }), {
+      title: t("update.title"),
+      kind: "error",
+    });
+    return;
+  }
   if (update) {
     const yes = await ask(
       t("update.available", { version: update.version }),
       { title: t("update.title"), kind: "info" }
     );
-    if (yes) await downloadAndInstall(update);
+    if (yes) {
+      try {
+        await downloadAndInstall(update);
+      } catch (e) {
+        await message(t("update.installFailed", { error: String(e) }), {
+          title: t("update.title"),
+          kind: "error",
+        });
+      }
+    }
   } else {
     await message(t("about.upToDate"), { title: t("update.title"), kind: "info" });
   }
 }
 
 // ─── AIエージェント ───────────────────────────────────────────────────────────
-
-interface AiAgentInfo {
-  kind: AiAgentKind;
-  name: string;
-  command: string;
-}
-
-const AI_AGENT_LABELS: Record<AiAgentKind, string> = {
-  claudeCode: "Claude Code",
-  geminiCli: "Gemini CLI",
-  codexCli: "Codex CLI",
-  clineCli: "Cline CLI",
-};
-
-const ALL_AGENT_KINDS: AiAgentKind[] = ["claudeCode", "geminiCli", "codexCli", "clineCli"];
 
 const detectedAgents = ref<AiAgentInfo[]>([]);
 
@@ -436,27 +450,7 @@ function getSoundLabel(sound: string | null | undefined): string {
           >{{ AI_AGENT_LABELS[kind] }}{{ !isAgentDetected(kind) ? t('autoApproval.notDetected') : '' }}</option>
         </select>
       </div>
-      <div class="row-input row-input--inline mt-8">
-        <span class="inline-label">{{ t('autoApproval.taskAddAgent') }}</span>
-        <select
-          class="text-input select-input"
-          :value="settings.aiAgent?.taskAddAgent ?? ''"
-          @change="(e) => {
-            const v = (e.target as HTMLSelectElement).value;
-            if (!settings.aiAgent) settings.aiAgent = {};
-            settings.aiAgent.taskAddAgent = v ? (v as AiAgentKind) : undefined;
-            scheduleSave();
-          }"
-        >
-          <option value="">{{ t('autoApproval.notSet') }}</option>
-          <option
-            v-for="kind in ALL_AGENT_KINDS"
-            :key="kind"
-            :value="kind"
-            :disabled="!isAgentDetected(kind)"
-          >{{ AI_AGENT_LABELS[kind] }}{{ !isAgentDetected(kind) ? t('autoApproval.notDetected') : '' }}</option>
-        </select>
-      </div>
+      <!-- 「タスク実行エージェント」はワークグループ単位に移動 -->
       <div class="row-input row-input--inline mt-8">
         <span class="inline-label">{{ t('autoApproval.aiTimeout') }}</span>
         <input
@@ -680,6 +674,18 @@ function getSoundLabel(sound: string | null | undefined): string {
           }"
         >
           <option v-for="theme in gamingBorderThemes" :key="theme.value" :value="theme.value">{{ t(theme.labelKey) }}</option>
+        </select>
+      </div>
+      <div class="row-input mt-8">
+        <label class="row-label">{{ t('appearance.uiScale') }}</label>
+        <select
+          class="text-input select-input"
+          :value="settings.appearance?.uiScale ?? 'normal'"
+          @change="(e) => onUiScaleChange((e.target as HTMLSelectElement).value)"
+        >
+          <option value="normal">{{ t('appearance.uiScaleNormal') }}</option>
+          <option value="large">{{ t('appearance.uiScaleLarge') }}</option>
+          <option value="xlarge">{{ t('appearance.uiScaleXLarge') }}</option>
         </select>
       </div>
     </div>
@@ -1220,7 +1226,11 @@ function getSoundLabel(sound: string | null | undefined): string {
       },
       "restartNote": "Enabling/disabling the effect requires restarting the app.",
       "opacity": "Opacity",
-      "color": "Tint color"
+      "color": "Tint color",
+      "uiScale": "UI scale",
+      "uiScaleNormal": "Normal",
+      "uiScaleLarge": "Large",
+      "uiScaleXLarge": "Extra Large"
     },
     "notificationSound": {
       "label": "Notification Sound",
@@ -1325,7 +1335,11 @@ function getSoundLabel(sound: string | null | undefined): string {
       },
       "restartNote": "エフェクトの有効/無効はアプリ再起動後に反映されます。",
       "opacity": "不透明度",
-      "color": "背景色"
+      "color": "背景色",
+      "uiScale": "UIスケール",
+      "uiScaleNormal": "通常",
+      "uiScaleLarge": "大",
+      "uiScaleXLarge": "特大"
     },
     "notificationSound": {
       "label": "通知音",

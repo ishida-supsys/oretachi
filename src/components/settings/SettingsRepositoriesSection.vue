@@ -1,8 +1,8 @@
 <script setup lang="ts">
-import { invoke } from "@tauri-apps/api/core";
 import { open, message } from "@tauri-apps/plugin-dialog";
 import { useI18n } from "vue-i18n";
 import { useSettings } from "../../composables/useSettings";
+import { useRepositoryActions } from "../../composables/useRepositoryActions";
 import { usePostAddSettings } from "../../composables/usePostAddSettings";
 import PostAddSettingsDialog from "../PostAddSettingsDialog.vue";
 
@@ -16,38 +16,20 @@ const {
   copyDialogCurrentPMArgs,
   copyDialogCurrentHooks,
   copyDialogCurrentPullBeforeAdd,
+  copyDialogCurrentBranchNamePattern,
   openCopyDialog,
   onDialogConfirm,
 } = usePostAddSettings();
 
+const { addRepository: addRepositoryAction } = useRepositoryActions();
+
 async function addRepository() {
-  const selected = await open({ directory: true, multiple: false });
-  if (typeof selected !== "string") return;
-
-  try {
-    const valid = await invoke<boolean>("git_validate_repo", { path: selected });
-    if (!valid) {
-      await message(t("error.notARepo"), { kind: "error" });
-      return;
-    }
-  } catch {
+  const result = await addRepositoryAction();
+  if (result === "notARepo") {
     await message(t("error.notARepo"), { kind: "error" });
-    return;
-  }
-
-  const name = selected.split(/[/\\]/).pop() ?? selected;
-
-  if (settings.value.repositories.some((r) => r.path === selected)) {
+  } else if (result === "alreadyRegistered") {
     await message(t("error.alreadyRegistered"), { kind: "warning" });
-    return;
   }
-
-  settings.value.repositories.push({
-    id: selected,
-    name,
-    path: selected,
-  });
-  scheduleSave();
 }
 
 function removeRepository(id: string) {
@@ -167,6 +149,7 @@ function clearExecScript(repoId: string) {
     :current-package-manager-args="copyDialogCurrentPMArgs"
     :current-notification-hooks="copyDialogCurrentHooks"
     :current-pull-before-add="copyDialogCurrentPullBeforeAdd"
+    :current-branch-name-pattern="copyDialogCurrentBranchNamePattern"
     @confirm="onDialogConfirm"
     @cancel="showCopyDialog = false"
   />

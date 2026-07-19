@@ -22,7 +22,9 @@
 - **Code Reviewer** — Built-in diff viewer with file tree and commit history display
 - **Sub-windows** — Detach any worktree into an independent window
 - **Notification system** — Send notifications to worktrees via MCP or REST API; tray popup shows unread count
-- **Built-in MCP Server** — Streamable HTTP MCP protocol server, provides repository and worktree information, usable directly from AI agents
+- **Built-in MCP Server** — Streamable HTTP MCP server that lets AI agents drive oretachi directly: control terminals (spawn / read / write / kill long-running dev servers & watchers), manage tasks and worktrees (add task, close worktree, query status, repositories, and app options), send notifications, and create artifacts
+- **Artifacts** — AI agents can generate and edit React / Markdown / HTML / SVG / Mermaid artifacts (domain-model diagrams, wireframes, and more) and preview them live in a dedicated viewer window
+- **Claude Code plugin & skills** — Auto-generate a Claude Code plugin (`.mcp.json`, hooks, skills) per worktree, bundling the `domain-model-diagram`, `wireframe`, and `background-command` custom skills
 - **Hotkeys** — `Alt`+key to instantly focus any worktree, auto-assignment on worktree creation, fully customizable key bindings
 - **IDE integration** — Auto-detect Cursor, VS Code, and Antigravity; built-in CodeReviewer also available
 

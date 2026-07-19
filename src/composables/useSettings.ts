@@ -1,10 +1,12 @@
-import { ref } from "vue";
+import { ref, watch } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { emit } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { error } from "@tauri-apps/plugin-log";
 import { platform } from "@tauri-apps/plugin-os";
-import type { AppSettings, HotkeyBinding, HotkeySettings } from "../types/settings";
+import type { AppSettings, HotkeyBinding, HotkeySettings, Workgroup } from "../types/settings";
 import { setLocale } from "../i18n";
+import { setVerboseLogging } from "../utils/log";
 
 const isMac = platform() === "macos";
 
@@ -17,6 +19,8 @@ const defaultHotkeys = () => ({
   trayNext: isMac ? { meta: true, key: "n" } : { ctrl: true, key: "n" },
   homeTab: { alt: true, key: "0" },
   addTask: isMac ? { meta: true, shift: true, key: "n" } : { ctrl: true, shift: true, key: "n" },
+  workgroupNext: { ctrl: true, key: "PageDown" },
+  workgroupPrev: { ctrl: true, key: "PageUp" },
 });
 
 function migrateHotkeys(hotkeys: HotkeySettings): boolean {
@@ -55,6 +59,44 @@ function migrateHotkeys(hotkeys: HotkeySettings): boolean {
   return changed;
 }
 
+/**
+ * ワークグループ移行 (冪等):
+ * 1. グループが無ければデフォルトグループを1件作成し、旧グローバル設定を引き継ぐ
+ * 2. workgroupId 未設定 or 不明なグループを指すワークツリーを先頭グループへ割り当て
+ * 3. activeWorkgroupId を補完
+ * 変更があれば true を返す。
+ */
+function migrateWorkgroups(loaded: AppSettings): boolean {
+  let changed = false;
+
+  if (!loaded.workgroups || loaded.workgroups.length === 0) {
+    const defaultGroup: Workgroup = {
+      id: `wg-default-${Date.now()}`,
+      autoAssignHotkey: loaded.autoAssignHotkey ?? false,
+      taskAddAgent: loaded.aiAgent?.taskAddAgent,
+      claudeCodeMode: "plan",
+    };
+    loaded.workgroups = [defaultGroup];
+    changed = true;
+  }
+
+  const groupIds = new Set(loaded.workgroups.map((g) => g.id));
+  const firstId = loaded.workgroups[0].id;
+  for (const wt of loaded.worktrees) {
+    if (!wt.workgroupId || !groupIds.has(wt.workgroupId)) {
+      wt.workgroupId = firstId;
+      changed = true;
+    }
+  }
+
+  if (!loaded.activeWorkgroupId || !groupIds.has(loaded.activeWorkgroupId)) {
+    loaded.activeWorkgroupId = firstId;
+    changed = true;
+  }
+
+  return changed;
+}
+
 const settings = ref<AppSettings>({
   repositories: [],
   worktreeBaseDir: "",
@@ -64,9 +106,18 @@ const settings = ref<AppSettings>({
   alwaysOnTop: false,
 });
 
+// Debug Mode (settings.debugMode) を webview 側の詳細ログ override に連動させる。
+// 起動時のロード・設定タブでのトグル変更の双方でこの watch が発火する。
+// (dev ビルドでは log.ts 側で常に verbose 扱いのため override の値に関わらず詳細ログは出る)
+watch(
+  () => settings.value.debugMode,
+  (enabled) => setVerboseLogging(enabled === true),
+  { immediate: true },
+);
+
 let saveTimer: ReturnType<typeof setTimeout> | null = null;
 
-async function loadSettings() {
+async function loadSettingsOnce() {
   const loaded = await invoke<AppSettings>("get_settings");
   // 古い設定ファイルに hotkeys がない場合のデフォルト補完
   if (!loaded.hotkeys) {
@@ -82,8 +133,10 @@ async function loadSettings() {
   if (loaded.alwaysOnTop === undefined) {
     loaded.alwaysOnTop = false;
   }
-  // ホットキーマイグレーション (冪等)
-  if (migrateHotkeys(loaded.hotkeys)) {
+  // ホットキー・ワークグループ マイグレーション (冪等)
+  const hotkeyChanged = migrateHotkeys(loaded.hotkeys);
+  const workgroupChanged = migrateWorkgroups(loaded);
+  if (hotkeyChanged || workgroupChanged) {
     try {
       await invoke("save_settings", { settings: loaded });
     } catch (e) {
@@ -96,12 +149,40 @@ async function loadSettings() {
   settings.value = loaded;
 }
 
+// 再入防止 (coalescing): 実行中に再度呼ばれたら 1 回だけ追加実行する。
+// settings-changed の連続発火で loadSettings が並行起動し、get_settings の
+// 戻り順前後で古い内容が新しい内容を上書きする競合を構造的に排除する。
+let loadInflight: Promise<void> | null = null;
+let loadRerun = false;
+
+async function loadSettings(): Promise<void> {
+  if (loadInflight) {
+    loadRerun = true;
+    return loadInflight;
+  }
+  loadInflight = (async () => {
+    do {
+      loadRerun = false;
+      try {
+        await loadSettingsOnce();
+      } catch (e) {
+        // get_settings 失敗時も rerun を取りこぼさず、呼び出し側に reject を
+        // 伝播させない（リスナーの後続処理が止まらないようにする）。
+        console.error("設定の読み込みに失敗:", e);
+      }
+    } while (loadRerun);
+  })().finally(() => {
+    loadInflight = null;
+  });
+  return loadInflight;
+}
+
 function scheduleSave() {
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(async () => {
     try {
       await invoke("save_settings", { settings: settings.value });
-      await emit("settings-changed");
+      await emit("settings-changed", { source: getCurrentWindow().label });
     } catch (e) {
       console.error("設定の保存に失敗:", e);
     }
@@ -115,7 +196,7 @@ async function flushSave() {
   }
   try {
     await invoke("save_settings", { settings: settings.value });
-    await emit("settings-changed");
+    await emit("settings-changed", { source: getCurrentWindow().label });
   } catch (e) {
     error(`設定の保存に失敗: ${e}`);
   }

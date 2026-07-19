@@ -1,4 +1,5 @@
 mod ai_commit_message;
+mod ai_description;
 mod ai_judge;
 mod ai_provider;
 mod archive_db;
@@ -7,11 +8,14 @@ mod claude_plugin_skills;
 mod fs_watcher;
 mod git_worktree;
 mod ide_launcher;
+mod job_object;
+mod main_thread_watch;
 pub mod mcp_server;
 mod process_utils;
 mod pty_manager;
 mod report_db;
 mod settings;
+mod system_metrics;
 mod task_db;
 mod task_executor;
 mod terminal_session;
@@ -19,10 +23,14 @@ mod terminal_session;
 #[cfg(target_os = "windows")]
 mod acrylic;
 
+#[cfg(target_os = "windows")]
+mod redirection_guard;
+
 use fs_watcher::FsWatcherManager;
 use process_utils::WorktreeRemoveManager;
 use pty_manager::{AiAgentChangedPayload, PtyManager};
 use settings::{AppSettings, SettingsManager};
+use system_metrics::SystemMetricsState;
 use tauri::{Emitter, Listener, Manager, State};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
@@ -50,33 +58,50 @@ fn artifacts_dir(
 // ─── PTY コマンド ────────────────────────────────────────────────────────────
 
 #[tauri::command]
-fn pty_spawn(
+async fn pty_spawn(
     app_handle: tauri::AppHandle,
-    state: State<PtyManager>,
+    state: State<'_, PtyManager>,
     rows: u16,
     cols: u16,
     shell: Option<String>,
     cwd: Option<String>,
 ) -> Result<u32, String> {
     log::debug!("[Terminal] cmd::pty_spawn rows={} cols={} shell={:?} cwd={:?}", rows, cols, shell, cwd);
-    state.spawn(app_handle, rows, cols, shell, cwd)
+    // ConPTY 生成 + プロセス spawn はブロッキング I/O のため spawn_blocking で実行し、
+    // 同期コマンドとしてメインスレッド (WebView2 UI スレッド) を塞がないようにする。
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.spawn(app_handle, rows, cols, shell, cwd))
+        .await
+        .map_err(|e| format!("spawn_blocking join error: {}", e))?
 }
 
+// pty_write は enqueue のみで非ブロッキング (実 I/O はセッション毎の writer スレッド)。
+// 同期コマンドのままにすることで、メインスレッド上の実行順 = チャネル投入順となり
+// キー入力の順序が保証される (async 化すると並列実行で順序が壊れうる)。
 #[tauri::command]
 fn pty_write(state: State<PtyManager>, session_id: u32, data: Vec<u8>) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::PtyWrite);
     state.write(session_id, data)
 }
 
 #[tauri::command]
-fn pty_resize(state: State<PtyManager>, session_id: u32, rows: u16, cols: u16) -> Result<(), String> {
+async fn pty_resize(state: State<'_, PtyManager>, session_id: u32, rows: u16, cols: u16) -> Result<(), String> {
     log::debug!("[Terminal] cmd::pty_resize session_id={} rows={} cols={}", session_id, rows, cols);
-    state.resize(session_id, rows, cols)
+    // ConPTY の resize は conhost への RPC でブロックしうるため spawn_blocking で実行
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.resize(session_id, rows, cols))
+        .await
+        .map_err(|e| format!("spawn_blocking join error: {}", e))?
 }
 
 #[tauri::command]
-fn pty_kill(state: State<PtyManager>, session_id: u32) -> Result<(), String> {
+async fn pty_kill(state: State<'_, PtyManager>, session_id: u32) -> Result<(), String> {
     log::info!("[Terminal] cmd::pty_kill session_id={} source=webview-invoke", session_id);
-    state.kill(session_id, "webview-invoke")
+    // taskkill /F /T は数秒かかることがあるため spawn_blocking で実行
+    let manager = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || manager.kill(session_id, "webview-invoke"))
+        .await
+        .map_err(|e| format!("spawn_blocking join error: {}", e))?
 }
 
 #[tauri::command]
@@ -86,6 +111,7 @@ fn pty_set_ai_agent(
     session_id: u32,
     is_agent: bool,
 ) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::PtySetAiAgent);
     state.set_ai_agent(session_id, is_agent)?;
     let mut sessions = std::collections::HashMap::new();
     sessions.insert(session_id, pty_manager::AiAgentInfo {
@@ -99,6 +125,7 @@ fn pty_set_ai_agent(
 
 #[tauri::command]
 fn pty_is_ai_agent(state: State<PtyManager>, session_id: u32) -> Result<bool, String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::PtyIsAiAgent);
     state.is_ai_agent(session_id)
 }
 
@@ -106,16 +133,19 @@ fn pty_is_ai_agent(state: State<PtyManager>, session_id: u32) -> Result<bool, St
 
 #[tauri::command]
 fn get_settings(state: State<SettingsManager>) -> AppSettings {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::GetSettings);
     state.get()
 }
 
 #[tauri::command]
 fn save_settings(state: State<SettingsManager>, settings: AppSettings) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::SaveSettings);
     state.save(settings)
 }
 
 #[tauri::command]
 fn apply_acrylic_effect(app_handle: tauri::AppHandle, r: u8, g: u8, b: u8, a: u8) {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::ApplyAcrylic);
     #[cfg(target_os = "windows")]
     {
         for (_, window) in app_handle.webview_windows() {
@@ -174,7 +204,14 @@ async fn git_worktree_remove(
     worktree_path: String,
 ) -> Result<(), String> {
     // 削除対象ディレクトリをcwdとして掴んでいるPTYセッションを先にkill
-    let killed = pty_manager.kill_sessions_in_dir(&worktree_path);
+    // (taskkill 最大10秒 + watcher join を含むため tokio ワーカーを塞がないよう spawn_blocking)
+    let killed = {
+        let manager = pty_manager.inner().clone();
+        let dir = worktree_path.clone();
+        tauri::async_runtime::spawn_blocking(move || manager.kill_sessions_in_dir(&dir))
+            .await
+            .map_err(|e| format!("spawn_blocking join error: {}", e))?
+    };
     if killed > 0 {
         // プロセスが完全に終了してファイルハンドルを解放するまで待機
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -221,6 +258,7 @@ fn cancel_worktree_remove(
     remove_manager: State<'_, WorktreeRemoveManager>,
     worktree_path: String,
 ) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::CancelWorktreeRemove);
     if remove_manager.cancel(&worktree_path) {
         Ok(())
     } else {
@@ -316,7 +354,15 @@ async fn git_worktree_restore(repo_path: String, worktree_path: String, branch_n
 
 #[tauri::command]
 async fn git_list_files(repo_path: String) -> Result<Vec<String>, String> {
-    run_git(move || git_worktree::list_tracked_files(&repo_path)).await
+    run_git(move || git_worktree::list_quick_open_files(&repo_path)).await
+}
+
+#[tauri::command]
+async fn list_dir_entries(
+    repo_path: String,
+    rel_path: String,
+) -> Result<Vec<git_worktree::DirEntry>, String> {
+    run_git(move || git_worktree::list_dir_entries(&repo_path, &rel_path)).await
 }
 
 #[tauri::command]
@@ -391,23 +437,33 @@ async fn git_commit(repo_path: String, message: String) -> Result<String, String
 
 #[tauri::command]
 fn detect_ides() -> Vec<ide_launcher::IdeInfo> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::DetectIdes);
     ide_launcher::detect_ides()
 }
 
 #[tauri::command]
 fn detect_ai_agents() -> Vec<ai_provider::AiAgentInfo> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::DetectAiAgents);
     ai_provider::detect_ai_agents()
 }
 
 #[tauri::command]
 fn open_in_ide(command: String, path: String) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::OpenInIde);
     ide_launcher::open_in_ide(&command, &path)
+}
+
+#[tauri::command]
+fn open_in_file_explorer(path: String) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::OpenInFileExplorer);
+    ide_launcher::open_in_file_explorer(&path)
 }
 
 // ─── MCP コマンド ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
 fn regenerate_mcp_api_key(app_handle: tauri::AppHandle) -> Result<String, String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::RegenerateMcpApiKey);
     let settings_manager = app_handle.state::<SettingsManager>();
     let mut settings = settings_manager.get();
     settings.mcp_api_key = settings::generate_api_key();
@@ -418,6 +474,7 @@ fn regenerate_mcp_api_key(app_handle: tauri::AppHandle) -> Result<String, String
 
 #[tauri::command]
 fn get_mcp_status(state: State<mcp_server::McpServerManager>) -> mcp_server::McpStatus {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::GetMcpStatus);
     state.get_status()
 }
 
@@ -443,16 +500,56 @@ async fn restart_mcp_server(app_handle: tauri::AppHandle) -> Result<mcp_server::
 }
 
 #[tauri::command]
-async fn prepare_for_relaunch(app_handle: tauri::AppHandle) -> Result<(), String> {
-    let mcp_manager = app_handle.state::<mcp_server::McpServerManager>();
-    let _lock = mcp_manager.acquire_restart_lock().await;
-    let completed = mcp_manager
-        .stop_and_wait(std::time::Duration::from_secs(3))
-        .await;
-    if !completed {
-        return Err("MCP server did not shut down within timeout".into());
+async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri_plugin_updater::UpdaterExt;
+
+    // 自前の on_before_exit を設定した Updater を構築する。
+    // プラグイン既定の on_before_exit (cleanup_before_exit) を踏襲しつつ、
+    // KILL_ON_JOB_CLOSE 解除を追加する。これは Windows で ShellExecute による
+    // インストーラ起動と process::exit(0) の「前」に走る (tauri-plugin-updater updater.rs)。
+    // 既存実装は relaunch 後の prepare_for_relaunch で解除していたが、Windows では
+    // downloadAndInstall 内で process::exit(0) され JS に戻らないため解除されず、
+    // インストーラが Job の巻き込み終了で殺されてアップデートが起動しなかった。
+    let app_hook = app.clone();
+    let updater = app
+        .updater_builder()
+        .on_before_exit(move || {
+            // Windows ではこの後 process::exit(0) され RunEvent::Exit のクリーンアップ
+            // (PtyManager::kill_all_fast 等) が走らない。KILL_ON_JOB_CLOSE を解除すると
+            // Job のセーフティネットも外れるため、解除の「前」に PTY 子プロセス
+            // (ターミナル / AI エージェント) を明示 kill してオーファン化を防ぐ。
+            app_hook
+                .state::<PtyManager>()
+                .kill_all_fast("update-before-exit");
+            app_hook.cleanup_before_exit();
+            job_object::release_kill_on_close();
+        })
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
+        return Ok(()); // 更新なし
+    };
+
+    let bytes = update
+        .download(|_, _| {}, || {})
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // install() は Windows では成功時に on_before_exit→process::exit(0) され戻らない。
+    // 失敗 (extract 失敗等、インストーラ起動前) 時のみ Err を返す。ここで MCP を止めて
+    // しまうと install 失敗時に MCP が落ちたまま残るため、MCP の停止は install 後
+    // （= 非 Windows の成功パスでのみ到達）に行う。
+    update.install(bytes).map_err(|e| e.to_string())?;
+
+    // 非 Windows（mac 等）のみ到達。restart() 前に MCP を停止してポート競合を避け、
+    // その後明示再起動する。restart() は `!` を返す。
+    {
+        let mcp = app.state::<mcp_server::McpServerManager>();
+        let _lock = mcp.acquire_restart_lock().await;
+        mcp.stop_and_wait(std::time::Duration::from_secs(3)).await;
     }
-    Ok(())
+    app.restart();
 }
 
 // ─── アーティファクトコマンド ─────────────────────────────────────────────────
@@ -582,6 +679,7 @@ async fn delete_task(
 
 #[tauri::command]
 fn path_exists(path: String) -> bool {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::PathExists);
     std::path::Path::new(&path).exists()
 }
 
@@ -607,6 +705,7 @@ fn notify_worktree_archived(
     name: String,
     branch_name: String,
 ) {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::NotifyWorktreeArchived);
     let _ = app_handle.emit("worktree-archived", serde_json::json!({
         "id": id,
         "name": name,
@@ -623,6 +722,7 @@ fn notify_worktree_added(
     name: String,
     branch_name: String,
 ) {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::NotifyWorktreeAdded);
     let _ = app_handle.emit("worktree-added", serde_json::json!({
         "id": id,
         "name": name,
@@ -663,11 +763,13 @@ fn start_fs_watch(
     worktree_id: String,
     worktree_path: String,
 ) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::StartFsWatch);
     state.start_watching(app_handle, worktree_id, worktree_path)
 }
 
 #[tauri::command]
 fn stop_fs_watch(state: State<FsWatcherManager>, worktree_id: String) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::StopFsWatch);
     state.stop_watching(&worktree_id)
 }
 
@@ -679,6 +781,7 @@ fn is_mcp_enabled() -> bool {
 
 #[tauri::command]
 fn set_debug_mode(enabled: bool) {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::SetDebugMode);
     if enabled {
         log::set_max_level(log::LevelFilter::Debug);
     } else {
@@ -689,11 +792,101 @@ fn set_debug_mode(enabled: bool) {
 
 #[tauri::command]
 fn get_debug_mode() -> bool {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::GetDebugMode);
     log::max_level() >= log::LevelFilter::Debug
+}
+
+/// 動作確認用: 初回起動ウィザードを毎回表示するか (ORETACHI_FORCE_WIZARD)。
+/// run() 冒頭で .env* 一式 (Vite 規約準拠、.env.development.local が最優先) を読むため、
+/// dev では .env.development.local 等で true にすると毎回表示される。
+/// インストール済みアプリでは .env* が存在しないため実質常に false になる。
+#[tauri::command]
+fn get_force_wizard() -> bool {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::GetForceWizard);
+    std::env::var("ORETACHI_FORCE_WIZARD")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+}
+
+/// 猫ターミナル向けシステムメトリクスのポーリングを開始する。
+#[tauri::command]
+fn system_metrics_start(app_handle: tauri::AppHandle, state: State<SystemMetricsState>) {
+    state.start(app_handle);
+}
+
+/// システムメトリクスのポーリングを停止する。
+#[tauri::command]
+fn system_metrics_stop(state: State<SystemMetricsState>) {
+    state.stop();
+}
+
+/// メインウィンドウの WebView2 にネイティブ診断イベントを登録する (Windows 限定)。
+///
+/// - `ProcessFailed`: browser/renderer プロセス破綻を ERROR ログ。完全アイドル中のフリーズ
+///   (WebView2Feedback #4141: idle 時 browser プロセス破綻) を **アプリ側ログに初めて残す** 決定打。
+/// - `NewBrowserVersionAvailable`: WebView2 ランタイム自動更新検知を WARN ログ。更新→破綻仮説の裏付け/反証用。
+///
+/// 失敗してもアプリ動作には影響させない (ログのみ)。**回復処理は一切行わない** (記録に徹する)。
+#[cfg(target_os = "windows")]
+fn subscribe_webview2_diagnostics(window: &tauri::WebviewWindow) {
+    use webview2_com::Microsoft::Web::WebView2::Win32::{
+        ICoreWebView2ProcessFailedEventArgs, COREWEBVIEW2_PROCESS_FAILED_KIND,
+    };
+    use webview2_com::{NewBrowserVersionAvailableEventHandler, ProcessFailedEventHandler};
+
+    let result = window.with_webview(|webview| unsafe {
+        // ProcessFailed は ICoreWebView2 直下のイベント。
+        match webview.controller().CoreWebView2() {
+            Ok(core) => {
+                let handler = ProcessFailedEventHandler::create(Box::new(
+                    |_sender, args: Option<ICoreWebView2ProcessFailedEventArgs>| {
+                        let mut kind = COREWEBVIEW2_PROCESS_FAILED_KIND(-1);
+                        if let Some(a) = args.as_ref() {
+                            let _ = a.ProcessFailedKind(&mut kind);
+                        }
+                        log::error!(
+                            "[webview2] ProcessFailed kind={} (browser/renderer プロセス破綻; アイドル時フリーズの疑い WebView2Feedback#4141)",
+                            kind.0
+                        );
+                        Ok(())
+                    },
+                ));
+                let mut token: i64 = 0;
+                if let Err(e) = core.add_ProcessFailed(&handler, &mut token) {
+                    log::warn!("[webview2] add_ProcessFailed failed: {}", e);
+                } else {
+                    log::info!("[webview2] ProcessFailed ハンドラ登録完了");
+                }
+            }
+            Err(e) => log::warn!("[webview2] CoreWebView2() 取得失敗: {}", e),
+        }
+
+        // NewBrowserVersionAvailable は ICoreWebView2Environment のイベント。
+        let env = webview.environment();
+        let handler = NewBrowserVersionAvailableEventHandler::create(Box::new(|_env, _args| {
+            log::warn!(
+                "[webview2] NewBrowserVersionAvailable: WebView2 ランタイム自動更新を検知 (更新後のアイドル破綻に注意 WebView2Feedback#4141)"
+            );
+            Ok(())
+        }));
+        let mut token: i64 = 0;
+        if let Err(e) = env.add_NewBrowserVersionAvailable(&handler, &mut token) {
+            log::warn!("[webview2] add_NewBrowserVersionAvailable failed: {}", e);
+        }
+    });
+    if let Err(e) = result {
+        log::warn!("[webview2] with_webview failed (診断イベント未登録): {}", e);
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Windows: インストーラ起動由来の RedirectionGuard 緩和策 (Enforce=1) を検出したら
+    // explorer.exe 経由でセルフリローンチする (Issue #70)。リローンチ時は exit(0) して戻らない。
+    // この時点ではロガー未初期化のため、結果は setup() に持ち越して記録する。
+    #[cfg(target_os = "windows")]
+    let redirection_guard_outcome = redirection_guard::relaunch_if_guarded();
+
     // Windows: tauri-plugin-notification はパスが \target\release で終わる場合に
     // AUMID を設定しないため、PowerShell として通知が表示される問題を回避する。
     #[cfg(target_os = "windows")]
@@ -705,11 +898,19 @@ pub fn run() {
         }
     }
 
-    // .env 読み込み（Vite の .env 規約に準拠）
-    // builder チェーンより前に読み込む必要があるためここで実施
-    let _ = dotenvy::from_filename(".env");
+    // メインスレッド・ブレッドクラムの単調時計を初期化する (以降の enter() より前に必須)。
+    main_thread_watch::init();
+
+    // .env 読み込み（Vite の .env 規約に準拠: 優先度 .{mode}.local > .{mode} > .local > base）
+    // builder チェーンより前に読み込む必要があるためここで実施。
+    // 読み込み順は「低優先 → 高優先」で、後勝ち（override）になるよう並べる。
+    // from_filename(_override) は cwd とその親を探索するため、cwd が src-tauri でも
+    // リポジトリルートの .env* 一式を解決する。
+    let _ = dotenvy::from_filename(".env"); // base（既存のシェル環境変数は上書きしない）
+    let _ = dotenvy::from_filename_override(".env.local"); // 全モード共通のローカル上書き
     if cfg!(debug_assertions) {
         let _ = dotenvy::from_filename_override(".env.development");
+        let _ = dotenvy::from_filename_override(".env.development.local");
     }
 
     // ORETACHI_DEBUG 環境変数でデバッグモードを判定（起動時点で確定）
@@ -727,6 +928,24 @@ pub fn run() {
     let mcp_enabled = is_mcp_enabled();
 
     let mut builder = tauri::Builder::default();
+
+    // 多重起動防止 (重複起動すると同一ログ/settings/SQLite への並行書き込みと
+    // ワークツリー復元による PTY/AI エージェントの重複 spawn が起きる)。
+    // single-instance プラグインは「最初に登録する」ことが公式要件。
+    // dev と本番は識別子 com.ia.oretachi を共有するため、debug ビルドでは登録しない
+    // (本番稼働中に `pnpm run tauri dev` が起動できなくなるのを避ける)。
+    #[cfg(not(debug_assertions))]
+    {
+        builder = builder.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            log::warn!("[single-instance] 二重起動を検出。既存インスタンスの main ウィンドウを前面化する");
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.show(); // トレイ常駐で非表示のケースに対応
+                let _ = window.unminimize();
+                let _ = window.set_focus();
+            }
+        }));
+    }
+
     if acrylic_enabled {
         builder = builder.plugin(tauri_plugin_liquid_glass::init());
 
@@ -737,6 +956,7 @@ pub fn run() {
             builder = builder.plugin(
                 tauri::plugin::Builder::<tauri::Wry>::new("acrylic-effect")
                     .on_window_ready(move |window| {
+                        let _bc = main_thread_watch::enter(main_thread_watch::Activity::WindowReady);
                         if let Ok(hwnd) = window.hwnd() {
                             acrylic::setup(hwnd.0, r, g, b, a);
                         }
@@ -748,7 +968,6 @@ pub fn run() {
     }
     let mut builder = builder
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
-        .plugin(tauri_plugin_cli::init())
         .plugin(
             tauri_plugin_log::Builder::new()
                 .targets([
@@ -799,8 +1018,10 @@ pub fn run() {
         .manage(mcp_server::DetachedWorktreeRegistry::default())
         .manage(ai_judge::ApprovalManager::new())
         .manage(ai_commit_message::CommitMessageManager::new())
+        .manage(ai_description::DescriptionManager::new())
         .manage(task_executor::TaskGenerateManager::new())
         .manage(FsWatcherManager::new())
+        .manage(SystemMetricsState::new())
         // ReportPool は setup() 内で非同期初期化するため、ここでは登録しない
         .invoke_handler(tauri::generate_handler![
             pty_spawn,
@@ -828,6 +1049,7 @@ pub fn run() {
             git_merge_branch,
             git_delete_branch,
             git_list_files,
+            list_dir_entries,
             git_read_file,
             git_get_merge_message,
             git_get_status,
@@ -840,16 +1062,19 @@ pub fn run() {
             detect_ides,
             detect_ai_agents,
             open_in_ide,
+            open_in_file_explorer,
             get_mcp_status,
             restart_mcp_server,
             regenerate_mcp_api_key,
             mcp_server::register_detached_worktree,
             mcp_server::unregister_detached_worktree,
-            prepare_for_relaunch,
+            download_and_install_update,
             ai_judge::judge_approval,
             ai_judge::cancel_approval,
             ai_commit_message::generate_commit_message,
             ai_commit_message::cancel_commit_message_generation,
+            ai_description::generate_description_from_plan,
+            ai_description::cancel_description_generation,
             terminal_session::save_terminal_session,
             terminal_session::load_terminal_session,
             terminal_session::delete_terminal_session,
@@ -877,12 +1102,40 @@ pub fn run() {
             delete_archive,
             set_debug_mode,
             get_debug_mode,
+            get_force_wizard,
+            system_metrics_start,
+            system_metrics_stop,
         ])
         .setup(move |app| {
             // env var が false の場合は DB初期化などの起動ログを含め debug! を抑制する。
             // settings.debug_mode は後で読み込まれるため、env var のみで先行設定する。
             if !env_debug {
                 log::set_max_level(log::LevelFilter::Info);
+            }
+
+            // 子プロセス（WebView2 等）を Job Object に取り込み、親終了時に OS レベルで
+            // 巻き込み終了させる。MCP サーバ spawn や window.show() より前に割り当てて
+            // 以降生成される全子プロセスを確実に Job 配下に入れる。
+            job_object::assign_current_process_to_job();
+
+            #[cfg(target_os = "windows")]
+            match &redirection_guard_outcome {
+                redirection_guard::GuardOutcome::NotGuarded => {}
+                redirection_guard::GuardOutcome::RelaunchedPreviously => {
+                    log::info!(
+                        "[RedirectionGuard] 緩和策 (Enforce=1) を検出したため explorer.exe 経由で再起動した"
+                    );
+                }
+                redirection_guard::GuardOutcome::StillGuarded => {
+                    log::warn!(
+                        "[RedirectionGuard] リローンチ後も緩和策 (Enforce=1) が残っている。ターミナル内のジャンクション操作 (pnpm install 等) が失敗する可能性がある"
+                    );
+                }
+                redirection_guard::GuardOutcome::RelaunchSkipped(reason) => {
+                    log::warn!(
+                        "[RedirectionGuard] 緩和策 (Enforce=1) を検出したが起動を継続: {reason}。ターミナル内のジャンクション操作 (pnpm install 等) が失敗する可能性がある"
+                    );
+                }
             }
 
             // レポート DB を同期的に初期化（ファイル接続のみで高速、起動前に完了させる）
@@ -981,9 +1234,15 @@ pub fn run() {
                 );
             }
 
-            // Claude Code プラグインファイルを生成・更新
-            if let Err(e) = claude_plugin::generate_plugin_files(app.handle()) {
-                log::warn!("[ClaudePlugin] Failed to generate plugin files: {}", e);
+            // Claude Code プラグインファイルを生成・更新（ORETACHI_PLUGIN_OVERWRITE=false で抑止）
+            if claude_plugin::overwrite_enabled() {
+                if let Err(e) = claude_plugin::generate_plugin_files(app.handle()) {
+                    log::warn!("[ClaudePlugin] Failed to generate plugin files: {}", e);
+                }
+            } else {
+                log::info!(
+                    "[ClaudePlugin] ORETACHI_PLUGIN_OVERWRITE=false: プラグイン生成をスキップ"
+                );
             }
 
             // AIエージェントインジケーター用ポーリング起動
@@ -995,7 +1254,9 @@ pub fn run() {
             // Webview ハング診断: heartbeat ループ（30秒間隔で ping → pong のラウンドトリップ計測）
             {
                 use std::sync::Arc;
-                use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+                // NOTE: ハング自動復旧（reload / WebView 再作成）を一時無効化したため、
+                // AtomicBool（recreate_attempted 用）は未使用となり import から除外している。
+                use std::sync::atomic::{AtomicU64, Ordering};
                 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
                 let last_pong_ms = Arc::new(AtomicU64::new(0));
@@ -1058,15 +1319,15 @@ pub fn run() {
                 tauri::async_runtime::spawn(async move {
                     let mut ping_pending_since: Option<u64> = None;
                     let mut unresponsive_logged_until_secs: u64 = 0;
-                    // reload() / 再作成が効いたかを追跡するフラグ。pong 復帰で reset。
-                    // recreate は spawn 内のタスクから書き戻すため AtomicBool。
-                    let mut reload_attempted = false;
-                    let recreate_attempted = Arc::new(AtomicBool::new(false));
-                    // recreate 世代カウンタ。新規 recreate 発火または pong 復帰で +1 し、
-                    // spawn 内のバックオフタイマーが「自分が起動した世代」と一致するときだけ
-                    // フラグをリセットする。これで「タイマーAが残存中にタスクBが新たな
-                    // recreate を spawn → タイマーAがBの状態を上書きして false に戻す」race を防ぐ。
-                    let recreate_generation = Arc::new(AtomicU64::new(0));
+                    // [一時無効化] 自動復旧（reload / WebView 再作成）がハング回復に失敗して
+                    // アプリ全体をクラッシュさせるため、復旧アクションを無効化している。
+                    // それに伴い以下の状態変数も未使用となるためコメントアウト:
+                    //   - reload_attempted    : reload() を試行したか
+                    //   - recreate_attempted  : WebView 再作成を試行したか
+                    //   - recreate_generation : 再作成バックオフタスクの世代カウンタ
+                    // let mut reload_attempted = false;
+                    // let recreate_attempted = Arc::new(AtomicBool::new(false));
+                    // let recreate_generation = Arc::new(AtomicU64::new(0));
                     loop {
                         tokio::time::sleep(Duration::from_secs(30)).await;
                         let now_ms = SystemTime::now()
@@ -1078,10 +1339,10 @@ pub fn run() {
                         if last_pong > 0 && now_ms.saturating_sub(last_pong) < 35_000 {
                             ping_pending_since = None;
                             unresponsive_logged_until_secs = 0;
-                            reload_attempted = false;
-                            recreate_attempted.store(false, Ordering::Relaxed);
-                            // 残存している recreate バックオフタスクを世代カウンタで invalidate
-                            recreate_generation.fetch_add(1, Ordering::Relaxed);
+                            // [一時無効化] 復旧アクション無効化に伴い、復旧フラグの reset も不要。
+                            // reload_attempted = false;
+                            // recreate_attempted.store(false, Ordering::Relaxed);
+                            // recreate_generation.fetch_add(1, Ordering::Relaxed);
                         }
                         // クリアされずに残っている場合のみ本当の未応答と判定
                         if let Some(pending_since) = ping_pending_since {
@@ -1109,6 +1370,10 @@ pub fn run() {
                                     unresponsive_logged_until_secs = 180;
                                 }
                             }
+                            // [一時無効化] 第1段階（30s 未応答）の WebView 強制リロード。
+                            // 自動復旧がハング回復に失敗してアプリをクラッシュさせるため無効化。
+                            // 診断ログ（上の未応答 ERROR ログ）は残し、復旧アクションのみ止める。
+                            /*
                             // 第1段階（30s 未応答）: メインウィンドウの強制リロードを試みる。
                             // eval("location.reload()") は JS タスクキュー経由のため、JS メインスレッド
                             // が詰まっていると実行されない。WebviewWindow::reload() は Tauri runtime
@@ -1127,7 +1392,13 @@ pub fn run() {
                                     }
                                 }
                             }
+                            */
 
+                            // [一時無効化] 第2段階（95s 未応答）の WebView ウィンドウ destroy → 再作成。
+                            // この復旧アクション（特に destroy → rebuild）がハング回復に失敗して
+                            // アプリ全体をクラッシュさせる原因となっているため無効化する。
+                            // 診断ログは残し、復旧アクションのみ止める。
+                            /*
                             // 第2段階（95s 未応答）: reload が効かなかった場合は WebView ウィンドウ
                             // 自体を destroy → tauri.conf.json の設定から再作成する。WebView2 プロセス
                             // 自身が応答不能な場合、reload メッセージが届かずこの段階に到達する。
@@ -1241,6 +1512,7 @@ pub fn run() {
                                     }
                                 });
                             }
+                            */
                         }
                         match ping_handle.emit("__webview-heartbeat-ping", serde_json::json!({ "ts": now_ms })) {
                             Ok(_) => {
@@ -1258,6 +1530,89 @@ pub fn run() {
                 });
             }
 
+            // メインスレッド watchdog: run_on_main_thread に投げた閉包の実行遅延を計測し、
+            // tao メインスレッド (= WebView2 への emit/IPC 配送を担う UI スレッド) の
+            // ブロックを検出する。heartbeat の「webview unresponsive」だけでは
+            // 「JS 側フリーズ」と「Rust メインスレッドブロック」を区別できないため、
+            // ハング時にどちらかをログから切り分けられるようにする診断機構。
+            {
+                use std::sync::Arc;
+                use std::sync::atomic::{AtomicU64, Ordering};
+                use std::time::{Duration, Instant};
+
+                // SystemTime は NTP 補正等で巻き戻り、blocked の誤検知を生むため、
+                // 単調な Instant 起点の経過 ms で比較する。
+                let watchdog_start = Instant::now();
+                let elapsed_ms = move || watchdog_start.elapsed().as_millis() as u64;
+
+                let main_ack_ms = Arc::new(AtomicU64::new(0));
+                let watchdog_handle = app.handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    let mut blocked_since: Option<u64> = None;
+                    let mut last_blocked_log_ms: u64 = 0;
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(15)).await;
+                        let sent = elapsed_ms();
+                        let ack = main_ack_ms.clone();
+                        if watchdog_handle
+                            .run_on_main_thread(move || {
+                                let _bc = main_thread_watch::enter(
+                                    main_thread_watch::Activity::WatchdogProbe,
+                                );
+                                ack.store(elapsed_ms(), Ordering::Relaxed);
+                            })
+                            .is_err()
+                        {
+                            // アプリ終了中など。次周期で再試行する。
+                            continue;
+                        }
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        let acked = main_ack_ms.load(Ordering::Relaxed);
+                        if acked >= sent {
+                            if let Some(since) = blocked_since.take() {
+                                log::warn!(
+                                    "[main-thread-watchdog] main thread recovered after {}s",
+                                    elapsed_ms().saturating_sub(since) / 1000
+                                );
+                            }
+                            last_blocked_log_ms = 0;
+                        } else {
+                            let first_detection = blocked_since.is_none();
+                            let since = *blocked_since.get_or_insert(sent);
+                            let blocked_secs = elapsed_ms().saturating_sub(since) / 1000;
+                            // ブロック初検知時のみ: UI スレッド ID をログし、プロセス全体の minidump を
+                            // 1 回だけ書き出す。停止中のネイティブスタック (WebView2/wry/tray) を後で解析できる。
+                            if first_detection {
+                                #[cfg(target_os = "windows")]
+                                {
+                                    log::error!(
+                                        "[main-thread-watchdog] UI thread id={} (minidump 内でこのスレッドのスタックを参照)",
+                                        main_thread_watch::ui_thread_id()
+                                    );
+                                    if let Ok(dir) = watchdog_handle.path().app_log_dir() {
+                                        let _ = std::fs::create_dir_all(&dir);
+                                        let path = dir.join(format!("oretachi-hang-{}.dmp", since));
+                                        main_thread_watch::write_hang_minidump_once(path);
+                                    }
+                                }
+                            }
+                            // 継続ブロック中の連続出力は 55 秒に 1 回へ抑制（初回は即時）
+                            if elapsed_ms().saturating_sub(last_blocked_log_ms) >= 55_000 {
+                                last_blocked_log_ms = elapsed_ms();
+                                // ブロック中の UI スレッドの「最後のブレッドクラム」を併記する。
+                                // label=="idle" なら停止はネイティブ event loop 側 (WebView2/wry/tray)、
+                                // それ以外なら当該同期コマンド内での停止と切り分けられる。
+                                let bc = main_thread_watch::snapshot();
+                                log::error!(
+                                    "[main-thread-watchdog] tao main thread blocked for {}s; last main-thread activity: {} (running {}ms) (run_on_main_thread closure not executed within 5s)",
+                                    blocked_secs, bc.label, bc.age_ms
+                                );
+                            }
+                        }
+                    }
+                });
+            }
+
             // 通常モード: MCP サーバー起動 + ウィンドウ表示
             if mcp_enabled {
                 let (mcp_port, mcp_remote_access) = {
@@ -1268,6 +1623,9 @@ pub fn run() {
             }
 
             if let Some(window) = app.get_webview_window("main") {
+                // WebView2 ネイティブ診断イベント (ProcessFailed / NewBrowserVersionAvailable) を購読する。
+                #[cfg(target_os = "windows")]
+                subscribe_webview2_diagnostics(&window);
                 let _ = window.show();
             }
 
@@ -1277,14 +1635,61 @@ pub fn run() {
         .expect("error while building tauri application");
 
     app.run(move |app_handle, event| {
+        // RunEvent ハンドラは UI スレッドで走る。Guard の Drop で復元するため、ここを抜けると
+        // ブレッドクラムは直前 (通常 idle) に戻る。RunEvent ディスパッチ「中」に停止した場合のみ
+        // ブレッドクラムが run-event のまま残り、イベント待ち「中」の停止 (= idle) と区別できる。
+        let _bc = main_thread_watch::enter(main_thread_watch::Activity::RunEvent);
+
+        // UI スレッド起因のイベントを可視化する (フリーズ直前の操作を追える)。
+        // 高頻度イベント (Moved/Resized/CursorMoved/MainEventsCleared 等) は意図的に除外する:
+        // 無条件 DEBUG ログはログ肥大＋UI スレッドのログ I/O が新たなスタール要因になるため。
+        match &event {
+            tauri::RunEvent::Ready => log::debug!("[run-event] Ready"),
+            tauri::RunEvent::Resumed => log::debug!("[run-event] Resumed"),
+            tauri::RunEvent::ExitRequested { code, .. } => {
+                log::debug!("[run-event] ExitRequested code={:?}", code)
+            }
+            tauri::RunEvent::WindowEvent { label, event, .. } => match event {
+                tauri::WindowEvent::CloseRequested { .. } => {
+                    log::debug!("[run-event] WindowEvent[{}] CloseRequested", label)
+                }
+                tauri::WindowEvent::Destroyed => {
+                    log::debug!("[run-event] WindowEvent[{}] Destroyed", label)
+                }
+                tauri::WindowEvent::Focused(focused) => {
+                    log::debug!("[run-event] WindowEvent[{}] Focused={}", label, focused)
+                }
+                tauri::WindowEvent::ThemeChanged(theme) => {
+                    log::debug!("[run-event] WindowEvent[{}] ThemeChanged={:?}", label, theme)
+                }
+                // Moved/Resized/ScaleFactorChanged/CursorMoved 等の高頻度イベントは除外
+                _ => {}
+            },
+            _ => {}
+        }
+
         if let tauri::RunEvent::Exit = event {
-            let pty_manager = app_handle.state::<PtyManager>();
-            pty_manager.kill_all("app-exit");
-            let mcp_manager = app_handle.state::<mcp_server::McpServerManager>();
-            mcp_manager.stop();
+            // ① MCP を最優先で停止し、ポート解放を有界に待つ。
+            //    stop_and_wait は serve future 完了（= TcpListener drop = ポート解放）まで待つ。
+            //    PTY kill が長引いてもポートは先に確実に解放されるため、再起動時の
+            //    「固定ポートが掴まれたまま bind 失敗 → 停止中」を防ぐ。
+            //    Exit 時点で tokio ランタイムは生存しており block_on は安全（有界 timeout で必ず復帰）。
             if mcp_enabled {
+                let mcp_manager = app_handle.state::<mcp_server::McpServerManager>();
+                let released = tauri::async_runtime::block_on(
+                    mcp_manager.stop_and_wait(std::time::Duration::from_millis(1500)),
+                );
+                if !released {
+                    log::warn!("[exit] MCP stop_and_wait timed out; port may still be held");
+                }
                 mcp_server::cleanup_port_file(app_handle);
             }
+
+            // ② PTY セッションを終了時専用の高速経路で kill（並列 + 有界 deadline）。
+            let pty_manager = app_handle.state::<PtyManager>();
+            pty_manager.kill_all_fast("app-exit");
+
+            // ③ ファイルシステムウォッチャーを停止。
             let fs_watcher = app_handle.state::<FsWatcherManager>();
             fs_watcher.stop_all();
         }
