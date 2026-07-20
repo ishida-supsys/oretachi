@@ -6,6 +6,20 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.25.3] - 2026-07-21
+
+### Added
+- MCP ターミナル追加時にサブウィンドウへ自動移行する設定を追加 (#58)
+
+### Fixed
+- 多数端末時の webview ハングを対策 (#101)
+- single-instance ガードを導入し本番アプリの重複起動を防止 (#101)
+- waitForTerminalReady が同期 ready を取りこぼし常に 5 秒待機していた問題を修正 (#58)
+
+### Changed
+- 端末の可視状態管理を useTerminalVisibility に切り出し (#101)
+- useOretachiTerminalForBackground のデフォルトを false に変更 (#101)
+
 ## [0.25.2] - 2026-07-14
 
 ### Added
@@ -515,7 +529,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.25.2...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.25.3...HEAD
+[0.25.3]: https://github.com/ishida-supsys/oretachi/compare/0.25.2...0.25.3
 [0.25.2]: https://github.com/ishida-supsys/oretachi/compare/0.25.1...0.25.2
 [0.25.1]: https://github.com/ishida-supsys/oretachi/compare/0.25.0...0.25.1
 [0.25.0]: https://github.com/ishida-supsys/oretachi/compare/0.24.6...0.25.0
