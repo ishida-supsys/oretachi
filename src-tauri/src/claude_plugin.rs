@@ -242,6 +242,22 @@ fn build_hooks_json(notifier_path: &str) -> serde_json::Value {
         hooks.insert("PermissionRequest".to_string(), serde_json::json!([exit_plan_group]));
     }
 
+    // UserPromptSubmit フック: プロンプト送信時にサイドカーを起動し、現在の description を
+    // additionalContext として注入する（逸脱していたら oretachi_set_description で更新させる）。
+    // 頻度はサーバー側 (/prompt-context) のワークツリー単位スロットルで抑制する。
+    // 通知は不要なので EVENT_CONFIG_KEYS には含めない（あちらは通知 kind の設定用）。
+    hooks.insert(
+        "UserPromptSubmit".to_string(),
+        serde_json::json!([{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": notifier_path,
+                "args": ["--prompt-context", "--project-dir", "${CLAUDE_PROJECT_DIR}"]
+            }]
+        }]),
+    );
+
     serde_json::json!({ "hooks": hooks })
 }
 

@@ -101,6 +101,10 @@ pub struct McpServerManager {
     /// hook: 3秒、approval: 1秒 debounce。general/completed や任意の kind は
     /// debounce しない（MCP クライアントの意図的な通知を握り潰さないため）
     notify_last_sent: Mutex<HashMap<(String, String), Option<std::time::Instant>>>,
+    /// /prompt-context のスロットル: worktree_id → 最終送信時刻。
+    /// UserPromptSubmit はプロンプトごとに発火するため、期間内は skip を返して
+    /// コンテキスト注入のノイズを抑える。
+    prompt_context_last_sent: Mutex<HashMap<String, std::time::Instant>>,
 }
 
 /// kind ごとの debounce 秒数。None の kind は debounce しない（毎回送信）。
@@ -162,6 +166,7 @@ impl McpServerManager {
             notify_listener_id: Mutex::new(None),
             hook_tx: broadcast::channel::<NotifyWorktreeEvent>(256).0,
             notify_last_sent: Mutex::new(HashMap::new()),
+            prompt_context_last_sent: Mutex::new(HashMap::new()),
         }
     }
 
@@ -231,7 +236,17 @@ pub struct SetDescriptionPayload {
 #[derive(Debug, Serialize, Clone)]
 pub struct SetWorktreeDescriptionEvent {
     pub worktree: String,
-    pub plan: String,
+    /// ExitPlanMode 経路: フロント側で AI 要約してから description にセットする
+    pub plan: Option<String>,
+    /// MCP 直接セット経路 (oretachi_set_description): AI 要約をスキップしてそのまま採用する
+    pub description: Option<String>,
+}
+
+/// UserPromptSubmit フック (--prompt-context) が送るペイロード
+#[derive(Debug, Deserialize)]
+pub struct PromptContextPayload {
+    #[serde(default, rename = "projectDir")]
+    pub project_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -242,6 +257,18 @@ pub struct NotifyWorktreeParams {
     pub kind: Option<String>,
     #[schemars(description = "通知本文（ライフサイクルフックのコンテキスト情報など）。省略可")]
     pub body: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetWorktreeDescriptionParams {
+    #[schemars(description = "ワークツリーの1行説明。このワークツリーで進めている作業全体の目的を簡潔に表す（改行なし、日本語なら15〜40文字程度）")]
+    pub description: String,
+    #[schemars(description = "ワークツリーのルートディレクトリ絶対パス（通常は自分の作業ディレクトリ）。worktree_name/worktree_id 未指定時はこれでワークツリーを特定する")]
+    pub project_dir: Option<String>,
+    #[schemars(description = "対象ワークツリー名（project_dir で特定できない場合に指定）")]
+    pub worktree_name: Option<String>,
+    #[schemars(description = "対象ワークツリーID（同名ワークツリーが複数ある場合に指定）")]
+    pub worktree_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -880,7 +907,87 @@ impl NotifyService {
         }
     }
 
-    #[tool(description = "登録済みワークツリーのステータス一覧を取得する")]
+    #[tool(description = "ワークツリーの1行説明(description)を直接セットする。description はこのワークツリーで進めている作業全体の目的を表す1行。更新するのは (a) 未設定のとき (b) 全く別の作業・目的に切り替わったとき (c) 説明が実態と大きくずれているとき、のみ。同一プラン内のサブタスク進行・レビュー対応・細部の修正では更新しないこと")]
+    fn oretachi_set_description(
+        &self,
+        Parameters(SetWorktreeDescriptionParams { description, project_dir, worktree_name, worktree_id }): Parameters<SetWorktreeDescriptionParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // 改行は空白に潰して1行に正規化。長すぎる場合は切り詰める。
+        let description: String = description
+            .replace(['\r', '\n'], " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if description.is_empty() {
+            return Err(McpError::invalid_params("description must not be empty", None));
+        }
+        let description: String = description.chars().take(200).collect();
+
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+
+        // 解決優先順位: worktree_id > worktree_name > project_dir 逆引き
+        let wt = if let Some(id) = worktree_id.as_deref() {
+            settings.worktrees.iter().find(|w| w.id == id).ok_or_else(|| {
+                McpError::invalid_params(format!("worktree id '{}' not found", id), None)
+            })?
+        } else if let Some(name) = worktree_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let matches: Vec<_> = settings.worktrees.iter().filter(|w| w.name == name).collect();
+            match matches.len() {
+                0 => {
+                    let names: Vec<&str> = settings.worktrees.iter().map(|w| w.name.as_str()).collect();
+                    return Err(McpError::invalid_params(
+                        format!("worktree '{}' not found. available: [{}]", name, names.join(", ")),
+                        None,
+                    ));
+                }
+                1 => matches[0],
+                _ => {
+                    let ids: Vec<&str> = matches.iter().map(|w| w.id.as_str()).collect();
+                    return Err(McpError::invalid_params(
+                        format!("multiple worktrees named '{}'. specify worktree_id to disambiguate: [{}]", name, ids.join(", ")),
+                        None,
+                    ));
+                }
+            }
+        } else if let Some(dir) = project_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            resolve_worktree_by_dir(&settings, dir).ok_or_else(|| {
+                let names: Vec<&str> = settings.worktrees.iter().map(|w| w.name.as_str()).collect();
+                McpError::invalid_params(
+                    format!("no worktree matches project_dir '{}'. available: [{}]", dir, names.join(", ")),
+                    None,
+                )
+            })?
+        } else {
+            return Err(McpError::invalid_params(
+                "specify one of project_dir / worktree_name / worktree_id",
+                None,
+            ));
+        };
+
+        let previous = wt.description.clone();
+        let event = SetWorktreeDescriptionEvent {
+            worktree: wt.name.clone(),
+            plan: None,
+            description: Some(description.clone()),
+        };
+        self.app_handle
+            .emit("set-worktree-description", &event)
+            .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
+        log::info!("[mcp] oretachi_set_description: worktree={} desc={}", wt.name, description);
+
+        let json = serde_json::json!({
+            "ok": true,
+            "worktree": wt.name,
+            "previous": previous,
+            "new": description,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string(&json).map_err(|e| McpError::internal_error(e.to_string(), None))?,
+        )]))
+    }
+
+    #[tool(description = "登録済みワークツリーのステータス一覧を取得する。各エントリはルートパス(path)と現在の1行説明(description)を含む")]
     fn oretachi_get_worktree_status(
         &self,
         Parameters(_params): Parameters<GetWorktreeStatusParams>,
@@ -897,6 +1004,8 @@ impl NotifyService {
                 serde_json::json!({
                     "id": wt.id,
                     "name": wt.name,
+                    "path": wt.path,
+                    "description": wt.description,
                     "repositoryName": wt.repository_name,
                     "branchName": wt.branch_name,
                     "isDetached": detached.contains(wt.id.as_str()),
@@ -1369,7 +1478,9 @@ impl ServerHandler for NotifyService {
                 title: Some("oretachi 通知サーバー".to_string()),
                 ..Default::default()
             },
-            instructions: Some("ワークツリーへの通知を管理します".to_string()),
+            instructions: Some(
+                "ワークツリーへの通知と description(1行説明) を管理します。作業内容が決まったら oretachi_set_description で作業全体の目的を1行でセットし、作業の目的そのものが変わったら更新してください（サブタスクの進行では更新不要）".to_string(),
+            ),
         }
     }
 
@@ -1594,7 +1705,8 @@ async fn set_description_handler(
 
     let event = SetWorktreeDescriptionEvent {
         worktree: worktree_name,
-        plan,
+        plan: Some(plan),
+        description: None,
     };
     match app_handle.emit("set-worktree-description", &event) {
         Ok(_) => StatusCode::OK,
@@ -1603,6 +1715,55 @@ async fn set_description_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
+}
+
+/// UserPromptSubmit フック (--prompt-context) 用。現在の description を返す。
+/// ワークツリー単位でスロットルし、期間内の再送・未解決時は {"skip":true} を返す
+/// （サイドカーは skip 時に何も出力せず exit 0 する）。
+const PROMPT_CONTEXT_THROTTLE_SECS: u64 = 600;
+
+async fn prompt_context_handler(
+    State(app_handle): State<AppHandle>,
+    Json(payload): Json<PromptContextPayload>,
+) -> Json<serde_json::Value> {
+    let settings = app_handle.state::<SettingsManager>().get();
+
+    let Some(wt) = payload
+        .project_dir
+        .as_deref()
+        .and_then(|d| resolve_worktree_by_dir(&settings, d))
+    else {
+        log::debug!(
+            "[prompt-context] could not resolve worktree (projectDir={:?}); skipping",
+            payload.project_dir
+        );
+        return Json(serde_json::json!({ "skip": true }));
+    };
+
+    let manager = app_handle.state::<McpServerManager>();
+    let now = std::time::Instant::now();
+    {
+        let mut map = manager
+            .prompt_context_last_sent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if let Some(prev) = map.get(&wt.id) {
+            if now.duration_since(*prev).as_secs() < PROMPT_CONTEXT_THROTTLE_SECS {
+                return Json(serde_json::json!({ "skip": true }));
+            }
+        }
+        map.insert(wt.id.clone(), now);
+    }
+
+    log::info!(
+        "[prompt-context] worktree={} description={:?}",
+        wt.name,
+        wt.description
+    );
+    Json(serde_json::json!({
+        "worktreeName": wt.name,
+        "description": wt.description,
+    }))
 }
 
 // ─── API Key Authentication Middleware ───────────────────────────────────────
@@ -2025,6 +2186,7 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
             .nest_service("/mcp", service)
             .route("/notify", post(notify_handler))
             .route("/set-description", post(set_description_handler))
+            .route("/prompt-context", post(prompt_context_handler))
             .with_state(app_handle.clone())
             .layer(middleware::from_fn(move |mut req: Request, next: Next| {
                 let key = api_key_state.clone();
