@@ -11,6 +11,9 @@
 //      ワークツリー名と kind の解決はサーバー側で project-dir / event から行う)
 //   oretachi-notify --set-description --project-dir "<dir>"
 //     (stdin の ExitPlanMode hook JSON を /set-description へ転送)
+//   oretachi-notify --prompt-context --project-dir "<dir>"
+//     (UserPromptSubmit フック用。/prompt-context から現在の description を取得し、
+//      additionalContext JSON を stdout に出力して Claude のコンテキストに注入する)
 //
 // hook からは userConfig ではなく CC 組み込み変数 ${CLAUDE_PROJECT_DIR} が --project-dir に渡る。
 // 未置換/空の場合はプロセスの current_dir (hook は worktree ディレクトリで実行される) にフォールバック。
@@ -40,6 +43,22 @@ fn main() {
         std::process::exit(0);
     }
 
+    // UserPromptSubmit フック (--prompt-context): /prompt-context から現在の description を
+    // 取得し、additionalContext JSON を stdout に出力する。スロットル中 (skip) やサーバ
+    // 未起動時は何も出力しない。フックをブロックしないよう常に exit 0 で終える。
+    if has_flag(&args, "--prompt-context", "-c") {
+        let dir = resolve_project_dir(&args);
+        match send_prompt_context(&dir) {
+            Ok(Some(output)) => println!("{}", output),
+            Ok(None) => {}
+            Err(_e) => {
+                #[cfg(debug_assertions)]
+                eprintln!("Prompt context failed: {}", _e);
+            }
+        }
+        std::process::exit(0);
+    }
+
     // 通知 (--notify): stdin(hook JSON) を body として /notify へ送る。
     // ワークツリー名と kind はサーバー側で project-dir / event から解決する。
     if has_flag(&args, "--notify", "-n") {
@@ -57,7 +76,7 @@ fn main() {
     }
 
     #[cfg(debug_assertions)]
-    eprintln!("Usage: oretachi-notify --notify --project-dir <dir> --event <Event> [--agent <agent>]\n       oretachi-notify --set-description --project-dir <dir>");
+    eprintln!("Usage: oretachi-notify --notify --project-dir <dir> --event <Event> [--agent <agent>]\n       oretachi-notify --set-description --project-dir <dir>\n       oretachi-notify --prompt-context --project-dir <dir>");
     std::process::exit(2);
 }
 
@@ -158,6 +177,93 @@ fn send_set_description(project_dir: &str, hook_json: Option<&str>) -> Result<()
         payload["hookJson"] = serde_json::Value::String(j.to_string());
     }
     post_json("/set-description", &payload)
+}
+
+/// UserPromptSubmit フック用。/prompt-context から現在の description を取得し、
+/// stdout に出力すべき additionalContext JSON を返す。skip 時は Ok(None)。
+fn send_prompt_context(project_dir: &str) -> Result<Option<String>, String> {
+    let payload = serde_json::json!({
+        "projectDir": project_dir,
+    });
+    let body = post_json_read_body("/prompt-context", &payload)?;
+    Ok(build_prompt_context_output(&body))
+}
+
+/// /prompt-context のレスポンスボディから UserPromptSubmit 用の
+/// additionalContext JSON を組み立てる。skip / parse 失敗時は None。
+fn build_prompt_context_output(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    if v["skip"].as_bool() == Some(true) {
+        return None;
+    }
+    let context = match v["description"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(desc) => format!(
+            "[oretachi] このワークツリーの現在の description: 「{}」。これは作業全体の目的を表す1行です。今の作業がこの説明の範囲内（同一プランのサブタスク進行・レビュー対応など）なら更新は不要です。全く別の作業に切り替わった場合、または説明が実態と大きくずれている場合のみ oretachi_set_description ツールで更新してください。",
+            desc
+        ),
+        None => "[oretachi] このワークツリーの description は未設定です。作業内容が決まっていれば oretachi_set_description ツールで作業全体の目的を1行でセットしてください。".to_string(),
+    };
+    let output = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": context,
+        }
+    });
+    Some(output.to_string())
+}
+
+/// post_json と同様に POST し、レスポンスボディまで読んで返す。
+/// /prompt-context のようにサーバの返す JSON が必要な場合に使う。
+fn post_json_read_body(path: &str, payload: &serde_json::Value) -> Result<String, String> {
+    let (port, api_key) = read_server_info()?;
+    let payload_str = payload.to_string();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAuthorization: Bearer {api_key}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload_str}",
+        payload_str.len()
+    );
+
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port)
+        .parse()
+        .map_err(|e| format!("Invalid address: {}", e))?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(3))
+        .map_err(|e| format!("Cannot connect to oretachi MCP server: {}", e))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("Failed to set write timeout: {}", e))?;
+    // body まで必要なので post_json より長めの読み取りタイムアウト（ローカル接続なので通常は数ms）
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| format!("Failed to set read timeout: {}", e))?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("Failed to send request: {}", e))?;
+    stream
+        .flush()
+        .map_err(|e| format!("Failed to flush: {}", e))?;
+
+    // Connection: close なのでサーバが閉じるまで読み切る（タイムアウト時は読めた分まで）
+    let mut raw = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => raw.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+    let response = String::from_utf8_lossy(&raw);
+    let (head, body) = response
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| "Incomplete HTTP response".to_string())?;
+    let status_line = head.lines().next().unwrap_or_default();
+    if !status_line.contains(" 200 ") {
+        return Err(format!("Server returned unexpected response: {}", status_line));
+    }
+    // axum の Json レスポンスは Content-Length 付き（chunked ではない）前提でそのまま返す
+    Ok(body.to_string())
 }
 
 /// mcp-server.json のポート/APIキーを読み、指定パスへ JSON を POST する。
@@ -264,6 +370,44 @@ mod tests {
     fn test_has_flag_absent() {
         let args = vec!["bin".to_string(), "--other".to_string()];
         assert!(!has_flag(&args, "--notify", "-n"));
+    }
+
+    #[test]
+    fn test_has_flag_prompt_context() {
+        let args = vec!["bin".to_string(), "--prompt-context".to_string(), "--project-dir".to_string(), "X:/wt/foo".to_string()];
+        assert!(has_flag(&args, "--prompt-context", "-c"));
+        assert!(!has_flag(&args, "--notify", "-n"));
+    }
+
+    #[test]
+    fn test_build_prompt_context_output_with_description() {
+        let body = r#"{"worktreeName":"foo","description":"認証機能のリファクタリング"}"#;
+        let out = build_prompt_context_output(body).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit");
+        let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(ctx.contains("認証機能のリファクタリング"));
+        assert!(ctx.contains("oretachi_set_description"));
+    }
+
+    #[test]
+    fn test_build_prompt_context_output_without_description() {
+        let body = r#"{"worktreeName":"foo","description":null}"#;
+        let out = build_prompt_context_output(body).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(ctx.contains("未設定"));
+        assert!(ctx.contains("oretachi_set_description"));
+    }
+
+    #[test]
+    fn test_build_prompt_context_output_skip() {
+        assert_eq!(build_prompt_context_output(r#"{"skip":true}"#), None);
+    }
+
+    #[test]
+    fn test_build_prompt_context_output_invalid_json() {
+        assert_eq!(build_prompt_context_output("not json"), None);
     }
 
     #[test]
