@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.26.0] - 2026-07-23
+
+### Added
+- プランモード以外でも description を更新可能にする (#102)
+
 ## [0.25.3] - 2026-07-21
 
 ### Added
@@ -529,7 +534,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.25.3...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.26.0...HEAD
+[0.26.0]: https://github.com/ishida-supsys/oretachi/compare/0.25.3...0.26.0
 [0.25.3]: https://github.com/ishida-supsys/oretachi/compare/0.25.2...0.25.3
 [0.25.2]: https://github.com/ishida-supsys/oretachi/compare/0.25.1...0.25.2
 [0.25.1]: https://github.com/ishida-supsys/oretachi/compare/0.25.0...0.25.1
