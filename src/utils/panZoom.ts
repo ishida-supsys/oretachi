@@ -46,6 +46,15 @@ const DRAG_THRESHOLD = 3;
 /** ホイール 1 ノッチあたりの倍率。加算ではなく乗算にして操作量に対する体感を揃える */
 const WHEEL_FACTOR = 1.1;
 
+/** 1 ノッチとみなす deltaY(px)。マウスホイールの 1 段が概ねこの値 */
+const WHEEL_NOTCH_PX = 100;
+
+/** deltaMode (0=PIXEL, 1=LINE, 2=PAGE) を px 換算する係数 */
+const DELTA_MODE_TO_PX = [1, 16, 800];
+
+/** 1 イベントで動かす上限ノッチ数。deltaMode=PAGE などの極端な値で飛びすぎるのを防ぐ */
+const MAX_NOTCHES_PER_EVENT = 3;
+
 /**
  * container 上の操作を監視して、target のパン/ズーム状態を管理する。
  *
@@ -161,10 +170,19 @@ export function createPanZoom(
   // --- ホイールによるズーム ---
   // ブラウザのスクロール/ズームを止めるため passive: false で登録する
   function onWheel(e: WheelEvent) {
+    // 横スクロール (deltaX のみ) はズーム操作ではないので、スクロールを妨げずに見送る。
+    // トラックパッドの2本指横スワイプやチルトホイールがここに来る
+    if (e.deltaY === 0) return;
     e.preventDefault();
+    // 倍率は deltaY の量に比例させる。1 イベント固定倍率にすると、ピクセル粒度で
+    // 大量の wheel を送るトラックパッドでは 1 スワイプで最大倍率に張り付いてしまう
+    const px = e.deltaY * (DELTA_MODE_TO_PX[e.deltaMode] ?? 1);
+    const notches = Math.max(
+      -MAX_NOTCHES_PER_EVENT,
+      Math.min(MAX_NOTCHES_PER_EVENT, px / WHEEL_NOTCH_PX)
+    );
     const rect = container.getBoundingClientRect();
-    const factor = e.deltaY > 0 ? 1 / WHEEL_FACTOR : WHEEL_FACTOR;
-    zoomAt(e.clientX - rect.left, e.clientY - rect.top, factor);
+    zoomAt(e.clientX - rect.left, e.clientY - rect.top, Math.pow(WHEEL_FACTOR, -notches));
   }
 
   container.addEventListener("wheel", onWheel, { passive: false });

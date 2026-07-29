@@ -12,7 +12,7 @@ const props = defineProps<{
   content: string;
 }>();
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 
 // md-editor-v3 は既定で mermaid を CDN から非同期ロードするため、初回パースに間に合わず
 // mermaid ブロックがソースのまま表示されてしまう。バンドル済みインスタンスを注入して
@@ -75,6 +75,21 @@ function togglePin(block: HTMLElement, btn: HTMLElement) {
   btn.title = t("panZoom.unpin");
 }
 
+/**
+ * 挿入済みボタンのツールチップを貼り直す。
+ * DOM に直接書いた title は locale 切替に追従しないため、切替時に呼ぶ
+ */
+function refreshTitles() {
+  root.value?.querySelectorAll<HTMLElement>("[data-mermaid-btn]").forEach((btn) => {
+    if (btn.dataset.mermaidBtn === "fullscreen") {
+      btn.title = t("panZoom.fullscreen");
+      return;
+    }
+    const block = btn.closest<HTMLElement>(".md-editor-mermaid");
+    btn.title = block && pinned.has(block) ? t("panZoom.unpin") : t("panZoom.pin");
+  });
+}
+
 /** ピン留めを全解除する (コンテンツ差し替え・アンマウント時) */
 function unpinAll() {
   pinned.forEach((controller) => controller.destroy());
@@ -103,6 +118,7 @@ function decorate() {
 
     const pinBtn = document.createElement("span");
     pinBtn.className = "mermaid-action-btn";
+    pinBtn.dataset.mermaidBtn = "pin";
     pinBtn.title = t("panZoom.pin");
     pinBtn.innerHTML = PIN_OFF_ICON;
     pinBtn.addEventListener("click", () => togglePin(block, pinBtn));
@@ -110,6 +126,7 @@ function decorate() {
 
     const expandBtn = document.createElement("span");
     expandBtn.className = "mermaid-action-btn";
+    expandBtn.dataset.mermaidBtn = "fullscreen";
     expandBtn.title = t("panZoom.fullscreen");
     expandBtn.innerHTML = EXPAND_ICON;
     expandBtn.addEventListener("click", () => openOverlay(block));
@@ -118,9 +135,15 @@ function decorate() {
 }
 
 async function openOverlay(block: HTMLElement) {
-  const svg = block.querySelector("svg");
+  const svg = block.querySelector<SVGElement>("svg");
   if (!svg) return;
-  overlaySvg.value = sanitizeMermaidSvg(svg.outerHTML);
+  // ピン留めで拡大/移動していると svg 自身に inline transform が載っている。
+  // そのまま持ち込むと全画面側のキャンバスの transform と二重にかかり、
+  // fitToView (transform を含まない offsetWidth で測る) も破綻するため落とす
+  const clone = svg.cloneNode(true) as SVGElement;
+  clone.style.transform = "";
+  clone.style.transformOrigin = "";
+  overlaySvg.value = sanitizeMermaidSvg(clone.outerHTML);
   await nextTick();
   canvas.value?.fitToView();
 }
@@ -152,6 +175,8 @@ onBeforeUnmount(() => {
   window.removeEventListener("keydown", onKeydown);
   unpinAll();
 });
+
+watch(locale, refreshTitles);
 
 watch(() => props.content, () => {
   closeOverlay();

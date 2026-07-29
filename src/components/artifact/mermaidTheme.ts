@@ -35,6 +35,13 @@ const peach = "#fab387";
 const red = "#f38ba8";
 
 /**
+ * useMaxWidth を切ると mermaid が svg に px 幅/高さを出力する。
+ * デフォルト (true) では `width: 100%` + `max-width` になり、パンズームキャンバス側で
+ * サイズを測れず、かつビューポート幅に押し込められて文字が小さくなる。
+ */
+const noMaxWidth = { useMaxWidth: false } as const;
+
+/**
  * mermaid のダークテーマ設定。
  *
  * 方針: ノードやセクションの「塗りは暗色 / 文字は明色 / 枠線はアクセント色」で統一する。
@@ -42,13 +49,6 @@ const red = "#f38ba8";
  * 塗りに明色を指定するとテキストとのコントラストが崩れやすい。図種ごとの変数まで
  * 明示的に指定して、flowchart 以外 (sequence / gantt / pie など) も読める色にする。
  */
-/**
- * useMaxWidth を切ると mermaid が svg に px 幅/高さを出力する。
- * デフォルト (true) では `width: 100%` + `max-width` になり、パンズームキャンバス側で
- * サイズを測れず、かつビューポート幅に押し込められて文字が小さくなる。
- */
-const noMaxWidth = { useMaxWidth: false } as const;
-
 export const mermaidConfig: MermaidConfig = {
   startOnLoad: false,
   theme: "dark",
