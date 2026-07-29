@@ -1,19 +1,32 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, onMounted, ref, watch, nextTick } from "vue";
 import DOMPurify from "dompurify";
+import PanZoomCanvas from "./PanZoomCanvas.vue";
 
 const props = defineProps<{
   content: string;
 }>();
 
+const canvas = ref<InstanceType<typeof PanZoomCanvas> | null>(null);
+
 const sanitized = computed(() =>
   DOMPurify.sanitize(props.content, { USE_PROFILES: { svg: true, svgFilters: true } })
 );
+
+async function fitAfterRender() {
+  await nextTick();
+  canvas.value?.fitToView();
+}
+
+onMounted(fitAfterRender);
+watch(sanitized, fitAfterRender);
 </script>
 
 <template>
   <div class="svg-view">
-    <div class="svg-container" v-html="sanitized" />
+    <PanZoomCanvas ref="canvas">
+      <div class="svg-container" v-html="sanitized" />
+    </PanZoomCanvas>
   </div>
 </template>
 
@@ -21,14 +34,13 @@ const sanitized = computed(() =>
 .svg-view {
   height: 100%;
   width: 100%;
-  overflow: auto;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  overflow: hidden;
 }
 
+/* 拡大縮小はキャンバス側の transform に任せ、SVG は本来のサイズで描画する */
 .svg-container :deep(svg) {
-  max-width: 100%;
-  max-height: 100%;
+  display: block;
+  max-width: none;
+  max-height: none;
 }
 </style>
