@@ -190,20 +190,23 @@ watch(() => props.content, () => {
   <div ref="root" class="markdown-view">
     <MdPreview :modelValue="content" theme="dark" language="ja-JP" :style="{ padding: '1rem 1.5rem' }" />
 
-    <div v-if="overlaySvg" class="mermaid-overlay">
-      <PanZoomCanvas ref="canvas">
-        <div class="overlay-svg" v-html="overlaySvg" />
-      </PanZoomCanvas>
-      <button
-        type="button"
-        class="overlay-close"
-        data-ui
-        :title="t('common.close')"
-        @click="closeOverlay"
-      >
-        <span class="pi pi-times" />
-      </button>
-    </div>
+    <!-- プレビュー内の stacking context / containing block から切り離すため body へ出す -->
+    <Teleport to="body">
+      <div v-if="overlaySvg" class="mermaid-overlay">
+        <PanZoomCanvas ref="canvas">
+          <div class="overlay-svg" v-html="overlaySvg" />
+        </PanZoomCanvas>
+        <button
+          type="button"
+          class="overlay-close"
+          data-ui
+          :title="t('common.close')"
+          @click="closeOverlay"
+        >
+          <span class="pi pi-times" />
+        </button>
+      </div>
+    </Teleport>
   </div>
 </template>
 
@@ -229,7 +232,10 @@ watch(() => props.content, () => {
 .mermaid-overlay {
   position: fixed;
   inset: 0;
-  z-index: 100;
+  /* md-editor-v3 のコードブロックヘッダーが position: sticky + z-index: 10000 で、
+     同 fullscreen も 10000。それらより前面に出す
+     (このウィンドウには App.vue の shutdown-overlay(10000) は出ないため競合しない) */
+  z-index: 10001;
   background: rgba(30, 30, 46, 0.97);
 }
 
