@@ -784,16 +784,16 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string,
     }
 
     // Claude Code プラグイン設定を settings.local.json に書き込む
-    if (repo?.notificationHooks?.length) {
-      try {
-        await invoke("write_claude_plugin_config", {
-          worktreePath: entry.path,
-          worktreeName: entry.name,
-          hooks: repo.notificationHooks,
-        });
-      } catch (e) {
-        await message(t("claudeHooksFailed", { error: e }), { kind: "warning" });
-      }
+    // 通知フック未設定でも無条件で有効化する（SessionStart フックによる systemPrompt 注入と
+    // MCP サーバーを全ワークツリーで使えるようにするため。未設定リポジトリの通知はサーバー側で drop）
+    try {
+      await invoke("write_claude_plugin_config", {
+        worktreePath: entry.path,
+        worktreeName: entry.name,
+        hooks: repo?.notificationHooks ?? [],
+      });
+    } catch (e) {
+      await message(t("claudeHooksFailed", { error: e }), { kind: "warning" });
     }
 
     // Claude Code セッションデータの引継ぎ

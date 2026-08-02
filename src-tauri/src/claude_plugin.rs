@@ -242,6 +242,25 @@ fn build_hooks_json(notifier_path: &str) -> serde_json::Value {
         hooks.insert("PermissionRequest".to_string(), serde_json::json!([exit_plan_group]));
     }
 
+    // SessionStart フック: セッション開始（startup/resume/clear/compact）のたびにサイドカーを起動し、
+    // /session-context からワークツリー所属グループの systemPrompt を取得してコンテキストに注入する。
+    // 解決は毎回サーバー側で行うため、グループ設定の変更は次の SessionStart から自動反映される。
+    // アプリ非稼働時はサイドカーが何も出力せず exit 0 するため、単体起動の claude には影響しない。
+    hooks.insert(
+        "SessionStart".to_string(),
+        serde_json::json!([{
+            "matcher": "",
+            "hooks": [{
+                "type": "command",
+                "command": notifier_path,
+                "args": [
+                    "--session-context",
+                    "--project-dir", "${CLAUDE_PROJECT_DIR}"
+                ]
+            }]
+        }]),
+    );
+
     serde_json::json!({ "hooks": hooks })
 }
 

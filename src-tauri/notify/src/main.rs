@@ -11,6 +11,9 @@
 //      ワークツリー名と kind の解決はサーバー側で project-dir / event から行う)
 //   oretachi-notify --set-description --project-dir "<dir>"
 //     (stdin の ExitPlanMode hook JSON を /set-description へ転送)
+//   oretachi-notify --session-context --project-dir "<dir>"
+//     (SessionStart フック用。/session-context からワークツリー所属グループの systemPrompt を
+//      取得し、SessionStart 用 JSON として stdout に出力する。失敗時は何も出力せず exit 0)
 //
 // hook からは userConfig ではなく CC 組み込み変数 ${CLAUDE_PROJECT_DIR} が --project-dir に渡る。
 // 未置換/空の場合はプロセスの current_dir (hook は worktree ディレクトリで実行される) にフォールバック。
@@ -40,6 +43,31 @@ fn main() {
         std::process::exit(0);
     }
 
+    // SessionStart フック (--session-context): /session-context からグループの systemPrompt を
+    // 取得し、SessionStart 用 JSON として stdout に出力する。
+    // oretachi 非稼働・未管理ディレクトリ・プロンプト未設定のいずれでも、claude 側に警告を
+    // 出さないよう何も出力せず必ず exit 0 する（--notify の exit(1) とは異なる方針）。
+    if has_flag(&args, "--session-context", "-c") {
+        let dir = resolve_project_dir(&args);
+        match fetch_session_context(&dir) {
+            Ok(Some(prompt)) => {
+                let out = serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": prompt
+                    }
+                });
+                println!("{}", out);
+            }
+            Ok(None) => {}
+            Err(_e) => {
+                #[cfg(debug_assertions)]
+                eprintln!("Session context fetch failed: {}", _e);
+            }
+        }
+        std::process::exit(0);
+    }
+
     // 通知 (--notify): stdin(hook JSON) を body として /notify へ送る。
     // ワークツリー名と kind はサーバー側で project-dir / event から解決する。
     if has_flag(&args, "--notify", "-n") {
@@ -57,7 +85,7 @@ fn main() {
     }
 
     #[cfg(debug_assertions)]
-    eprintln!("Usage: oretachi-notify --notify --project-dir <dir> --event <Event> [--agent <agent>]\n       oretachi-notify --set-description --project-dir <dir>");
+    eprintln!("Usage: oretachi-notify --notify --project-dir <dir> --event <Event> [--agent <agent>]\n       oretachi-notify --set-description --project-dir <dir>\n       oretachi-notify --session-context --project-dir <dir>");
     std::process::exit(2);
 }
 
@@ -158,6 +186,72 @@ fn send_set_description(project_dir: &str, hook_json: Option<&str>) -> Result<()
         payload["hookJson"] = serde_json::Value::String(j.to_string());
     }
     post_json("/set-description", &payload)
+}
+
+/// /session-context からワークツリー所属グループの systemPrompt を取得する。
+/// 未管理ディレクトリやプロンプト未設定の場合はサーバーが prompt: null を返すので Ok(None)。
+fn fetch_session_context(project_dir: &str) -> Result<Option<String>, String> {
+    let payload = serde_json::json!({ "projectDir": project_dir });
+    let body = post_json_read_body("/session-context", &payload)?;
+    let v: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("Invalid response JSON: {}", e))?;
+    Ok(v.get("prompt")
+        .and_then(|p| p.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty()))
+}
+
+/// mcp-server.json のポート/APIキーを読み、指定パスへ JSON を POST してレスポンスボディを返す。
+/// post_json と異なりボディまで読む（Connection: close なので EOF まで読み切る）。
+fn post_json_read_body(path: &str, payload: &serde_json::Value) -> Result<String, String> {
+    let (port, api_key) = read_server_info()?;
+    let payload_str = payload.to_string();
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\nAuthorization: Bearer {api_key}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload_str}",
+        payload_str.len()
+    );
+
+    use std::io::{Read, Write};
+    use std::time::Duration;
+
+    let addr: std::net::SocketAddr = format!("127.0.0.1:{}", port)
+        .parse()
+        .map_err(|e| format!("Invalid address: {}", e))?;
+    let mut stream = std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(3))
+        .map_err(|e| format!("Cannot connect to oretachi MCP server: {}", e))?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .map_err(|e| format!("Failed to set write timeout: {}", e))?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .map_err(|e| format!("Failed to set read timeout: {}", e))?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("Failed to send request: {}", e))?;
+    stream
+        .flush()
+        .map_err(|e| format!("Failed to flush: {}", e))?;
+
+    // Connection: close なので EOF まで読む。タイムアウト等のエラーはそこまでの受信分で判定する。
+    let mut response = Vec::new();
+    let mut buf = [0u8; 4096];
+    loop {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => response.extend_from_slice(&buf[..n]),
+            Err(_) => break,
+        }
+    }
+
+    let text = String::from_utf8_lossy(&response).into_owned();
+    let (head, body) = text
+        .split_once("\r\n\r\n")
+        .ok_or_else(|| "Incomplete HTTP response".to_string())?;
+    let status_line = head.lines().next().unwrap_or_default();
+    if !status_line.starts_with("HTTP/") || !status_line.contains(" 200 ") {
+        return Err(format!("Server returned unexpected response: {}", status_line));
+    }
+    Ok(body.to_string())
 }
 
 /// mcp-server.json のポート/APIキーを読み、指定パスへ JSON を POST する。
@@ -264,6 +358,19 @@ mod tests {
     fn test_has_flag_absent() {
         let args = vec!["bin".to_string(), "--other".to_string()];
         assert!(!has_flag(&args, "--notify", "-n"));
+    }
+
+    #[test]
+    fn test_has_flag_session_context() {
+        let args = vec![
+            "bin".to_string(),
+            "--session-context".to_string(),
+            "--project-dir".to_string(),
+            "X:/wt/foo".to_string(),
+        ];
+        assert!(has_flag(&args, "--session-context", "-c"));
+        assert!(!has_flag(&args, "--notify", "-n"));
+        assert!(!has_flag(&args, "--set-description", "-d"));
     }
 
     #[test]

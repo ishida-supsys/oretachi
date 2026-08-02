@@ -18,7 +18,7 @@ use tokio::sync::{broadcast, oneshot, watch, RwLock};
 
 use crate::git_worktree::get_git_remotes;
 use crate::pty_manager::PtyManager;
-use crate::settings::{AppSettings, SettingsManager, WorktreeEntry};
+use crate::settings::{AppSettings, SettingsManager, Workgroup, WorktreeEntry};
 
 const PORT_FILE: &str = "mcp-port";
 const SERVER_INFO_FILE: &str = "mcp-server.json";
@@ -226,6 +226,13 @@ pub struct SetDescriptionPayload {
     /// ExitPlanMode フックが stdin で受け取った hook JSON 文字列（生）
     #[serde(rename = "hookJson")]
     pub hook_json: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionContextPayload {
+    /// SessionStart フックの oretachi-notify が送る ${CLAUDE_PROJECT_DIR}。
+    #[serde(default, rename = "projectDir")]
+    pub project_dir: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1410,6 +1417,26 @@ fn resolve_worktree_by_dir<'a>(settings: &'a AppSettings, dir: &str) -> Option<&
         .find(|w| normalize_path_for_match(&w.path) == target)
 }
 
+/// ワークツリーの所属ワークグループを解決する。workgroup_id が未設定/不明な場合は
+/// 先頭グループにフォールバック（フロントの resolvedGroupId と同仕様）。
+fn resolve_workgroup<'a>(settings: &'a AppSettings, worktree: &WorktreeEntry) -> Option<&'a Workgroup> {
+    worktree
+        .workgroup_id
+        .as_ref()
+        .and_then(|id| settings.workgroups.iter().find(|g| &g.id == id))
+        .or_else(|| settings.workgroups.first())
+}
+
+/// リポジトリに通知フックが1件以上設定されているか。
+fn repo_has_notification_hooks(settings: &AppSettings, worktree: &WorktreeEntry) -> bool {
+    settings
+        .repositories
+        .iter()
+        .find(|r| r.id == worktree.repository_id)
+        .and_then(|r| r.notification_hooks.as_ref())
+        .map_or(false, |h| !h.is_empty())
+}
+
 /// イベント名の既定 kind。ユーザー設定 (repo.notification_hooks) が無い場合のフォールバック。
 fn default_kind_for_event(event: &str) -> &'static str {
     match event {
@@ -1458,6 +1485,18 @@ async fn notify_handler(
             }
         },
     };
+
+    // ライフサイクルフック由来（event 指定・kind 明示なし）の通知は、通知フックが1件も
+    // 設定されていないリポジトリでは破棄する。プラグインは全ワークツリーで無条件有効化される
+    // （SessionStart 注入用）ため、未設定リポジトリの通知挙動を従来（プラグイン無効=通知なし）
+    // と一致させる。kind 明示指定（旧形式/MCP 経由）は意図的な通知なので対象外。
+    if payload.kind.is_none() && payload.event.is_some() {
+        if let Some(w) = worktree {
+            if !repo_has_notification_hooks(&settings, w) {
+                return StatusCode::OK;
+            }
+        }
+    }
 
     // kind: 明示指定(旧形式/MCP) > event からの解決 > "general"
     let kind = if let Some(k) = payload.kind.clone() {
@@ -1603,6 +1642,33 @@ async fn set_description_handler(
             StatusCode::INTERNAL_SERVER_ERROR
         }
     }
+}
+
+// ─── Simple REST endpoint (/session-context) ─────────────────────────────────
+
+/// SessionStart フックから呼ばれ、ワークツリー所属グループの systemPrompt を返す。
+/// 解決を毎回ここで行うため、グループ設定の変更は次のセッション開始から自動反映される。
+/// 未解決（管理外ディレクトリ・プロンプト未設定）は prompt: null を返し、注入は行われない。
+async fn session_context_handler(
+    State(app_handle): State<AppHandle>,
+    Json(payload): Json<SessionContextPayload>,
+) -> Json<serde_json::Value> {
+    let settings = app_handle.state::<SettingsManager>().get();
+    let prompt = payload
+        .project_dir
+        .as_deref()
+        .and_then(|d| resolve_worktree_by_dir(&settings, d))
+        .and_then(|w| resolve_workgroup(&settings, w))
+        .and_then(|g| g.system_prompt.clone())
+        .filter(|s| !s.trim().is_empty());
+    if let Some(p) = &prompt {
+        log::info!(
+            "[session-context] projectDir={:?} prompt_len={}",
+            payload.project_dir,
+            p.len()
+        );
+    }
+    Json(serde_json::json!({ "prompt": prompt }))
 }
 
 // ─── API Key Authentication Middleware ───────────────────────────────────────
@@ -2025,6 +2091,7 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
             .nest_service("/mcp", service)
             .route("/notify", post(notify_handler))
             .route("/set-description", post(set_description_handler))
+            .route("/session-context", post(session_context_handler))
             .with_state(app_handle.clone())
             .layer(middleware::from_fn(move |mut req: Request, next: Next| {
                 let key = api_key_state.clone();
