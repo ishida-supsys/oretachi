@@ -113,6 +113,10 @@ const artifactCounts = reactive(new Map<string, number>());
 // ホームカードの description 開閉状態（ワークツリー毎・settings.json に永続化）
 const descriptionOpenMap = reactive(new Map<string, boolean>());
 
+// MCP 直接セットの時刻（ワークツリーID毎）。進行中だった AI 要約が
+// 完了後に直接セットを上書きしないための競合ガード
+const descriptionDirectSetAt = new Map<string, number>();
+
 function onToggleDescription(worktreeId: string) {
   const cur = descriptionOpenMap.get(worktreeId) ?? false;
   descriptionOpenMap.set(worktreeId, !cur);
@@ -1232,22 +1236,42 @@ onMounted(async () => {
     onAddTaskConfirm(event.payload.prompt, event.payload.remote_exec);
   });
 
-  // ExitPlanMode フック由来: プランを AI 要約してワークツリーの description にセット
-  await listen<{ worktree: string; plan: string }>("set-worktree-description", async (event) => {
-    const { worktree, plan } = event.payload;
+  // ワークツリーの description セット
+  // - plan あり (ExitPlanMode フック由来): AI 要約してからセット
+  // - description あり (MCP oretachi_set_description 由来): AI 要約をスキップして直接セット
+  await listen<{ worktree: string; plan?: string; description?: string }>("set-worktree-description", async (event) => {
+    const { worktree, plan, description } = event.payload;
     const rt = worktrees.value.find((w) => w.name === worktree);
-    if (!rt || !plan?.trim()) return;
+    if (!rt) return;
+    // ランタイム用 worktrees.value（カード表示用）と
+    // 永続化対象 settings.value.worktrees（loadWorktreesFromSettings でシャローコピー
+    // される別オブジェクト）の両方を更新する
+    const apply = (text: string) => {
+      rt.description = text;
+      const entry = settings.value.worktrees.find((w) => w.id === rt.id);
+      if (entry) entry.description = text;
+      scheduleSave();
+    };
+    if (description?.trim()) {
+      // 直接セットが常に勝つ: 進行中の AI 要約をキャンセルし、
+      // 完了済みの要約が後から上書きしないようセット時刻を記録する
+      descriptionDirectSetAt.set(rt.id, Date.now());
+      invoke("cancel_description_generation", { worktreeId: rt.id }).catch(() => {});
+      apply(description.trim());
+      logDebug(`[Description] direct set for worktree=${worktree}: ${description.trim()}`);
+      return;
+    }
+    if (!plan?.trim()) return;
+    const requestedAt = Date.now();
     try {
       const summary = await invoke<string>("generate_description_from_plan", { worktreeId: rt.id, plan });
+      if ((descriptionDirectSetAt.get(rt.id) ?? 0) > requestedAt) {
+        logDebug(`[Description] summary discarded (direct set is newer) for worktree=${worktree}`);
+        return;
+      }
       const trimmed = summary?.trim();
       if (trimmed) {
-        // ランタイム用 worktrees.value（カード表示用）と
-        // 永続化対象 settings.value.worktrees（loadWorktreesFromSettings でシャローコピー
-        // される別オブジェクト）の両方を更新する
-        rt.description = trimmed;
-        const entry = settings.value.worktrees.find((w) => w.id === rt.id);
-        if (entry) entry.description = trimmed;
-        scheduleSave();
+        apply(trimmed);
         logDebug(`[Description] set for worktree=${worktree}: ${trimmed}`);
       }
     } catch (e) {

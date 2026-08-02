@@ -33,6 +33,15 @@ export default {
     checkFailed: 'Failed to check for updates.\n{error}',
     installFailed: 'Failed to install the update.\n{error}',
   },
+  panZoom: {
+    zoomIn: 'Zoom in (+)',
+    zoomOut: 'Zoom out (-)',
+    fitToView: 'Fit to view (F)',
+    resetZoom: 'Actual size (0)',
+    fullscreen: 'Open in fullscreen viewer',
+    pin: 'Enable zoom and pan on this diagram',
+    unpin: 'Disable zoom and pan',
+  },
   about: {
     label: 'About',
     checkUpdate: 'Check for updates',

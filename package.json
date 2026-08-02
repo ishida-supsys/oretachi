@@ -1,7 +1,7 @@
 {
   "name": "oretachi",
   "private": true,
-  "version": "0.25.3",
+  "version": "0.26.0",
   "type": "module",
   "scripts": {
     "prepare": "node scripts/copy-vendor.mjs && node scripts/build-sidecar.mjs",
@@ -42,6 +42,7 @@
     "md-editor-v3": "^6.4.0",
     "mermaid": "^11.13.0",
     "monaco-editor": "^0.55.1",
+    "papaparse": "^5.5.4",
     "primeicons": "^7.0.0",
     "primevue": "^4.5.4",
     "react": "^18.3.1",
@@ -55,6 +56,7 @@
     "@tailwindcss/vite": "^4.2.1",
     "@tauri-apps/cli": "^2.11.2",
     "@types/dompurify": "^3.2.0",
+    "@types/papaparse": "^5.5.2",
     "@vitejs/plugin-vue": "^5.2.1",
     "tailwindcss": "^4.2.1",
     "tailwindcss-primeui": "^0.6.1",

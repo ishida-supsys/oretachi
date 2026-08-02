@@ -26,7 +26,7 @@ export interface WorktreeEntry {
   hotkeyChar?: string; // Alt+[この文字] でフォーカス
   autoApproval?: boolean;
   autoApprovalPrompt?: string;
-  description?: string; // AIが自動生成する説明（ExitPlanMode hookでプランを要約してセット）
+  description?: string; // 作業全体の目的を表す1行説明（ExitPlanMode hookのAI要約、または MCP oretachi_set_description で直接セット）
   descriptionOpen?: boolean; // ホームカードの description 開閉状態（ワークツリー毎）
   workgroupId?: string; // 所属するワークグループのID（未設定は先頭グループにフォールバック）
 }
