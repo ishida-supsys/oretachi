@@ -6,6 +6,7 @@ const { t } = useI18n();
 import WorktreeCard from "./WorktreeCard.vue";
 import TaskCard from "./TaskCard.vue";
 import ArchiveTable from "./ArchiveTable.vue";
+import RepositoryPanel from "./RepositoryPanel.vue";
 import HomeCatTerminal from "./HomeCatTerminal.vue";
 import WorkgroupBar from "./WorkgroupBar.vue";
 import { useMasonryLayout } from "../composables/useMasonryLayout";
@@ -232,6 +233,9 @@ const emit = defineEmits<{
 
 const { panelMode } = useHomePanel();
 
+// ヘッダーの「+ 追加」ボタンからリポジトリ追加を呼ぶための参照
+const repositoryPanelRef = ref<InstanceType<typeof RepositoryPanel> | null>(null);
+
 const { sortedTasks } = useTasks();
 const { hasMore, isLoading, loadTasks, loadMore, search } = useTaskPersistence();
 const {
@@ -370,6 +374,7 @@ watch(
         <option value="worktree">{{ t('worktreeTitle') }}</option>
         <option value="task">{{ t('taskTitle') }}</option>
         <option value="archive">{{ t('archiveTitle') }}</option>
+        <option value="repository">{{ t('repositoryTitle') }}</option>
       </select>
       <WorkgroupBar
         v-if="panelMode === 'worktree'"
@@ -408,6 +413,15 @@ watch(
             </button>
           </div>
           <button class="btn-icon-header" :title="t('addTaskButton')" @click="emit('addTask')">
+            <i class="pi pi-plus"></i>
+          </button>
+        </template>
+        <template v-else-if="panelMode === 'repository'">
+          <button
+            class="btn-icon-header"
+            :title="t('addRepositoryButton')"
+            @click="repositoryPanelRef?.addRepository()"
+          >
             <i class="pi pi-plus"></i>
           </button>
         </template>
@@ -513,6 +527,11 @@ watch(
       <div ref="scrollSentinelRef" class="scroll-sentinel">
         <i v-if="isLoading" class="pi pi-spinner pi-spin loading-spinner" />
       </div>
+    </template>
+
+    <!-- リポジトリパネル -->
+    <template v-else-if="panelMode === 'repository'">
+      <RepositoryPanel ref="repositoryPanelRef" />
     </template>
 
     <!-- アーカイブパネル -->
@@ -736,7 +755,9 @@ watch(
     "addTaskButton": "Add task",
     "archiveTitle": "Archives",
     "archiveEmpty": "No archives.",
-    "archiveSearchPlaceholder": "Search archives..."
+    "archiveSearchPlaceholder": "Search archives...",
+    "repositoryTitle": "Repositories",
+    "addRepositoryButton": "Add repository"
   },
   "ja": {
     "worktreeTitle": "ワークツリー",
@@ -751,7 +772,9 @@ watch(
     "addTaskButton": "タスクを追加",
     "archiveTitle": "アーカイブ",
     "archiveEmpty": "アーカイブがありません。",
-    "archiveSearchPlaceholder": "アーカイブを検索..."
+    "archiveSearchPlaceholder": "アーカイブを検索...",
+    "repositoryTitle": "リポジトリ",
+    "addRepositoryButton": "リポジトリを追加"
   }
 }
 </i18n>
