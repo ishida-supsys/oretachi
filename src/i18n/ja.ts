@@ -33,6 +33,15 @@ export default {
     checkFailed: 'アップデートの確認に失敗しました。\n{error}',
     installFailed: 'アップデートのインストールに失敗しました。\n{error}',
   },
+  panZoom: {
+    zoomIn: '拡大 (+)',
+    zoomOut: '縮小 (-)',
+    fitToView: '全体を表示 (F)',
+    resetZoom: '実際のサイズ (0)',
+    fullscreen: '全画面ビューアーで開く',
+    pin: 'この図で拡大縮小・移動を有効にする',
+    unpin: '拡大縮小・移動を無効にする',
+  },
   about: {
     label: 'バージョン情報',
     checkUpdate: 'アップデートを確認',
