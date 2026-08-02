@@ -72,6 +72,9 @@ pub struct Workgroup {
     pub claude_code_mode: Option<String>,
     #[serde(default)]
     pub exec_prompt: Option<String>,
+    /// Claude Code セッションに常時注入するプロンプト（SessionStart フック経由。/clear 後も維持）
+    #[serde(default)]
+    pub system_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

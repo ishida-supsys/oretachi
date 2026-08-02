@@ -32,6 +32,7 @@ const autoAssignHotkey = ref(props.group.autoAssignHotkey ?? false);
 const taskAddAgent = ref<AiAgentKind | "">(props.group.taskAddAgent ?? "");
 const claudeCodeMode = ref<ClaudeCodeMode>(props.group.claudeCodeMode ?? "plan");
 const execPrompt = ref(props.group.execPrompt ?? "");
+const systemPrompt = ref(props.group.systemPrompt ?? "");
 
 function save() {
   emit("save", {
@@ -41,6 +42,7 @@ function save() {
     taskAddAgent: taskAddAgent.value || undefined,
     claudeCodeMode: claudeCodeMode.value,
     execPrompt: execPrompt.value.trim() || undefined,
+    systemPrompt: systemPrompt.value.trim() || undefined,
   });
 }
 </script>
@@ -104,6 +106,12 @@ function save() {
         <label class="label">{{ t('execPrompt') }}</label>
         <textarea v-model="execPrompt" class="textarea" :placeholder="t('execPromptPlaceholder')" rows="4" />
         <p class="hint">{{ t('execPromptHint') }}</p>
+      </div>
+
+      <div class="field">
+        <label class="label">{{ t('systemPrompt') }}</label>
+        <textarea v-model="systemPrompt" class="textarea" :placeholder="t('systemPromptPlaceholder')" rows="4" />
+        <p class="hint">{{ t('systemPromptHint') }}</p>
       </div>
 
       <div class="dialog-actions">
@@ -330,6 +338,9 @@ function save() {
     "execPrompt": "Execution prompt",
     "execPromptPlaceholder": "e.g. Work on the following task.\n\n{'{{PROMPT}}'}",
     "execPromptHint": "{'{{PROMPT}}'} is replaced with the task prompt. Empty = task prompt only.",
+    "systemPrompt": "System prompt",
+    "systemPromptPlaceholder": "e.g. Always respond in Japanese.",
+    "systemPromptHint": "Injected into every Claude Code session in this group. Persists across /clear and restarts. Claude Code only.",
     "saveButton": "Save",
     "removeGroup": "Delete this group"
   },
@@ -347,6 +358,9 @@ function save() {
     "execPrompt": "実行プロンプト",
     "execPromptPlaceholder": "例: 以下のタスクに取り組んでください。\n\n{'{{PROMPT}}'}",
     "execPromptHint": "{'{{PROMPT}}'} がタスク実行プロンプトに置換されます。未指定ならプロンプトのみと等価。",
+    "systemPrompt": "システムプロンプト",
+    "systemPromptPlaceholder": "例: 常に日本語で応答してください。",
+    "systemPromptHint": "このグループの Claude Code セッションに常時注入されます。/clear や再起動後も維持。Claude Code のみ対応。",
     "saveButton": "保存",
     "removeGroup": "このグループを削除"
   }

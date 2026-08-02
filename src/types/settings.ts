@@ -42,6 +42,7 @@ export interface Workgroup {
   taskAddAgent?: AiAgentKind;       // タスク実行エージェント（グループ単位）
   claudeCodeMode?: ClaudeCodeMode;  // Claude Code モード（既定: plan）
   execPrompt?: string;              // 実行プロンプトテンプレート（置換タグ {{PROMPT}}）
+  systemPrompt?: string;            // Claude Code セッションに常時注入（SessionStart フック経由。/clear 後も維持）
 }
 
 export interface TerminalSettings {

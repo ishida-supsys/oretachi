@@ -298,16 +298,16 @@ export function useTaskExecution(deps: {
       }
 
       // Claude Code プラグイン設定を settings.local.json に書き込む
-      if (repo.notificationHooks?.length) {
-        try {
-          await invoke("write_claude_plugin_config", {
-            worktreePath: entry.path,
-            worktreeName: entry.name,
-            hooks: repo.notificationHooks,
-          });
-        } catch (e) {
-          await message(t("claudeHooksFailed", { error: e }), { kind: "warning" });
-        }
+      // 通知フック未設定でも無条件で有効化する（SessionStart フックによる systemPrompt 注入と
+      // MCP サーバーを全ワークツリーで使えるようにするため。未設定リポジトリの通知はサーバー側で drop）
+      try {
+        await invoke("write_claude_plugin_config", {
+          worktreePath: entry.path,
+          worktreeName: entry.name,
+          hooks: repo.notificationHooks ?? [],
+        });
+      } catch (e) {
+        await message(t("claudeHooksFailed", { error: e }), { kind: "warning" });
       }
 
       const pending = buildPendingCommand(repo, entry);
@@ -365,6 +365,22 @@ export function useTaskExecution(deps: {
     const terminal = wt.terminals[0];
     if (!terminal) {
       throw new Error(`ターミナルが見つかりません: ${wt.name}`);
+    }
+
+    // Claude Code プラグイン設定を settings.local.json に反映（冪等マージ）。
+    // 新規作成時だけでなくタスク実行時にも書くことで、プラグイン設定が書かれる前に
+    // 作成された既存ワークツリーにも SessionStart 注入を適用する。エージェント実行中の
+    // 追いプロンプト送信パスでも、次回の claude 手動再起動セッションに効くよう先に書く。
+    // 失敗してもタスクは続行。
+    const repoOfWt = settings.value.repositories.find((r) => r.id === wt.repositoryId);
+    try {
+      await invoke("write_claude_plugin_config", {
+        worktreePath: wt.path,
+        worktreeName: wt.name,
+        hooks: repoOfWt?.notificationHooks ?? [],
+      });
+    } catch (e) {
+      console.warn("[write_claude_plugin_config] failed:", e);
     }
 
     // sessionId を取得してエージェント実行中か判定
