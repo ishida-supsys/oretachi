@@ -2,7 +2,7 @@
 import { ref, watch, onMounted, nextTick } from "vue";
 import mermaid from "mermaid";
 import PanZoomCanvas from "./PanZoomCanvas.vue";
-import { mermaidConfig, sanitizeMermaidSvg } from "./mermaidTheme";
+import { mermaidConfig, sanitizeMermaidSvg } from "../../utils/mermaidTheme";
 
 const props = defineProps<{
   content: string;

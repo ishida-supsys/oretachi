@@ -5,7 +5,7 @@ import { MdPreview, config } from "md-editor-v3";
 import "md-editor-v3/lib/preview.css";
 import mermaid from "mermaid";
 import PanZoomCanvas from "./PanZoomCanvas.vue";
-import { mermaidConfig, sanitizeMermaidSvg } from "./mermaidTheme";
+import { mermaidConfig, sanitizeMermaidSvg } from "../../utils/mermaidTheme";
 import { createPanZoom, type PanZoomController } from "../../utils/panZoom";
 
 const props = defineProps<{
