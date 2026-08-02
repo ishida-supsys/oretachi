@@ -289,7 +289,7 @@ pub struct ArtifactParams {
     pub repository: String,
     #[schemars(description = "ブランチ名")]
     pub branch: String,
-    #[schemars(description = "コンテンツの種類 (create時必須): application/vnd.ant.code, text/markdown, text/html, image/svg+xml, application/vnd.ant.mermaid, application/vnd.ant.react (Tailwind CSSユーティリティクラス利用可)")]
+    #[schemars(description = "コンテンツの種類 (create時必須): application/vnd.ant.code, text/markdown, text/html, image/svg+xml, application/vnd.ant.mermaid, application/vnd.ant.react (Tailwind CSSユーティリティクラス利用可), text/csv, text/tab-separated-values (1行目をヘッダとするテーブルビューアで表示)")]
     #[serde(rename = "type")]
     pub content_type: Option<String>,
     #[schemars(description = "アーティファクトのタイトル (create時必須)")]
