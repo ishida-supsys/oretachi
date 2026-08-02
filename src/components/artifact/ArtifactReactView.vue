@@ -117,6 +117,8 @@ const codeContent = computed(() =>
         v-else
         :srcdoc="srcdocHtml"
         sandbox="allow-scripts"
+        allow="fullscreen"
+        allowfullscreen
         class="react-iframe"
       />
     </div>

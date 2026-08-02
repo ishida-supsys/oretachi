@@ -59,6 +59,23 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
         "wireframe/templates/screens--screen.example.jsx",
         include_str!("../skills/wireframe/templates/screens--screen.example.jsx"),
     ),
+    // --- presentation ---
+    (
+        "presentation/SKILL.md",
+        include_str!("../skills/presentation/SKILL.md"),
+    ),
+    (
+        "presentation/templates/entry-point.jsx",
+        include_str!("../skills/presentation/templates/entry-point.jsx"),
+    ),
+    (
+        "presentation/templates/components--deck.jsx",
+        include_str!("../skills/presentation/templates/components--deck.jsx"),
+    ),
+    (
+        "presentation/templates/slides--slide.example.jsx",
+        include_str!("../skills/presentation/templates/slides--slide.example.jsx"),
+    ),
     // --- background-command ---
     (
         "background-command/SKILL.md",
