@@ -6,6 +6,26 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.27.0] - 2026-08-04
+
+### Added
+- mermaid/SVG アーティファクトのパンズーム対応と可読性改善 (#103)
+- CSV/TSV ビューアとプレゼンテーションスキルを追加 (#105)
+- グループ systemPrompt を SessionStart フックで Claude Code セッションに常時注入 (#104)
+- ホームタブにリポジトリ一覧を追加しアーティファクトを恒久保存可能にする (#106)
+
+### Fixed
+- 横スクロールでズームインしてしまう問題とホイール倍率の暴走を修正 (#103)
+- width="100%" 指定の SVG アーティファクトがクリップされる問題を修正 (#103)
+- 全画面ビューアーがコードブロックのヘッダーに隠れる問題を修正 (#103)
+- リポジトリ側の転送/削除を worktree 単位と別 kind に分離し日次サマリの誤集計を解消 (#106)
+- 恒久保存ディレクトリ名を sha256 先頭 128bit に変更し Windows のパス長上限を回避 (#106)
+- 壊れた JSON が 1 件あるとリポジトリアーティファクト一覧全体が失敗する問題を修正 (#106)
+- RepositoryPanel のリスナリークと、リロード後にアーティファクトウィンドウが無反応になる問題を修正 (#106)
+
+### Changed
+- mermaidTheme を components 配下から utils へ移動 (#103)
+
 ## [0.26.0] - 2026-07-23
 
 ### Added
@@ -534,7 +554,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.26.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.27.0...HEAD
+[0.27.0]: https://github.com/ishida-supsys/oretachi/compare/0.26.0...0.27.0
 [0.26.0]: https://github.com/ishida-supsys/oretachi/compare/0.25.3...0.26.0
 [0.25.3]: https://github.com/ishida-supsys/oretachi/compare/0.25.2...0.25.3
 [0.25.2]: https://github.com/ishida-supsys/oretachi/compare/0.25.1...0.25.2
