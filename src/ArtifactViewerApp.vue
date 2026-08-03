@@ -12,6 +12,8 @@ import ArtifactHtmlView from "./components/artifact/ArtifactHtmlView.vue";
 import ArtifactSvgView from "./components/artifact/ArtifactSvgView.vue";
 import ArtifactMermaidView from "./components/artifact/ArtifactMermaidView.vue";
 import ArtifactReactView from "./components/artifact/ArtifactReactView.vue";
+import ArtifactTableView from "./components/artifact/ArtifactTableView.vue";
+import { isTableContentType } from "./utils/csvArtifact";
 import type {
   ArtifactMeta,
   ArtifactData,
@@ -49,6 +51,8 @@ const typeIcons: Record<string, string> = {
   "image/svg+xml": "pi-image",
   "application/vnd.ant.mermaid": "pi-sitemap",
   "application/vnd.ant.react": "pi-play",
+  "text/csv": "pi-table",
+  "text/tab-separated-values": "pi-table",
 };
 
 function typeIcon(contentType: string): string {
@@ -316,6 +320,12 @@ onUnmounted(() => {
             v-else-if="selectedArtifact.content_type === 'application/vnd.ant.react'"
             :content="selectedArtifact.content"
             :modules="selectedArtifact.modules"
+          />
+          <ArtifactTableView
+            v-else-if="isTableContentType(selectedArtifact.content_type)"
+            :key="selectedArtifact.id"
+            :content="selectedArtifact.content"
+            :content-type="selectedArtifact.content_type"
           />
           <ArtifactCodeView
             v-else

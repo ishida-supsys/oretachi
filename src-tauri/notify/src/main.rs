@@ -11,6 +11,9 @@
 //      ワークツリー名と kind の解決はサーバー側で project-dir / event から行う)
 //   oretachi-notify --set-description --project-dir "<dir>"
 //     (stdin の ExitPlanMode hook JSON を /set-description へ転送)
+//   oretachi-notify --session-context --project-dir "<dir>"
+//     (SessionStart フック用。/session-context からワークツリー所属グループの systemPrompt を
+//      取得し、SessionStart 用 JSON として stdout に出力する。失敗時は何も出力せず exit 0)
 //   oretachi-notify --prompt-context --project-dir "<dir>"
 //     (UserPromptSubmit フック用。/prompt-context から現在の description を取得し、
 //      additionalContext JSON を stdout に出力して Claude のコンテキストに注入する)
@@ -39,6 +42,31 @@ fn main() {
             eprintln!("Set description failed: {}", e);
             let _ = e;
             std::process::exit(1);
+        }
+        std::process::exit(0);
+    }
+
+    // SessionStart フック (--session-context): /session-context からグループの systemPrompt を
+    // 取得し、SessionStart 用 JSON として stdout に出力する。
+    // oretachi 非稼働・未管理ディレクトリ・プロンプト未設定のいずれでも、claude 側に警告を
+    // 出さないよう何も出力せず必ず exit 0 する（--notify の exit(1) とは異なる方針）。
+    if has_flag(&args, "--session-context", "-s") {
+        let dir = resolve_project_dir(&args);
+        match fetch_session_context(&dir) {
+            Ok(Some(prompt)) => {
+                let out = serde_json::json!({
+                    "hookSpecificOutput": {
+                        "hookEventName": "SessionStart",
+                        "additionalContext": prompt
+                    }
+                });
+                println!("{}", out);
+            }
+            Ok(None) => {}
+            Err(_e) => {
+                #[cfg(debug_assertions)]
+                eprintln!("Session context fetch failed: {}", _e);
+            }
         }
         std::process::exit(0);
     }
@@ -76,7 +104,7 @@ fn main() {
     }
 
     #[cfg(debug_assertions)]
-    eprintln!("Usage: oretachi-notify --notify --project-dir <dir> --event <Event> [--agent <agent>]\n       oretachi-notify --set-description --project-dir <dir>\n       oretachi-notify --prompt-context --project-dir <dir>");
+    eprintln!("Usage: oretachi-notify --notify --project-dir <dir> --event <Event> [--agent <agent>]\n       oretachi-notify --set-description --project-dir <dir>\n       oretachi-notify --session-context --project-dir <dir>\n       oretachi-notify --prompt-context --project-dir <dir>");
     std::process::exit(2);
 }
 
@@ -179,6 +207,19 @@ fn send_set_description(project_dir: &str, hook_json: Option<&str>) -> Result<()
     post_json("/set-description", &payload)
 }
 
+/// /session-context からワークツリー所属グループの systemPrompt を取得する。
+/// 未管理ディレクトリやプロンプト未設定の場合はサーバーが prompt: null を返すので Ok(None)。
+fn fetch_session_context(project_dir: &str) -> Result<Option<String>, String> {
+    let payload = serde_json::json!({ "projectDir": project_dir });
+    let body = post_json_read_body("/session-context", &payload)?;
+    let v: serde_json::Value =
+        serde_json::from_str(&body).map_err(|e| format!("Invalid response JSON: {}", e))?;
+    Ok(v.get("prompt")
+        .and_then(|p| p.as_str())
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty()))
+}
+
 /// UserPromptSubmit フック用。/prompt-context から現在の description を取得し、
 /// stdout に出力すべき additionalContext JSON を返す。skip 時は Ok(None)。
 fn send_prompt_context(project_dir: &str) -> Result<Option<String>, String> {
@@ -213,7 +254,7 @@ fn build_prompt_context_output(body: &str) -> Option<String> {
 }
 
 /// post_json と同様に POST し、レスポンスボディまで読んで返す。
-/// /prompt-context のようにサーバの返す JSON が必要な場合に使う。
+/// /session-context・/prompt-context のようにサーバの返す JSON が必要な場合に使う。
 fn post_json_read_body(path: &str, payload: &serde_json::Value) -> Result<String, String> {
     let (port, api_key) = read_server_info()?;
     let payload_str = payload.to_string();
@@ -370,6 +411,20 @@ mod tests {
     fn test_has_flag_absent() {
         let args = vec!["bin".to_string(), "--other".to_string()];
         assert!(!has_flag(&args, "--notify", "-n"));
+    }
+
+    #[test]
+    fn test_has_flag_session_context() {
+        let args = vec![
+            "bin".to_string(),
+            "--session-context".to_string(),
+            "--project-dir".to_string(),
+            "X:/wt/foo".to_string(),
+        ];
+        assert!(has_flag(&args, "--session-context", "-s"));
+        assert!(!has_flag(&args, "--prompt-context", "-c"));
+        assert!(!has_flag(&args, "--notify", "-n"));
+        assert!(!has_flag(&args, "--set-description", "-d"));
     }
 
     #[test]
