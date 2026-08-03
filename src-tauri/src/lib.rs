@@ -55,15 +55,23 @@ fn artifacts_dir(
         .join(worktree_id))
 }
 
-/// リポジトリ ID（＝リポジトリの絶対パス）を URL-safe base64 に変換してディレクトリ名にする。
-/// base64url の文字集合は `A-Za-z0-9-_` のみなので、パス区切りやドライブレターの `:` を含まない。
+/// リポジトリ ID（＝リポジトリの絶対パス）を SHA-256 の先頭 128bit（32桁の hex）に
+/// 変換してディレクトリ名にする。
+/// base64 だと元パス長の 4/3 倍になり、深いパスで Windows の 255 文字上限を超えて
+/// `create_dir_all` が失敗するため、長さが元パスに依存しないハッシュを使う。
+/// hex なのでパス区切りやドライブレターの `:` を含まない。
 fn repo_artifacts_dir(
     app_handle: &tauri::AppHandle,
     repository_id: &str,
 ) -> Result<std::path::PathBuf, String> {
-    use base64::Engine;
-    let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(repository_id);
-    // エンコード結果は理論上安全だが、ディレクトリ名として使う以上ここでも検証する
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(repository_id.as_bytes());
+    let encoded = digest.iter().take(16).fold(String::new(), |mut acc, b| {
+        use std::fmt::Write;
+        let _ = write!(acc, "{:02x}", b);
+        acc
+    });
+    // hex は理論上安全だが、ディレクトリ名として使う以上ここでも検証する
     validate_path_component(&encoded)?;
     Ok(app_handle
         .path()
@@ -701,9 +709,21 @@ async fn list_repo_artifacts(
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-            let mut val: serde_json::Value =
-                serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            // 恒久保存領域なので、1件壊れていても残りは必ず返す（全体を Err にしない）
+            let raw = match std::fs::read_to_string(&path) {
+                Ok(raw) => raw,
+                Err(e) => {
+                    log::warn!("[RepoArtifact] 読み込み失敗のためスキップ: {:?}: {}", path, e);
+                    continue;
+                }
+            };
+            let mut val: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(val) => val,
+                Err(e) => {
+                    log::warn!("[RepoArtifact] JSON 解析失敗のためスキップ: {:?}: {}", path, e);
+                    continue;
+                }
+            };
             if let Some(obj) = val.as_object_mut() {
                 obj.remove("content");
                 obj.remove("modules");
@@ -757,6 +777,7 @@ async fn copy_artifact_to_repository(
     let dest_path = dest_dir.join(format!("{}.json", artifact_id));
 
     let source_worktree_id = worktree_id.clone();
+    let marker_content = repository_id.clone();
     let tmp_name = format!(".{}.tmp{}", artifact_id, std::process::id());
     let copied = tokio::task::spawn_blocking(move || -> Result<bool, String> {
         if dest_path.exists() && !overwrite {
@@ -776,9 +797,19 @@ async fn copy_artifact_to_repository(
         let json = serde_json::to_string(&val).map_err(|e| e.to_string())?;
 
         std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+        // ディレクトリ名はハッシュなので、どのリポジトリのものか分かるよう元パスを残す。
+        // 拡張子が json ではないため list_repo_artifacts の対象外。
+        let marker_path = dest_dir.join("repository-path.txt");
+        if !marker_path.exists() {
+            let _ = std::fs::write(&marker_path, marker_content);
+        }
+
         // 一時ファイルへ書いてから rename することで、書き込み途中の破損ファイルが残らないようにする
         let tmp_path = dest_dir.join(tmp_name);
-        std::fs::write(&tmp_path, json).map_err(|e| e.to_string())?;
+        if let Err(e) = std::fs::write(&tmp_path, json) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!("アーティファクトの書き込みに失敗しました: {}", e));
+        }
         if let Err(e) = std::fs::rename(&tmp_path, &dest_path) {
             let _ = std::fs::remove_file(&tmp_path);
             return Err(format!("アーティファクトの書き込みに失敗しました: {}", e));
@@ -805,7 +836,10 @@ async fn copy_artifact_to_repository(
         }),
     );
     if let Some(pool) = app_handle.try_state::<report_db::ReportPool>() {
-        let _ = report_db::insert(&pool.0, "artifact_change:copy", &artifact_id).await;
+        // 日次サマリの artifact_added/removed は `artifact_change:create` /
+        // `artifact_change:delete` を前方一致で数えるため、意味の異なるリポジトリ転送は
+        // 別 kind にして既存カウンタを汚さない
+        let _ = report_db::insert(&pool.0, "repo_artifact_change:copy", &artifact_id).await;
     }
 
     Ok(CopyArtifactResult {
@@ -844,7 +878,8 @@ async fn delete_repo_artifact(
             }),
         );
         if let Some(pool) = app_handle.try_state::<report_db::ReportPool>() {
-            let _ = report_db::insert(&pool.0, "artifact_change:delete", &artifact_id).await;
+            // ワークツリー単位の削除を数える `artifact_change:delete` とは区別する
+            let _ = report_db::insert(&pool.0, "repo_artifact_change:delete", &artifact_id).await;
         }
     }
     Ok(())

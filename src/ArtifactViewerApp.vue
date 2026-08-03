@@ -118,8 +118,13 @@ async function refreshSelected(artifactId: string, command: string) {
   } else if (command === "create") {
     // 同じ ID の再作成（上書き転送）では selectArtifact が早期 return するため、
     // 選択中の本文を捨てて読み直させる
-    if (selectedId.value === artifactId) selectedArtifact.value = null;
-    await selectArtifact(artifactId);
+    const isSelected = selectedId.value === artifactId;
+    if (isSelected) selectedArtifact.value = null;
+    // リポジトリ側は「保管庫を眺める」用途なので、他ウィンドウからの転送で
+    // 閲覧中の表示を奪わない。ワークツリー側は生成直後に見せる従来動作を維持する。
+    if (isSelected || !isRepositoryScope || selectedId.value === null) {
+      await selectArtifact(artifactId);
+    }
   } else if (selectedId.value === artifactId) {
     try {
       const raw = await invokeRead(artifactId);
@@ -256,7 +261,12 @@ onUnmounted(() => {
           <span :class="`pi ${typeIcon(selectedArtifact.content_type)} type-icon`" />
           <div class="content-title-area">
             <span class="content-title">{{ selectedArtifact.title }}</span>
-            <span class="content-type">{{ selectedArtifact.content_type }}</span>
+            <span class="content-type">
+              {{ selectedArtifact.content_type }}
+              <template v-if="isRepositoryScope && selectedArtifact.source_worktree_id">
+                · {{ t("source", { worktreeId: selectedArtifact.source_worktree_id }) }}
+              </template>
+            </span>
           </div>
           <div class="header-actions">
             <button
@@ -537,6 +547,7 @@ onUnmounted(() => {
   "en": {
     "emptyList": "No artifacts",
     "selectPrompt": "Select an artifact to view",
+    "source": "from worktree {worktreeId}",
     "transfer": {
       "label": "Transfer to repository",
       "labelNamed": "Transfer to {repository}",
@@ -556,6 +567,7 @@ onUnmounted(() => {
   "ja": {
     "emptyList": "アーティファクトがありません",
     "selectPrompt": "アーティファクトを選択してください",
+    "source": "転送元 worktree {worktreeId}",
     "transfer": {
       "label": "リポジトリへ転送",
       "labelNamed": "{repository} へ転送",

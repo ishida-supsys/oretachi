@@ -100,15 +100,26 @@ function clearExecScript(repoId: string) {
   scheduleSave();
 }
 
+let disposed = false;
+
 onMounted(async () => {
-  await refreshAllArtifactCounts();
-  unlisten = await listen<RepoArtifactChangedEvent>("repo-artifact-changed", async (event) => {
+  // 件数取得を待ってから listen すると、その間に unmount された場合に
+  // unlisten が呼ばれずリスナが残り続けるため、先に登録する
+  const fn = await listen<RepoArtifactChangedEvent>("repo-artifact-changed", async (event) => {
     await refreshArtifactCount(event.payload.repositoryId);
   });
+  if (disposed) {
+    fn();
+    return;
+  }
+  unlisten = fn;
+  await refreshAllArtifactCounts();
 });
 
 onUnmounted(() => {
+  disposed = true;
   unlisten?.();
+  unlisten = null;
 });
 
 // ホームタブのヘッダーにある「+ 追加」ボタンから呼ばれる

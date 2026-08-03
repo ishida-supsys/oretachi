@@ -3,6 +3,34 @@ import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
 // キーは worktreeId、リポジトリスコープは `repo:<repositoryId>` の形で同じマップを共用する
 const artifactWindowMap = new Map<string, WebviewWindow>();
 
+/**
+ * 既に開いているビューアがあればフォーカスして true を返す。
+ * このマップはウィンドウごとのモジュール状態なので、呼び出し元ウィンドウがリロードされると
+ * 空になる。その状態で同じラベルの WebviewWindow を作ると重複エラーになり、既存ウィンドウに
+ * フォーカスも当たらず「ボタンが無反応」に見えるため、OS 側にも問い合わせる。
+ */
+async function focusExisting(key: string, label: string): Promise<boolean> {
+  const cached = artifactWindowMap.get(key);
+  if (cached) {
+    await cached.setFocus();
+    return true;
+  }
+  try {
+    const found = await WebviewWindow.getByLabel(label);
+    if (found) {
+      artifactWindowMap.set(key, found);
+      found.once("tauri://destroyed", () => {
+        artifactWindowMap.delete(key);
+      });
+      await found.setFocus();
+      return true;
+    }
+  } catch {
+    /* 取得できなければ新規作成にフォールバックする */
+  }
+  return false;
+}
+
 /** リポジトリ ID（絶対パス）をウィンドウラベルに使える形へ変換する */
 function encodeRepositoryLabel(repositoryId: string): string {
   // btoa は Latin-1 しか扱えないため、UTF-8 バイト列に落としてからエンコードする
@@ -18,11 +46,7 @@ export function useArtifactWindow() {
     worktreeName: string,
     repositoryName?: string,
   ): Promise<void> {
-    const existing = artifactWindowMap.get(worktreeId);
-    if (existing) {
-      await existing.setFocus();
-      return;
-    }
+    if (await focusExisting(worktreeId, `artifact-${worktreeId}`)) return;
 
     const baseUrl = window.location.origin + window.location.pathname;
     const url =
@@ -58,18 +82,14 @@ export function useArtifactWindow() {
     repositoryName: string,
   ): Promise<void> {
     const key = `repo:${repositoryId}`;
-    const existing = artifactWindowMap.get(key);
-    if (existing) {
-      await existing.setFocus();
-      return;
-    }
+    const label = `artifact-repo-${encodeRepositoryLabel(repositoryId)}`;
+    if (await focusExisting(key, label)) return;
 
     const baseUrl = window.location.origin + window.location.pathname;
     const url =
       `${baseUrl}?mode=artifact&scope=repository&repositoryId=${encodeURIComponent(repositoryId)}` +
       `&repositoryName=${encodeURIComponent(repositoryName)}`;
 
-    const label = `artifact-repo-${encodeRepositoryLabel(repositoryId)}`;
     const win = new WebviewWindow(label, {
       url,
       title: `Artifacts - ${repositoryName}`,
