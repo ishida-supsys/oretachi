@@ -53,6 +53,7 @@ import { useShutdownGuard } from "./composables/useShutdownGuard";
 import type { ArchiveRow } from "./types/archive";
 import { logDebug } from "./utils/log";
 import { cssPxToLogical } from "./utils/uiScale";
+import { sortHomeFirst } from "./utils/homeWorktree";
 import { useUiZoom } from "./composables/useUiZoom";
 import { consumeMaxBlockedMs, startEventLoopMonitor } from "./utils/eventLoopMonitor";
 import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
@@ -282,8 +283,8 @@ const autoApproval = useAppAutoApproval({
 const { autoApprovalMap, aiJudgingWorktrees } = autoApproval;
 const { onToggleAutoApproval, onCancelAiJudging } = autoApproval;
 
-// タスク実行 (executeAddWorktree / executeAgentWorktree)
-const { executeAddWorktree, executeAgentWorktree, resolveShell, buildPendingCommand, waitForScriptCompletion } =
+// タスク実行 (executeAddWorktree / executeAgentWorktree / launchHomeAgent)
+const { executeAddWorktree, executeAgentWorktree, launchHomeAgent, resolveShell, buildPendingCommand, waitForScriptCompletion } =
   useTaskExecution({
     t,
     settings,
@@ -332,7 +333,8 @@ const worktreeCardTooltips = computed(() => {
 });
 
 // サイドバー・メインエリア共通: detachedでないワークツリーのみ（毎レンダリングでのfilter()生成を回避）
-const attachedWorktrees = computed(() => worktrees.value.filter(w => !isDetached(w.id)));
+// ホームはタブ列の先頭に固定する
+const attachedWorktrees = computed(() => sortHomeFirst(worktrees.value.filter(w => !isDetached(w.id))));
 const { showAddTaskDialog, rerunTaskId, rerunPrompt, onAddTaskConfirm, onAddTaskCancel } =
   useAddTaskDialog(async (code) => {
     if (code.type === "add_worktree") {
@@ -1834,6 +1836,7 @@ onMounted(async () => {
         @cancel-ai-judging="onCancelAiJudging"
         @cancel-remove="cancelWorktreeRemove"
         @duplicate-worktree="onDuplicateWorktree"
+        @launch-home-agent="launchHomeAgent()"
         @toggle-description="onToggleDescription"
         @reorder-worktrees="reorderWorktree"
         @commit-reorder="saveWorktreeOrder"
@@ -1866,10 +1869,13 @@ onMounted(async () => {
             :ai-judging="aiJudgingWorktrees.has(wt.id)"
             :is-window-focused="isWindowFocused"
             :task-tooltip="worktreeTaskTooltips.get(wt.id)"
+            :is-home="wt.isHome === true"
+            :home-path="wt.path"
             @open-in-ide="onOpenInIde(wt.id)"
             @open-artifacts="onOpenArtifacts(wt.id)"
             @cancel-ai-judging="onCancelAiJudging(wt.id)"
             @click-auto-approval="onClickAutoApproval(wt.id)"
+            @launch-home-agent="launchHomeAgent()"
           />
           <!-- フレームコンテンツ -->
           <div :data-frame-area="wt.id" class="flex-1 min-h-0 overflow-hidden">
@@ -2057,6 +2063,7 @@ onMounted(async () => {
     "claudeHooksFailed": "Failed to write Claude Code notification hooks: {error}",
     "sessionCopyFailed": "Failed to copy Claude Code session data: {error}",
     "worktreeSetupIncomplete": "Worktree created, but some setup steps failed: {error}",
+    "homeAgentNoBaseDir": "Set the worktree base directory in Settings before launching the management agent.",
     "shuttingDown": "Shutting down...",
     "minimize": "Minimize",
     "maximize": "Maximize",
@@ -2089,6 +2096,7 @@ onMounted(async () => {
     "claudeHooksFailed": "Claude Code通知フックの書き込みに失敗しました: {error}",
     "sessionCopyFailed": "Claude Codeセッションデータのコピーに失敗しました: {error}",
     "worktreeSetupIncomplete": "ワークツリーは作成されましたが、一部のセットアップ処理に失敗しました: {error}",
+    "homeAgentNoBaseDir": "管理エージェントを起動する前に、設定でワークツリー追加先ディレクトリを指定してください。",
     "shuttingDown": "終了しています...",
     "minimize": "最小化",
     "maximize": "最大化",

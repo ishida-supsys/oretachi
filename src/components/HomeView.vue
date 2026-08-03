@@ -18,6 +18,7 @@ import { useTaskPersistence } from "../composables/useTaskPersistence";
 import { useTaskSearch } from "../composables/useTaskSearch";
 import { useInfiniteScroll } from "../composables/useInfiniteScroll";
 import { useArchivePersistence, deleteArchive } from "../composables/useArchivePersistence";
+import { sortHomeFirst } from "../utils/homeWorktree";
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import autoAnimate from "@formkit/auto-animate";
 import type { AnimationController } from "@formkit/auto-animate";
@@ -224,6 +225,7 @@ const emit = defineEmits<{
   cancelAiJudging: [worktreeId: string];
   cancelRemove: [worktreeId: string];
   duplicateWorktree: [worktreeId: string];
+  launchHomeAgent: [];
   toggleDescription: [worktreeId: string];
   addTask: [];
   removeTask: [taskId: string];
@@ -289,8 +291,9 @@ watch(panelMode, async (mode, oldMode) => {
 
 // アクティブなワークグループでワークツリーをフィルタ
 const { activeWorkgroupId, resolvedGroupId, groups: workgroups, moveWorktreeToWorkgroup } = useWorkgroups();
+// ホームはカード一覧の先頭に固定する
 const worktreesRef = computed(() =>
-  props.worktrees.filter((w) => resolvedGroupId(w.workgroupId) === activeWorkgroupId.value),
+  sortHomeFirst(props.worktrees.filter((w) => resolvedGroupId(w.workgroupId) === activeWorkgroupId.value)),
 );
 const tasksRef = sortedTasks;
 
@@ -498,6 +501,7 @@ watch(
               @cancel-ai-judging="emit('cancelAiJudging', $event)"
               @cancel-remove="emit('cancelRemove', $event)"
               @duplicate-worktree="emit('duplicateWorktree', $event)"
+              @launch-home-agent="emit('launchHomeAgent')"
               @toggle-description="onCardToggleDescription"
             />
           </div>

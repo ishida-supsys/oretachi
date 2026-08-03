@@ -29,6 +29,12 @@ export interface WorktreeEntry {
   description?: string; // 作業全体の目的を表す1行説明（ExitPlanMode hookのAI要約、または MCP oretachi_set_description で直接セット）
   descriptionOpen?: boolean; // ホームカードの description 開閉状態（ワークツリー毎）
   workgroupId?: string; // 所属するワークグループのID（未設定は先頭グループにフォールバック）
+  /**
+   * ホームワークツリー。path = worktreeBaseDir を作業ディレクトリとする擬似ワークツリーで、
+   * git ワークツリーではないため削除・複製・マージ・ブランチ操作を一切通さない。
+   * 一覧では常に先頭に固定される（utils/sortHomeFirst）。
+   */
+  isHome?: boolean;
 }
 
 // Claude Code の起動モード（taskAddAgent が claudeCode のときのみ意味を持つ）
@@ -139,5 +145,6 @@ export interface AppSettings {
   debugMode?: boolean;
   useOretachiTerminalForBackground?: boolean; // AI からの background コマンドを oretachi ターミナルで起動するか (デフォルト: false)
   moveToSubWindowOnMcpSpawn?: boolean; // MCP 経由のターミナル追加時にサブウィンドウへ自動移行するか (デフォルト: false)
+  homeAgentPrompt?: string; // ホームの管理エージェント起動プロンプト (空なら DEFAULT_HOME_AGENT_PROMPT)
   wizardCompleted?: boolean; // 初回起動ウィザード完了フラグ (Rust 側 init() でシーディング)
 }

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { open, message } from "@tauri-apps/plugin-dialog";
 import { useI18n } from "vue-i18n";
-import { useSettings } from "../../composables/useSettings";
+import { useSettings, migrateHomeWorktree, setupHomeClaudeDir } from "../../composables/useSettings";
 import { useRepositoryActions } from "../../composables/useRepositoryActions";
 
 const { t } = useI18n();
@@ -12,7 +12,10 @@ async function selectWorktreeBaseDir() {
   const selected = await open({ directory: true, multiple: false });
   if (typeof selected === "string") {
     settings.value.worktreeBaseDir = selected;
+    // ホームワークツリーとその .claude/ (プラグイン設定 + 同梱スキル) を用意する
+    migrateHomeWorktree(settings.value);
     scheduleSave();
+    await setupHomeClaudeDir(selected);
   }
 }
 

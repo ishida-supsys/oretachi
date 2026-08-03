@@ -9,6 +9,7 @@ import type { Worktree } from "../types/worktree";
 import type { AddWorktreeTaskCode, AgentWorktreeTaskCode } from "../types/task";
 import type { WebSessionInfo } from "../types/terminal";
 import { decodePtyOutput } from "../utils/decodePtyOutput";
+import { DEFAULT_HOME_AGENT_PROMPT } from "../constants/homeAgentPrompt";
 import { useWorkgroups } from "./useWorkgroups";
 
 /** Claude Code モード → permission-mode フラグ */
@@ -403,6 +404,24 @@ export function useTaskExecution(deps: {
       return;
     }
 
+    await launchAgentInTerminal(wt, terminal.id, code.prompt, { remoteExec: code.remoteExec });
+  }
+
+  /**
+   * 指定ワークツリーの指定ターミナルでエージェントを起動する。
+   * プロンプトは一時ファイル経由で渡し、シェルに応じたコマンドへラップする。
+   * detached（サブウィンドウ）と メインウィンドウ の両方に対応。
+   *
+   * @param opts.applyGroupExecPrompt ワークグループの実行プロンプトテンプレートを適用するか（既定 true）。
+   *   ホームの管理エージェントのようにテンプレートを噛ませたくない場合に false を渡す。
+   */
+  async function launchAgentInTerminal(
+    wt: Worktree,
+    terminalId: number,
+    prompt: string,
+    opts?: { remoteExec?: boolean; applyGroupExecPrompt?: boolean },
+  ): Promise<void> {
+    const remoteExec = opts?.remoteExec ?? false;
     // タスク実行エージェント・モード・実行プロンプトは所属ワークグループ単位
     const group = groupOf(wt);
     const agentKind = group?.taskAddAgent ?? settings.value.aiAgent?.taskAddAgent ?? settings.value.aiAgent?.approvalAgent ?? "claudeCode";
@@ -415,13 +434,15 @@ export function useTaskExecution(deps: {
       (shell === undefined && isWindows);
 
     // 実行プロンプトテンプレート ({{PROMPT}}) を適用してから一時ファイルへ書き出し
-    const finalPrompt = applyExecPrompt(group?.execPrompt, code.prompt);
+    const finalPrompt = (opts?.applyGroupExecPrompt ?? true)
+      ? applyExecPrompt(group?.execPrompt, prompt)
+      : prompt;
     const tempPath = await invoke<string>("write_temp_prompt", { content: finalPrompt });
 
     const claudeMode = claudeModeFlag(group?.claudeCodeMode);
     let agentCmd: string;
     switch (agentKind) {
-      case "claudeCode": agentCmd = code.remoteExec ? `claude --remote ${claudeMode}` : `claude ${claudeMode}`; break;
+      case "claudeCode": agentCmd = remoteExec ? `claude --remote ${claudeMode}` : `claude ${claudeMode}`; break;
       case "geminiCli":  agentCmd = "gemini"; break;
       case "codexCli":   agentCmd = "codex"; break;
       case "clineCli":   agentCmd = "cline"; break;
@@ -473,17 +494,17 @@ export function useTaskExecution(deps: {
 
     if (isDetached(wt.id)) {
       // サブウィンドウに移動済みの場合: pty_write で直接PTYに書き込む
-      const sid = getDetachedSessionId(terminal.id);
+      const sid = getDetachedSessionId(terminalId);
       if (sid === null) {
         throw new Error(`セッションIDが見つかりません: ${wt.name}`);
       }
       const bytes = Array.from(new TextEncoder().encode(command));
       await invoke("pty_write", { sessionId: sid, data: bytes });
       await invoke("pty_set_ai_agent", { sessionId: sid, isAgent: true });
-      if (code.remoteExec) listenForWebSession(sid, terminal.id);
+      if (remoteExec) listenForWebSession(sid, terminalId);
     } else {
       // メインウィンドウ: terminalRef 経由で書き込む
-      const termRef = getTerminalRef(terminal.id);
+      const termRef = getTerminalRef(terminalId);
       if (!termRef) {
         throw new Error(`ターミナルが見つかりません: ${wt.name}`);
       }
@@ -492,14 +513,58 @@ export function useTaskExecution(deps: {
       const sid = termRef.sessionId;
       if (sid != null) {
         await invoke("pty_set_ai_agent", { sessionId: sid, isAgent: true });
-        if (code.remoteExec) listenForWebSession(sid, terminal.id);
+        if (remoteExec) listenForWebSession(sid, terminalId);
       }
     }
+  }
+
+  /**
+   * ホームワークツリーで管理エージェントを起動する。
+   * 既にエージェントが動いているタブがあれば再起動せずブラケットペーストで追送する。
+   */
+  async function launchHomeAgent(): Promise<void> {
+    const home = worktrees.value.find((w) => w.isHome);
+    if (!home) {
+      await message(t("homeAgentNoBaseDir"), { kind: "warning" });
+      return;
+    }
+
+    const prompt = settings.value.homeAgentPrompt?.trim() || DEFAULT_HOME_AGENT_PROMPT;
+
+    // 既存タブでエージェントが動いていればそこへ追送する
+    for (const term of home.terminals) {
+      let sessionId: number | null;
+      let agentRunning: boolean;
+      if (isDetached(home.id)) {
+        sessionId = getDetachedSessionId(term.id);
+        agentRunning = sessionId != null
+          ? await invoke<boolean>("pty_is_ai_agent", { sessionId })
+          : false;
+      } else {
+        sessionId = getTerminalRef(term.id)?.sessionId ?? null;
+        agentRunning = terminalAgentStatus.get(term.id) === true;
+      }
+      if (agentRunning && sessionId != null) {
+        await sendPromptToRunningAgent(sessionId, home.id, term.id, prompt);
+        return;
+      }
+    }
+
+    // 動いているエージェントが無ければ新しいタブを立てて起動する
+    const before = new Set(home.terminals.map((tm) => tm.id));
+    await onAddTerminal(home.id);
+    const created = home.terminals.find((tm) => !before.has(tm.id));
+    if (!created) {
+      throw new Error("ホームのターミナルを作成できませんでした");
+    }
+    await launchAgentInTerminal(home, created.id, prompt, { applyGroupExecPrompt: false });
   }
 
   return {
     executeAddWorktree,
     executeAgentWorktree,
+    launchAgentInTerminal,
+    launchHomeAgent,
     resolveShell,
     buildScriptCommand,
     buildPendingCommand,

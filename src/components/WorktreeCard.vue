@@ -47,7 +47,11 @@ const emit = defineEmits<{
   duplicateWorktree: [worktreeId: string];
   toggleDescription: [worktreeId: string];
   moveToWorkgroup: [payload: { worktreeId: string; groupId: string }];
+  launchHomeAgent: [];
 }>();
+
+// ホームは git ワークツリーではないため、削除・複製・並べ替えを一切出さない
+const isHome = computed(() => props.worktree.isHome === true);
 
 // ドラッグ（カード名のD&D並べ替え）直後に発火しうる click を1回だけ無視するためのフラグ。
 // Chromium は通常 drag 後に click を出さないが、ブラウザ差異に備えてガードする。
@@ -153,11 +157,12 @@ const terminalList = computed(() =>
       <div class="card-info">
         <span
           class="card-name"
-          draggable="true"
+          :draggable="!isHome"
           @dragstart.stop="onNameDragStart($event)"
           @dragend.stop="onNameDragEnd()"
         >{{ worktree.name }}</span>
-        <span class="card-branch">{{ worktree.branchName }}</span>
+        <span v-if="isHome" class="card-home-badge">HOME</span>
+        <span class="card-branch">{{ isHome ? worktree.path : worktree.branchName }}</span>
         <span v-if="detached" class="card-detached-badge">{{ t('subWindowBadge') }}</span>
         <button
           v-if="aiJudging"
@@ -169,6 +174,13 @@ const terminalList = computed(() =>
         </button>
       </div>
       <div class="card-actions">
+        <button
+          v-if="isHome"
+          class="btn-icon"
+          :title="t('launchHomeAgent')"
+          :disabled="loading"
+          @click="emit('launchHomeAgent')"
+        ><span class="pi pi-sparkles" /></button>
         <button
           class="btn-icon"
           :title="t('openInIde')"
@@ -236,7 +248,7 @@ const terminalList = computed(() =>
           <span :class="detached ? 'pi pi-window-maximize' : 'pi pi-external-link'" />
           {{ detached ? t('menu.moveToMainWindow') : t('menu.moveToSubWindow') }}
         </button>
-        <button class="popup-item" :disabled="loading" @click="onDuplicate">
+        <button v-if="!isHome" class="popup-item" :disabled="loading" @click="onDuplicate">
           <span class="pi pi-copy" />
           {{ t('menu.duplicate') }}
         </button>
@@ -262,8 +274,8 @@ const terminalList = computed(() =>
             <span v-if="g.id === currentWorkgroupId" class="pi pi-check" style="margin-left: auto; color: var(--p-green-400)" />
           </button>
         </div>
-        <div class="popup-divider" />
-        <button class="popup-item popup-item-danger" :disabled="loading" @click="onDelete">
+        <div v-if="!isHome" class="popup-divider" />
+        <button v-if="!isHome" class="popup-item popup-item-danger" :disabled="loading" @click="onDelete">
           <span class="pi pi-trash" />
           {{ t('menu.delete') }}
         </button>
@@ -384,6 +396,15 @@ const terminalList = computed(() =>
   font-size: 10px;
   color: #89b4fa;
   background: rgba(137, 180, 250, 0.15);
+  border-radius: 3px;
+  padding: 1px 5px;
+}
+
+.card-home-badge {
+  font-size: 10px;
+  font-weight: 700;
+  color: #cba6f7;
+  background: rgba(203, 166, 247, 0.15);
   border-radius: 3px;
   padding: 1px 5px;
 }
@@ -573,6 +594,7 @@ const terminalList = computed(() =>
     "autoApprovalBadge": "Auto approval",
     "aiJudgingBadge": "AI judging",
     "openInIde": "Open in IDE",
+    "launchHomeAgent": "Launch management agent",
     "openArtifacts": "Open artifacts",
     "addTerminal": "Add terminal",
     "noTerminals": "No terminals",
@@ -594,6 +616,7 @@ const terminalList = computed(() =>
     "autoApprovalBadge": "自動承認",
     "aiJudgingBadge": "AI判定中",
     "openInIde": "IDE で開く",
+    "launchHomeAgent": "管理エージェントを起動",
     "openArtifacts": "アーティファクト",
     "addTerminal": "ターミナルを追加",
     "noTerminals": "ターミナルがありません",

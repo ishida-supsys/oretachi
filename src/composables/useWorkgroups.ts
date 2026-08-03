@@ -3,6 +3,7 @@ import { useSettings } from "./useSettings";
 import { useWorktrees } from "./useWorktrees";
 import { useNotifications } from "./useNotifications";
 import { i18n } from "../i18n";
+import { isHomeWorktree } from "../utils/homeWorktree";
 import type { Workgroup } from "../types/settings";
 
 const { settings, scheduleSave } = useSettings();
@@ -60,10 +61,10 @@ function displayName(group: Workgroup): string {
   return i18n.global.t("workgroup.autoName", { n: idx + 1 });
 }
 
-/** グループに属するワークツリー数（フォールバック込み） */
+/** グループに属するワークツリー数（フォールバック込み）。ホームは実作業ではないので数えない */
 function worktreeCount(groupId: string): number {
   return settings.value.worktrees.filter(
-    (w) => resolvedGroupId(w.workgroupId) === groupId,
+    (w) => !isHomeWorktree(w) && resolvedGroupId(w.workgroupId) === groupId,
   ).length;
 }
 

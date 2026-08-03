@@ -54,6 +54,10 @@ pub struct WorktreeEntry {
     pub description_open: Option<bool>,
     #[serde(default, rename = "workgroupId")]
     pub workgroup_id: Option<String>,
+    /// ホームワークツリー（ワークツリー追加先ディレクトリを作業ディレクトリとする擬似ワークツリー）。
+    /// git ワークツリーではないため merge / branch 削除 / worktree remove は通さない。
+    #[serde(default, rename = "isHome")]
+    pub is_home: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -394,6 +398,9 @@ pub struct AppSettings {
     pub use_oretachi_terminal_for_background: bool,
     #[serde(default = "default_move_to_sub_window_on_mcp_spawn", rename = "moveToSubWindowOnMcpSpawn")]
     pub move_to_sub_window_on_mcp_spawn: bool,
+    /// ホームワークツリーの管理エージェント起動プロンプト。None/空 = フロント側の既定値を使う
+    #[serde(default, rename = "homeAgentPrompt")]
+    pub home_agent_prompt: Option<String>,
     /// 初回起動ウィザード完了フラグ。None = 旧設定ファイル or 未シーディング
     /// (init() で既存ファイルなら Some(true)、新規なら Some(false) にシーディングする)
     #[serde(default, rename = "wizardCompleted")]
@@ -436,6 +443,7 @@ impl Default for AppSettings {
             debug_mode: false,
             use_oretachi_terminal_for_background: default_use_oretachi_terminal_for_background(),
             move_to_sub_window_on_mcp_spawn: default_move_to_sub_window_on_mcp_spawn(),
+            home_agent_prompt: None,
             wizard_completed: None,
         }
     }
@@ -779,5 +787,34 @@ mod tests {
     fn test_ai_timeout_secs_zero_fallback() {
         let settings = AppSettings { ai_timeout_secs: 0, ..Default::default() };
         assert_eq!(settings.get_ai_timeout_secs(), 120);
+    }
+
+    #[test]
+    fn test_worktree_entry_is_home_defaults_to_false() {
+        let json = r#"{
+            "id": "1", "name": "wt", "repositoryId": "r", "repositoryName": "repo",
+            "path": "/path", "branchName": "main"
+        }"#;
+        let entry: WorktreeEntry = serde_json::from_str(json).unwrap();
+        assert!(!entry.is_home);
+    }
+
+    #[test]
+    fn test_worktree_entry_is_home_round_trip() {
+        let json = r#"{
+            "id": "home", "name": "home", "repositoryId": "", "repositoryName": "",
+            "path": "/base", "branchName": "", "isHome": true
+        }"#;
+        let entry: WorktreeEntry = serde_json::from_str(json).unwrap();
+        assert!(entry.is_home);
+        let restored: WorktreeEntry = serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+        assert!(restored.is_home);
+    }
+
+    #[test]
+    fn test_home_agent_prompt_defaults_to_none() {
+        let json = r#"{"repositories": [], "worktreeBaseDir": "", "worktrees": []}"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert!(settings.home_agent_prompt.is_none());
     }
 }

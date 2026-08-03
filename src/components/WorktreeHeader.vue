@@ -16,6 +16,9 @@ const props = defineProps<{
   isWindowFocused: boolean;
   showWindowControls?: boolean;
   taskTooltip?: string;
+  /** ホームワークツリー: ブランチ表示の代わりにパスを出し、管理エージェント起動ボタンを追加する */
+  isHome?: boolean;
+  homePath?: string;
 }>();
 
 defineEmits<{
@@ -23,6 +26,7 @@ defineEmits<{
   "open-artifacts": [];
   "cancel-ai-judging": [];
   "click-auto-approval": [];
+  "launch-home-agent": [];
 }>();
 
 function onHeaderDrag(e: MouseEvent) {
@@ -68,6 +72,19 @@ async function closeWindow() {
         {{ props.worktreeName }}
       </span>
       <span
+        v-if="props.isHome"
+        class="text-[10px] px-1.5 py-0.5 rounded font-mono font-bold"
+        style="background: rgba(203,166,247,0.15); color: #cba6f7; border: 1px solid rgba(203,166,247,0.3)"
+      >HOME</span>
+      <span
+        v-if="props.isHome"
+        class="flex items-center gap-1 text-xs font-mono text-[#9399b2]"
+      >
+        <span class="pi pi-folder" style="font-size: 10px" />
+        {{ props.homePath }}
+      </span>
+      <span
+        v-else
         v-tooltip.bottom="props.taskTooltip ? { value: props.taskTooltip, escape: false, showDelay: 300, class: 'task-tooltip-sm' } : undefined"
         class="flex items-center gap-1 text-xs font-mono text-[#9399b2]"
         :class="{ 'cursor-help': props.taskTooltip }"
@@ -108,6 +125,15 @@ async function closeWindow() {
       </button>
     </div>
     <div class="flex items-center">
+      <button
+        v-if="props.isHome"
+        class="flex items-center gap-1.5 h-7 px-2.5 rounded bg-[#cba6f7] hover:bg-[#b48ce8] text-[#1e1e2e] text-xs font-semibold transition-colors mr-1"
+        :title="t('launchHomeAgent')"
+        @click="$emit('launch-home-agent')"
+      >
+        <span class="pi pi-sparkles text-xs" />
+        {{ t('launchHomeAgent') }}
+      </button>
       <button
         class="flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors mr-1"
         :title="t('openInIde')"
@@ -159,6 +185,7 @@ async function closeWindow() {
     "autoApprovalBadge": "Auto approval",
     "aiJudgingBadge": "AI judging",
     "openInIde": "Open in IDE",
+    "launchHomeAgent": "Agent",
     "openArtifacts": "Artifacts",
     "minimize": "Minimize",
     "maximize": "Maximize",
@@ -169,6 +196,7 @@ async function closeWindow() {
     "autoApprovalBadge": "自動承認",
     "aiJudgingBadge": "AI判定中",
     "openInIde": "IDE で開く",
+    "launchHomeAgent": "管理エージェント",
     "openArtifacts": "アーティファクト",
     "minimize": "最小化",
     "maximize": "最大化",

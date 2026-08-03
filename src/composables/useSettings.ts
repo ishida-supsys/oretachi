@@ -7,6 +7,7 @@ import { platform } from "@tauri-apps/plugin-os";
 import type { AppSettings, HotkeyBinding, HotkeySettings, Workgroup } from "../types/settings";
 import { setLocale } from "../i18n";
 import { setVerboseLogging } from "../utils/log";
+import { isHomeWorktree, makeHomeWorktreeEntry } from "../utils/homeWorktree";
 
 const isMac = platform() === "macos";
 
@@ -97,6 +98,43 @@ function migrateWorkgroups(loaded: AppSettings): boolean {
   return changed;
 }
 
+/**
+ * ホームワークツリー移行 (冪等):
+ * 1. worktreeBaseDir が未設定なら何もしない（ホームは作らない）
+ * 2. isHome エントリが無ければ配列先頭に挿入する
+ * 3. 既存エントリの path が worktreeBaseDir とズレていれば追従させる
+ * 変更があれば true を返す。migrateWorkgroups より前に呼ぶこと（workgroupId の補完を任せるため）。
+ */
+export function migrateHomeWorktree(loaded: AppSettings): boolean {
+  const baseDir = loaded.worktreeBaseDir?.trim();
+  if (!baseDir) return false;
+
+  const existing = loaded.worktrees.find(isHomeWorktree);
+  if (!existing) {
+    loaded.worktrees.unshift(makeHomeWorktreeEntry(baseDir));
+    return true;
+  }
+  if (existing.path !== baseDir) {
+    existing.path = baseDir;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * ホームの .claude/ (プラグイン設定 + 同梱スキル) を用意する。
+ * overwrite=false なので既存のスキルファイルは温存され、ユーザーの編集を壊さない。
+ * 失敗してもアプリの動作は続行させる（ログのみ）。
+ */
+export async function setupHomeClaudeDir(homePath: string, overwrite = false): Promise<void> {
+  if (!homePath.trim()) return;
+  try {
+    await invoke("setup_home_claude_dir", { homePath, overwrite });
+  } catch (e) {
+    console.error("ホームの .claude/ 準備に失敗:", e);
+  }
+}
+
 const settings = ref<AppSettings>({
   repositories: [],
   worktreeBaseDir: "",
@@ -133,15 +171,21 @@ async function loadSettingsOnce() {
   if (loaded.alwaysOnTop === undefined) {
     loaded.alwaysOnTop = false;
   }
-  // ホットキー・ワークグループ マイグレーション (冪等)
+  // ホットキー・ホーム・ワークグループ マイグレーション (冪等)
+  // ホームはワークグループより先に入れる（workgroupId の補完を migrateWorkgroups に任せるため）
   const hotkeyChanged = migrateHotkeys(loaded.hotkeys);
+  const homeChanged = migrateHomeWorktree(loaded);
   const workgroupChanged = migrateWorkgroups(loaded);
-  if (hotkeyChanged || workgroupChanged) {
+  if (hotkeyChanged || homeChanged || workgroupChanged) {
     try {
       await invoke("save_settings", { settings: loaded });
     } catch (e) {
       console.error("マイグレーション保存に失敗:", e);
     }
+  }
+  // ホームを新規作成 or パス変更したときだけ .claude/ を用意する（待たない）
+  if (homeChanged) {
+    void setupHomeClaudeDir(loaded.worktreeBaseDir);
   }
   if (loaded.locale) {
     setLocale(loaded.locale as "en" | "ja");

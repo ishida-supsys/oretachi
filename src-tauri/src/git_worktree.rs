@@ -515,6 +515,123 @@ pub fn get_status(repo_path: &str) -> Result<Vec<GitStatusEntry>, String> {
 }
 
 #[derive(Serialize)]
+pub struct WorktreeInspection {
+    /// 未コミット変更の件数（staged + unstaged + untracked）。0 なら clean
+    #[serde(rename = "dirtyCount")]
+    pub dirty_count: usize,
+    /// 現在のブランチ名（detached HEAD の場合は None）
+    pub branch: Option<String>,
+    /// マージ済み判定に使ったベースブランチ
+    #[serde(rename = "baseBranch")]
+    pub base_branch: Option<String>,
+    /// ベースブランチにマージ済みなら Some(ベースブランチ名)。未マージ・判定不能なら None
+    #[serde(rename = "mergedInto")]
+    pub merged_into: Option<String>,
+    /// 最終コミット日時 (ISO8601)
+    #[serde(rename = "lastCommitAt")]
+    pub last_commit_at: Option<String>,
+    /// 最終コミットの件名
+    #[serde(rename = "lastCommitSubject")]
+    pub last_commit_subject: Option<String>,
+    /// ベースブランチに対する ahead / behind のコミット数
+    pub ahead: Option<u32>,
+    pub behind: Option<u32>,
+}
+
+/// ワークツリーの棚卸しに必要な git 情報をまとめて返す。
+/// 不要ワークツリー判定（マージ済み・未コミット変更なし・最終更新）の根拠として使う。
+///
+/// `base_branch` 未指定時は origin/HEAD → main → master の順で既定ブランチを推定する。
+/// マージ済み判定やベースブランチ解決に失敗しても全体はエラーにせず、該当フィールドを None にする
+/// （リモート未設定・単独ブランチなど正常な構成でも失敗しうるため）。
+pub fn inspect_worktree(
+    worktree_path: &str,
+    base_branch: Option<&str>,
+) -> Result<WorktreeInspection, String> {
+    let dirty_count = get_status(worktree_path)?.len();
+
+    let branch = run_git_in(worktree_path, &["rev-parse", "--abbrev-ref", "HEAD"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty() && s != "HEAD");
+
+    let last_commit_at = run_git_in(worktree_path, &["log", "-1", "--format=%cI"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let last_commit_subject = run_git_in(worktree_path, &["log", "-1", "--format=%s"])
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let resolved_base = base_branch
+        .map(|b| b.to_string())
+        .or_else(|| detect_base_branch(worktree_path));
+
+    let mut merged_into = None;
+    let mut ahead = None;
+    let mut behind = None;
+
+    if let (Some(base), Some(cur)) = (resolved_base.as_deref(), branch.as_deref()) {
+        if base != cur {
+            // マージ済み判定: base に cur の HEAD が含まれているか
+            if let Ok(out) = run_git_in(worktree_path, &["branch", "--merged", base]) {
+                let is_merged = out
+                    .lines()
+                    .map(|l| l.trim_start_matches('*').trim())
+                    .any(|l| l == cur);
+                if is_merged {
+                    merged_into = Some(base.to_string());
+                }
+            }
+            // ahead/behind: "<behind>\t<ahead>" 形式
+            if let Ok(out) = run_git_in(
+                worktree_path,
+                &["rev-list", "--left-right", "--count", &format!("{}...{}", base, cur)],
+            ) {
+                let mut it = out.split_whitespace();
+                behind = it.next().and_then(|s| s.parse::<u32>().ok());
+                ahead = it.next().and_then(|s| s.parse::<u32>().ok());
+            }
+        }
+    }
+
+    Ok(WorktreeInspection {
+        dirty_count,
+        branch,
+        base_branch: resolved_base,
+        merged_into,
+        last_commit_at,
+        last_commit_subject,
+        ahead,
+        behind,
+    })
+}
+
+/// 既定ブランチを推定する。origin/HEAD → main → master の順に存在確認する。
+fn detect_base_branch(worktree_path: &str) -> Option<String> {
+    if let Ok(out) = run_git_in(worktree_path, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
+        let name = out.trim();
+        if let Some(stripped) = name.strip_prefix("origin/") {
+            if !stripped.is_empty() {
+                return Some(stripped.to_string());
+            }
+        }
+    }
+    for candidate in ["main", "master"] {
+        if run_git_in(
+            worktree_path,
+            &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", candidate)],
+        )
+        .is_ok()
+        {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+#[derive(Serialize)]
 pub struct FileDiff {
     pub old_content: String,
     pub new_content: String,
