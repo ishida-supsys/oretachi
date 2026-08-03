@@ -5,6 +5,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { open, ask, message } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useSettings, migrateHomeWorktree, setupHomeClaudeDir } from "../composables/useSettings";
+import { useWorktrees } from "../composables/useWorktrees";
 import { DEFAULT_HOME_AGENT_PROMPT } from "../constants/homeAgentPrompt";
 import { useUpdater } from "../composables/useUpdater";
 import ColorPicker from "primevue/colorpicker";
@@ -23,6 +24,7 @@ const { t } = useI18n();
 const toast = useToast();
 
 const { settings, scheduleSave, flushSave } = useSettings();
+const { syncWorktreesFromSettings } = useWorktrees();
 
 const { isChecking, checkForUpdate, downloadAndInstall } = useUpdater();
 
@@ -163,7 +165,11 @@ async function selectWorktreeBaseDir() {
     settings.value.worktreeBaseDir = selected;
     // ホームワークツリーを生成・追従させ、その .claude/ (プラグイン設定 + 同梱スキル) を用意する。
     // 既存のスキルファイルは上書きしない。
-    migrateHomeWorktree(settings.value);
+    // scheduleSave が emit する settings-changed は自ウィンドウでは無視されるため、
+    // ランタイム配列は自分で同期する（片方だけ変異させると再起動までカードとタブに出ない）。
+    if (migrateHomeWorktree(settings.value)) {
+      syncWorktreesFromSettings();
+    }
     scheduleSave();
     await setupHomeClaudeDir(selected);
   }

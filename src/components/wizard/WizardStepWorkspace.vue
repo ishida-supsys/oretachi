@@ -2,18 +2,24 @@
 import { open, message } from "@tauri-apps/plugin-dialog";
 import { useI18n } from "vue-i18n";
 import { useSettings, migrateHomeWorktree, setupHomeClaudeDir } from "../../composables/useSettings";
+import { useWorktrees } from "../../composables/useWorktrees";
 import { useRepositoryActions } from "../../composables/useRepositoryActions";
 
 const { t } = useI18n();
 const { settings, scheduleSave } = useSettings();
+const { syncWorktreesFromSettings } = useWorktrees();
 const { addRepository: addRepositoryAction } = useRepositoryActions();
 
 async function selectWorktreeBaseDir() {
   const selected = await open({ directory: true, multiple: false });
   if (typeof selected === "string") {
     settings.value.worktreeBaseDir = selected;
-    // ホームワークツリーとその .claude/ (プラグイン設定 + 同梱スキル) を用意する
-    migrateHomeWorktree(settings.value);
+    // ホームワークツリーとその .claude/ (プラグイン設定 + 同梱スキル) を用意する。
+    // ランタイム配列も同期しないと、ウィザード完了直後に home がタブ・カードへ出ない
+    // (自ウィンドウ発の settings-changed は無視されるため自動同期されない)。
+    if (migrateHomeWorktree(settings.value)) {
+      syncWorktreesFromSettings();
+    }
     scheduleSave();
     await setupHomeClaudeDir(selected);
   }

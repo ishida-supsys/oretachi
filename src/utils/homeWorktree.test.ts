@@ -13,25 +13,25 @@ describe("isHomeWorktree", () => {
 
 describe("sortHomeFirst", () => {
   it("ホームを先頭に移動し、残りの相対順序は維持する", () => {
-    const a = { id: "a" };
+    const a = { id: "a", isHome: false };
     const b = { id: "b", isHome: true };
-    const c = { id: "c" };
+    const c = { id: "c", isHome: false };
     expect(sortHomeFirst([a, b, c]).map((w) => w.id)).toEqual(["b", "a", "c"]);
   });
 
   it("ホームが既に先頭ならそのまま", () => {
     const home = { id: "home", isHome: true };
-    const a = { id: "a" };
+    const a = { id: "a", isHome: false };
     expect(sortHomeFirst([home, a]).map((w) => w.id)).toEqual(["home", "a"]);
   });
 
   it("ホームが無ければ元の配列をそのまま返す（新規配列を作らない）", () => {
-    const list = [{ id: "a" }, { id: "b" }];
+    const list = [{ id: "a", isHome: false }, { id: "b", isHome: false }];
     expect(sortHomeFirst(list)).toBe(list);
   });
 
   it("空配列でも壊れない", () => {
-    expect(sortHomeFirst([])).toEqual([]);
+    expect(sortHomeFirst<{ isHome?: boolean }>([])).toEqual([]);
   });
 });
 

@@ -150,6 +150,17 @@ async function requestOpenInIde() {
   await openInIde(worktreePath, { worktreeId, worktreeName, origin: "sub" });
 }
 
+// ホームワークツリーかどうか（ヘッダーの表示切り替えと管理エージェントボタンの出し分け用）
+const isHome = computed(
+  () => settings.value.worktrees.find((w) => w.id === worktreeId)?.isHome === true,
+);
+
+// 管理エージェントの起動はメインウィンドウ側の launchHomeAgent に委譲する
+// (プロンプト組み立てとエージェント稼働判定がメイン側に集約されているため)
+async function requestLaunchHomeAgent() {
+  await emitTo("main", "sub-launch-home-agent", { worktreeId });
+}
+
 function onTerminalTitleChange(terminalId: number, title: string) {
   const entry = terminalEntries.get(terminalId);
   if (entry) entry.title = title;
@@ -573,10 +584,13 @@ async function onCancelAiJudging() {
         :is-window-focused="isWindowFocused"
         :show-window-controls="true"
         :task-tooltip="getWorktreeTaskTooltip(repositoryName, branchName)"
+        :is-home="isHome"
+        :home-path="worktreePath"
         @open-in-ide="requestOpenInIde"
         @open-artifacts="requestOpenArtifacts"
         @cancel-ai-judging="onCancelAiJudging"
         @click-auto-approval="showAutoApprovalPromptDialog = true"
+        @launch-home-agent="requestLaunchHomeAgent"
       />
 
       <!-- フレームレイアウト -->

@@ -53,7 +53,7 @@ import { useShutdownGuard } from "./composables/useShutdownGuard";
 import type { ArchiveRow } from "./types/archive";
 import { logDebug } from "./utils/log";
 import { cssPxToLogical } from "./utils/uiScale";
-import { sortHomeFirst } from "./utils/homeWorktree";
+import { isHomeWorktree, sortHomeFirst } from "./utils/homeWorktree";
 import { useUiZoom } from "./composables/useUiZoom";
 import { consumeMaxBlockedMs, startEventLoopMonitor } from "./utils/eventLoopMonitor";
 import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
@@ -398,9 +398,11 @@ const removeWorkgroupName = computed(() => {
   const g = settings.value.workgroups?.find((w) => w.id === removeWorkgroupId.value);
   return g ? workgroupDisplayName(g) : "";
 });
+// ホームは削除できないためグループ削除の対象メンバーから除外する
+// (含めると kill/アーカイブだけ実行されてワークツリーは残り、グループ削除も remaining 判定で失敗する)
 const removeWorkgroupMembers = computed(() =>
   removeWorkgroupId.value
-    ? worktrees.value.filter((w) => resolvedGroupId(w.workgroupId) === removeWorkgroupId.value)
+    ? worktrees.value.filter((w) => !isHomeWorktree(w) && resolvedGroupId(w.workgroupId) === removeWorkgroupId.value)
     : [],
 );
 let removingWorkgroup = false;
@@ -415,9 +417,9 @@ async function onRemoveWorkgroupConfirm(archive: boolean) {
   const groupId = removeWorkgroupId.value;
   if (!groupId || removingWorkgroup) return;
   removingWorkgroup = true;
-  // 削除対象のスナップショット（削除中に worktrees が変化するため固定）
+  // 削除対象のスナップショット（削除中に worktrees が変化するため固定）。ホームは削除対象外
   const members = worktrees.value
-    .filter((w) => resolvedGroupId(w.workgroupId) === groupId)
+    .filter((w) => !isHomeWorktree(w) && resolvedGroupId(w.workgroupId) === groupId)
     .map((w) => w.id);
   const opts = { mergeTo: "", deleteBranch: true, forceBranch: true };
   try {
@@ -431,8 +433,10 @@ async function onRemoveWorkgroupConfirm(archive: boolean) {
     }
   } finally {
     removingWorkgroup = false;
-    // 所属ワークツリーが残っていなければグループを削除
-    const remaining = worktrees.value.some((w) => resolvedGroupId(w.workgroupId) === groupId);
+    // 所属ワークツリーが残っていなければグループを削除。
+    // ホームは削除対象外なので残存判定にも数えない（数えるとグループが永久に削除できなくなる）。
+    // グループレコードが消えたホームは resolvedGroupId のフォールバックで先頭グループへ移る。
+    const remaining = worktrees.value.some((w) => !isHomeWorktree(w) && resolvedGroupId(w.workgroupId) === groupId);
     if (!remaining) deleteWorkgroupRecord(groupId);
     removeWorkgroupId.value = null;
   }
@@ -1449,6 +1453,11 @@ onMounted(async () => {
   // ターミナル追加リクエスト (サブウィンドウから)
   await listen<{ worktreeId: string }>("sub-add-terminal-request", async (event) => {
     await handleSubAddTerminalRequest(event.payload.worktreeId);
+  });
+
+  // 管理エージェント起動リクエスト (サブウィンドウに切り出した home から)
+  await listen("sub-launch-home-agent", async () => {
+    await launchHomeAgent();
   });
 
   // アーティファクト変更時の処理

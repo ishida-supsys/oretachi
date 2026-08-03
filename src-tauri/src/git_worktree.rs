@@ -516,7 +516,8 @@ pub fn get_status(repo_path: &str) -> Result<Vec<GitStatusEntry>, String> {
 
 #[derive(Serialize)]
 pub struct WorktreeInspection {
-    /// 未コミット変更の件数（staged + unstaged + untracked）。0 なら clean
+    /// 未コミット変更のあるファイル数（staged / unstaged / untracked を重複排除した実ファイル数）。
+    /// 0 なら clean。同一ファイルが staged と unstaged の両方に該当しても 1 と数える。
     #[serde(rename = "dirtyCount")]
     pub dirty_count: usize,
     /// 現在のブランチ名（detached HEAD の場合は None）
@@ -548,7 +549,13 @@ pub fn inspect_worktree(
     worktree_path: &str,
     base_branch: Option<&str>,
 ) -> Result<WorktreeInspection, String> {
-    let dirty_count = get_status(worktree_path)?.len();
+    // get_status は 1 ファイルにつき staged / unstaged / untracked を別エントリで返すため、
+    // パスで重複排除して「変更のあるファイル数」にそろえる
+    let dirty_count = get_status(worktree_path)?
+        .into_iter()
+        .map(|e| e.path)
+        .collect::<std::collections::HashSet<_>>()
+        .len();
 
     let branch = run_git_in(worktree_path, &["rev-parse", "--abbrev-ref", "HEAD"])
         .ok()
@@ -608,27 +615,35 @@ pub fn inspect_worktree(
     })
 }
 
-/// 既定ブランチを推定する。origin/HEAD → main → master の順に存在確認する。
+/// 既定ブランチを推定する。origin/HEAD → main → master の順に候補を試し、
+/// **実際に解決できる ref だけを返す**（ローカルブランチが無ければ `origin/<name>` にフォールバック）。
+/// 解決できない名前を返すと `branch --merged` / `rev-list` が黙って失敗し、
+/// mergedInto や ahead/behind が恒常的に None になってしまうため。
 fn detect_base_branch(worktree_path: &str) -> Option<String> {
+    let mut candidates: Vec<String> = Vec::new();
     if let Ok(out) = run_git_in(worktree_path, &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"]) {
-        let name = out.trim();
-        if let Some(stripped) = name.strip_prefix("origin/") {
+        if let Some(stripped) = out.trim().strip_prefix("origin/") {
             if !stripped.is_empty() {
-                return Some(stripped.to_string());
+                candidates.push(stripped.to_string());
             }
         }
     }
-    for candidate in ["main", "master"] {
-        if run_git_in(
-            worktree_path,
-            &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{}", candidate)],
-        )
-        .is_ok()
-        {
-            return Some(candidate.to_string());
+    candidates.push("main".to_string());
+    candidates.push("master".to_string());
+
+    for name in candidates {
+        if ref_exists(worktree_path, &format!("refs/heads/{}", name)) {
+            return Some(name);
+        }
+        if ref_exists(worktree_path, &format!("refs/remotes/origin/{}", name)) {
+            return Some(format!("origin/{}", name));
         }
     }
     None
+}
+
+fn ref_exists(worktree_path: &str, full_ref: &str) -> bool {
+    run_git_in(worktree_path, &["rev-parse", "--verify", "--quiet", full_ref]).is_ok()
 }
 
 #[derive(Serialize)]

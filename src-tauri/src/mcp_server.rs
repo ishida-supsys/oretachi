@@ -1118,7 +1118,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "指定ワークツリーの git 状態を返す。未コミット変更数(dirtyCount)・ベースブランチへのマージ済み判定(mergedInto)・最終コミット日時(lastCommitAt)・ahead/behind を含む。不要ワークツリーの判定根拠に使う")]
+    #[tool(description = "指定ワークツリーの git 状態を返す。未コミット変更のあるファイル数(dirtyCount)・ベースブランチへのマージ済み判定(mergedInto)・最終コミット日時(lastCommitAt)・ahead/behind を含む。不要ワークツリーの判定根拠に使う")]
     fn oretachi_inspect_worktree(
         &self,
         Parameters(InspectWorktreeParams { worktree_name, worktree_id, base_branch }): Parameters<InspectWorktreeParams>,

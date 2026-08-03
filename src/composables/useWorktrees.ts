@@ -89,7 +89,10 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
 
   // ホームは git ワークツリーではなく path がワークツリー追加先ディレクトリそのもの。
   // 削除するとワークツリー群の親ごと消えるため、UI で隠すだけでなくここでも止める。
-  if (isHomeWorktree(worktree)) return;
+  // 静かに return すると呼び出し側が成功扱いでカード/ターミナル状態を破棄してしまうので必ず throw する。
+  if (isHomeWorktree(worktree)) {
+    throw new Error("ホームワークツリーは削除できません");
+  }
 
   // リポジトリパスを取得（id = リポジトリパスとして使用）
   const repoEntry = settings.value.repositories.find(
