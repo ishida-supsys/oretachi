@@ -712,7 +712,7 @@ async function onOpenInIde(worktreeId: string) {
 async function onOpenArtifacts(worktreeId: string) {
   const worktree = worktrees.value.find((w) => w.id === worktreeId);
   if (!worktree) return;
-  await openArtifactViewer(worktree.id, worktree.name);
+  await openArtifactViewer(worktree.id, worktree.name, worktree.repositoryName);
 }
 
 async function onShowAddWorktreeDialog() {
@@ -1447,7 +1447,7 @@ onMounted(async () => {
     if (settings.value.worktreeDefaults?.autoOpenArtifact === false) return;
     const wt = worktrees.value.find((w) => w.id === wid);
     if (!wt) return;
-    await openArtifactViewer(wt.id, wt.name);
+    await openArtifactViewer(wt.id, wt.name, wt.repositoryName);
   });
 
   // サブウィンドウイベントリスナーを初期化

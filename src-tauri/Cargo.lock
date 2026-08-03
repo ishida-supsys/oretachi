@@ -3653,6 +3653,7 @@ dependencies = [
  "rmcp",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "subtle",
  "sysinfo 0.38.4",

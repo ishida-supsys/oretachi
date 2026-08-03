@@ -1,10 +1,15 @@
 <script setup lang="ts">
+import { onMounted, onUnmounted, ref } from "vue";
 import { open, message } from "@tauri-apps/plugin-dialog";
+import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { useI18n } from "vue-i18n";
-import { useSettings } from "../../composables/useSettings";
-import { useRepositoryActions } from "../../composables/useRepositoryActions";
-import { usePostAddSettings } from "../../composables/usePostAddSettings";
-import PostAddSettingsDialog from "../PostAddSettingsDialog.vue";
+import { useSettings } from "../composables/useSettings";
+import { useRepositoryActions } from "../composables/useRepositoryActions";
+import { usePostAddSettings } from "../composables/usePostAddSettings";
+import { useArtifactWindow } from "../composables/useArtifactWindow";
+import type { RepoArtifactChangedEvent } from "../types/artifact";
+import PostAddSettingsDialog from "./PostAddSettingsDialog.vue";
 
 const { t } = useI18n();
 const { settings, scheduleSave } = useSettings();
@@ -22,6 +27,26 @@ const {
 } = usePostAddSettings();
 
 const { addRepository: addRepositoryAction } = useRepositoryActions();
+const { openRepositoryArtifactViewer } = useArtifactWindow();
+
+/** リポジトリ ID → 恒久保存アーティファクト件数 */
+const artifactCounts = ref(new Map<string, number>());
+let unlisten: UnlistenFn | null = null;
+
+async function refreshArtifactCount(repoId: string) {
+  try {
+    const list = await invoke<unknown[]>("list_repo_artifacts", { repositoryId: repoId });
+    artifactCounts.value.set(repoId, list.length);
+    // Map の変異は追跡されないため、再代入して再描画させる
+    artifactCounts.value = new Map(artifactCounts.value);
+  } catch {
+    /* 件数バッジは補助情報なので失敗しても無視 */
+  }
+}
+
+async function refreshAllArtifactCounts() {
+  await Promise.all(settings.value.repositories.map((r) => refreshArtifactCount(r.id)));
+}
 
 async function addRepository() {
   const result = await addRepositoryAction();
@@ -29,18 +54,28 @@ async function addRepository() {
     await message(t("error.notARepo"), { kind: "error" });
   } else if (result === "alreadyRegistered") {
     await message(t("error.alreadyRegistered"), { kind: "warning" });
+  } else if (result === "added") {
+    await refreshAllArtifactCounts();
   }
 }
 
 function removeRepository(id: string) {
-  settings.value.repositories = settings.value.repositories.filter(
-    (r) => r.id !== id
-  );
+  // ボタンの disabled だけに頼らず、関数側でもワークツリー有無をガードする
+  if (hasWorktrees(id)) return;
+  settings.value.repositories = settings.value.repositories.filter((r) => r.id !== id);
   scheduleSave();
 }
 
 function hasWorktrees(repoId: string): boolean {
   return settings.value.worktrees.some((w) => w.repositoryId === repoId);
+}
+
+function artifactCount(repoId: string): number {
+  return artifactCounts.value.get(repoId) ?? 0;
+}
+
+async function openArtifacts(repoId: string, repoName: string) {
+  await openRepositoryArtifactViewer(repoId, repoName);
 }
 
 async function selectExecScript(repoId: string) {
@@ -65,18 +100,34 @@ function clearExecScript(repoId: string) {
   scheduleSave();
 }
 
+let disposed = false;
 
+onMounted(async () => {
+  // 件数取得を待ってから listen すると、その間に unmount された場合に
+  // unlisten が呼ばれずリスナが残り続けるため、先に登録する
+  const fn = await listen<RepoArtifactChangedEvent>("repo-artifact-changed", async (event) => {
+    await refreshArtifactCount(event.payload.repositoryId);
+  });
+  if (disposed) {
+    fn();
+    return;
+  }
+  unlisten = fn;
+  await refreshAllArtifactCounts();
+});
+
+onUnmounted(() => {
+  disposed = true;
+  unlisten?.();
+  unlisten = null;
+});
+
+// ホームタブのヘッダーにある「+ 追加」ボタンから呼ばれる
+defineExpose({ addRepository });
 </script>
 
 <template>
-  <div class="field-group">
-    <div class="field-header">
-      <label class="field-label">{{ t("repositories.label") }}</label>
-      <button class="btn-primary" @click="addRepository">
-        {{ t("repositories.add") }}
-      </button>
-    </div>
-
+  <div class="repo-panel">
     <div class="repo-list">
       <div v-if="settings.repositories.length === 0" class="empty-state">
         {{ t("repositories.empty") }}
@@ -90,6 +141,14 @@ function clearExecScript(repoId: string) {
         <div class="repo-row-main">
           <span class="repo-name">{{ repo.name }}</span>
           <span class="repo-path">{{ repo.path }}</span>
+          <button
+            class="btn-artifacts"
+            :title="t('repositories.artifactsTooltip')"
+            @click="openArtifacts(repo.id, repo.name)"
+          >
+            <i class="pi pi-box"></i>
+            <span>{{ artifactCount(repo.id) }}</span>
+          </button>
           <button
             class="btn-remove"
             :disabled="hasWorktrees(repo.id)"
@@ -139,39 +198,26 @@ function clearExecScript(repoId: string) {
         </div>
       </div>
     </div>
-  </div>
 
-  <PostAddSettingsDialog
-    v-if="showCopyDialog"
-    :repo-path="copyDialogRepoPath"
-    :current-targets="copyDialogCurrentTargets"
-    :current-package-manager="copyDialogCurrentPM"
-    :current-package-manager-args="copyDialogCurrentPMArgs"
-    :current-notification-hooks="copyDialogCurrentHooks"
-    :current-pull-before-add="copyDialogCurrentPullBeforeAdd"
-    :current-branch-name-pattern="copyDialogCurrentBranchNamePattern"
-    @confirm="onDialogConfirm"
-    @cancel="showCopyDialog = false"
-  />
+    <PostAddSettingsDialog
+      v-if="showCopyDialog"
+      :repo-path="copyDialogRepoPath"
+      :current-targets="copyDialogCurrentTargets"
+      :current-package-manager="copyDialogCurrentPM"
+      :current-package-manager-args="copyDialogCurrentPMArgs"
+      :current-notification-hooks="copyDialogCurrentHooks"
+      :current-pull-before-add="copyDialogCurrentPullBeforeAdd"
+      :current-branch-name-pattern="copyDialogCurrentBranchNamePattern"
+      @confirm="onDialogConfirm"
+      @cancel="showCopyDialog = false"
+    />
+  </div>
 </template>
 
 <style scoped>
-.field-group {
-  margin-bottom: 24px;
-}
-
-.field-label {
-  display: block;
-  font-size: 13px;
-  color: #a6adc8;
-  margin-bottom: 8px;
-}
-
-.field-header {
+.repo-panel {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 8px;
+  flex-direction: column;
 }
 
 .text-input {
@@ -183,22 +229,6 @@ function clearExecScript(repoId: string) {
   font-size: 13px;
   color: #cdd6f4;
   outline: none;
-}
-
-.btn-primary {
-  background: #cba6f7;
-  color: #1e1e2e;
-  border: none;
-  border-radius: 4px;
-  padding: 6px 12px;
-  font-size: 12px;
-  cursor: pointer;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.btn-primary:hover {
-  background: #b4befe;
 }
 
 .btn-secondary {
@@ -285,6 +315,26 @@ function clearExecScript(repoId: string) {
   font-size: 12px;
 }
 
+.btn-artifacts {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  background: transparent;
+  color: #cba6f7;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-artifacts:hover {
+  border-color: #cba6f7;
+  background: #313244;
+}
+
 .btn-remove {
   background: transparent;
   color: #6c7086;
@@ -317,11 +367,10 @@ function clearExecScript(repoId: string) {
 {
   "en": {
     "repositories": {
-      "label": "Repositories",
-      "add": "+ Add",
       "empty": "No repositories registered",
       "hasWorktrees": "Cannot delete: worktrees exist",
-      "execScript": "Exec script"
+      "execScript": "Exec script",
+      "artifactsTooltip": "Open artifacts saved to this repository"
     },
     "postAdd": {
       "label": "Settings",
@@ -345,11 +394,10 @@ function clearExecScript(repoId: string) {
   },
   "ja": {
     "repositories": {
-      "label": "リポジトリ一覧",
-      "add": "+ 追加",
       "empty": "リポジトリが登録されていません",
       "hasWorktrees": "ワークツリーが存在するため削除できません",
-      "execScript": "実行スクリプト"
+      "execScript": "実行スクリプト",
+      "artifactsTooltip": "このリポジトリに保存したアーティファクトを開く"
     },
     "postAdd": {
       "label": "追加設定",

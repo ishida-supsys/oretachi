@@ -17,7 +17,6 @@ import { playNotificationSound } from "../utils/notificationSound";
 import { applyUiZoom } from "../composables/useUiZoom";
 import type { NotificationKind } from "../composables/useNotifications";
 import SettingsHotkeySection from "./settings/SettingsHotkeySection.vue";
-import SettingsRepositoriesSection from "./settings/SettingsRepositoriesSection.vue";
 
 const { t } = useI18n();
 const toast = useToast();
@@ -595,8 +594,7 @@ function getSoundLabel(sound: string | null | undefined): string {
     <!-- ホットキー設定 -->
     <SettingsHotkeySection />
 
-    <!-- リポジトリ一覧 -->
-    <SettingsRepositoriesSection />
+    <!-- リポジトリ一覧はホームタブのリポジトリパネル（RepositoryPanel.vue）へ移設 -->
 
     <!-- 外観設定 -->
     <div class="field-group">

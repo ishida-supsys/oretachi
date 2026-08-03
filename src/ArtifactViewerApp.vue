@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
+import { useToast } from "primevue/usetoast";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { ask, message } from "@tauri-apps/plugin-dialog";
 import Toast from "primevue/toast";
 import ArtifactCodeView from "./components/artifact/ArtifactCodeView.vue";
 import ArtifactMarkdownView from "./components/artifact/ArtifactMarkdownView.vue";
@@ -12,18 +14,33 @@ import ArtifactMermaidView from "./components/artifact/ArtifactMermaidView.vue";
 import ArtifactReactView from "./components/artifact/ArtifactReactView.vue";
 import ArtifactTableView from "./components/artifact/ArtifactTableView.vue";
 import { isTableContentType } from "./utils/csvArtifact";
-import type { ArtifactMeta, ArtifactData, ArtifactChangedEvent } from "./types/artifact";
+import type {
+  ArtifactMeta,
+  ArtifactData,
+  ArtifactChangedEvent,
+  RepoArtifactChangedEvent,
+  CopyArtifactResult,
+} from "./types/artifact";
 
 const { t } = useI18n();
+const toast = useToast();
 
 const params = new URLSearchParams(window.location.search);
+// scope 未指定は従来どおり worktree スコープとして扱う（古い URL 互換）
+const scope = params.get("scope") === "repository" ? "repository" : "worktree";
 const worktreeId = params.get("worktreeId") ?? "";
 const worktreeName = params.get("worktreeName") ?? "";
+const repositoryId = params.get("repositoryId") ?? "";
+const repositoryName = params.get("repositoryName") ?? "";
+
+const isRepositoryScope = scope === "repository";
+const headerTitle = isRepositoryScope ? repositoryName : worktreeName;
 
 const artifacts = ref<ArtifactMeta[]>([]);
 const selectedId = ref<string | null>(null);
 const selectedArtifact = ref<ArtifactData | null>(null);
 const loading = ref(false);
+const transferring = ref(false);
 
 let unlisten: UnlistenFn | null = null;
 
@@ -55,12 +72,25 @@ function mapArtifact(raw: any): ArtifactData {
   return { ...raw, content_type: raw.type ?? raw.content_type };
 }
 
+// スコープごとの Tauri コマンド差分を吸収する薄いラッパ
+function invokeList(): Promise<any[]> {
+  return isRepositoryScope
+    ? invoke<any[]>("list_repo_artifacts", { repositoryId })
+    : invoke<any[]>("list_artifacts", { worktreeId });
+}
+
+function invokeRead(artifactId: string): Promise<string> {
+  return isRepositoryScope
+    ? invoke<string>("read_repo_artifact", { repositoryId, artifactId })
+    : invoke<string>("read_artifact", { worktreeId, artifactId });
+}
+
 async function loadList() {
   try {
-    const list = await invoke<any[]>("list_artifacts", { worktreeId });
+    const list = await invokeList();
     artifacts.value = list.map(mapMeta);
   } catch (e) {
-    console.error("list_artifacts failed", e);
+    console.error("list artifacts failed", e);
   }
 }
 
@@ -69,10 +99,10 @@ async function selectArtifact(id: string) {
   selectedId.value = id;
   loading.value = true;
   try {
-    const raw = await invoke<string>("read_artifact", { worktreeId, artifactId: id });
+    const raw = await invokeRead(id);
     selectedArtifact.value = mapArtifact(JSON.parse(raw));
   } catch (e) {
-    console.error("read_artifact failed", e);
+    console.error("read artifact failed", e);
     selectedArtifact.value = null;
   } finally {
     loading.value = false;
@@ -90,12 +120,81 @@ async function refreshSelected(artifactId: string, command: string) {
       }
     }
   } else if (command === "create") {
-    await selectArtifact(artifactId);
+    // 同じ ID の再作成（上書き転送）では selectArtifact が早期 return するため、
+    // 選択中の本文を捨てて読み直させる
+    const isSelected = selectedId.value === artifactId;
+    if (isSelected) selectedArtifact.value = null;
+    // リポジトリ側は「保管庫を眺める」用途なので、他ウィンドウからの転送で
+    // 閲覧中の表示を奪わない。ワークツリー側は生成直後に見せる従来動作を維持する。
+    if (isSelected || !isRepositoryScope || selectedId.value === null) {
+      await selectArtifact(artifactId);
+    }
   } else if (selectedId.value === artifactId) {
     try {
-      const raw = await invoke<string>("read_artifact", { worktreeId, artifactId });
+      const raw = await invokeRead(artifactId);
       selectedArtifact.value = mapArtifact(JSON.parse(raw));
     } catch { /* ignore */ }
+  }
+}
+
+/**
+ * 表示中のアーティファクトを、このワークツリーの元リポジトリへコピーする。
+ * 転送先はバックエンドが worktreeId から解決するため、ここでは指定しない。
+ */
+async function transferToRepository() {
+  const artifactId = selectedId.value;
+  if (!artifactId || transferring.value) return;
+
+  transferring.value = true;
+  try {
+    let result = await invoke<CopyArtifactResult>("copy_artifact_to_repository", {
+      worktreeId,
+      artifactId,
+      overwrite: false,
+    });
+
+    if (result.status === "exists") {
+      const confirmed = await ask(
+        t("transfer.overwriteConfirm", { repository: result.repositoryName }),
+        { title: t("transfer.overwriteTitle"), kind: "warning" },
+      );
+      if (!confirmed) return;
+      result = await invoke<CopyArtifactResult>("copy_artifact_to_repository", {
+        worktreeId,
+        artifactId,
+        overwrite: true,
+      });
+    }
+
+    toast.add({
+      severity: "success",
+      summary: t("transfer.done", { repository: result.repositoryName }),
+      life: 3000,
+    });
+  } catch (e) {
+    console.error("copy_artifact_to_repository failed", e);
+    await message(String(e), { title: t("transfer.failed"), kind: "error" });
+  } finally {
+    transferring.value = false;
+  }
+}
+
+/** リポジトリスコープでのみ使う、恒久保存アーティファクトの個別削除 */
+async function deleteRepoArtifact() {
+  const artifactId = selectedId.value;
+  if (!artifactId) return;
+
+  const confirmed = await ask(
+    t("delete.confirm", { title: selectedArtifact.value?.title ?? artifactId }),
+    { title: t("delete.title"), kind: "warning" },
+  );
+  if (!confirmed) return;
+
+  try {
+    await invoke("delete_repo_artifact", { repositoryId, artifactId });
+  } catch (e) {
+    console.error("delete_repo_artifact failed", e);
+    await message(String(e), { title: t("delete.failed"), kind: "error" });
   }
 }
 
@@ -105,10 +204,17 @@ onMounted(async () => {
     await selectArtifact(artifacts.value[0].id);
   }
 
-  unlisten = await listen<ArtifactChangedEvent>("artifact-changed", async (event) => {
-    if (event.payload.worktreeId !== worktreeId) return;
-    await refreshSelected(event.payload.artifactId, event.payload.command);
-  });
+  if (isRepositoryScope) {
+    unlisten = await listen<RepoArtifactChangedEvent>("repo-artifact-changed", async (event) => {
+      if (event.payload.repositoryId !== repositoryId) return;
+      await refreshSelected(event.payload.artifactId, event.payload.command);
+    });
+  } else {
+    unlisten = await listen<ArtifactChangedEvent>("artifact-changed", async (event) => {
+      if (event.payload.worktreeId !== worktreeId) return;
+      await refreshSelected(event.payload.artifactId, event.payload.command);
+    });
+  }
 });
 
 onUnmounted(() => {
@@ -121,8 +227,8 @@ onUnmounted(() => {
     <Toast />
     <div class="sidebar">
       <div class="sidebar-header">
-        <span class="pi pi-box sidebar-icon" />
-        <span class="sidebar-title">{{ worktreeName }}</span>
+        <span :class="isRepositoryScope ? 'pi pi-folder sidebar-icon' : 'pi pi-box sidebar-icon'" />
+        <span class="sidebar-title">{{ headerTitle }}</span>
       </div>
       <div class="artifact-list">
         <div v-if="artifacts.length === 0" class="empty-list">
@@ -159,7 +265,33 @@ onUnmounted(() => {
           <span :class="`pi ${typeIcon(selectedArtifact.content_type)} type-icon`" />
           <div class="content-title-area">
             <span class="content-title">{{ selectedArtifact.title }}</span>
-            <span class="content-type">{{ selectedArtifact.content_type }}</span>
+            <span class="content-type">
+              {{ selectedArtifact.content_type }}
+              <template v-if="isRepositoryScope && selectedArtifact.source_worktree_id">
+                · {{ t("source", { worktreeId: selectedArtifact.source_worktree_id }) }}
+              </template>
+            </span>
+          </div>
+          <div class="header-actions">
+            <button
+              v-if="!isRepositoryScope"
+              class="btn-header btn-transfer"
+              :disabled="transferring"
+              :title="t('transfer.tooltip')"
+              @click="transferToRepository"
+            >
+              <i :class="transferring ? 'pi pi-spin pi-spinner' : 'pi pi-upload'" />
+              <span>{{ repositoryName ? t("transfer.labelNamed", { repository: repositoryName }) : t("transfer.label") }}</span>
+            </button>
+            <button
+              v-else
+              class="btn-header btn-delete"
+              :title="t('delete.title')"
+              @click="deleteRepoArtifact"
+            >
+              <i class="pi pi-trash" />
+              <span>{{ t("delete.label") }}</span>
+            </button>
           </div>
         </div>
         <div class="content-body">
@@ -356,6 +488,48 @@ onUnmounted(() => {
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  flex: 1;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.btn-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #313244;
+  color: #cdd6f4;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.btn-header:hover:not(:disabled) {
+  background: #45475a;
+}
+
+.btn-header:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.btn-transfer {
+  border-color: #cba6f7;
+  color: #cba6f7;
+}
+
+.btn-delete:hover {
+  border-color: #f38ba8;
+  color: #f38ba8;
 }
 
 .content-title {
@@ -382,11 +556,43 @@ onUnmounted(() => {
 {
   "en": {
     "emptyList": "No artifacts",
-    "selectPrompt": "Select an artifact to view"
+    "selectPrompt": "Select an artifact to view",
+    "source": "from worktree {worktreeId}",
+    "transfer": {
+      "label": "Transfer to repository",
+      "labelNamed": "Transfer to {repository}",
+      "tooltip": "Copy this artifact to the repository so it survives worktree deletion",
+      "overwriteTitle": "Overwrite?",
+      "overwriteConfirm": "An artifact with the same ID already exists in {repository}. Overwrite it?",
+      "done": "Transferred to {repository}",
+      "failed": "Transfer failed"
+    },
+    "delete": {
+      "label": "Delete",
+      "title": "Delete artifact",
+      "confirm": "Delete \"{title}\" from this repository?",
+      "failed": "Delete failed"
+    }
   },
   "ja": {
     "emptyList": "アーティファクトがありません",
-    "selectPrompt": "アーティファクトを選択してください"
+    "selectPrompt": "アーティファクトを選択してください",
+    "source": "転送元 worktree {worktreeId}",
+    "transfer": {
+      "label": "リポジトリへ転送",
+      "labelNamed": "{repository} へ転送",
+      "tooltip": "リポジトリへコピーして、ワークツリー削除後も残るようにします",
+      "overwriteTitle": "上書きしますか？",
+      "overwriteConfirm": "{repository} に同じ ID のアーティファクトが既にあります。上書きしますか？",
+      "done": "{repository} に転送しました",
+      "failed": "転送に失敗しました"
+    },
+    "delete": {
+      "label": "削除",
+      "title": "アーティファクトの削除",
+      "confirm": "「{title}」をこのリポジトリから削除しますか？",
+      "failed": "削除に失敗しました"
+    }
   }
 }
 </i18n>

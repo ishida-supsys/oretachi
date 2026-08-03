@@ -55,6 +55,32 @@ fn artifacts_dir(
         .join(worktree_id))
 }
 
+/// リポジトリ ID（＝リポジトリの絶対パス）を SHA-256 の先頭 128bit（32桁の hex）に
+/// 変換してディレクトリ名にする。
+/// base64 だと元パス長の 4/3 倍になり、深いパスで Windows の 255 文字上限を超えて
+/// `create_dir_all` が失敗するため、長さが元パスに依存しないハッシュを使う。
+/// hex なのでパス区切りやドライブレターの `:` を含まない。
+fn repo_artifacts_dir(
+    app_handle: &tauri::AppHandle,
+    repository_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(repository_id.as_bytes());
+    let encoded = digest.iter().take(16).fold(String::new(), |mut acc, b| {
+        use std::fmt::Write;
+        let _ = write!(acc, "{:02x}", b);
+        acc
+    });
+    // hex は理論上安全だが、ディレクトリ名として使う以上ここでも検証する
+    validate_path_component(&encoded)?;
+    Ok(app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("repo-artifacts")
+        .join(encoded))
+}
+
 // ─── PTY コマンド ────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -624,6 +650,241 @@ async fn delete_artifacts(app_handle: tauri::AppHandle, worktree_id: String) -> 
     Ok(())
 }
 
+// ─── リポジトリ・アーティファクトコマンド ─────────────────────────────────────
+//
+// ワークツリー削除で消える artifacts/<worktreeId>/ とは別に、リポジトリ単位の
+// 恒久領域 repo-artifacts/<base64url(repositoryPath)>/ を持つ。
+
+#[derive(serde::Serialize)]
+struct CopyArtifactResult {
+    /// "copied" | "exists"（"exists" は overwrite=false で衝突したとき）
+    status: String,
+    #[serde(rename = "repositoryId")]
+    repository_id: String,
+    #[serde(rename = "repositoryName")]
+    repository_name: String,
+}
+
+/// ワークツリー ID から転送先リポジトリ（id, name）を解決する
+fn resolve_worktree_repository(
+    settings_manager: &SettingsManager,
+    worktree_id: &str,
+) -> Result<(String, String), String> {
+    let settings = settings_manager.get();
+    let worktree = settings
+        .worktrees
+        .iter()
+        .find(|w| w.id == worktree_id)
+        .ok_or_else(|| format!("ワークツリーが見つかりません: {}", worktree_id))?;
+    let repo = settings
+        .repositories
+        .iter()
+        .find(|r| r.id == worktree.repository_id)
+        .ok_or_else(|| {
+            format!(
+                "リポジトリが登録されていません: {}",
+                worktree.repository_id
+            )
+        })?;
+    Ok((repo.id.clone(), repo.name.clone()))
+}
+
+/// リポジトリのアーティファクト一覧を返す。
+/// 一覧・件数バッジ用途のため content / modules は落としてメタのみ返す。
+#[tauri::command]
+async fn list_repo_artifacts(
+    app_handle: tauri::AppHandle,
+    repository_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let dir = repo_artifacts_dir(&app_handle, &repository_id)?;
+    tokio::task::spawn_blocking(move || {
+        if !dir.exists() {
+            return Ok(vec![]);
+        }
+        let mut artifacts = Vec::new();
+        let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                continue;
+            }
+            // 恒久保存領域なので、1件壊れていても残りは必ず返す（全体を Err にしない）
+            let raw = match std::fs::read_to_string(&path) {
+                Ok(raw) => raw,
+                Err(e) => {
+                    log::warn!("[RepoArtifact] 読み込み失敗のためスキップ: {:?}: {}", path, e);
+                    continue;
+                }
+            };
+            let mut val: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(val) => val,
+                Err(e) => {
+                    log::warn!("[RepoArtifact] JSON 解析失敗のためスキップ: {:?}: {}", path, e);
+                    continue;
+                }
+            };
+            if let Some(obj) = val.as_object_mut() {
+                obj.remove("content");
+                obj.remove("modules");
+            }
+            artifacts.push(val);
+        }
+        artifacts.sort_by(|a, b| {
+            let a_time = a.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+            let b_time = b.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+            b_time.cmp(&a_time)
+        });
+        Ok(artifacts)
+    })
+    .await
+    .map_err(|e| format!("task join error: {}", e))?
+}
+
+#[tauri::command]
+async fn read_repo_artifact(
+    app_handle: tauri::AppHandle,
+    repository_id: String,
+    artifact_id: String,
+) -> Result<String, String> {
+    validate_path_component(&artifact_id)?;
+    let artifact_path =
+        repo_artifacts_dir(&app_handle, &repository_id)?.join(format!("{}.json", artifact_id));
+    tokio::task::spawn_blocking(move || {
+        std::fs::read_to_string(&artifact_path).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| format!("task join error: {}", e))?
+}
+
+/// ワークツリーのアーティファクトを、そのワークツリーの元リポジトリへコピーする。
+/// 転送先はワークツリーから解決するため引数には取らない（誤転送の防止）。
+#[tauri::command]
+async fn copy_artifact_to_repository(
+    app_handle: tauri::AppHandle,
+    settings_manager: State<'_, SettingsManager>,
+    worktree_id: String,
+    artifact_id: String,
+    overwrite: bool,
+) -> Result<CopyArtifactResult, String> {
+    validate_path_component(&artifact_id)?;
+    let (repository_id, repository_name) =
+        resolve_worktree_repository(&settings_manager, &worktree_id)?;
+
+    let source_path =
+        artifacts_dir(&app_handle, &worktree_id)?.join(format!("{}.json", artifact_id));
+    let dest_dir = repo_artifacts_dir(&app_handle, &repository_id)?;
+    let dest_path = dest_dir.join(format!("{}.json", artifact_id));
+
+    let source_worktree_id = worktree_id.clone();
+    let marker_content = repository_id.clone();
+    let tmp_name = format!(".{}.tmp{}", artifact_id, std::process::id());
+    let copied = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        if dest_path.exists() && !overwrite {
+            return Ok(false);
+        }
+
+        let raw = std::fs::read_to_string(&source_path)
+            .map_err(|e| format!("アーティファクトの読み込みに失敗しました: {}", e))?;
+        let mut val: serde_json::Value = serde_json::from_str(&raw)
+            .map_err(|e| format!("アーティファクトの JSON 解析に失敗しました: {}", e))?;
+        if let Some(obj) = val.as_object_mut() {
+            obj.insert(
+                "source_worktree_id".to_string(),
+                serde_json::Value::String(source_worktree_id),
+            );
+        }
+        let json = serde_json::to_string(&val).map_err(|e| e.to_string())?;
+
+        std::fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+        // ディレクトリ名はハッシュなので、どのリポジトリのものか分かるよう元パスを残す。
+        // 拡張子が json ではないため list_repo_artifacts の対象外。
+        let marker_path = dest_dir.join("repository-path.txt");
+        if !marker_path.exists() {
+            let _ = std::fs::write(&marker_path, marker_content);
+        }
+
+        // 一時ファイルへ書いてから rename することで、書き込み途中の破損ファイルが残らないようにする
+        let tmp_path = dest_dir.join(tmp_name);
+        if let Err(e) = std::fs::write(&tmp_path, json) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!("アーティファクトの書き込みに失敗しました: {}", e));
+        }
+        if let Err(e) = std::fs::rename(&tmp_path, &dest_path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(format!("アーティファクトの書き込みに失敗しました: {}", e));
+        }
+        Ok(true)
+    })
+    .await
+    .map_err(|e| format!("task join error: {}", e))??;
+
+    if !copied {
+        return Ok(CopyArtifactResult {
+            status: "exists".to_string(),
+            repository_id,
+            repository_name,
+        });
+    }
+
+    let _ = app_handle.emit(
+        "repo-artifact-changed",
+        serde_json::json!({
+            "repositoryId": repository_id,
+            "artifactId": artifact_id,
+            "command": "create",
+        }),
+    );
+    if let Some(pool) = app_handle.try_state::<report_db::ReportPool>() {
+        // 日次サマリの artifact_added/removed は `artifact_change:create` /
+        // `artifact_change:delete` を前方一致で数えるため、意味の異なるリポジトリ転送は
+        // 別 kind にして既存カウンタを汚さない
+        let _ = report_db::insert(&pool.0, "repo_artifact_change:copy", &artifact_id).await;
+    }
+
+    Ok(CopyArtifactResult {
+        status: "copied".to_string(),
+        repository_id,
+        repository_name,
+    })
+}
+
+#[tauri::command]
+async fn delete_repo_artifact(
+    app_handle: tauri::AppHandle,
+    repository_id: String,
+    artifact_id: String,
+) -> Result<(), String> {
+    validate_path_component(&artifact_id)?;
+    let artifact_path =
+        repo_artifacts_dir(&app_handle, &repository_id)?.join(format!("{}.json", artifact_id));
+    let deleted = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        if !artifact_path.exists() {
+            return Ok(false);
+        }
+        std::fs::remove_file(&artifact_path).map_err(|e| e.to_string())?;
+        Ok(true)
+    })
+    .await
+    .map_err(|e| format!("task join error: {}", e))??;
+
+    if deleted {
+        let _ = app_handle.emit(
+            "repo-artifact-changed",
+            serde_json::json!({
+                "repositoryId": repository_id,
+                "artifactId": artifact_id,
+                "command": "delete",
+            }),
+        );
+        if let Some(pool) = app_handle.try_state::<report_db::ReportPool>() {
+            // ワークツリー単位の削除を数える `artifact_change:delete` とは区別する
+            let _ = report_db::insert(&pool.0, "repo_artifact_change:delete", &artifact_id).await;
+        }
+    }
+    Ok(())
+}
+
 // ─── レポートコマンド ─────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1084,6 +1345,10 @@ pub fn run() {
             list_artifacts,
             read_artifact,
             delete_artifacts,
+            list_repo_artifacts,
+            read_repo_artifact,
+            copy_artifact_to_repository,
+            delete_repo_artifact,
             start_fs_watch,
             stop_fs_watch,
             settings::list_system_sounds,
