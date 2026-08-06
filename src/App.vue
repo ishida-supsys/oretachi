@@ -1280,13 +1280,25 @@ onMounted(async () => {
   });
 
   // MCPからのワークツリークローズ（アーカイブ）
-  await listen<{ worktree_id: string; worktree_name: string; merge_to: string; delete_branch: boolean; force_branch: boolean }>("mcp-close-worktree", async (event) => {
-    const { worktree_id, merge_to, delete_branch, force_branch } = event.payload;
-    await archiveWorktree(worktree_id, {
-      mergeTo: merge_to,
-      deleteBranch: delete_branch,
-      forceBranch: force_branch,
-    });
+  await listen<{ request_id: string; worktree_id: string; worktree_name: string; merge_to: string; delete_branch: boolean; force_branch: boolean }>("mcp-close-worktree", async (event) => {
+    const { request_id, worktree_id, merge_to, delete_branch, force_branch } = event.payload;
+    // force_branch の既定値は Rust 側（Option が残っている mcp_server.rs）で導出済み
+    await archiveWorktree(
+      worktree_id,
+      {
+        mergeTo: merge_to,
+        deleteBranch: delete_branch,
+        forceBranch: force_branch,
+      },
+      async (result) => {
+        // MCP 呼び出し元へ実際の成否を返す
+        await invoke("mcp_close_worktree_result", {
+          requestId: request_id,
+          status: result.ok ? "ok" : result.cancelled ? "cancelled" : "error",
+          error: result.ok || result.cancelled ? null : result.error,
+        }).catch(() => { /* 呼び出し元がタイムアウト済みの場合は無視 */ });
+      },
+    );
   });
 
   // MCPからの新規ターミナル追加（pnpm dev など長時間バックグラウンドコマンド用）
