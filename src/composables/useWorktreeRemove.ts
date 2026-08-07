@@ -3,8 +3,9 @@ import type { Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { message } from "@tauri-apps/plugin-dialog";
-import { useWorktrees } from "./useWorktrees";
+import { useWorktrees, BranchDeleteAfterRemoveError } from "./useWorktrees";
 import { cancelApproval } from "../utils/autoApproval";
+import { logWarn } from "../utils/log";
 import { saveArchive, deleteArchive } from "./useArchivePersistence";
 import type { Worktree } from "../types/worktree";
 
@@ -45,7 +46,15 @@ export type RemoveOptions = { mergeTo: string; deleteBranch: boolean; forceBranc
 /** 削除処理の最終結果。MCP 経由の呼び出し元へ成否を返すために使う */
 export type WorktreeRemoveResult =
   | { ok: true }
-  | { ok: false; cancelled: boolean; error: string };
+  | { ok: false; cancelled: boolean; error: string; busy?: boolean };
+
+/**
+ * 処理中のワークツリーID。同一ワークツリーへのクローズ要求が二重に走ると、
+ * 2回目はワークツリー実体が既に無い状態で git 操作を行い「ブランチが無い」等の
+ * 誤ったエラーになるため、モジュールスコープで多重実行を弾く。
+ * （MCP のackタイムアウト後のエージェント再実行、UI操作との競合などで発生しうる）
+ */
+const inFlightRemovals = new Set<string>();
 
 /** 結果が確定した時点で呼ばれるコールバック（エラーダイアログ表示より前に呼ばれる） */
 export type OnRemoveSettled = (result: WorktreeRemoveResult) => Promise<void>;
@@ -119,33 +128,53 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
       }
       return result;
     }
-    const failure = (e: unknown): WorktreeRemoveResult => ({
-      ok: false,
-      cancelled: String(e) === "cancelled",
-      error: String(e),
-    });
+    const failure = (e: unknown): WorktreeRemoveResult =>
+      e instanceof BranchDeleteAfterRemoveError
+        ? {
+            ok: false,
+            cancelled: false,
+            error: t("branchDeleteFailed", { error: e.reason }),
+          }
+        : {
+            ok: false,
+            cancelled: String(e) === "cancelled",
+            error: String(e),
+          };
 
     const worktree = worktrees.value.find((w) => w.id === worktreeId);
     if (!worktree) {
       return await settle({ ok: false, cancelled: false, error: `worktree ${worktreeId} not found` });
     }
 
-    clearNotification(worktreeId);
-
-    // UI 破壊的操作の前に事前処理（アーカイブ保存など）を実行する。
-    // ここで失敗した場合はワークツリーに何も手を加えずエラーを表示して終了する。
-    if (beforeRemove) {
-      try {
-        await beforeRemove(worktree);
-      } catch (e) {
-        const result = await settle(failure(e));
-        await message(t("deleteFailed", { error: e }), { kind: "error" });
-        return result;
-      }
+    // 同一ワークツリーのクローズが既に進行中なら何もしない（ダイアログも出さない）
+    if (inFlightRemovals.has(worktreeId)) {
+      logWarn(`[worktree] close already in progress for ${worktreeId}, ignoring duplicate request`);
+      return await settle({
+        ok: false,
+        cancelled: false,
+        busy: true,
+        error: "close already in progress",
+      });
     }
-
+    // 多重実行ガードとローディング表示は同時に立てる（この間にカードの削除ボタンから
+    // 再操作されると、無音のまま何も起きないため）。以降の解除は末尾の finally で行う。
+    inFlightRemovals.add(worktreeId);
     loadingWorktrees.set(worktreeId, loadingText);
     try {
+      clearNotification(worktreeId);
+
+      // UI 破壊的操作の前に事前処理（アーカイブ保存など）を実行する。
+      // ここで失敗した場合はワークツリーに何も手を加えずエラーを表示して終了する。
+      if (beforeRemove) {
+        try {
+          await beforeRemove(worktree);
+        } catch (e) {
+          const result = await settle(failure(e));
+          await message(t("deleteFailed", { error: e }), { kind: "error" });
+          return result;
+        }
+      }
+
       if (isDetached(worktreeId)) {
         await moveToMainWindow(worktreeId);
         subWindowFocusMap.delete(worktreeId);
@@ -202,7 +231,12 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
         await settle(failure(e));
         // "cancelled" はユーザー操作によるキャンセルなのでエラーダイアログを出さない
         if (String(e) !== "cancelled") {
-          await message(t("deleteFailed", { error: e }), { kind: "error" });
+          // ワークツリーは削除済みでブランチ削除だけ失敗した場合は、その旨を明示する
+          if (e instanceof BranchDeleteAfterRemoveError) {
+            await message(t("branchDeleteFailed", { error: e.reason }), { kind: "warning" });
+          } else {
+            await message(t("deleteFailed", { error: e }), { kind: "error" });
+          }
         }
       } finally {
         homeViewRef.value?.unhideCard(worktreeId);
@@ -221,6 +255,7 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
     } finally {
       loadingWorktrees.delete(worktreeId);
       cancellableWorktrees.delete(worktreeId);
+      inFlightRemovals.delete(worktreeId);
     }
 
     // ここに到達して結果が未確定なのは想定外（通常発生しない）。安全側に倒して不明=失敗として返す
