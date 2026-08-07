@@ -42,6 +42,14 @@ export type WorktreeRemoveOptions = {
 
 export type RemoveOptions = { mergeTo: string; deleteBranch: boolean; forceBranch: boolean };
 
+/** 削除処理の最終結果。MCP 経由の呼び出し元へ成否を返すために使う */
+export type WorktreeRemoveResult =
+  | { ok: true }
+  | { ok: false; cancelled: boolean; error: string };
+
+/** 結果が確定した時点で呼ばれるコールバック（エラーダイアログ表示より前に呼ばれる） */
+export type OnRemoveSettled = (result: WorktreeRemoveResult) => Promise<void>;
+
 export function useWorktreeRemove(options: WorktreeRemoveOptions) {
   const {
     loadingWorktrees,
@@ -90,6 +98,7 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
    *  beforeRemove: git 操作前に呼ぶ任意の非同期処理（アーカイブ保存など）
    *  onRemoveFailed: git 操作失敗時に beforeRemove の副作用をロールバックするコールバック
    *  afterRemove: git 操作成功後に呼ぶ任意の非同期処理（MCP通知など）
+   *  onSettled: 成否が確定した時点（エラーダイアログ表示より前）に呼ぶ任意の非同期処理
    */
   async function _execute(
     worktreeId: string,
@@ -98,9 +107,28 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
     beforeRemove?: (worktree: Worktree) => Promise<void>,
     onRemoveFailed?: (worktree: Worktree) => Promise<void>,
     afterRemove?: (worktree: Worktree) => Promise<void>,
-  ): Promise<void> {
+    onSettled?: OnRemoveSettled,
+  ): Promise<WorktreeRemoveResult> {
+    // 結果は必ず一度だけ確定・通知する（エラーダイアログは await でブロックするため通知はその前に行う）
+    let settledResult: WorktreeRemoveResult | null = null;
+    async function settle(result: WorktreeRemoveResult): Promise<WorktreeRemoveResult> {
+      if (settledResult) return settledResult;
+      settledResult = result;
+      if (onSettled) {
+        try { await onSettled(result); } catch { /* 通知失敗は削除の成否に影響しない */ }
+      }
+      return result;
+    }
+    const failure = (e: unknown): WorktreeRemoveResult => ({
+      ok: false,
+      cancelled: String(e) === "cancelled",
+      error: String(e),
+    });
+
     const worktree = worktrees.value.find((w) => w.id === worktreeId);
-    if (!worktree) return;
+    if (!worktree) {
+      return await settle({ ok: false, cancelled: false, error: `worktree ${worktreeId} not found` });
+    }
 
     clearNotification(worktreeId);
 
@@ -110,8 +138,9 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
       try {
         await beforeRemove(worktree);
       } catch (e) {
+        const result = await settle(failure(e));
         await message(t("deleteFailed", { error: e }), { kind: "error" });
-        return;
+        return result;
       }
     }
 
@@ -161,6 +190,7 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
         if (afterRemove) {
           try { await afterRemove(worktree); } catch { /* 通知失敗はワークツリー削除の成否に影響しない */ }
         }
+        await settle({ ok: true });
         await nextTick();
         if (savedPositions) homeViewRef.value?.animateAfterRemove(savedPositions);
       } catch (e) {
@@ -169,6 +199,7 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
         if (onRemoveFailed) {
           try { await onRemoveFailed(worktree); } catch { /* ロールバック失敗は無視 */ }
         }
+        await settle(failure(e));
         // "cancelled" はユーザー操作によるキャンセルなのでエラーダイアログを出さない
         if (String(e) !== "cancelled") {
           await message(t("deleteFailed", { error: e }), { kind: "error" });
@@ -183,6 +214,7 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
       if (onRemoveFailed) {
         try { await onRemoveFailed(worktree); } catch { /* ロールバック失敗は無視 */ }
       }
+      await settle(failure(e));
       if (String(e) !== "cancelled") {
         await message(t("deleteFailed", { error: e }), { kind: "error" });
       }
@@ -190,11 +222,18 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
       loadingWorktrees.delete(worktreeId);
       cancellableWorktrees.delete(worktreeId);
     }
+
+    // ここに到達して結果が未確定なのは想定外（通常発生しない）。安全側に倒して不明=失敗として返す
+    return settledResult ?? (await settle({ ok: false, cancelled: false, error: "unknown" }));
   }
 
   /** アーカイブDBに保存してワークツリーを削除する（ダイアログ経由・MCP経由の共通処理） */
-  async function archiveWorktree(worktreeId: string, removeOptions: RemoveOptions): Promise<void> {
-    await _execute(
+  async function archiveWorktree(
+    worktreeId: string,
+    removeOptions: RemoveOptions,
+    onSettled?: OnRemoveSettled,
+  ): Promise<WorktreeRemoveResult> {
+    return await _execute(
       worktreeId,
       removeOptions,
       t("archivingText"),
@@ -236,12 +275,17 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
           branchName: worktree.branchName,
         });
       },
+      onSettled,
     );
   }
 
   /** アーカイブDBへの保存なしでワークツリーを削除する */
-  async function removeWorktreeNoArchive(worktreeId: string, removeOptions: RemoveOptions): Promise<void> {
-    await _execute(worktreeId, removeOptions, t("deletingText"));
+  async function removeWorktreeNoArchive(
+    worktreeId: string,
+    removeOptions: RemoveOptions,
+    onSettled?: OnRemoveSettled,
+  ): Promise<WorktreeRemoveResult> {
+    return await _execute(worktreeId, removeOptions, t("deletingText"), undefined, undefined, undefined, onSettled);
   }
 
   return {

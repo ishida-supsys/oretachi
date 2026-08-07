@@ -68,7 +68,65 @@ pub fn unregister_detached_worktree(
     }
 }
 
+/// ワークツリークローズの最終結果。フロントエンドの status 文字列に対応する。
+pub enum CloseWorktreeOutcome {
+    Closed,
+    /// ユーザーが削除リトライをキャンセルした（エラーではない）
+    Cancelled,
+    Failed(String),
+}
+
+/// oretachi_close_worktree の処理結果をフロントエンドから受け取るための oneshot 送信側を保持する。
+/// MCP ツールは request_id ごとに receiver を待ち、フロント側が
+/// mcp_close_worktree_result コマンドで実際の成否を返す。
+#[derive(Default)]
+pub struct CloseWorktreeAckRegistry(pub Mutex<HashMap<String, oneshot::Sender<CloseWorktreeOutcome>>>);
+
+impl CloseWorktreeAckRegistry {
+    fn register(&self, request_id: String) -> oneshot::Receiver<CloseWorktreeOutcome> {
+        let (tx, rx) = oneshot::channel();
+        match self.0.lock() {
+            Ok(mut g) => { g.insert(request_id, tx); }
+            Err(e) => { e.into_inner().insert(request_id, tx); }
+        }
+        rx
+    }
+
+    fn take(&self, request_id: &str) -> Option<oneshot::Sender<CloseWorktreeOutcome>> {
+        match self.0.lock() {
+            Ok(mut g) => g.remove(request_id),
+            Err(e) => e.into_inner().remove(request_id),
+        }
+    }
+}
+
+/// フロントエンドがワークツリークローズの成否を MCP ツールへ返す。
+/// status: "ok" | "cancelled" | それ以外は失敗扱い。
+/// 該当 request_id が既にタイムアウト等で除去済みの場合は何もしない。
+#[tauri::command]
+pub fn mcp_close_worktree_result(
+    request_id: String,
+    status: String,
+    error: Option<String>,
+    registry: tauri::State<'_, CloseWorktreeAckRegistry>,
+) {
+    if let Some(tx) = registry.take(&request_id) {
+        let outcome = match status.as_str() {
+            "ok" => CloseWorktreeOutcome::Closed,
+            "cancelled" => CloseWorktreeOutcome::Cancelled,
+            _ => CloseWorktreeOutcome::Failed(error.unwrap_or_else(|| "unknown error".to_string())),
+        };
+        let _ = tx.send(outcome);
+    }
+}
+
 static PEER_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+static CLOSE_WORKTREE_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// クローズ結果を待つ上限。worktree remove はロックエラー時にキャンセルまで無限リトライする
+/// (git_worktree::worktree_remove_persistent) ため、タイムアウトしても失敗とは断定せず
+/// 「継続中」として返す。MCP クライアント側のツールタイムアウト(既定 60 秒前後)に
+/// 先んじて応答を返せるよう、それより短く設定する。
+const CLOSE_WORKTREE_ACK_TIMEOUT_SECS: u64 = 45;
 
 // ─── MCP Server Manager ───────────────────────────────────────────────────────
 
@@ -397,12 +455,13 @@ pub struct CloseWorktreeParams {
     pub merge_to: Option<String>,
     #[schemars(description = "ワークツリー削除後にブランチを削除するか（省略時は false）")]
     pub delete_branch: Option<bool>,
-    #[schemars(description = "未マージでもブランチを強制削除するか（省略時は false）")]
+    #[schemars(description = "未マージでもブランチを強制削除（git branch -D）するか。省略時は delete_branch と同じ値（削除するなら強制削除。UI の手動削除と同じ挙動）。false を明示するとマージ済み確認つき（git branch -d）になり、未マージのブランチではクローズが失敗する")]
     pub force_branch: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Clone)]
 struct CloseWorktreeEvent {
+    request_id: String,
     worktree_id: String,
     worktree_name: String,
     merge_to: String,
@@ -1200,7 +1259,7 @@ impl NotifyService {
     }
 
     #[tool(description = "ワークツリーをアーカイブ（クローズ）する。アーカイブDBに記録してgitワークツリーを削除する")]
-    fn oretachi_close_worktree(
+    async fn oretachi_close_worktree(
         &self,
         Parameters(CloseWorktreeParams { worktree_name, worktree_id, merge_to, delete_branch, force_branch }): Parameters<CloseWorktreeParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -1209,50 +1268,104 @@ impl NotifyService {
             return Err(McpError::invalid_params("worktree_name must not be empty", None));
         }
 
-        let settings_manager = self.app_handle.state::<SettingsManager>();
-        let settings = settings_manager.get();
+        // await をまたいで State / settings の参照を保持しないよう、ここで所有権のある値へ確定させる
+        let (target_id, target_name) = {
+            let settings_manager = self.app_handle.state::<SettingsManager>();
+            let settings = settings_manager.get();
 
-        let wt = if let Some(id) = worktree_id.as_deref() {
-            // IDが指定されている場合はIDで特定
-            settings.worktrees.iter().find(|w| w.id == id).ok_or_else(|| {
-                McpError::invalid_params(format!("worktree id '{}' not found", id), None)
-            })?
-        } else {
-            // 名前で特定（同名が複数ある場合はエラー）
-            let matches: Vec<_> = settings.worktrees.iter().filter(|w| w.name == worktree_name).collect();
-            match matches.len() {
-                0 => {
-                    let names: Vec<&str> = settings.worktrees.iter().map(|w| w.name.as_str()).collect();
-                    return Err(McpError::invalid_params(
-                        format!("worktree '{}' not found. available: [{}]", worktree_name, names.join(", ")),
-                        None,
-                    ));
+            let wt = if let Some(id) = worktree_id.as_deref() {
+                // IDが指定されている場合はIDで特定
+                settings.worktrees.iter().find(|w| w.id == id).ok_or_else(|| {
+                    McpError::invalid_params(format!("worktree id '{}' not found", id), None)
+                })?
+            } else {
+                // 名前で特定（同名が複数ある場合はエラー）
+                let matches: Vec<_> = settings.worktrees.iter().filter(|w| w.name == worktree_name).collect();
+                match matches.len() {
+                    0 => {
+                        let names: Vec<&str> = settings.worktrees.iter().map(|w| w.name.as_str()).collect();
+                        return Err(McpError::invalid_params(
+                            format!("worktree '{}' not found. available: [{}]", worktree_name, names.join(", ")),
+                            None,
+                        ));
+                    }
+                    1 => matches[0],
+                    _ => {
+                        let ids: Vec<&str> = matches.iter().map(|w| w.id.as_str()).collect();
+                        return Err(McpError::invalid_params(
+                            format!("multiple worktrees named '{}'. specify worktree_id to disambiguate: [{}]", worktree_name, ids.join(", ")),
+                            None,
+                        ));
+                    }
                 }
-                1 => matches[0],
-                _ => {
-                    let ids: Vec<&str> = matches.iter().map(|w| w.id.as_str()).collect();
-                    return Err(McpError::invalid_params(
-                        format!("multiple worktrees named '{}'. specify worktree_id to disambiguate: [{}]", worktree_name, ids.join(", ")),
-                        None,
-                    ));
-                }
-            }
+            };
+            (wt.id.clone(), wt.name.clone())
         };
+
+        // フロント側の処理結果を受け取るための oneshot を先に登録してから emit する
+        let request_id = format!(
+            "close-{}",
+            CLOSE_WORKTREE_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let rx = {
+            let registry = self.app_handle.state::<CloseWorktreeAckRegistry>();
+            registry.register(request_id.clone())
+        };
+
+        // force_branch 省略時は delete_branch と同じ値にする（UI の手動削除と同じ意味論）。
+        // git branch -d は「現在の HEAD またはその upstream にマージ済みか」しか見ないため、
+        // 未マージブランチはもちろん、merge_to を指定して別ワークツリーでマージした場合でも
+        // メインリポジトリの HEAD 基準では未マージ判定になり失敗する。
+        // ここで Option を潰すため、明示的な false は尊重される（-d でのマージ済み確認）。
+        let delete_branch = delete_branch.unwrap_or(false);
+        let force_branch = force_branch.unwrap_or(delete_branch);
 
         let event = CloseWorktreeEvent {
-            worktree_id: wt.id.clone(),
-            worktree_name: wt.name.clone(),
+            request_id: request_id.clone(),
+            worktree_id: target_id,
+            worktree_name: target_name.clone(),
             merge_to: merge_to.unwrap_or_default(),
-            delete_branch: delete_branch.unwrap_or(false),
-            force_branch: force_branch.unwrap_or(false),
+            delete_branch,
+            force_branch,
         };
-        self.app_handle
-            .emit("mcp-close-worktree", &event)
-            .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
-        log::info!("[mcp] oretachi_close_worktree: name={}", worktree_name);
-        Ok(CallToolResult::success(vec![Content::text(
-            "ワークツリーのクローズリクエストを送信しました。処理は非同期に行われます。",
-        )]))
+        if let Err(e) = self.app_handle.emit("mcp-close-worktree", &event) {
+            self.app_handle.state::<CloseWorktreeAckRegistry>().take(&request_id);
+            return Err(McpError::internal_error(e.to_string(), None));
+        }
+        log::info!("[mcp] oretachi_close_worktree: name={} request_id={}", worktree_name, request_id);
+
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(CLOSE_WORKTREE_ACK_TIMEOUT_SECS),
+            rx,
+        )
+        .await
+        {
+            Ok(Ok(CloseWorktreeOutcome::Closed)) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "ワークツリー '{}' をクローズしました。",
+                target_name
+            ))])),
+            Ok(Ok(CloseWorktreeOutcome::Cancelled)) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "ワークツリー '{}' のクローズはユーザー操作によりキャンセルされました。ワークツリーはそのまま残っています。",
+                target_name
+            ))])),
+            Ok(Ok(CloseWorktreeOutcome::Failed(msg))) => {
+                log::warn!("[mcp] oretachi_close_worktree failed: name={} error={}", worktree_name, msg);
+                Err(McpError::internal_error(
+                    format!("ワークツリー '{}' のクローズに失敗しました: {}", target_name, msg),
+                    None,
+                ))
+            }
+            // 送信側が take 済みで drop された（通常発生しない）
+            Ok(Err(_)) => Ok(CallToolResult::success(vec![Content::text(
+                "ワークツリーのクローズリクエストを送信しましたが、結果を受け取れませんでした。oretachi_get_worktree_status で確認してください。",
+            )])),
+            Err(_) => {
+                self.app_handle.state::<CloseWorktreeAckRegistry>().take(&request_id);
+                Ok(CallToolResult::success(vec![Content::text(
+                    "ワークツリーのクローズリクエストを送信しましたが、時間内に完了しませんでした。削除リトライ中（UI からキャンセル可能）か、メインウィンドウがまだ処理を受け付けていない可能性があります。oretachi_get_worktree_status で状態を確認してください。",
+                )]))
+            }
+        }
     }
 
     #[tool(description = "指定ワークツリーに新しいターミナルタブを追加し、与えられたコマンドを流し込む。pnpm dev / tauri dev / vite / next dev など長時間常駐するバックグラウンドコマンドを oretachi UI 上で起動するために使う")]

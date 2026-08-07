@@ -40,7 +40,7 @@ export function useRemoveWorktreeDialog(core: ReturnType<typeof useWorktreeRemov
   /** ダイアログ確認後の共通処理: state をクリアしてコア処理に委譲する */
   async function _confirm(
     removeOptions: RemoveOptions,
-    execute: (worktreeId: string, removeOptions: RemoveOptions) => Promise<void>,
+    execute: (worktreeId: string, removeOptions: RemoveOptions) => Promise<unknown>,
   ): Promise<void> {
     if (!removeTargetWorktree.value) return;
     const { id: worktreeId } = removeTargetWorktree.value;
