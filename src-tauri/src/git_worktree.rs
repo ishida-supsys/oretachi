@@ -238,12 +238,18 @@ pub fn merge_branch(repo_path: &str, source_branch: &str, target_branch: &str) -
         }
     } else {
         // target_branch がどのワークツリーにもチェックアウトされていない → repo_path で checkout して merge
-        let head_output = make_command("git")
-            .args(["rev-parse", "--abbrev-ref", "HEAD"])
-            .current_dir(repo_path)
-            .output()
-            .map_err(|e| format!("git command error: {}", e))?;
-        let original_branch = String::from_utf8_lossy(&head_output.stdout).trim().to_string();
+        // detached HEAD の場合はブランチ名が取れないため、戻り先としてコミットハッシュを使う
+        let original_branch = match current_branch(repo_path) {
+            Some(branch) => branch,
+            None => {
+                let head_output = make_command("git")
+                    .args(["rev-parse", "HEAD"])
+                    .current_dir(repo_path)
+                    .output()
+                    .map_err(|e| format!("git command error: {}", e))?;
+                String::from_utf8_lossy(&head_output.stdout).trim().to_string()
+            }
+        };
 
         let checkout_output = make_command("git")
             .args(["checkout", target_branch])
@@ -284,10 +290,61 @@ pub fn merge_branch(repo_path: &str, source_branch: &str, target_branch: &str) -
     Ok(())
 }
 
-pub fn delete_branch(repo_path: &str, branch_name: &str, force: bool) -> Result<(), String> {
+/// ローカルブランチが存在するか（refs/heads/<name> の有無で判定）
+pub fn branch_exists(repo_path: &str, branch_name: &str) -> bool {
+    let refname = format!("refs/heads/{}", branch_name);
+    make_command("git")
+        .args(["rev-parse", "--verify", "--quiet", &refname])
+        .current_dir(repo_path)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// ワークツリーがチェックアウトしているブランチ名（detached HEAD の場合は None）
+pub fn current_branch(worktree_path: &str) -> Option<String> {
+    let output = make_command("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(worktree_path)
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() || name == "HEAD" {
+        None
+    } else {
+        Some(name)
+    }
+}
+
+/// ブランチを削除する。戻り値は「実際に削除したか」（false = 既に存在せずスキップ）。
+/// ブランチが無い状態は目的の状態に到達済みなので成功として扱う（冪等）。
+pub fn delete_branch(repo_path: &str, branch_name: &str, force: bool) -> Result<bool, String> {
+    if !branch_exists(repo_path, branch_name) {
+        log::info!(
+            "[worktree] branch '{}' already absent in {}, skip delete",
+            branch_name, repo_path
+        );
+        return Ok(false);
+    }
+
     let flag = if force { "-D" } else { "-d" };
-    run_git_in(repo_path, &["branch", flag, branch_name])?;
-    Ok(())
+    match run_git_in(repo_path, &["branch", flag, branch_name]) {
+        Ok(_) => Ok(true),
+        Err(e) => {
+            // 存在確認との競合（別プロセスが先に削除した等）は成功扱い
+            if e.contains("not found") {
+                log::info!(
+                    "[worktree] branch '{}' disappeared before delete in {}, treated as deleted",
+                    branch_name, repo_path
+                );
+                return Ok(false);
+            }
+            Err(e)
+        }
+    }
 }
 
 // ─── コードレビュー用 Git 関数 ───────────────────────────────────────────────

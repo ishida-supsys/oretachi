@@ -367,8 +367,15 @@ async fn git_merge_branch(
 }
 
 #[tauri::command]
-async fn git_delete_branch(repo_path: String, branch_name: String, force: bool) -> Result<(), String> {
+/// ブランチを削除する。戻り値 false は「既に存在しなかったためスキップ」を表す（エラーではない）
+async fn git_delete_branch(repo_path: String, branch_name: String, force: bool) -> Result<bool, String> {
     run_git(move || git_worktree::delete_branch(&repo_path, &branch_name, force)).await
+}
+
+/// ワークツリーがチェックアウトしているブランチ名（detached HEAD の場合は null）
+#[tauri::command]
+async fn git_worktree_current_branch(worktree_path: String) -> Result<Option<String>, String> {
+    run_git(move || Ok::<_, String>(git_worktree::current_branch(&worktree_path))).await
 }
 
 #[tauri::command]
@@ -1300,6 +1307,7 @@ pub fn run() {
             git_worktree_remove,
             cancel_worktree_remove,
             git_worktree_restore,
+            git_worktree_current_branch,
             git_list_branches,
             detect_package_manager,
             read_gitignore,

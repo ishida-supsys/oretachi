@@ -73,6 +73,8 @@ pub enum CloseWorktreeOutcome {
     Closed,
     /// ユーザーが削除リトライをキャンセルした（エラーではない）
     Cancelled,
+    /// 同じワークツリーのクローズ処理が既に進行中だった（エラーではない）
+    Busy,
     Failed(String),
 }
 
@@ -101,7 +103,7 @@ impl CloseWorktreeAckRegistry {
 }
 
 /// フロントエンドがワークツリークローズの成否を MCP ツールへ返す。
-/// status: "ok" | "cancelled" | それ以外は失敗扱い。
+/// status: "ok" | "cancelled" | "busy" | それ以外は失敗扱い。
 /// 該当 request_id が既にタイムアウト等で除去済みの場合は何もしない。
 #[tauri::command]
 pub fn mcp_close_worktree_result(
@@ -114,6 +116,7 @@ pub fn mcp_close_worktree_result(
         let outcome = match status.as_str() {
             "ok" => CloseWorktreeOutcome::Closed,
             "cancelled" => CloseWorktreeOutcome::Cancelled,
+            "busy" => CloseWorktreeOutcome::Busy,
             _ => CloseWorktreeOutcome::Failed(error.unwrap_or_else(|| "unknown error".to_string())),
         };
         let _ = tx.send(outcome);
@@ -1348,6 +1351,10 @@ impl NotifyService {
                 "ワークツリー '{}' のクローズはユーザー操作によりキャンセルされました。ワークツリーはそのまま残っています。",
                 target_name
             ))])),
+            Ok(Ok(CloseWorktreeOutcome::Busy)) => Ok(CallToolResult::success(vec![Content::text(format!(
+                "ワークツリー '{}' は既にクローズ処理中です。再実行せず、oretachi_get_worktree_status で完了を確認してください。",
+                target_name
+            ))])),
             Ok(Ok(CloseWorktreeOutcome::Failed(msg))) => {
                 log::warn!("[mcp] oretachi_close_worktree failed: name={} error={}", worktree_name, msg);
                 Err(McpError::internal_error(
@@ -1362,7 +1369,7 @@ impl NotifyService {
             Err(_) => {
                 self.app_handle.state::<CloseWorktreeAckRegistry>().take(&request_id);
                 Ok(CallToolResult::success(vec![Content::text(
-                    "ワークツリーのクローズリクエストを送信しましたが、時間内に完了しませんでした。削除リトライ中（UI からキャンセル可能）か、メインウィンドウがまだ処理を受け付けていない可能性があります。oretachi_get_worktree_status で状態を確認してください。",
+                    "ワークツリーのクローズリクエストを送信しましたが、時間内に完了しませんでした。削除リトライ中（UI からキャンセル可能）か、メインウィンドウがまだ処理を受け付けていない可能性があります。このツールを再実行せず、oretachi_get_worktree_status で状態を確認してください（再実行しても処理中のクローズには影響しません）。",
                 )]))
             }
         }
