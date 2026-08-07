@@ -6,6 +6,12 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.27.1] - 2026-08-07
+
+### Fixed
+- MCP 経由の `oretachi_close_worktree` で未マージ／squash マージ済みブランチの削除が失敗し、ワークツリーが復元されてクローズが進まない問題を修正 (#107)
+- クローズ結果を MCP 呼び出し元へ返すようにし、成功／キャンセル／失敗を区別できるようにした (#107)
+
 ## [0.27.0] - 2026-08-04
 
 ### Added
@@ -554,7 +560,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.27.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.27.1...HEAD
+[0.27.1]: https://github.com/ishida-supsys/oretachi/compare/0.27.0...0.27.1
 [0.27.0]: https://github.com/ishida-supsys/oretachi/compare/0.26.0...0.27.0
 [0.26.0]: https://github.com/ishida-supsys/oretachi/compare/0.25.3...0.26.0
 [0.25.3]: https://github.com/ishida-supsys/oretachi/compare/0.25.2...0.25.3
