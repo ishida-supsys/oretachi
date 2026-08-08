@@ -9,7 +9,6 @@ import type { Worktree } from "../types/worktree";
 import type { AddWorktreeTaskCode, AgentWorktreeTaskCode } from "../types/task";
 import type { WebSessionInfo } from "../types/terminal";
 import { decodePtyOutput } from "../utils/decodePtyOutput";
-import { DEFAULT_HOME_AGENT_PROMPT } from "../constants/homeAgentPrompt";
 import { useWorkgroups } from "./useWorkgroups";
 
 /** Claude Code モード → permission-mode フラグ */
@@ -411,15 +410,12 @@ export function useTaskExecution(deps: {
    * 指定ワークツリーの指定ターミナルでエージェントを起動する。
    * プロンプトは一時ファイル経由で渡し、シェルに応じたコマンドへラップする。
    * detached（サブウィンドウ）と メインウィンドウ の両方に対応。
-   *
-   * @param opts.applyGroupExecPrompt ワークグループの実行プロンプトテンプレートを適用するか（既定 true）。
-   *   ホームの管理エージェントのようにテンプレートを噛ませたくない場合に false を渡す。
    */
   async function launchAgentInTerminal(
     wt: Worktree,
     terminalId: number,
     prompt: string,
-    opts?: { remoteExec?: boolean; applyGroupExecPrompt?: boolean },
+    opts?: { remoteExec?: boolean },
   ): Promise<void> {
     const remoteExec = opts?.remoteExec ?? false;
     // タスク実行エージェント・モード・実行プロンプトは所属ワークグループ単位
@@ -434,9 +430,7 @@ export function useTaskExecution(deps: {
       (shell === undefined && isWindows);
 
     // 実行プロンプトテンプレート ({{PROMPT}}) を適用してから一時ファイルへ書き出し
-    const finalPrompt = (opts?.applyGroupExecPrompt ?? true)
-      ? applyExecPrompt(group?.execPrompt, prompt)
-      : prompt;
+    const finalPrompt = applyExecPrompt(group?.execPrompt, prompt);
     const tempPath = await invoke<string>("write_temp_prompt", { content: finalPrompt });
 
     const claudeMode = claudeModeFlag(group?.claudeCodeMode);
@@ -518,53 +512,10 @@ export function useTaskExecution(deps: {
     }
   }
 
-  /**
-   * ホームワークツリーで管理エージェントを起動する。
-   * 既にエージェントが動いているタブがあれば再起動せずブラケットペーストで追送する。
-   */
-  async function launchHomeAgent(): Promise<void> {
-    const home = worktrees.value.find((w) => w.isHome);
-    if (!home) {
-      await message(t("homeAgentNoBaseDir"), { kind: "warning" });
-      return;
-    }
-
-    const prompt = settings.value.homeAgentPrompt?.trim() || DEFAULT_HOME_AGENT_PROMPT;
-
-    // 既存タブでエージェントが動いていればそこへ追送する
-    for (const term of home.terminals) {
-      let sessionId: number | null;
-      let agentRunning: boolean;
-      if (isDetached(home.id)) {
-        sessionId = getDetachedSessionId(term.id);
-        agentRunning = sessionId != null
-          ? await invoke<boolean>("pty_is_ai_agent", { sessionId })
-          : false;
-      } else {
-        sessionId = getTerminalRef(term.id)?.sessionId ?? null;
-        agentRunning = terminalAgentStatus.get(term.id) === true;
-      }
-      if (agentRunning && sessionId != null) {
-        await sendPromptToRunningAgent(sessionId, home.id, term.id, prompt);
-        return;
-      }
-    }
-
-    // 動いているエージェントが無ければ新しいタブを立てて起動する
-    const before = new Set(home.terminals.map((tm) => tm.id));
-    await onAddTerminal(home.id);
-    const created = home.terminals.find((tm) => !before.has(tm.id));
-    if (!created) {
-      throw new Error("ホームのターミナルを作成できませんでした");
-    }
-    await launchAgentInTerminal(home, created.id, prompt, { applyGroupExecPrompt: false });
-  }
-
   return {
     executeAddWorktree,
     executeAgentWorktree,
     launchAgentInTerminal,
-    launchHomeAgent,
     resolveShell,
     buildScriptCommand,
     buildPendingCommand,

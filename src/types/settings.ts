@@ -145,6 +145,6 @@ export interface AppSettings {
   debugMode?: boolean;
   useOretachiTerminalForBackground?: boolean; // AI からの background コマンドを oretachi ターミナルで起動するか (デフォルト: false)
   moveToSubWindowOnMcpSpawn?: boolean; // MCP 経由のターミナル追加時にサブウィンドウへ自動移行するか (デフォルト: false)
-  homeAgentPrompt?: string; // ホームの管理エージェント起動プロンプト (空なら DEFAULT_HOME_AGENT_PROMPT)
+  homeAgentPrompt?: string; // home のセッションに SessionStart で注入するプロンプト (空なら Rust 側の既定値)
   wizardCompleted?: boolean; // 初回起動ウィザード完了フラグ (Rust 側 init() でシーディング)
 }

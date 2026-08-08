@@ -6,7 +6,6 @@ import { open, ask, message } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { useSettings, migrateHomeWorktree, setupHomeClaudeDir } from "../composables/useSettings";
 import { useWorktrees } from "../composables/useWorktrees";
-import { DEFAULT_HOME_AGENT_PROMPT } from "../constants/homeAgentPrompt";
 import { useUpdater } from "../composables/useUpdater";
 import ColorPicker from "primevue/colorpicker";
 import Password from "primevue/password";
@@ -178,6 +177,12 @@ async function selectWorktreeBaseDir() {
 // ─── ホームの管理エージェント ──────────────────────────────────────────────────
 
 const reseedResult = ref("");
+
+// プロンプト未設定時に実際に注入される既定値（Rust 側の定義を唯一の出所にする）
+const defaultHomeAgentPrompt = ref("");
+onMounted(async () => {
+  defaultHomeAgentPrompt.value = await invoke<string>("get_default_home_agent_prompt").catch(() => "");
+});
 
 /** 同梱スキルを既定内容へ戻す（ユーザーが編集したファイルも上書きする） */
 async function reseedHomeSkills() {
@@ -582,7 +587,7 @@ function getSoundLabel(sound: string | null | undefined): string {
         class="text-input home-agent-prompt"
         rows="6"
         :value="settings.homeAgentPrompt ?? ''"
-        :placeholder="DEFAULT_HOME_AGENT_PROMPT"
+        :placeholder="defaultHomeAgentPrompt"
         @change="(e) => {
           const v = (e.target as HTMLTextAreaElement).value.trim();
           settings.homeAgentPrompt = v ? v : undefined;
@@ -1265,7 +1270,7 @@ function getSoundLabel(sound: string | null | undefined): string {
     },
     "homeAgent": {
       "label": "Home management agent",
-      "desc": "Prompt used when launching the agent from the home worktree. Leave empty to use the default. The actual procedures live as skills under .claude/skills/ in the base directory.",
+      "desc": "Injected into every Claude Code session started in the home worktree (via the SessionStart hook, so it survives /clear and restarts). Just run `claude` there and it becomes the worktree management agent. Leave empty to use the default shown below; the actual procedures live as skills under .claude/skills/ in the base directory.",
       "reseedSkills": "Restore bundled skills",
       "reseedSkillsDesc": "Bundled skills (worktree-cleanup / report / assign) are written once and never overwrite your edits. This button restores them to the defaults; skills you added yourself are left untouched.",
       "reseedConfirm": "Overwrite the bundled skill files with their default contents? Your edits to those files will be lost.",
@@ -1384,7 +1389,7 @@ function getSoundLabel(sound: string | null | undefined): string {
     },
     "homeAgent": {
       "label": "ホームの管理エージェント",
-      "desc": "home から管理エージェントを起動するときのプロンプト。空なら既定値を使います。実際の手順は追加先ディレクトリの .claude/skills/ にスキルとして置かれます。",
+      "desc": "home で起動した Claude Code セッションに常時注入されます（SessionStart フック経由。/clear や再起動後も維持）。home で claude を起動するだけでワークツリー管理エージェントになります。空なら下に薄く表示されている既定値が使われます。実際の手順は追加先ディレクトリの .claude/skills/ にスキルとして置かれます。",
       "reseedSkills": "同梱スキルを再展開",
       "reseedSkillsDesc": "同梱スキル (worktree-cleanup / report / assign) は初回のみ書き出され、以降ユーザーの編集を上書きしません。このボタンは既定内容に戻します。自分で追加したスキルには触れません。",
       "reseedConfirm": "同梱スキルのファイルを既定内容で上書きしますか？ これらのファイルへの編集は失われます。",

@@ -1,3 +1,21 @@
+use crate::settings::AppSettings;
+
+/// ホームで起動した Claude Code セッションに SessionStart フック経由で注入する既定プロンプト。
+/// 定型操作の実体は `.claude/skills/` 側にあるので、ここは役割とスキルの在り処、
+/// および削除に承認を要求することだけを伝える短いものにしている。
+pub const DEFAULT_HOME_AGENT_PROMPT: &str = include_str!("../prompts/home-agent.md");
+
+/// ホームに注入するプロンプトを解決する。設定 `homeAgentPrompt` が空なら既定値を使う。
+pub fn resolve_home_agent_prompt(settings: &AppSettings) -> String {
+    settings
+        .home_agent_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_HOME_AGENT_PROMPT)
+        .to_string()
+}
+
 /// ホームワークツリー（ワークツリー追加先ディレクトリ）の `.claude/skills/` に
 /// シードとして書き出すスキルファイルの埋め込みデータ。
 /// 各エントリは (skills/ ディレクトリからの相対パス, ファイル内容) のペア。
@@ -44,4 +62,27 @@ pub fn write_home_skill_files(home_path: &str, overwrite: bool) -> Result<usize,
     }
 
     Ok(written)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_resolve_home_agent_prompt_falls_back_to_default() {
+        let settings = AppSettings::default();
+        assert_eq!(resolve_home_agent_prompt(&settings), DEFAULT_HOME_AGENT_PROMPT);
+    }
+
+    #[test]
+    fn test_resolve_home_agent_prompt_treats_blank_as_unset() {
+        let settings = AppSettings { home_agent_prompt: Some("   \n ".to_string()), ..Default::default() };
+        assert_eq!(resolve_home_agent_prompt(&settings), DEFAULT_HOME_AGENT_PROMPT);
+    }
+
+    #[test]
+    fn test_resolve_home_agent_prompt_uses_custom_value() {
+        let settings = AppSettings { home_agent_prompt: Some("  カスタム指示  ".to_string()), ..Default::default() };
+        assert_eq!(resolve_home_agent_prompt(&settings), "カスタム指示");
+    }
 }

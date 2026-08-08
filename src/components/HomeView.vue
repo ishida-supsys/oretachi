@@ -225,7 +225,6 @@ const emit = defineEmits<{
   cancelAiJudging: [worktreeId: string];
   cancelRemove: [worktreeId: string];
   duplicateWorktree: [worktreeId: string];
-  launchHomeAgent: [];
   toggleDescription: [worktreeId: string];
   addTask: [];
   removeTask: [taskId: string];
@@ -501,7 +500,6 @@ watch(
               @cancel-ai-judging="emit('cancelAiJudging', $event)"
               @cancel-remove="emit('cancelRemove', $event)"
               @duplicate-worktree="emit('duplicateWorktree', $event)"
-              @launch-home-agent="emit('launchHomeAgent')"
               @toggle-description="onCardToggleDescription"
             />
           </div>

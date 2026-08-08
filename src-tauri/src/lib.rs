@@ -364,6 +364,12 @@ async fn setup_home_claude_dir(
     .await
 }
 
+/// ホームに注入する管理エージェントプロンプトの既定値。設定画面のプレースホルダ表示用。
+#[tauri::command]
+fn get_default_home_agent_prompt() -> String {
+    home_skills::DEFAULT_HOME_AGENT_PROMPT.to_string()
+}
+
 #[tauri::command]
 async fn copy_claude_session_data(
     source_worktree_path: String,
@@ -1333,6 +1339,7 @@ pub fn run() {
             copy_gitignore_targets,
             write_claude_plugin_config,
             setup_home_claude_dir,
+            get_default_home_agent_prompt,
             copy_claude_session_data,
             copy_working_changes,
             git_merge_branch,

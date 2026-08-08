@@ -1995,8 +1995,15 @@ async fn session_context_handler(
         .project_dir
         .as_deref()
         .and_then(|d| resolve_worktree_by_dir(&settings, d))
-        .and_then(|w| resolve_workgroup(&settings, w))
-        .and_then(|g| g.system_prompt.clone())
+        .and_then(|w| {
+            if w.is_home {
+                // ホームで起動したセッションは常にワークツリー管理エージェントとして振る舞わせる。
+                // 通常の開発向けであろうグループの systemPrompt は用途が違うので使わない。
+                Some(crate::home_skills::resolve_home_agent_prompt(&settings))
+            } else {
+                resolve_workgroup(&settings, w).and_then(|g| g.system_prompt.clone())
+            }
+        })
         .filter(|s| !s.trim().is_empty());
     if let Some(p) = &prompt {
         log::info!(

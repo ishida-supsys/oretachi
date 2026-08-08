@@ -26,7 +26,6 @@ defineEmits<{
   "open-artifacts": [];
   "cancel-ai-judging": [];
   "click-auto-approval": [];
-  "launch-home-agent": [];
 }>();
 
 function onHeaderDrag(e: MouseEvent) {
@@ -126,15 +125,6 @@ async function closeWindow() {
     </div>
     <div class="flex items-center">
       <button
-        v-if="props.isHome"
-        class="flex items-center gap-1.5 h-7 px-2.5 rounded bg-[#cba6f7] hover:bg-[#b48ce8] text-[#1e1e2e] text-xs font-semibold transition-colors mr-1"
-        :title="t('launchHomeAgent')"
-        @click="$emit('launch-home-agent')"
-      >
-        <span class="pi pi-sparkles text-xs" />
-        {{ t('launchHomeAgent') }}
-      </button>
-      <button
         class="flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors mr-1"
         :title="t('openInIde')"
         @click="$emit('open-in-ide')"
@@ -185,7 +175,6 @@ async function closeWindow() {
     "autoApprovalBadge": "Auto approval",
     "aiJudgingBadge": "AI judging",
     "openInIde": "Open in IDE",
-    "launchHomeAgent": "Agent",
     "openArtifacts": "Artifacts",
     "minimize": "Minimize",
     "maximize": "Maximize",
@@ -196,7 +185,6 @@ async function closeWindow() {
     "autoApprovalBadge": "自動承認",
     "aiJudgingBadge": "AI判定中",
     "openInIde": "IDE で開く",
-    "launchHomeAgent": "管理エージェント",
     "openArtifacts": "アーティファクト",
     "minimize": "最小化",
     "maximize": "最大化",

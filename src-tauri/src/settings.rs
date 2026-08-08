@@ -398,7 +398,8 @@ pub struct AppSettings {
     pub use_oretachi_terminal_for_background: bool,
     #[serde(default = "default_move_to_sub_window_on_mcp_spawn", rename = "moveToSubWindowOnMcpSpawn")]
     pub move_to_sub_window_on_mcp_spawn: bool,
-    /// ホームワークツリーの管理エージェント起動プロンプト。None/空 = フロント側の既定値を使う
+    /// ホームで起動した Claude Code セッションに SessionStart フックで注入するプロンプト。
+    /// None/空 = home_skills::DEFAULT_HOME_AGENT_PROMPT を使う
     #[serde(default, rename = "homeAgentPrompt")]
     pub home_agent_prompt: Option<String>,
     /// 初回起動ウィザード完了フラグ。None = 旧設定ファイル or 未シーディング

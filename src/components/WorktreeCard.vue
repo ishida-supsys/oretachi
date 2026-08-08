@@ -47,7 +47,6 @@ const emit = defineEmits<{
   duplicateWorktree: [worktreeId: string];
   toggleDescription: [worktreeId: string];
   moveToWorkgroup: [payload: { worktreeId: string; groupId: string }];
-  launchHomeAgent: [];
 }>();
 
 // ホームは git ワークツリーではないため、削除・複製・並べ替えを一切出さない
@@ -174,13 +173,6 @@ const terminalList = computed(() =>
         </button>
       </div>
       <div class="card-actions">
-        <button
-          v-if="isHome"
-          class="btn-icon"
-          :title="t('launchHomeAgent')"
-          :disabled="loading"
-          @click="emit('launchHomeAgent')"
-        ><span class="pi pi-sparkles" /></button>
         <button
           class="btn-icon"
           :title="t('openInIde')"
@@ -594,7 +586,6 @@ const terminalList = computed(() =>
     "autoApprovalBadge": "Auto approval",
     "aiJudgingBadge": "AI judging",
     "openInIde": "Open in IDE",
-    "launchHomeAgent": "Launch management agent",
     "openArtifacts": "Open artifacts",
     "addTerminal": "Add terminal",
     "noTerminals": "No terminals",
@@ -616,7 +607,6 @@ const terminalList = computed(() =>
     "autoApprovalBadge": "自動承認",
     "aiJudgingBadge": "AI判定中",
     "openInIde": "IDE で開く",
-    "launchHomeAgent": "管理エージェントを起動",
     "openArtifacts": "アーティファクト",
     "addTerminal": "ターミナルを追加",
     "noTerminals": "ターミナルがありません",
