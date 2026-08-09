@@ -53,6 +53,7 @@ import { useShutdownGuard } from "./composables/useShutdownGuard";
 import type { ArchiveRow } from "./types/archive";
 import { logDebug } from "./utils/log";
 import { cssPxToLogical } from "./utils/uiScale";
+import { isHomeWorktree } from "./utils/homeWorktree";
 import { isPseudoWorktree, makeRepositoryWorktreeId, sortPseudoFirst } from "./utils/repositoryWorktree";
 import { useUiZoom } from "./composables/useUiZoom";
 import { consumeMaxBlockedMs, startEventLoopMonitor } from "./utils/eventLoopMonitor";
@@ -60,6 +61,7 @@ import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from ".
 import { ask } from "@tauri-apps/plugin-dialog";
 import { useUpdater } from "./composables/useUpdater";
 import Toast from "primevue/toast";
+import Popover from "primevue/popover";
 import MacTrafficLights from "./components/MacTrafficLights.vue";
 import { isMac } from "./composables/usePlatform";
 
@@ -335,6 +337,38 @@ const worktreeCardTooltips = computed(() => {
 // サイドバー・メインエリア共通: detachedでないワークツリーのみ（毎レンダリングでのfilter()生成を回避）
 // ホームはタブ列の先頭に固定する
 const attachedWorktrees = computed(() => sortPseudoFirst(worktrees.value.filter(w => !isDetached(w.id))));
+
+// タブバーには通常のワークツリーだけを並べ、ホームとリポジトリは1つのドロップダウンにまとめる
+// （リポジトリが増えるとタブが溢れて肝心のワークツリーが見えなくなるため）
+const homeMenuWorktrees = computed(() => attachedWorktrees.value.filter(isPseudoWorktree));
+const tabBarWorktrees = computed(() => attachedWorktrees.value.filter((w) => !isPseudoWorktree(w)));
+
+/** ドロップダウン内のどれかを開いているならそのエントリ（ボタンのラベル・強調に使う） */
+const activePseudoWorktree = computed(() =>
+  viewMode.value === "terminal"
+    ? homeMenuWorktrees.value.find((w) => w.id === activeWorktreeId.value) ?? null
+    : null,
+);
+
+/** 畳んだエントリの通知はドロップダウンボタンに合算して出す（埋もれさせない） */
+const homeMenuNotificationCount = computed(() =>
+  homeMenuWorktrees.value.reduce((sum, w) => sum + (notificationCounts.value.get(w.id) ?? 0), 0),
+);
+
+/** ボタンのラベル。何も開いていなければホーム（未設定ならメニュー名）にフォールバックする */
+const homeMenuLabel = computed(
+  () =>
+    activePseudoWorktree.value?.name ??
+    homeMenuWorktrees.value.find(isHomeWorktree)?.name ??
+    t("homeMenuTitle"),
+);
+
+const homeMenuRef = ref<InstanceType<typeof Popover> | null>(null);
+
+function onHomeMenuSelect(worktreeId: string) {
+  homeMenuRef.value?.hide();
+  switchToWorktree(worktreeId);
+}
 // 複製ダイアログの「セッション引継ぎ元」候補。ホーム/リポジトリは git ワークツリーではないので出さない
 const sessionSourceWorktrees = computed(() => settings.value.worktrees.filter((w) => !isPseudoWorktree(w)));
 const { showAddTaskDialog, rerunTaskId, rerunPrompt, onAddTaskConfirm, onAddTaskCancel } =
@@ -1814,10 +1848,63 @@ onMounted(async () => {
       <!-- 区切り線 -->
       <div class="w-px h-5 bg-[#313244] shrink-0 mx-1" />
 
+      <!-- ホーム / リポジトリのドロップダウン（タブ列と一緒にスクロールさせず左端に固定する） -->
+      <button
+        v-if="homeMenuWorktrees.length > 0"
+        class="flex items-center gap-1.5 px-3 py-2 text-xs shrink-0 border-r border-[#313244] transition-colors"
+        :class="activePseudoWorktree ? 'text-[#cba6f7]' : 'text-[#6c7086] hover:text-[#cdd6f4]'"
+        :title="t('homeMenuTitle')"
+        @click="homeMenuRef?.toggle($event)"
+      >
+        <span
+          class="shrink-0"
+          :class="activePseudoWorktree?.isRepository ? 'pi pi-folder' : 'pi pi-home'"
+          :style="activePseudoWorktree?.isRepository ? 'font-size: 10px; color: #fab387' : 'font-size: 10px'"
+        />
+        <span>{{ homeMenuLabel }}</span>
+        <span
+          v-if="homeMenuNotificationCount"
+          class="text-[9px] px-1 py-0.5 rounded-full font-bold shrink-0 leading-none"
+          style="background: #f38ba8; color: #1e1e2e; min-width: 14px; text-align: center;"
+        >{{ homeMenuNotificationCount }}</span>
+        <span class="pi pi-chevron-down shrink-0" style="font-size: 8px" />
+      </button>
+
+      <Popover ref="homeMenuRef">
+        <div class="flex flex-col" style="min-width: 200px">
+          <template v-for="(wt, i) in homeMenuWorktrees" :key="wt.id">
+            <div v-if="i === 1" class="h-px my-1" style="background: var(--p-content-border-color)" />
+            <button
+              class="flex items-center gap-2 px-3 py-2 text-xs rounded text-left w-full transition-colors hover:bg-[#313244]"
+              :class="wt.id === activeWorktreeId && viewMode === 'terminal' ? 'text-[#cba6f7]' : ''"
+              :style="wt.id === activeWorktreeId && viewMode === 'terminal' ? '' : 'color: var(--p-text-color)'"
+              @click="onHomeMenuSelect(wt.id)"
+            >
+              <span
+                class="shrink-0"
+                :class="wt.isRepository ? 'pi pi-folder' : 'pi pi-home'"
+                :style="wt.isRepository ? 'font-size: 11px; color: #fab387' : 'font-size: 11px'"
+              />
+              <span class="flex-1 truncate">{{ wt.name }}</span>
+              <span
+                v-if="hotkeyChars.get(wt.id)"
+                class="text-[9px] px-1 py-0.5 rounded font-mono font-medium shrink-0"
+                style="background: rgba(203,166,247,0.15); color: #cba6f7; border: 1px solid rgba(203,166,247,0.3)"
+              >{{ hotkeyChars.get(wt.id)!.toUpperCase() }}</span>
+              <span
+                v-if="notificationCounts.get(wt.id)"
+                class="text-[9px] px-1 py-0.5 rounded-full font-bold shrink-0 leading-none"
+                style="background: #f38ba8; color: #1e1e2e; min-width: 14px; text-align: center;"
+              >{{ notificationCounts.get(wt.id) }}</span>
+            </button>
+          </template>
+        </div>
+      </Popover>
+
       <!-- ワークツリー単位のタブ -->
       <div class="flex overflow-x-auto min-w-0 flex-1" data-window-drag-exclude>
         <button
-          v-for="wt in attachedWorktrees"
+          v-for="wt in tabBarWorktrees"
           :key="wt.id"
           class="flex items-center gap-1.5 px-3 py-2 text-xs shrink-0 border-r border-[#313244] transition-colors"
           :class="
@@ -1827,11 +1914,6 @@ onMounted(async () => {
           "
           @click="switchToWorktree(wt.id)"
         >
-          <span
-            v-if="wt.isRepository"
-            class="pi pi-folder shrink-0"
-            style="font-size: 10px; color: #fab387"
-          />
           <span>{{ wt.name }}</span>
           <span
             v-if="hotkeyChars.get(wt.id)"
@@ -2139,7 +2221,8 @@ onMounted(async () => {
     "shuttingDown": "Shutting down...",
     "minimize": "Minimize",
     "maximize": "Maximize",
-    "close": "Close"
+    "close": "Close",
+    "homeMenuTitle": "Home & repositories"
   },
   "ja": {
     "taskAddSummary": "タスク追加",
@@ -2171,7 +2254,8 @@ onMounted(async () => {
     "shuttingDown": "終了しています...",
     "minimize": "最小化",
     "maximize": "最大化",
-    "close": "閉じる"
+    "close": "閉じる",
+    "homeMenuTitle": "ホーム・リポジトリ"
   }
 }
 </i18n>
