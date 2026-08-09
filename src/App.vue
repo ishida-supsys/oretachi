@@ -21,7 +21,7 @@ import FirstRunWizard from "./components/wizard/FirstRunWizard.vue";
 import { message } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { useIdeSelect } from "./composables/useIdeSelect";
-import { useSettings } from "./composables/useSettings";
+import { useSettings, syncRepositoryWorktrees } from "./composables/useSettings";
 import { useWorktrees } from "./composables/useWorktrees";
 import { useI18n } from "vue-i18n";
 import { useSubWindows, requestSubWindowLayout } from "./composables/useSubWindows";
@@ -53,7 +53,7 @@ import { useShutdownGuard } from "./composables/useShutdownGuard";
 import type { ArchiveRow } from "./types/archive";
 import { logDebug } from "./utils/log";
 import { cssPxToLogical } from "./utils/uiScale";
-import { isHomeWorktree, sortHomeFirst } from "./utils/homeWorktree";
+import { isPseudoWorktree, makeRepositoryWorktreeId, sortPseudoFirst } from "./utils/repositoryWorktree";
 import { useUiZoom } from "./composables/useUiZoom";
 import { consumeMaxBlockedMs, startEventLoopMonitor } from "./utils/eventLoopMonitor";
 import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
@@ -334,7 +334,9 @@ const worktreeCardTooltips = computed(() => {
 
 // サイドバー・メインエリア共通: detachedでないワークツリーのみ（毎レンダリングでのfilter()生成を回避）
 // ホームはタブ列の先頭に固定する
-const attachedWorktrees = computed(() => sortHomeFirst(worktrees.value.filter(w => !isDetached(w.id))));
+const attachedWorktrees = computed(() => sortPseudoFirst(worktrees.value.filter(w => !isDetached(w.id))));
+// 複製ダイアログの「セッション引継ぎ元」候補。ホーム/リポジトリは git ワークツリーではないので出さない
+const sessionSourceWorktrees = computed(() => settings.value.worktrees.filter((w) => !isPseudoWorktree(w)));
 const { showAddTaskDialog, rerunTaskId, rerunPrompt, onAddTaskConfirm, onAddTaskCancel } =
   useAddTaskDialog(async (code) => {
     if (code.type === "add_worktree") {
@@ -398,11 +400,11 @@ const removeWorkgroupName = computed(() => {
   const g = settings.value.workgroups?.find((w) => w.id === removeWorkgroupId.value);
   return g ? workgroupDisplayName(g) : "";
 });
-// ホームは削除できないためグループ削除の対象メンバーから除外する
+// ホーム/リポジトリは削除できないためグループ削除の対象メンバーから除外する
 // (含めると kill/アーカイブだけ実行されてワークツリーは残り、グループ削除も remaining 判定で失敗する)
 const removeWorkgroupMembers = computed(() =>
   removeWorkgroupId.value
-    ? worktrees.value.filter((w) => !isHomeWorktree(w) && resolvedGroupId(w.workgroupId) === removeWorkgroupId.value)
+    ? worktrees.value.filter((w) => !isPseudoWorktree(w) && resolvedGroupId(w.workgroupId) === removeWorkgroupId.value)
     : [],
 );
 let removingWorkgroup = false;
@@ -417,9 +419,9 @@ async function onRemoveWorkgroupConfirm(archive: boolean) {
   const groupId = removeWorkgroupId.value;
   if (!groupId || removingWorkgroup) return;
   removingWorkgroup = true;
-  // 削除対象のスナップショット（削除中に worktrees が変化するため固定）。ホームは削除対象外
+  // 削除対象のスナップショット（削除中に worktrees が変化するため固定）。ホーム/リポジトリは削除対象外
   const members = worktrees.value
-    .filter((w) => !isHomeWorktree(w) && resolvedGroupId(w.workgroupId) === groupId)
+    .filter((w) => !isPseudoWorktree(w) && resolvedGroupId(w.workgroupId) === groupId)
     .map((w) => w.id);
   const opts = { mergeTo: "", deleteBranch: true, forceBranch: true };
   try {
@@ -434,9 +436,9 @@ async function onRemoveWorkgroupConfirm(archive: boolean) {
   } finally {
     removingWorkgroup = false;
     // 所属ワークツリーが残っていなければグループを削除。
-    // ホームは削除対象外なので残存判定にも数えない（数えるとグループが永久に削除できなくなる）。
-    // グループレコードが消えたホームは resolvedGroupId のフォールバックで先頭グループへ移る。
-    const remaining = worktrees.value.some((w) => !isHomeWorktree(w) && resolvedGroupId(w.workgroupId) === groupId);
+    // ホーム/リポジトリは削除対象外なので残存判定にも数えない（数えるとグループが永久に削除できなくなる）。
+    // グループレコードが消えた擬似エントリは resolvedGroupId のフォールバックで先頭グループへ移る。
+    const remaining = worktrees.value.some((w) => !isPseudoWorktree(w) && resolvedGroupId(w.workgroupId) === groupId);
     if (!remaining) deleteWorkgroupRecord(groupId);
     removeWorkgroupId.value = null;
   }
@@ -569,7 +571,17 @@ function goSettings() {
 }
 
 function onTabBarDrag(e: MouseEvent) {
-  if ((e.target as HTMLElement).closest("button")) return;
+  const target = e.target as HTMLElement;
+  if (target.closest("button")) return;
+  // タブ列の横スクロールバー上での mousedown までウィンドウドラッグにすると、
+  // つまみを掴んだ瞬間にウィンドウが動いてスクロールできなくなる。
+  // スクロールバーは clientHeight / clientWidth の外側にあるので座標で判定して除外する。
+  const scroller = target.closest<HTMLElement>("[data-window-drag-exclude]");
+  if (scroller) {
+    const rect = scroller.getBoundingClientRect();
+    if (e.clientY - rect.top >= scroller.clientHeight) return;
+    if (e.clientX - rect.left >= scroller.clientWidth) return;
+  }
   getCurrentWindow().startDragging();
 }
 
@@ -724,6 +736,58 @@ async function onOpenArtifacts(worktreeId: string) {
 async function onShowAddWorktreeDialog() {
   duplicateSourceData.value = null;
   showAddDialog.value = true;
+}
+
+/**
+ * リポジトリ登録を解除する。
+ * 擬似ワークツリーのターミナル・フレーム・サブウィンドウ・永続化ファイルまで面倒を見る必要があるため、
+ * RepositoryPanel ではなく（それらの Map を持つ）App.vue 側で処理する。
+ */
+async function onRemoveRepository(repositoryId: string) {
+  // ボタンの disabled だけに頼らず、ここでもワークツリー有無をガードする
+  const hasWorktrees = settings.value.worktrees.some(
+    (w) => !isPseudoWorktree(w) && w.repositoryId === repositoryId,
+  );
+  if (hasWorktrees) return;
+
+  const pseudoId = makeRepositoryWorktreeId(repositoryId);
+
+  // サブウィンドウに出 している場合はメインへ戻してから片付ける
+  if (isDetached(pseudoId)) {
+    await moveToMainWindow(pseudoId);
+    subWindowEvents.subWindowFocusMap.delete(pseudoId);
+  }
+  await closeArtifactWindow(pseudoId);
+
+  // ターミナルプロセスを停止し、terminalId 単位の状態をすべて掃除する
+  const worktree = worktrees.value.find((w) => w.id === pseudoId);
+  const bundle = worktreeFrameBundles.get(pseudoId);
+  for (const terminal of worktree ? [...worktree.terminals] : []) {
+    const term = bundle?.terminalRefs.get(terminal.id) ?? getTerminalRef(terminal.id);
+    if (term?.isRunning) {
+      try { await term.kill(); } catch { /* 既に終了している場合は無視 */ }
+    }
+    terminalWorktreeMap.delete(terminal.id);
+    terminalExitCodes.delete(terminal.id);
+    terminalAgentStatus.delete(terminal.id);
+    terminalAiSessions.delete(terminal.id);
+    terminalWebSessions.delete(terminal.id);
+    thumbnailUrls.delete(terminal.id);
+    pendingByTerminal.delete(terminal.id);
+    readyTerminals.delete(terminal.id);
+  }
+  worktree?.terminals.splice(0);
+  worktreeFrameBundles.delete(pseudoId);
+  clearNotification(pseudoId);
+  artifactCounts.delete(pseudoId);
+  descriptionOpenMap.delete(pseudoId);
+  if (activeWorktreeId.value === pseudoId) goHome();
+
+  // settings から外し、擬似ワークツリーの prune とセッションファイル掃除を syncRepositoryWorktrees に任せる
+  settings.value.repositories = settings.value.repositories.filter((r) => r.id !== repositoryId);
+  syncRepositoryWorktrees();
+  syncWorktreesFromSettings();
+  await flushSave();
 }
 
 async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string, sessionSourcePath?: string, copyWorkingChangesFrom?: string) {
@@ -1751,7 +1815,7 @@ onMounted(async () => {
       <div class="w-px h-5 bg-[#313244] shrink-0 mx-1" />
 
       <!-- ワークツリー単位のタブ -->
-      <div class="flex overflow-x-auto min-w-0 flex-1">
+      <div class="flex overflow-x-auto min-w-0 flex-1" data-window-drag-exclude>
         <button
           v-for="wt in attachedWorktrees"
           :key="wt.id"
@@ -1763,6 +1827,11 @@ onMounted(async () => {
           "
           @click="switchToWorktree(wt.id)"
         >
+          <span
+            v-if="wt.isRepository"
+            class="pi pi-folder shrink-0"
+            style="font-size: 10px; color: #fab387"
+          />
           <span>{{ wt.name }}</span>
           <span
             v-if="hotkeyChars.get(wt.id)"
@@ -1848,6 +1917,7 @@ onMounted(async () => {
         @remove-task="removeTask"
         @rerun-task="rerunTaskId = $event"
         @remove-workgroup="onRemoveWorkgroup"
+        @remove-repository="onRemoveRepository"
       />
 
       <!-- 設定ビュー -->
@@ -1873,6 +1943,7 @@ onMounted(async () => {
             :is-window-focused="isWindowFocused"
             :task-tooltip="worktreeTaskTooltips.get(wt.id)"
             :is-home="wt.isHome === true"
+            :is-repository="wt.isRepository === true"
             :home-path="wt.path"
             @open-in-ide="onOpenInIde(wt.id)"
             @open-artifacts="onOpenArtifacts(wt.id)"
@@ -1945,7 +2016,7 @@ onMounted(async () => {
       v-if="showAddDialog"
       :repositories="settings.repositories"
       :worktree-base-dir="settings.worktreeBaseDir"
-      :active-worktrees="settings.worktrees"
+      :active-worktrees="sessionSourceWorktrees"
       :archived-worktrees="duplicateSourceData?.archivedWorktrees ?? []"
       :submitting="false"
       :duplicate-source="duplicateSourceData"

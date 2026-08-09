@@ -92,11 +92,11 @@ request and repositories, and perform appropriate worktree operations.
 const JSON_SCHEMA: &str = r#"{"type":"object","properties":{"code":{"type":"array","items":{"oneOf":[{"type":"object","properties":{"type":{"const":"add_worktree"},"repository":{"type":"string"},"branch":{"type":"string"},"source_branch":{"type":"string"}},"required":["type","repository","branch"]},{"type":"object","properties":{"type":{"const":"agent_worktree"},"repository":{"type":"string"},"branch":{"type":"string"},"prompt":{"type":"string"}},"required":["type","repository","branch","prompt"]}]}}},"required":["code"]}"#;
 
 fn build_worktree_list_text(settings: &crate::settings::AppSettings) -> String {
-    // ホームは git ワークツリーではなくタスクの割り当て先にもならないので候補から外す
+    // ホーム / リポジトリは git ワークツリーではなくタスクの割り当て先にもならないので候補から外す
     let lines: Vec<String> = settings
         .worktrees
         .iter()
-        .filter(|wt| !wt.is_home)
+        .filter(|wt| !wt.is_home && !wt.is_repository)
         .map(|wt| {
             format!(
                 "- {} (repository: {}, branch: {})",
@@ -386,6 +386,7 @@ mod tests {
             description_open: None,
             workgroup_id: None,
             is_home: false,
+            is_repository: false,
         }
     }
 

@@ -18,7 +18,8 @@ import { useTaskPersistence } from "../composables/useTaskPersistence";
 import { useTaskSearch } from "../composables/useTaskSearch";
 import { useInfiniteScroll } from "../composables/useInfiniteScroll";
 import { useArchivePersistence, deleteArchive } from "../composables/useArchivePersistence";
-import { sortHomeFirst } from "../utils/homeWorktree";
+import { isPseudoWorktree } from "../utils/repositoryWorktree";
+import { computeNaturalCardWidth } from "../utils/cardWidth";
 import { computed, nextTick, reactive, ref, watch } from "vue";
 import autoAnimate from "@formkit/auto-animate";
 import type { AnimationController } from "@formkit/auto-animate";
@@ -230,9 +231,10 @@ const emit = defineEmits<{
   removeTask: [taskId: string];
   rerunTask: [taskId: string];
   removeWorkgroup: [groupId: string];
+  removeRepository: [repositoryId: string];
 }>();
 
-const { panelMode } = useHomePanel();
+const { panelMode, listMode } = useHomePanel();
 
 // ヘッダーの「+ 追加」ボタンからリポジトリ追加を呼ぶための参照
 const repositoryPanelRef = ref<InstanceType<typeof RepositoryPanel> | null>(null);
@@ -290,9 +292,11 @@ watch(panelMode, async (mode, oldMode) => {
 
 // アクティブなワークグループでワークツリーをフィルタ
 const { activeWorkgroupId, resolvedGroupId, groups: workgroups, moveWorktreeToWorkgroup } = useWorkgroups();
-// ホームはカード一覧の先頭に固定する
+// ホーム/リポジトリの擬似ワークツリーはリポジトリ一覧側に出すのでここからは外す
 const worktreesRef = computed(() =>
-  sortHomeFirst(props.worktrees.filter((w) => resolvedGroupId(w.workgroupId) === activeWorkgroupId.value)),
+  props.worktrees.filter(
+    (w) => !isPseudoWorktree(w) && resolvedGroupId(w.workgroupId) === activeWorkgroupId.value,
+  ),
 );
 const tasksRef = sortedTasks;
 
@@ -315,23 +319,11 @@ function onMoveToWorkgroup(payload: { worktreeId: string; groupId: string }) {
   moveWorktreeToWorkgroup(payload.worktreeId, payload.groupId);
 }
 
-// 各ワークツリーカードの自然幅（ターミナルサムネイル幅から計算）をもとに列幅を決定する
-const naturalCardWidth = computed(() => {
-  const THUMBNAIL_W = 107;  // TerminalThumbnail の固定幅
-  const THUMBNAIL_GAP = 8;  // .terminals-row の gap
-  const CARD_PADDING = 24;  // .worktree-card の padding 12px × 2
-  const MIN_WIDTH = 260;    // ヘッダーボタンが収まる最小幅
-  const MAX_TERMINALS_PER_ROW = 2;  // 1行に表示するターミナルの最大数
-
-  let max = MIN_WIDTH;
-  for (const wt of props.worktrees) {
-    const n = Math.min(wt.terminals.length, MAX_TERMINALS_PER_ROW);
-    if (n <= 0) continue;
-    const w = CARD_PADDING + n * THUMBNAIL_W + (n - 1) * THUMBNAIL_GAP;
-    if (w > max) max = w;
-  }
-  return max;
-});
+// 各ワークツリーカードの自然幅（ターミナルサムネイル幅から計算）をもとに列幅を決定する。
+// 一覧に出さない擬似ワークツリーのターミナル数で列幅が決まらないよう worktreesRef を使う。
+const naturalCardWidth = computed(() =>
+  computeNaturalCardWidth(worktreesRef.value.map((wt) => wt.terminals.length)),
+);
 
 const TASK_CARD_WIDTH = ref(260);
 
@@ -376,7 +368,6 @@ watch(
         <option value="worktree">{{ t('worktreeTitle') }}</option>
         <option value="task">{{ t('taskTitle') }}</option>
         <option value="archive">{{ t('archiveTitle') }}</option>
-        <option value="repository">{{ t('repositoryTitle') }}</option>
       </select>
       <WorkgroupBar
         v-if="panelMode === 'worktree'"
@@ -384,7 +375,16 @@ watch(
         @remove-workgroup="emit('removeWorkgroup', $event)"
       />
       <div class="header-actions">
-        <template v-if="panelMode === 'worktree'">
+        <template v-if="panelMode === 'worktree' && listMode === 'repository'">
+          <button
+            class="btn-icon-header"
+            :title="t('addRepositoryButton')"
+            @click="repositoryPanelRef?.addRepository()"
+          >
+            <i class="pi pi-plus"></i>
+          </button>
+        </template>
+        <template v-else-if="panelMode === 'worktree'">
           <button
             class="btn-icon-header"
             :class="{ 'btn-active': showAllDescriptions }"
@@ -418,15 +418,6 @@ watch(
             <i class="pi pi-plus"></i>
           </button>
         </template>
-        <template v-else-if="panelMode === 'repository'">
-          <button
-            class="btn-icon-header"
-            :title="t('addRepositoryButton')"
-            @click="repositoryPanelRef?.addRepository()"
-          >
-            <i class="pi pi-plus"></i>
-          </button>
-        </template>
         <template v-else>
           <div class="task-search">
             <i class="pi pi-search search-icon" />
@@ -446,8 +437,8 @@ watch(
     </div>
 
     <!-- ワークツリーパネル -->
-    <template v-if="panelMode === 'worktree'">
-      <div v-if="worktrees.length === 0" class="empty-state">
+    <template v-if="panelMode === 'worktree' && listMode === 'worktree'">
+      <div v-if="worktreesRef.length === 0" class="empty-state">
         {{ t('worktreeEmpty') }}
       </div>
 
@@ -507,6 +498,30 @@ watch(
       </div>
     </template>
 
+    <!-- リポジトリパネル（ワークツリーパネル内のもう一方の一覧） -->
+    <template v-else-if="panelMode === 'worktree'">
+      <RepositoryPanel
+        ref="repositoryPanelRef"
+        :worktrees="worktrees"
+        :thumbnail-urls="thumbnailUrls"
+        :artifact-counts="artifactCounts"
+        :notifications="notifications"
+        :hotkey-chars="hotkeyChars"
+        :detached-worktrees="detachedWorktrees"
+        :auto-approvals="autoApprovals"
+        @select-terminal="emit('selectTerminal', $event)"
+        @add-terminal="emit('addTerminal', $event)"
+        @open-in-ide="emit('openInIde', $event)"
+        @open-artifacts="emit('openArtifacts', $event)"
+        @move-to-sub-window="emit('moveToSubWindow', $event)"
+        @move-to-main-window="emit('moveToMainWindow', $event)"
+        @focus-sub-window="emit('focusSubWindow', $event)"
+        @set-hotkey-char="emit('setHotkeyChar', $event)"
+        @toggle-auto-approval="emit('toggleAutoApproval', $event)"
+        @remove-repository="emit('removeRepository', $event)"
+      />
+    </template>
+
     <!-- タスクパネル -->
     <template v-else-if="panelMode === 'task'">
       <div v-if="sortedTasks.length === 0 && !isLoading" class="empty-state">
@@ -529,11 +544,6 @@ watch(
       <div ref="scrollSentinelRef" class="scroll-sentinel">
         <i v-if="isLoading" class="pi pi-spinner pi-spin loading-spinner" />
       </div>
-    </template>
-
-    <!-- リポジトリパネル -->
-    <template v-else-if="panelMode === 'repository'">
-      <RepositoryPanel ref="repositoryPanelRef" />
     </template>
 
     <!-- アーカイブパネル -->

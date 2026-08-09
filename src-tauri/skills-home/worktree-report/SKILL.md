@@ -10,7 +10,7 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp_
 
 ## 手順
 
-1. `oretachi_get_worktree_status` で全ワークツリーを取得する（`isHome` は除外）。
+1. `oretachi_get_worktree_status` で全ワークツリーを取得する（`isHome` / `isRepository` は除外）。
    `query` を渡せば name / branchName / description の部分一致で絞り込める。
 2. `oretachi_inspect_worktree` で各ワークツリーの git 状態を取得する。
 3. `oretachi_list_terminals` でターミナルの稼働状況（running / exited、AI エージェントの有無）を取得する。

@@ -4,8 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { open, ask, message } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { useSettings, migrateHomeWorktree, setupHomeClaudeDir } from "../composables/useSettings";
-import { useWorktrees } from "../composables/useWorktrees";
+import { useSettings } from "../composables/useSettings";
 import { useUpdater } from "../composables/useUpdater";
 import ColorPicker from "primevue/colorpicker";
 import Password from "primevue/password";
@@ -23,7 +22,6 @@ const { t } = useI18n();
 const toast = useToast();
 
 const { settings, scheduleSave, flushSave } = useSettings();
-const { syncWorktreesFromSettings } = useWorktrees();
 
 const { isChecking, checkForUpdate, downloadAndInstall } = useUpdater();
 
@@ -158,45 +156,8 @@ async function copyApiKey() {
 
 onMounted(fetchMcpStatus);
 
-async function selectWorktreeBaseDir() {
-  const selected = await open({ directory: true, multiple: false });
-  if (typeof selected === "string") {
-    settings.value.worktreeBaseDir = selected;
-    // ホームワークツリーを生成・追従させ、その .claude/ (プラグイン設定 + 同梱スキル) を用意する。
-    // 既存のスキルファイルは上書きしない。
-    // scheduleSave が emit する settings-changed は自ウィンドウでは無視されるため、
-    // ランタイム配列は自分で同期する（片方だけ変異させると再起動までカードとタブに出ない）。
-    if (migrateHomeWorktree(settings.value)) {
-      syncWorktreesFromSettings();
-    }
-    scheduleSave();
-    await setupHomeClaudeDir(selected);
-  }
-}
-
-// ─── ホームの管理エージェント ──────────────────────────────────────────────────
-
-const reseedResult = ref("");
-
-// プロンプト未設定時に実際に注入される既定値（Rust 側の定義を唯一の出所にする）
-const defaultHomeAgentPrompt = ref("");
-onMounted(async () => {
-  defaultHomeAgentPrompt.value = await invoke<string>("get_default_home_agent_prompt").catch(() => "");
-});
-
-/** 同梱スキルを既定内容へ戻す（ユーザーが編集したファイルも上書きする） */
-async function reseedHomeSkills() {
-  const baseDir = settings.value.worktreeBaseDir;
-  if (!baseDir) return;
-  const ok = await ask(t("homeAgent.reseedConfirm"), { kind: "warning" });
-  if (!ok) return;
-  try {
-    const count = await invoke<number>("setup_home_claude_dir", { homePath: baseDir, overwrite: true });
-    reseedResult.value = t("homeAgent.reseedDone", { count });
-  } catch (e) {
-    await message(t("homeAgent.reseedFailed", { error: e }), { kind: "error" });
-  }
-}
+// ワークツリー追加先ディレクトリとホームの管理エージェント設定は、
+// ワークグループバーの「リポジトリ」チップから開く HomeSettingsDialog.vue へ移設した。
 
 // ─── 外観 ─────────────────────────────────────────────────────────────────────
 
@@ -564,42 +525,8 @@ function getSoundLabel(sound: string | null | undefined): string {
       </template>
     </div>
 
-    <!-- ワークツリー追加先ディレクトリ -->
-    <div class="field-group">
-      <label class="field-label">{{ t('worktreeBaseDir.label') }}</label>
-      <div class="row-input">
-        <input
-          class="text-input"
-          :value="settings.worktreeBaseDir"
-          readonly
-          :placeholder="t('common.notConfigured')"
-        />
-        <button class="btn-secondary" @click="selectWorktreeBaseDir">{{ t('worktreeBaseDir.select') }}</button>
-      </div>
-      <p class="field-description">{{ t('worktreeBaseDir.homeDesc') }}</p>
-    </div>
-
-    <!-- ホームの管理エージェント -->
-    <div v-if="settings.worktreeBaseDir" class="field-group">
-      <label class="field-label">{{ t('homeAgent.label') }}</label>
-      <p class="field-description">{{ t('homeAgent.desc') }}</p>
-      <textarea
-        class="text-input home-agent-prompt"
-        rows="6"
-        :value="settings.homeAgentPrompt ?? ''"
-        :placeholder="defaultHomeAgentPrompt"
-        @change="(e) => {
-          const v = (e.target as HTMLTextAreaElement).value.trim();
-          settings.homeAgentPrompt = v ? v : undefined;
-          scheduleSave();
-        }"
-      />
-      <div class="row-input mt-8">
-        <button class="btn-secondary" @click="reseedHomeSkills">{{ t('homeAgent.reseedSkills') }}</button>
-        <span v-if="reseedResult" class="field-description">{{ reseedResult }}</span>
-      </div>
-      <p class="field-description">{{ t('homeAgent.reseedSkillsDesc') }}</p>
-    </div>
+    <!-- ワークツリー追加先ディレクトリ / ホームの管理エージェントは
+         ワークグループバーの「リポジトリ」チップ → HomeSettingsDialog.vue へ移設 -->
 
     <!-- ワークツリー追加時のデフォルト動作 -->
     <div class="field-group">
@@ -838,14 +765,6 @@ function getSoundLabel(sound: string | null | undefined): string {
   font-size: 13px;
   color: #cdd6f4;
   outline: none;
-}
-
-.home-agent-prompt {
-  width: 100%;
-  box-sizing: border-box;
-  resize: vertical;
-  font-family: monospace;
-  line-height: 1.6;
 }
 
 .btn-primary {
@@ -1263,20 +1182,6 @@ function getSoundLabel(sound: string | null | undefined): string {
       "moveToSubWindowOnMcpSpawn": "Move worktree to sub-window when MCP adds a terminal",
       "moveToSubWindowOnMcpSpawnDesc": "If the worktree is not yet in a sub-window, automatically move it after MCP spawns a terminal. Stabilizes terminal sizing for long-running background commands. All other terminals in the worktree will move together."
     },
-    "worktreeBaseDir": {
-      "label": "Worktree base directory",
-      "select": "Select",
-      "homeDesc": "This directory is also the working directory of the \"home\" worktree, where the management agent runs. No home worktree is created while this is unset."
-    },
-    "homeAgent": {
-      "label": "Home management agent",
-      "desc": "Injected into every Claude Code session started in the home worktree (via the SessionStart hook, so it survives /clear and restarts). Just run `claude` there and it becomes the worktree management agent. Leave empty to use the default shown below; the actual procedures live as skills under .claude/skills/ in the base directory.",
-      "reseedSkills": "Restore bundled skills",
-      "reseedSkillsDesc": "Bundled skills (worktree-cleanup / report / assign) are written once and never overwrite your edits. This button restores them to the defaults; skills you added yourself are left untouched.",
-      "reseedConfirm": "Overwrite the bundled skill files with their default contents? Your edits to those files will be lost.",
-      "reseedDone": "Restored {count} skill file(s).",
-      "reseedFailed": "Failed to restore skills: {error}"
-    },
     "worktreeDefaults": {
       "label": "Default worktree behavior",
       "openInSubWindow": "Open in sub window",
@@ -1381,20 +1286,6 @@ function getSoundLabel(sound: string | null | undefined): string {
       "useOretachiTerminalForBackgroundDesc": "OFF の場合、AI Agent は pnpm dev / vite / nodemon 等を oretachi のターミナルタブではなく Claude Code の bash run_in_background で起動します。",
       "moveToSubWindowOnMcpSpawn": "MCP からターミナルが追加されたらサブウィンドウへ自動移行する",
       "moveToSubWindowOnMcpSpawnDesc": "ワークツリーがメインウィンドウにある場合、MCP のターミナル追加直後に自動でサブウィンドウへ移行します。バックグラウンドコマンドの表示サイズを安定させるための設定です。ワークツリー内の他のターミナルも一緒に移動します。"
-    },
-    "worktreeBaseDir": {
-      "label": "ワークツリーの追加先ディレクトリ",
-      "select": "選択",
-      "homeDesc": "このディレクトリは、管理エージェントが動く「home」ワークツリーの作業ディレクトリにもなります。未設定のあいだ home は作られません。"
-    },
-    "homeAgent": {
-      "label": "ホームの管理エージェント",
-      "desc": "home で起動した Claude Code セッションに常時注入されます（SessionStart フック経由。/clear や再起動後も維持）。home で claude を起動するだけでワークツリー管理エージェントになります。空なら下に薄く表示されている既定値が使われます。実際の手順は追加先ディレクトリの .claude/skills/ にスキルとして置かれます。",
-      "reseedSkills": "同梱スキルを再展開",
-      "reseedSkillsDesc": "同梱スキル (worktree-cleanup / report / assign) は初回のみ書き出され、以降ユーザーの編集を上書きしません。このボタンは既定内容に戻します。自分で追加したスキルには触れません。",
-      "reseedConfirm": "同梱スキルのファイルを既定内容で上書きしますか？ これらのファイルへの編集は失われます。",
-      "reseedDone": "{count} 件のスキルファイルを再展開しました。",
-      "reseedFailed": "スキルの再展開に失敗しました: {error}"
     },
     "worktreeDefaults": {
       "label": "ワークツリー追加時のデフォルト動作",

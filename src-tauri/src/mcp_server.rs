@@ -1066,7 +1066,7 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "登録済みワークツリーのステータス一覧を取得する。各エントリはルートパス(path)・1行説明(description)・ブランチ名・isHome を含む。query で name / branchName / description の部分一致検索ができる")]
+    #[tool(description = "登録済みワークツリーのステータス一覧を取得する。各エントリはルートパス(path)・1行説明(description)・ブランチ名・isHome・isRepository を含む。isHome / isRepository が true のものは git ワークツリーではない擬似エントリなので、作業割り当てや削除の候補からは外すこと。query で name / branchName / description の部分一致検索ができる")]
     fn oretachi_get_worktree_status(
         &self,
         Parameters(GetWorktreeStatusParams { query }): Parameters<GetWorktreeStatusParams>,
@@ -1106,6 +1106,7 @@ impl NotifyService {
                     "repositoryName": wt.repository_name,
                     "branchName": wt.branch_name,
                     "isHome": wt.is_home,
+                    "isRepository": wt.is_repository,
                     "isDetached": detached.contains(wt.id.as_str()),
                     "autoApproval": wt.auto_approval,
                 })
@@ -1399,11 +1400,12 @@ impl NotifyService {
                 }
             };
 
-            // ホームは git ワークツリーではなく、path がワークツリー追加先ディレクトリそのもの。
-            // 削除するとワークツリー群の親ごと壊すため、エージェントからの要求は必ず拒否する。
-            if wt.is_home {
+            // ホーム / リポジトリは git ワークツリーではなく、path がワークツリー追加先ディレクトリ
+            // またはリポジトリのルートそのもの。削除すると親ごと壊すため、要求は必ず拒否する。
+            if wt.is_home || wt.is_repository {
+                let kind = if wt.is_home { "home worktree" } else { "repository" };
                 return Err(McpError::invalid_params(
-                    format!("worktree '{}' is the home worktree and cannot be closed", wt.name),
+                    format!("worktree '{}' is the {} and cannot be closed", wt.name, kind),
                     None,
                 ));
             }
@@ -2000,6 +2002,11 @@ async fn session_context_handler(
                 // ホームで起動したセッションは常にワークツリー管理エージェントとして振る舞わせる。
                 // 通常の開発向けであろうグループの systemPrompt は用途が違うので使わない。
                 Some(crate::home_skills::resolve_home_agent_prompt(&settings))
+            } else if w.is_repository {
+                // リポジトリ root は擬似ワークツリー導入前は resolve_worktree_by_dir が解決できず
+                // None が返っていた場所。開発ワークツリー向けのグループ systemPrompt は用途が違うので
+                // 注入しない（将来 repositoryAgentPrompt を足すならここを分岐させる）。
+                None
             } else {
                 resolve_workgroup(&settings, w).and_then(|g| g.system_prompt.clone())
             }

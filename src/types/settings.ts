@@ -35,6 +35,13 @@ export interface WorktreeEntry {
    * 一覧では常に先頭に固定される（utils/sortHomeFirst）。
    */
   isHome?: boolean;
+  /**
+   * リポジトリ擬似ワークツリー。path = Repository.path を作業ディレクトリとする擬似ワークツリーで、
+   * git ワークツリーではないため削除・複製・マージ・ブランチ操作を一切通さない。
+   * settings.repositories を正として migrateRepositoryWorktrees が生成・追従・prune する
+   * （utils/repositoryWorktree）。
+   */
+  isRepository?: boolean;
 }
 
 // Claude Code の起動モード（taskAddAgent が claudeCode のときのみ意味を持つ）

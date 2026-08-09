@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { open, message } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -8,8 +8,16 @@ import { useSettings } from "../composables/useSettings";
 import { useRepositoryActions } from "../composables/useRepositoryActions";
 import { usePostAddSettings } from "../composables/usePostAddSettings";
 import { useArtifactWindow } from "../composables/useArtifactWindow";
+import { useMasonryLayout } from "../composables/useMasonryLayout";
+import { computeNaturalCardWidth } from "../utils/cardWidth";
+import { isHomeWorktree } from "../utils/homeWorktree";
+import { isRepositoryWorktree, makeRepositoryWorktreeId } from "../utils/repositoryWorktree";
 import type { RepoArtifactChangedEvent } from "../types/artifact";
+import type { Repository } from "../types/settings";
+import type { Worktree } from "../types/worktree";
 import PostAddSettingsDialog from "./PostAddSettingsDialog.vue";
+import RepositoryCard from "./RepositoryCard.vue";
+import WorktreeCard from "./WorktreeCard.vue";
 
 const { t } = useI18n();
 const { settings, scheduleSave } = useSettings();
@@ -29,16 +37,40 @@ const {
 const { addRepository: addRepositoryAction } = useRepositoryActions();
 const { openRepositoryArtifactViewer } = useArtifactWindow();
 
+const props = defineProps<{
+  worktrees: Worktree[];
+  thumbnailUrls: Map<number, string>;
+  /** ワークツリー単位のアーティファクト件数（ホームカード用） */
+  artifactCounts: Map<string, number>;
+  notifications: Map<string, number>;
+  hotkeyChars: Map<string, string>;
+  detachedWorktrees: Set<string>;
+  autoApprovals: Map<string, boolean>;
+}>();
+
+const emit = defineEmits<{
+  selectTerminal: [terminalId: number];
+  addTerminal: [worktreeId: string];
+  openInIde: [worktreeId: string];
+  openArtifacts: [worktreeId: string];
+  moveToSubWindow: [worktreeId: string];
+  moveToMainWindow: [worktreeId: string];
+  focusSubWindow: [worktreeId: string];
+  setHotkeyChar: [worktreeId: string];
+  toggleAutoApproval: [worktreeId: string];
+  removeRepository: [repositoryId: string];
+}>();
+
 /** リポジトリ ID → 恒久保存アーティファクト件数 */
-const artifactCounts = ref(new Map<string, number>());
+const repoArtifactCounts = ref(new Map<string, number>());
 let unlisten: UnlistenFn | null = null;
 
 async function refreshArtifactCount(repoId: string) {
   try {
     const list = await invoke<unknown[]>("list_repo_artifacts", { repositoryId: repoId });
-    artifactCounts.value.set(repoId, list.length);
+    repoArtifactCounts.value.set(repoId, list.length);
     // Map の変異は追跡されないため、再代入して再描画させる
-    artifactCounts.value = new Map(artifactCounts.value);
+    repoArtifactCounts.value = new Map(repoArtifactCounts.value);
   } catch {
     /* 件数バッジは補助情報なので失敗しても無視 */
   }
@@ -59,23 +91,19 @@ async function addRepository() {
   }
 }
 
-function removeRepository(id: string) {
-  // ボタンの disabled だけに頼らず、関数側でもワークツリー有無をガードする
-  if (hasWorktrees(id)) return;
-  settings.value.repositories = settings.value.repositories.filter((r) => r.id !== id);
-  scheduleSave();
-}
-
+/**
+ * 配下にワークツリーがあるか。
+ * リポジトリ擬似ワークツリーは repositoryId が自分自身を指すので数えない
+ * （数えると登録解除が永久にできなくなる）。
+ */
 function hasWorktrees(repoId: string): boolean {
-  return settings.value.worktrees.some((w) => w.repositoryId === repoId);
+  return props.worktrees.some((w) => !isRepositoryWorktree(w) && w.repositoryId === repoId);
 }
 
-function artifactCount(repoId: string): number {
-  return artifactCounts.value.get(repoId) ?? 0;
-}
-
-async function openArtifacts(repoId: string, repoName: string) {
-  await openRepositoryArtifactViewer(repoId, repoName);
+async function openArtifacts(repoId: string) {
+  const repo = settings.value.repositories.find((r) => r.id === repoId);
+  if (!repo) return;
+  await openRepositoryArtifactViewer(repo.id, repo.name);
 }
 
 async function selectExecScript(repoId: string) {
@@ -99,6 +127,38 @@ function clearExecScript(repoId: string) {
   repo.execScript = undefined;
   scheduleSave();
 }
+
+// ─── 一覧（ホームカード + リポジトリカード） ────────────────────────────────
+
+type RepoListItem =
+  | { key: string; kind: "home"; worktree: Worktree }
+  | { key: string; kind: "repo"; repo: Repository; worktree?: Worktree };
+
+const homeWorktree = computed(() => props.worktrees.find(isHomeWorktree));
+
+/** ホームを先頭に、以降は settings.repositories の順で並べる */
+const listItems = computed<RepoListItem[]>(() => {
+  const byId = new Map(props.worktrees.map((w) => [w.id, w]));
+  const items: RepoListItem[] = [];
+  const home = homeWorktree.value;
+  if (home) items.push({ key: home.id, kind: "home", worktree: home });
+  for (const repo of settings.value.repositories) {
+    items.push({
+      key: repo.id,
+      kind: "repo",
+      repo,
+      worktree: byId.get(makeRepositoryWorktreeId(repo.id)),
+    });
+  }
+  return items;
+});
+
+const cardWidth = computed(() =>
+  computeNaturalCardWidth(listItems.value.map((item) => item.worktree?.terminals.length ?? 0)),
+);
+
+// 並べ替え・削除アニメーションは持たない一覧なので、auto-animate / FLIP は使わない
+const { containerRef, columns } = useMasonryLayout(listItems, { minColumnWidth: cardWidth, gap: 12 });
 
 let disposed = false;
 
@@ -128,75 +188,65 @@ defineExpose({ addRepository });
 
 <template>
   <div class="repo-panel">
-    <div class="repo-list">
-      <div v-if="settings.repositories.length === 0" class="empty-state">
-        {{ t("repositories.empty") }}
-      </div>
-
+    <div ref="containerRef" class="repo-list">
       <div
-        v-for="repo in settings.repositories"
-        :key="repo.id"
-        class="repo-item"
+        v-for="(col, colIndex) in columns"
+        :key="colIndex"
+        class="masonry-column"
+        :style="{ maxWidth: cardWidth + 'px' }"
       >
-        <div class="repo-row-main">
-          <span class="repo-name">{{ repo.name }}</span>
-          <span class="repo-path">{{ repo.path }}</span>
-          <button
-            class="btn-artifacts"
-            :title="t('repositories.artifactsTooltip')"
-            @click="openArtifacts(repo.id, repo.name)"
-          >
-            <i class="pi pi-box"></i>
-            <span>{{ artifactCount(repo.id) }}</span>
-          </button>
-          <button
-            class="btn-remove"
-            :disabled="hasWorktrees(repo.id)"
-            :title="
-              hasWorktrees(repo.id)
-                ? t('repositories.hasWorktrees')
-                : undefined
-            "
-            @click="removeRepository(repo.id)"
-          >&times;</button>
-        </div>
-
-        <div class="repo-row-script">
-          <div class="row-col row-col-left">
-            <span class="script-label">{{ t("postAdd.label") }}</span>
-            <span class="copy-summary">
-              <template v-if="repo.packageManager">{{ repo.packageManager }}</template>
-              <template v-if="repo.packageManager && repo.copyTargets?.length"> | </template>
-              <template v-if="repo.copyTargets?.length">{{ t("postAdd.itemsSelected", { count: repo.copyTargets.length }) }}</template>
-              <template v-if="repo.notificationHooks?.length"> | {{ t("postAdd.hooksCount", { count: repo.notificationHooks.length }) }}</template>
-              <template v-if="repo.pullBeforeAdd"> | {{ t("postAdd.pullBeforeAdd") }}</template>
-              <template v-if="!repo.packageManager && !repo.copyTargets?.length && !repo.notificationHooks?.length && !repo.pullBeforeAdd">{{ t("postAdd.notConfigured") }}</template>
-            </span>
-            <button class="btn-secondary" @click="openCopyDialog(repo.id)">
-              {{ t("postAdd.configure") }}
-            </button>
-          </div>
-          <div class="row-col row-col-right">
-            <span class="script-label">{{ t("repositories.execScript") }}</span>
-            <input
-              class="text-input script-input"
-              :value="repo.execScript ?? ''"
-              readonly
-              :placeholder="t('common.notConfigured')"
-            />
-            <button class="btn-secondary" @click="selectExecScript(repo.id)">
-              {{ t("worktreeBaseDir.select") }}
-            </button>
-            <button
-              v-if="repo.execScript"
-              class="btn-secondary"
-              @click="clearExecScript(repo.id)"
-            >
-              {{ t("common.clear") }}
-            </button>
-          </div>
-        </div>
+        <template v-for="item in col" :key="item.key">
+          <!-- ホームカードは WorktreeCard の isHome 分岐をそのまま使う -->
+          <WorktreeCard
+            v-if="item.kind === 'home'"
+            :worktree="item.worktree"
+            :thumbnail-urls="thumbnailUrls"
+            :detached="detachedWorktrees.has(item.worktree.id)"
+            :notification-count="notifications.get(item.worktree.id) ?? 0"
+            :hotkey-char="hotkeyChars.get(item.worktree.id)"
+            :artifact-count="artifactCounts.get(item.worktree.id) ?? 0"
+            :auto-approval="autoApprovals.get(item.worktree.id) ?? false"
+            @select-terminal="emit('selectTerminal', $event)"
+            @add-terminal="emit('addTerminal', $event)"
+            @open-in-ide="emit('openInIde', $event)"
+            @open-artifacts="emit('openArtifacts', $event)"
+            @move-to-sub-window="emit('moveToSubWindow', $event)"
+            @move-to-main-window="emit('moveToMainWindow', $event)"
+            @focus-sub-window="emit('focusSubWindow', $event)"
+            @set-hotkey-char="emit('setHotkeyChar', $event)"
+            @toggle-auto-approval="emit('toggleAutoApproval', $event)"
+          />
+          <RepositoryCard
+            v-else
+            :repo="item.repo"
+            :worktree="item.worktree"
+            :thumbnail-urls="thumbnailUrls"
+            :artifact-count="repoArtifactCounts.get(item.repo.id) ?? 0"
+            :notification-count="item.worktree ? notifications.get(item.worktree.id) ?? 0 : 0"
+            :hotkey-char="item.worktree ? hotkeyChars.get(item.worktree.id) : undefined"
+            :detached="item.worktree ? detachedWorktrees.has(item.worktree.id) : false"
+            :auto-approval="item.worktree ? autoApprovals.get(item.worktree.id) ?? false : false"
+            :has-worktrees="hasWorktrees(item.repo.id)"
+            @select-terminal="emit('selectTerminal', $event)"
+            @add-terminal="emit('addTerminal', $event)"
+            @open-in-ide="emit('openInIde', $event)"
+            @open-artifacts="openArtifacts"
+            @move-to-sub-window="emit('moveToSubWindow', $event)"
+            @move-to-main-window="emit('moveToMainWindow', $event)"
+            @focus-sub-window="emit('focusSubWindow', $event)"
+            @set-hotkey-char="emit('setHotkeyChar', $event)"
+            @toggle-auto-approval="emit('toggleAutoApproval', $event)"
+            @configure-post-add="openCopyDialog"
+            @select-exec-script="selectExecScript"
+            @clear-exec-script="clearExecScript"
+            @remove-repository="emit('removeRepository', $event)"
+          />
+        </template>
       </div>
+    </div>
+
+    <div v-if="settings.repositories.length === 0" class="empty-state">
+      {{ t("repositories.empty") }}
     </div>
 
     <PostAddSettingsDialog
@@ -220,138 +270,20 @@ defineExpose({ addRepository });
   flex-direction: column;
 }
 
-.text-input {
-  flex: 1;
-  background: #313244;
-  border: 1px solid #45475a;
-  border-radius: 4px;
-  padding: 6px 10px;
-  font-size: 13px;
-  color: #cdd6f4;
-  outline: none;
-}
-
-.btn-secondary {
-  background: #313244;
-  color: #cdd6f4;
-  border: 1px solid #45475a;
-  border-radius: 4px;
-  padding: 6px 12px;
-  font-size: 12px;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.btn-secondary:hover {
-  background: #45475a;
-}
-
+/* ワークツリー一覧 (.worktree-list) と同じ masonry レイアウト */
 .repo-list {
-  border: 1px solid #313244;
-  border-radius: 6px;
-  overflow: hidden;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: flex-start;
 }
 
-.repo-item {
+.masonry-column {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  padding: 10px 12px;
-  border-bottom: 1px solid #313244;
-  background: #181825;
-}
-
-.repo-item:last-child {
-  border-bottom: none;
-}
-
-.repo-row-main {
-  display: flex;
-  align-items: center;
   gap: 12px;
-}
-
-.repo-row-script {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
-.row-col {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.repo-name {
-  min-width: 120px;
-  font-size: 13px;
-  font-weight: 600;
-  color: #cdd6f4;
-}
-
-.repo-path {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
-  color: #6c7086;
-}
-
-.script-label {
-  white-space: nowrap;
-  font-size: 11px;
-  color: #6c7086;
-}
-
-.copy-summary {
-  font-size: 11px;
-  color: #a6adc8;
-  white-space: nowrap;
-}
-
-.script-input {
-  font-size: 12px;
-}
-
-.btn-artifacts {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  background: transparent;
-  color: #cba6f7;
-  border: 1px solid #45475a;
-  border-radius: 4px;
-  padding: 3px 8px;
-  font-size: 11px;
-  font-weight: 600;
-  cursor: pointer;
-  white-space: nowrap;
-}
-
-.btn-artifacts:hover {
-  border-color: #cba6f7;
-  background: #313244;
-}
-
-.btn-remove {
-  background: transparent;
-  color: #6c7086;
-  border: none;
-  font-size: 16px;
-  cursor: pointer;
-  padding: 0 4px;
-  line-height: 1;
-}
-
-.btn-remove:hover {
-  color: #f38ba8;
-}
-
-.btn-remove:disabled {
-  color: #313244;
-  cursor: not-allowed;
+  flex: 1 1 0;
+  min-width: 0;
 }
 
 .empty-state {
@@ -359,7 +291,6 @@ defineExpose({ addRepository });
   text-align: center;
   color: #6c7086;
   font-size: 13px;
-  background: #181825;
 }
 </style>
 
@@ -367,56 +298,20 @@ defineExpose({ addRepository });
 {
   "en": {
     "repositories": {
-      "empty": "No repositories registered",
-      "hasWorktrees": "Cannot delete: worktrees exist",
-      "execScript": "Exec script",
-      "artifactsTooltip": "Open artifacts saved to this repository"
-    },
-    "postAdd": {
-      "label": "Settings",
-      "configure": "Configure",
-      "itemsSelected": "{count} selected",
-      "hooksCount": "{count} hooks",
-      "pullBeforeAdd": "fetch",
-      "notConfigured": "Not configured"
+      "empty": "No repositories registered"
     },
     "error": {
       "notARepo": "The selected folder is not a git repository.",
       "alreadyRegistered": "This repository is already registered."
-    },
-    "common": {
-      "notConfigured": "Not configured",
-      "clear": "Clear"
-    },
-    "worktreeBaseDir": {
-      "select": "Select"
     }
   },
   "ja": {
     "repositories": {
-      "empty": "リポジトリが登録されていません",
-      "hasWorktrees": "ワークツリーが存在するため削除できません",
-      "execScript": "実行スクリプト",
-      "artifactsTooltip": "このリポジトリに保存したアーティファクトを開く"
-    },
-    "postAdd": {
-      "label": "追加設定",
-      "configure": "設定",
-      "itemsSelected": "{count}件選択中",
-      "hooksCount": "{count}件フック",
-      "pullBeforeAdd": "fetch",
-      "notConfigured": "未設定"
+      "empty": "リポジトリが登録されていません"
     },
     "error": {
       "notARepo": "選択したフォルダは git リポジトリではありません。",
       "alreadyRegistered": "このリポジトリはすでに登録されています。"
-    },
-    "common": {
-      "notConfigured": "未設定",
-      "clear": "クリア"
-    },
-    "worktreeBaseDir": {
-      "select": "選択"
     }
   }
 }

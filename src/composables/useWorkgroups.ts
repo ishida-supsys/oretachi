@@ -2,13 +2,15 @@ import { computed } from "vue";
 import { useSettings } from "./useSettings";
 import { useWorktrees } from "./useWorktrees";
 import { useNotifications } from "./useNotifications";
+import { useHomePanel } from "./useHomePanel";
 import { i18n } from "../i18n";
-import { isHomeWorktree } from "../utils/homeWorktree";
+import { isPseudoWorktree } from "../utils/repositoryWorktree";
 import type { Workgroup } from "../types/settings";
 
 const { settings, scheduleSave } = useSettings();
 const { worktrees } = useWorktrees();
 const { notifications } = useNotifications();
+const { listMode } = useHomePanel();
 
 function genId(): string {
   return `wg-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -31,14 +33,28 @@ const activeWorkgroupId = computed<string>({
   },
 });
 
-/** アクティブグループを delta だけ循環移動（末尾↔先頭でラップ） */
+/**
+ * アクティブなチップを delta だけ循環移動（末尾↔先頭でラップ）。
+ * ワークグループバーと同じ並び（先頭がリポジトリ、以降がワークグループ）で回すので、
+ * リポジトリ一覧もローテーションに含まれる。
+ */
 function cycleWorkgroup(delta: number): void {
   const list = groups.value;
-  if (list.length <= 1) return;
-  const idx = list.findIndex((g) => g.id === activeWorkgroupId.value);
-  const base = idx === -1 ? 0 : idx;
-  const next = (base + delta + list.length) % list.length;
-  activeWorkgroupId.value = list[next].id;
+  const total = list.length + 1; // +1 = リポジトリチップ
+  if (total <= 1) return;
+
+  const current =
+    listMode.value === "repository"
+      ? 0
+      : Math.max(0, list.findIndex((g) => g.id === activeWorkgroupId.value)) + 1;
+  const next = (current + delta + total) % total;
+
+  if (next === 0) {
+    listMode.value = "repository";
+    return;
+  }
+  listMode.value = "worktree";
+  activeWorkgroupId.value = list[next - 1].id;
 }
 
 /** worktree が実際に属するグループID（未設定/不明なら先頭グループにフォールバック） */
@@ -61,10 +77,10 @@ function displayName(group: Workgroup): string {
   return i18n.global.t("workgroup.autoName", { n: idx + 1 });
 }
 
-/** グループに属するワークツリー数（フォールバック込み）。ホームは実作業ではないので数えない */
+/** グループに属するワークツリー数（フォールバック込み）。ホーム/リポジトリは実作業ではないので数えない */
 function worktreeCount(groupId: string): number {
   return settings.value.worktrees.filter(
-    (w) => !isHomeWorktree(w) && resolvedGroupId(w.workgroupId) === groupId,
+    (w) => !isPseudoWorktree(w) && resolvedGroupId(w.workgroupId) === groupId,
   ).length;
 }
 
@@ -125,6 +141,8 @@ function reorderWorkgroup(fromId: string, toId: string): void {
 /** ワークツリーを別グループへ移動する */
 function moveWorktreeToWorkgroup(worktreeId: string, groupId: string): void {
   const entry = settings.value.worktrees.find((w) => w.id === worktreeId);
+  // ホーム/リポジトリはグループ一覧に出ないので移動先を持たない（UI 経路は無いが防御的に弾く）
+  if (isPseudoWorktree(entry)) return;
   if (entry) entry.workgroupId = groupId;
   const wt = worktrees.value.find((w) => w.id === worktreeId);
   if (wt) wt.workgroupId = groupId;

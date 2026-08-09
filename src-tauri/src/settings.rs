@@ -58,6 +58,10 @@ pub struct WorktreeEntry {
     /// git ワークツリーではないため merge / branch 削除 / worktree remove は通さない。
     #[serde(default, rename = "isHome")]
     pub is_home: bool,
+    /// リポジトリ擬似ワークツリー（Repository.path を作業ディレクトリとする擬似ワークツリー）。
+    /// git ワークツリーではないため merge / branch 削除 / worktree remove は通さない。
+    #[serde(default, rename = "isRepository")]
+    pub is_repository: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -810,6 +814,30 @@ mod tests {
         assert!(entry.is_home);
         let restored: WorktreeEntry = serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
         assert!(restored.is_home);
+    }
+
+    #[test]
+    fn test_worktree_entry_is_repository_defaults_to_false() {
+        let json = r#"{
+            "id": "1", "name": "wt", "repositoryId": "r", "repositoryName": "repo",
+            "path": "/path", "branchName": "main"
+        }"#;
+        let entry: WorktreeEntry = serde_json::from_str(json).unwrap();
+        assert!(!entry.is_repository);
+    }
+
+    #[test]
+    fn test_worktree_entry_is_repository_round_trip() {
+        let json = r#"{
+            "id": "repo-oretachi-1a2b3c4d", "name": "oretachi", "repositoryId": "X:\\devel\\oretachi",
+            "repositoryName": "oretachi", "path": "X:\\devel\\oretachi", "branchName": "",
+            "isRepository": true
+        }"#;
+        let entry: WorktreeEntry = serde_json::from_str(json).unwrap();
+        assert!(entry.is_repository);
+        assert!(!entry.is_home);
+        let restored: WorktreeEntry = serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
+        assert!(restored.is_repository);
     }
 
     #[test]

@@ -12,7 +12,7 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp_
 ## 手順
 
 1. `oretachi_get_worktree_status` で全ワークツリーを取得する。
-   `isHome: true` のエントリ（ホーム自身）は対象外。
+   `isHome: true`（ホーム自身）と `isRepository: true`（リポジトリのルート）は対象外。
 2. 各ワークツリーについて `oretachi_inspect_worktree` を呼び、
    `dirtyCount` / `mergedInto` / `lastCommitAt` を取得する。
 3. ターミナルが残っているものは `oretachi_list_terminals` で状態を確認し、
@@ -44,7 +44,7 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp_
 - ユーザーの承認なしに `oretachi_close_worktree` を呼ばない
 - `dirtyCount > 0` のワークツリーを削除推奨に入れない
 - 「要確認」を勝手に削除推奨へ格上げしない
-- ホーム（`isHome: true`）を削除しようとしない（サーバー側でも拒否される）
+- ホーム（`isHome: true`）とリポジトリ（`isRepository: true`）を削除しようとしない（サーバー側でも拒否される）
 
 ## 削除時のオプション
 

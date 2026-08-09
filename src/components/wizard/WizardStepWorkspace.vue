@@ -1,9 +1,15 @@
 <script setup lang="ts">
 import { open, message } from "@tauri-apps/plugin-dialog";
 import { useI18n } from "vue-i18n";
-import { useSettings, migrateHomeWorktree, setupHomeClaudeDir } from "../../composables/useSettings";
+import {
+  useSettings,
+  migrateHomeWorktree,
+  setupHomeClaudeDir,
+  syncRepositoryWorktrees,
+} from "../../composables/useSettings";
 import { useWorktrees } from "../../composables/useWorktrees";
 import { useRepositoryActions } from "../../composables/useRepositoryActions";
+import { isRepositoryWorktree } from "../../utils/repositoryWorktree";
 
 const { t } = useI18n();
 const { settings, scheduleSave } = useSettings();
@@ -35,12 +41,17 @@ async function addRepository() {
 }
 
 function hasWorktrees(repoId: string): boolean {
-  return settings.value.worktrees.some((w) => w.repositoryId === repoId);
+  // リポジトリ擬似ワークツリーは repositoryId が自分自身を指すので数えない
+  // (数えると削除ボタンが永久に disabled になる)
+  return settings.value.worktrees.some((w) => !isRepositoryWorktree(w) && w.repositoryId === repoId);
 }
 
 function removeRepository(id: string) {
   if (hasWorktrees(id)) return;
   settings.value.repositories = settings.value.repositories.filter((r) => r.id !== id);
+  // 対応する擬似ワークツリーと、そのターミナルセッションの残骸を掃除する
+  syncRepositoryWorktrees();
+  syncWorktreesFromSettings();
   scheduleSave();
 }
 </script>
