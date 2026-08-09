@@ -20,6 +20,38 @@ use crate::git_worktree::get_git_remotes;
 use crate::pty_manager::PtyManager;
 use crate::settings::{AppSettings, SettingsManager, Workgroup, WorktreeEntry};
 
+/// artifact / artifact_module の read-modify-write を直列化するグローバルロック。
+/// これらのツールは read_only_hint = true を宣言しているため Claude Code 側が
+/// isConcurrencySafe = true とみなし、同一アーティファクトに対して並列に呼び出しうる。
+/// NotifyService は接続ごとに生成されるためプロセス共有の static で持つ。
+static ARTIFACT_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// 一時ファイル名の衝突を避けるための連番。
+static ARTIFACT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// アーティファクト JSON をアトミックに書き込む。
+///
+/// `tokio_fs::write` は truncate → write なので、書き込み中のファイルを
+/// 読んだ側が壊れた JSON を掴む。read_only_hint = true を宣言した結果
+/// Claude Code が読み書きを並列実行しうるため、一時ファイル + rename にする。
+/// rename は同一ディレクトリ内なら Windows/Unix ともに既存ファイルを置換する。
+/// 一時ファイルの拡張子は `.json` にならないため search_artifact の走査対象外。
+async fn write_artifact_atomic(path: &std::path::Path, contents: &str) -> Result<(), McpError> {
+    let seq = ARTIFACT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
+    tmp_name.push(format!(".tmp-{}-{}", std::process::id(), seq));
+    let tmp_path = path.with_file_name(tmp_name);
+
+    tokio_fs::write(&tmp_path, contents)
+        .await
+        .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+    if let Err(e) = tokio_fs::rename(&tmp_path, path).await {
+        let _ = tokio_fs::remove_file(&tmp_path).await;
+        return Err(McpError::internal_error(e.to_string(), None));
+    }
+    Ok(())
+}
+
 const PORT_FILE: &str = "mcp-port";
 const SERVER_INFO_FILE: &str = "mcp-server.json";
 
@@ -546,7 +578,7 @@ impl NotifyService {
         }
     }
 
-    #[tool(description = "アーティファクトを操作する。create: 新規作成, update: 差分更新(old_str→new_str), rewrite: 全置換, get: 1件取得(offset/limitで行範囲指定可)")]
+    #[tool(description = "アーティファクトを操作する。create: 新規作成, update: 差分更新(old_str→new_str), rewrite: 全置換, get: 1件取得(offset/limitで行範囲指定可)", annotations(read_only_hint = true))]
     async fn artifact(
         &self,
         Parameters(ArtifactParams {
@@ -585,6 +617,13 @@ impl NotifyService {
         if id.contains("..") || id.contains('/') || id.contains('\\') || id.contains('\0') {
             return Err(McpError::invalid_params("不正なアーティファクトIDです".to_string(), None));
         }
+
+        // 書き込み系コマンドは read-modify-write の競合を避けるため直列化する
+        let _write_guard = if matches!(command.as_str(), "get" | "outline") {
+            None
+        } else {
+            Some(ARTIFACT_WRITE_LOCK.lock().await)
+        };
 
         let artifacts_dir = self
             .app_handle
@@ -739,8 +778,7 @@ impl NotifyService {
 
         let json = serde_json::to_string_pretty(&data)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        tokio_fs::write(&artifact_path, &json).await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        write_artifact_atomic(&artifact_path, &json).await?;
 
         log::info!("[mcp] artifact command={} id={} worktree_id={}", command, id, worktree_id);
         if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
@@ -758,7 +796,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Reactアーティファクトのモジュールを操作する。大規模アーティファクトをファイル単位で管理するために使用。list: モジュール一覧(行数のみ), get: 1モジュール取得(offset/limitで行範囲指定可), create: 追加, update: 差分更新, rewrite: 全置換, delete: 削除")]
+    #[tool(description = "Reactアーティファクトのモジュールを操作する。大規模アーティファクトをファイル単位で管理するために使用。list: モジュール一覧(行数のみ), get: 1モジュール取得(offset/limitで行範囲指定可), create: 追加, update: 差分更新, rewrite: 全置換, delete: 削除", annotations(read_only_hint = true))]
     async fn artifact_module(
         &self,
         Parameters(ArtifactModuleParams {
@@ -793,6 +831,13 @@ impl NotifyService {
         if id.contains("..") || id.contains('/') || id.contains('\\') || id.contains('\0') {
             return Err(McpError::invalid_params("不正なアーティファクトIDです".to_string(), None));
         }
+
+        // 書き込み系コマンドは read-modify-write の競合を避けるため直列化する
+        let _write_guard = if matches!(command.as_str(), "list" | "get") {
+            None
+        } else {
+            Some(ARTIFACT_WRITE_LOCK.lock().await)
+        };
 
         let artifacts_dir = self.app_handle.path().app_data_dir()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?
@@ -869,8 +914,7 @@ impl NotifyService {
                 data.updated_at = now;
                 let json = serde_json::to_string_pretty(&data)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-                tokio_fs::write(&artifact_path, &json).await
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                write_artifact_atomic(&artifact_path, &json).await?;
                 if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
                     "worktreeId": worktree_id, "artifactId": id, "command": "create",
                 })) { log::warn!("Failed to emit artifact-changed: {}", e); }
@@ -886,8 +930,7 @@ impl NotifyService {
                 data.updated_at = now;
                 let json = serde_json::to_string_pretty(&data)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-                tokio_fs::write(&artifact_path, &json).await
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                write_artifact_atomic(&artifact_path, &json).await?;
                 if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
                     "worktreeId": worktree_id, "artifactId": id, "command": "rewrite",
                 })) { log::warn!("Failed to emit artifact-changed: {}", e); }
@@ -912,8 +955,7 @@ impl NotifyService {
                 data.updated_at = now;
                 let json = serde_json::to_string_pretty(&data)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-                tokio_fs::write(&artifact_path, &json).await
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                write_artifact_atomic(&artifact_path, &json).await?;
                 if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
                     "worktreeId": worktree_id, "artifactId": id, "command": "update",
                 })) { log::warn!("Failed to emit artifact-changed: {}", e); }
@@ -929,8 +971,7 @@ impl NotifyService {
                 data.updated_at = now;
                 let json = serde_json::to_string_pretty(&data)
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-                tokio_fs::write(&artifact_path, &json).await
-                    .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+                write_artifact_atomic(&artifact_path, &json).await?;
                 if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
                     "worktreeId": worktree_id, "artifactId": id, "command": "delete_module",
                 })) { log::warn!("Failed to emit artifact-changed: {}", e); }
@@ -1056,7 +1097,7 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "登録済みワークツリーのステータス一覧を取得する。各エントリはルートパス(path)と現在の1行説明(description)を含む")]
+    #[tool(description = "登録済みワークツリーのステータス一覧を取得する。各エントリはルートパス(path)と現在の1行説明(description)を含む", annotations(read_only_hint = true))]
     fn oretachi_get_worktree_status(
         &self,
         Parameters(_params): Parameters<GetWorktreeStatusParams>,
@@ -1089,7 +1130,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "AI agent が参照するグローバル app options (background terminal の起動先トグル等) を取得する")]
+    #[tool(description = "AI agent が参照するグローバル app options (background terminal の起動先トグル等) を取得する", annotations(read_only_hint = true))]
     fn oretachi_get_app_options(
         &self,
         Parameters(_params): Parameters<GetAppOptionsParams>,
@@ -1107,7 +1148,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "List all registered repositories with their names and git remote URLs")]
+    #[tool(description = "List all registered repositories with their names and git remote URLs", annotations(read_only_hint = true))]
     async fn oretachi_list_repository(
         &self,
         Parameters(_params): Parameters<ListRepositoryParams>,
@@ -1144,7 +1185,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "アーティファクトを検索する。queryを省略すると全件返却。title/content/type/languageを対象に部分一致検索。結果はcontentを除いたメタデータのみ")]
+    #[tool(description = "アーティファクトを検索する。queryを省略すると全件返却。title/content/type/languageを対象に部分一致検索。結果はcontentを除いたメタデータのみ", annotations(read_only_hint = true))]
     async fn search_artifact(
         &self,
         Parameters(SearchArtifactParams { repository, branch, query }): Parameters<SearchArtifactParams>,
@@ -1261,7 +1302,7 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "ワークツリーをアーカイブ（クローズ）する。アーカイブDBに記録してgitワークツリーを削除する")]
+    #[tool(description = "ワークツリーをアーカイブ（クローズ）する。アーカイブDBに記録してgitワークツリーを削除する", annotations(destructive_hint = true))]
     async fn oretachi_close_worktree(
         &self,
         Parameters(CloseWorktreeParams { worktree_name, worktree_id, merge_to, delete_branch, force_branch }): Parameters<CloseWorktreeParams>,
@@ -1435,7 +1476,7 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "現在の PTY セッション一覧を返す。session_id, cwd, isAiAgent, ワークツリー名/ID を含む。oretachi_kill_terminal を呼ぶ前の確認に使う")]
+    #[tool(description = "現在の PTY セッション一覧を返す。session_id, cwd, isAiAgent, ワークツリー名/ID を含む。oretachi_kill_terminal を呼ぶ前の確認に使う", annotations(read_only_hint = true))]
     fn oretachi_list_terminals(
         &self,
         Parameters(ListTerminalsParams { worktree_name, worktree_id }): Parameters<ListTerminalsParams>,
@@ -1507,7 +1548,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "指定 PTY セッションを停止する。oretachi_list_terminals で取得した session_id を渡す。UI のタブは pty-exit イベント経由で自動的に消える")]
+    #[tool(description = "指定 PTY セッションを停止する。oretachi_list_terminals で取得した session_id を渡す。UI のタブは pty-exit イベント経由で自動的に消える", annotations(destructive_hint = true))]
     async fn oretachi_kill_terminal(
         &self,
         Parameters(KillTerminalParams { session_id }): Parameters<KillTerminalParams>,
@@ -1529,7 +1570,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text("killed")]))
     }
 
-    #[tool(description = "指定 PTY セッションの最近の出力履歴を返す。レスポンスは JSON: { text, cursor, lostBytes }。text は ANSI 除去済み UTF-8。連続ポーリングで重複を避けるには、次回呼び出しの from_cursor に前回の cursor を渡す（差分読み）。lostBytes>0 はリングバッファ溢れで先頭が欠落したことを意味する。先に oretachi_list_terminals で session_id を取得すること")]
+    #[tool(description = "指定 PTY セッションの最近の出力履歴を返す。レスポンスは JSON: { text, cursor, lostBytes }。text は ANSI 除去済み UTF-8。連続ポーリングで重複を避けるには、次回呼び出しの from_cursor に前回の cursor を渡す（差分読み）。lostBytes>0 はリングバッファ溢れで先頭が欠落したことを意味する。先に oretachi_list_terminals で session_id を取得すること", annotations(read_only_hint = true))]
     fn oretachi_read_terminal(
         &self,
         Parameters(ReadTerminalParams { session_id, max_bytes, from_cursor }): Parameters<ReadTerminalParams>,
@@ -2470,4 +2511,66 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
         // 停止完了を通知
         let _ = complete_tx.send(());
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Claude Code は plan モードで `readOnlyHint` が立っていない MCP ツールを
+    /// permissions.allow に関わらず一律 ask にする。ここで advertise 内容を固定しておく。
+    #[test]
+    fn read_only_tools_advertise_read_only_hint() {
+        const READ_ONLY: &[&str] = &[
+            "artifact",
+            "artifact_module",
+            "search_artifact",
+            "oretachi_get_worktree_status",
+            "oretachi_get_app_options",
+            "oretachi_list_repository",
+            "oretachi_list_terminals",
+            "oretachi_read_terminal",
+        ];
+        const NOT_READ_ONLY: &[&str] = &[
+            "notify_worktree",
+            "oretachi_set_description",
+            "oretachi_add_task",
+            "oretachi_close_worktree",
+            "oretachi_spawn_terminal",
+            "oretachi_kill_terminal",
+            "oretachi_write_terminal",
+        ];
+
+        let tools = NotifyService::tool_router().list_all();
+        let hint = |name: &str| -> Option<bool> {
+            tools
+                .iter()
+                .find(|t| t.name == name)
+                .unwrap_or_else(|| panic!("tool '{}' が存在しません", name))
+                .annotations
+                .as_ref()
+                .and_then(|a| a.read_only_hint)
+        };
+
+        for name in READ_ONLY {
+            assert_eq!(hint(name), Some(true), "{} は read_only_hint = true であるべき", name);
+        }
+        for name in NOT_READ_ONLY {
+            assert_ne!(hint(name), Some(true), "{} が誤って read-only 宣言されている", name);
+        }
+    }
+
+    #[test]
+    fn destructive_tools_advertise_destructive_hint() {
+        let tools = NotifyService::tool_router().list_all();
+        for name in ["oretachi_close_worktree", "oretachi_kill_terminal"] {
+            let t = tools.iter().find(|t| t.name == name).expect("tool が存在しません");
+            assert_eq!(
+                t.annotations.as_ref().and_then(|a| a.destructive_hint),
+                Some(true),
+                "{} は destructive_hint = true であるべき",
+                name
+            );
+        }
+    }
 }
