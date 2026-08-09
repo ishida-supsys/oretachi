@@ -1292,10 +1292,16 @@ onMounted(async () => {
       },
       async (result) => {
         // MCP 呼び出し元へ実際の成否を返す
+        let status = "ok";
+        let error: string | null = null;
+        if (!result.ok) {
+          status = result.cancelled ? "cancelled" : result.busy ? "busy" : "error";
+          if (status === "error") error = result.error;
+        }
         await invoke("mcp_close_worktree_result", {
           requestId: request_id,
-          status: result.ok ? "ok" : result.cancelled ? "cancelled" : "error",
-          error: result.ok || result.cancelled ? null : result.error,
+          status,
+          error,
         }).catch(() => { /* 呼び出し元がタイムアウト済みの場合は無視 */ });
       },
     );
@@ -2048,6 +2054,7 @@ onMounted(async () => {
     "duplicatingText": "Duplicating...",
     "copyWorkingChangesFailed": "Failed to copy working changes: {error}",
     "deleteFailed": "Delete failed: {error}",
+    "branchDeleteFailed": "The worktree was removed, but deleting its branch failed: {error}",
     "ideNotInstalled": "None of Cursor, VS Code, Antigravity are installed.",
     "ideNotInstalledTitle": "IDE not found",
     "ideLaunchFailed": "Failed to launch IDE: {error}",
@@ -2080,6 +2087,7 @@ onMounted(async () => {
     "duplicatingText": "複製中...",
     "copyWorkingChangesFailed": "作業中変更のコピーに失敗しました: {error}",
     "deleteFailed": "削除に失敗しました: {error}",
+    "branchDeleteFailed": "ワークツリーは削除しましたが、ブランチの削除に失敗しました: {error}",
     "ideNotInstalled": "Cursor、VS Code、Antigravity のいずれもインストールされていません。",
     "ideNotInstalledTitle": "IDE が見つかりません",
     "ideLaunchFailed": "IDE の起動に失敗しました: {error}",
