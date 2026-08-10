@@ -6,6 +6,29 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-08-10
+
+### Added
+- ワークツリー追加先ディレクトリを `isHome` 付きの擬似ワークツリー「ホーム」として追加し、タブ・フレーム分割・セッション永続化にそのまま載せた (#110)
+- ホームで claude を起動するだけでワークツリー管理エージェントとして振る舞うよう、プロンプトを SessionStart フック経由で注入する方式に統一 (#110)
+- 管理業務を `<baseDir>/.claude/skills/` の同梱スキルとして定義 (worktree-cleanup / worktree-report / worktree-assign)。ユーザーが編集・追加できる (#110)
+- MCP に `oretachi_inspect_worktree` を新設 (dirtyCount / mergedInto / lastCommitAt / ahead・behind) (#110)
+- 登録済みリポジトリを擬似ワークツリー化し、リポジトリ root でターミナルを開けるようにした (#110)
+- ワークグループバー先頭にリポジトリチップを追加し、Ctrl+PgUp/PgDown のローテーションにも参加させた (#110)
+- ホームタブをドロップダウン化し、リポジトリのタブをその中へ畳んだ。畳んだエントリの通知件数はボタンに合算表示する (#110)
+- リポジトリ一覧を masonry カード表示にし、`HomeSettingsDialog` へホーム関連設定を移設 (#110)
+
+### Fixed
+- plan モードで oretachi の MCP ツールが毎回承認要求される問題を修正。read-only ツールへ `annotations.readOnlyHint` を付与した (#109)
+- MCP の `oretachi_close_worktree` でブランチが既に存在しない場合にエラーダイアログが出る問題を修正。`delete_branch` を冪等化し、二重クローズの in-flight ガードを追加 (#108)
+- ワークツリー削除後にブランチ削除だけ失敗したケースを専用の警告として区別 (#108)
+- `detect_base_branch` が実在する ref のみ返すよう修正。ローカルに main が無い環境で mergedInto / ahead / behind が常に取得できなかった (#110)
+- `oretachi_list_terminals` の cwd 逆引きを最長プレフィックス一致に変更し、全端末がホーム判定になる問題を解消 (#110)
+- ワークグループ削除フローからホームを除外し、削除が黙って失敗する問題を修正 (#110)
+- baseDir 選択時に `syncWorktreesFromSettings` を呼ぶようにし、初回ウィザード直後にホームがタブ・カードへ出ない問題を修正 (#110)
+- リポジトリ登録解除時にターミナル kill・承認判定プロセスの cancel・自動承認マップの掃除を行うよう修正 (#110)
+- タブバーの横スクロールバーを掴めない問題を修正 (#110)
+
 ## [0.27.1] - 2026-08-07
 
 ### Fixed
@@ -560,7 +583,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.27.1...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.28.0...HEAD
+[0.28.0]: https://github.com/ishida-supsys/oretachi/compare/0.27.1...0.28.0
 [0.27.1]: https://github.com/ishida-supsys/oretachi/compare/0.27.0...0.27.1
 [0.27.0]: https://github.com/ishida-supsys/oretachi/compare/0.26.0...0.27.0
 [0.26.0]: https://github.com/ishida-supsys/oretachi/compare/0.25.3...0.26.0
