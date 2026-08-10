@@ -461,7 +461,20 @@ pub struct ArtifactModuleParams {
 pub struct ListRepositoryParams {}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct GetWorktreeStatusParams {}
+pub struct GetWorktreeStatusParams {
+    #[schemars(description = "絞り込みキーワード（name / branchName / description の部分一致、大文字小文字は区別しない）。省略時は全件")]
+    pub query: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InspectWorktreeParams {
+    #[schemars(description = "調べるワークツリーの名前")]
+    pub worktree_name: Option<String>,
+    #[schemars(description = "ワークツリーID（同名ワークツリーが複数ある場合に指定）")]
+    pub worktree_id: Option<String>,
+    #[schemars(description = "マージ済み判定の対象ブランチ（省略時はリポジトリの既定ブランチを自動判定）")]
+    pub base_branch: Option<String>,
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetAppOptionsParams {}
@@ -1097,19 +1110,37 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "登録済みワークツリーのステータス一覧を取得する。各エントリはルートパス(path)と現在の1行説明(description)を含む", annotations(read_only_hint = true))]
+    #[tool(description = "登録済みワークツリーのステータス一覧を取得する。各エントリはルートパス(path)・1行説明(description)・ブランチ名・isHome・isRepository を含む。isHome / isRepository が true のものは git ワークツリーではない擬似エントリなので、作業割り当てや削除の候補からは外すこと。query で name / branchName / description の部分一致検索ができる", annotations(read_only_hint = true))]
     fn oretachi_get_worktree_status(
         &self,
-        Parameters(_params): Parameters<GetWorktreeStatusParams>,
+        Parameters(GetWorktreeStatusParams { query }): Parameters<GetWorktreeStatusParams>,
     ) -> Result<CallToolResult, McpError> {
         let settings_manager = self.app_handle.state::<SettingsManager>();
         let settings = settings_manager.get();
         let detached: std::collections::HashSet<&str> =
             settings.detached_worktree_ids.iter().map(|s| s.as_str()).collect();
 
+        // query は name / branchName / description のいずれかに部分一致すれば通す（大文字小文字を無視）
+        let needle = query
+            .as_deref()
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+            .map(|q| q.to_lowercase());
+
         let results: Vec<serde_json::Value> = settings
             .worktrees
             .iter()
+            .filter(|wt| match needle.as_deref() {
+                None => true,
+                Some(q) => {
+                    wt.name.to_lowercase().contains(q)
+                        || wt.branch_name.to_lowercase().contains(q)
+                        || wt
+                            .description
+                            .as_deref()
+                            .map_or(false, |d| d.to_lowercase().contains(q))
+                }
+            })
             .map(|wt| {
                 serde_json::json!({
                     "id": wt.id,
@@ -1118,6 +1149,8 @@ impl NotifyService {
                     "description": wt.description,
                     "repositoryName": wt.repository_name,
                     "branchName": wt.branch_name,
+                    "isHome": wt.is_home,
+                    "isRepository": wt.is_repository,
                     "isDetached": detached.contains(wt.id.as_str()),
                     "autoApproval": wt.auto_approval,
                 })
@@ -1128,6 +1161,75 @@ impl NotifyService {
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         log::info!("[mcp] oretachi_get_worktree_status: {} entries", results.len());
         Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "指定ワークツリーの git 状態を返す。未コミット変更のあるファイル数(dirtyCount)・ベースブランチへのマージ済み判定(mergedInto)・最終コミット日時(lastCommitAt)・ahead/behind を含む。不要ワークツリーの判定根拠に使う", annotations(read_only_hint = true))]
+    fn oretachi_inspect_worktree(
+        &self,
+        Parameters(InspectWorktreeParams { worktree_name, worktree_id, base_branch }): Parameters<InspectWorktreeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+
+        let wt = if let Some(id) = worktree_id.as_deref() {
+            settings.worktrees.iter().find(|w| w.id == id).ok_or_else(|| {
+                McpError::invalid_params(format!("worktree id '{}' not found", id), None)
+            })?
+        } else if let Some(name) = worktree_name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
+            let matches: Vec<_> = settings.worktrees.iter().filter(|w| w.name == name).collect();
+            match matches.len() {
+                0 => {
+                    let names: Vec<&str> = settings.worktrees.iter().map(|w| w.name.as_str()).collect();
+                    return Err(McpError::invalid_params(
+                        format!("worktree '{}' not found. available: [{}]", name, names.join(", ")),
+                        None,
+                    ));
+                }
+                1 => matches[0],
+                _ => {
+                    let ids: Vec<&str> = matches.iter().map(|w| w.id.as_str()).collect();
+                    return Err(McpError::invalid_params(
+                        format!("multiple worktrees named '{}'. specify worktree_id to disambiguate: [{}]", name, ids.join(", ")),
+                        None,
+                    ));
+                }
+            }
+        } else {
+            return Err(McpError::invalid_params(
+                "specify one of worktree_name / worktree_id",
+                None,
+            ));
+        };
+
+        // ホーム / リポジトリは git ワークツリーではないので、ワークツリーとしての git 状態を持たない
+        // （リポジトリ root で git は動くが branchName が空の擬似エントリなので結果が噛み合わない）
+        if wt.is_home || wt.is_repository {
+            let kind = if wt.is_home { "home worktree" } else { "repository" };
+            return Err(McpError::invalid_params(
+                format!("worktree '{}' is the {} and has no worktree git state", wt.name, kind),
+                None,
+            ));
+        }
+
+        let inspection = crate::git_worktree::inspect_worktree(&wt.path, base_branch.as_deref())
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+        let mut json = serde_json::to_value(&inspection)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        if let Some(obj) = json.as_object_mut() {
+            obj.insert("id".to_string(), serde_json::json!(wt.id));
+            obj.insert("name".to_string(), serde_json::json!(wt.name));
+            obj.insert("path".to_string(), serde_json::json!(wt.path));
+        }
+
+        log::info!(
+            "[mcp] oretachi_inspect_worktree: name={} dirty={} merged={:?}",
+            wt.name, inspection.dirty_count, inspection.merged_into
+        );
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+        )]))
     }
 
     #[tool(description = "AI agent が参照するグローバル app options (background terminal の起動先トグル等) を取得する", annotations(read_only_hint = true))]
@@ -1343,6 +1445,17 @@ impl NotifyService {
                     }
                 }
             };
+
+            // ホーム / リポジトリは git ワークツリーではなく、path がワークツリー追加先ディレクトリ
+            // またはリポジトリのルートそのもの。削除すると親ごと壊すため、要求は必ず拒否する。
+            if wt.is_home || wt.is_repository {
+                let kind = if wt.is_home { "home worktree" } else { "repository" };
+                return Err(McpError::invalid_params(
+                    format!("worktree '{}' is the {} and cannot be closed", wt.name, kind),
+                    None,
+                ));
+            }
+
             (wt.id.clone(), wt.name.clone())
         };
 
@@ -1517,12 +1630,15 @@ impl NotifyService {
 
         let mut items: Vec<serde_json::Value> = Vec::new();
         for info in raw {
+            // ホームの path はワークツリー追加先ディレクトリ = 全ワークツリーの祖先なので、
+            // 先頭一致で拾うと全ターミナルがホーム所属になってしまう。最長一致を採用する。
             let matched_wt = info.cwd.as_deref().and_then(|c| {
                 let cp = std::path::Path::new(c);
-                settings.worktrees.iter().find(|w| {
-                    let wp = std::path::Path::new(&w.path);
-                    cp.starts_with(wp)
-                })
+                settings
+                    .worktrees
+                    .iter()
+                    .filter(|w| cp.starts_with(std::path::Path::new(&w.path)))
+                    .max_by_key(|w| std::path::Path::new(&w.path).components().count())
             });
             let matched_wt_id = matched_wt.map(|w| w.id.clone());
             if let Some(ref fid) = filter_id {
@@ -1931,8 +2047,20 @@ async fn session_context_handler(
         .project_dir
         .as_deref()
         .and_then(|d| resolve_worktree_by_dir(&settings, d))
-        .and_then(|w| resolve_workgroup(&settings, w))
-        .and_then(|g| g.system_prompt.clone())
+        .and_then(|w| {
+            if w.is_home {
+                // ホームで起動したセッションは常にワークツリー管理エージェントとして振る舞わせる。
+                // 通常の開発向けであろうグループの systemPrompt は用途が違うので使わない。
+                Some(crate::home_skills::resolve_home_agent_prompt(&settings))
+            } else if w.is_repository {
+                // リポジトリ root は擬似ワークツリー導入前は resolve_worktree_by_dir が解決できず
+                // None が返っていた場所。開発ワークツリー向けのグループ systemPrompt は用途が違うので
+                // 注入しない（将来 repositoryAgentPrompt を足すならここを分岐させる）。
+                None
+            } else {
+                resolve_workgroup(&settings, w).and_then(|g| g.system_prompt.clone())
+            }
+        })
         .filter(|s| !s.trim().is_empty());
     if let Some(p) = &prompt {
         log::info!(
@@ -2526,6 +2654,7 @@ mod tests {
             "artifact_module",
             "search_artifact",
             "oretachi_get_worktree_status",
+            "oretachi_inspect_worktree",
             "oretachi_get_app_options",
             "oretachi_list_repository",
             "oretachi_list_terminals",

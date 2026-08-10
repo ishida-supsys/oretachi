@@ -150,6 +150,14 @@ async function requestOpenInIde() {
   await openInIde(worktreePath, { worktreeId, worktreeName, origin: "sub" });
 }
 
+// ホーム / リポジトリの擬似ワークツリーか（ヘッダーでブランチ名の代わりにパスを出すため）
+const isHome = computed(
+  () => settings.value.worktrees.find((w) => w.id === worktreeId)?.isHome === true,
+);
+const isRepository = computed(
+  () => settings.value.worktrees.find((w) => w.id === worktreeId)?.isRepository === true,
+);
+
 function onTerminalTitleChange(terminalId: number, title: string) {
   const entry = terminalEntries.get(terminalId);
   if (entry) entry.title = title;
@@ -573,6 +581,9 @@ async function onCancelAiJudging() {
         :is-window-focused="isWindowFocused"
         :show-window-controls="true"
         :task-tooltip="getWorktreeTaskTooltip(repositoryName, branchName)"
+        :is-home="isHome"
+        :is-repository="isRepository"
+        :home-path="worktreePath"
         @open-in-ide="requestOpenInIde"
         @open-artifacts="requestOpenArtifacts"
         @cancel-ai-judging="onCancelAiJudging"

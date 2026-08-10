@@ -1,18 +1,33 @@
 <script setup lang="ts">
 import { open, message } from "@tauri-apps/plugin-dialog";
 import { useI18n } from "vue-i18n";
-import { useSettings } from "../../composables/useSettings";
+import {
+  useSettings,
+  migrateHomeWorktree,
+  setupHomeClaudeDir,
+  syncRepositoryWorktrees,
+} from "../../composables/useSettings";
+import { useWorktrees } from "../../composables/useWorktrees";
 import { useRepositoryActions } from "../../composables/useRepositoryActions";
+import { isRepositoryWorktree } from "../../utils/repositoryWorktree";
 
 const { t } = useI18n();
 const { settings, scheduleSave } = useSettings();
+const { syncWorktreesFromSettings } = useWorktrees();
 const { addRepository: addRepositoryAction } = useRepositoryActions();
 
 async function selectWorktreeBaseDir() {
   const selected = await open({ directory: true, multiple: false });
   if (typeof selected === "string") {
     settings.value.worktreeBaseDir = selected;
+    // ホームワークツリーとその .claude/ (プラグイン設定 + 同梱スキル) を用意する。
+    // ランタイム配列も同期しないと、ウィザード完了直後に home がタブ・カードへ出ない
+    // (自ウィンドウ発の settings-changed は無視されるため自動同期されない)。
+    if (migrateHomeWorktree(settings.value)) {
+      syncWorktreesFromSettings();
+    }
     scheduleSave();
+    await setupHomeClaudeDir(selected);
   }
 }
 
@@ -26,12 +41,17 @@ async function addRepository() {
 }
 
 function hasWorktrees(repoId: string): boolean {
-  return settings.value.worktrees.some((w) => w.repositoryId === repoId);
+  // リポジトリ擬似ワークツリーは repositoryId が自分自身を指すので数えない
+  // (数えると削除ボタンが永久に disabled になる)
+  return settings.value.worktrees.some((w) => !isRepositoryWorktree(w) && w.repositoryId === repoId);
 }
 
 function removeRepository(id: string) {
   if (hasWorktrees(id)) return;
   settings.value.repositories = settings.value.repositories.filter((r) => r.id !== id);
+  // 対応する擬似ワークツリーと、そのターミナルセッションの残骸を掃除する
+  syncRepositoryWorktrees();
+  syncWorktreesFromSettings();
   scheduleSave();
 }
 </script>

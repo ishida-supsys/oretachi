@@ -7,6 +7,12 @@ import { platform } from "@tauri-apps/plugin-os";
 import type { AppSettings, HotkeyBinding, HotkeySettings, Workgroup } from "../types/settings";
 import { setLocale } from "../i18n";
 import { setVerboseLogging } from "../utils/log";
+import { isHomeWorktree, makeHomeWorktreeEntry } from "../utils/homeWorktree";
+import {
+  isRepositoryWorktree,
+  makeRepositoryWorktreeEntry,
+  makeRepositoryWorktreeId,
+} from "../utils/repositoryWorktree";
 
 const isMac = platform() === "macos";
 
@@ -97,6 +103,137 @@ function migrateWorkgroups(loaded: AppSettings): boolean {
   return changed;
 }
 
+/**
+ * ホームワークツリー移行 (冪等):
+ * 1. worktreeBaseDir が未設定なら何もしない（ホームは作らない）
+ * 2. isHome エントリが無ければ配列先頭に挿入する
+ * 3. 既存エントリの path が worktreeBaseDir とズレていれば追従させる
+ * 変更があれば true を返す。migrateWorkgroups より前に呼ぶこと（workgroupId の補完を任せるため）。
+ */
+export function migrateHomeWorktree(loaded: AppSettings): boolean {
+  const baseDir = loaded.worktreeBaseDir?.trim();
+  if (!baseDir) return false;
+
+  const existing = loaded.worktrees.find(isHomeWorktree);
+  if (!existing) {
+    loaded.worktrees.unshift(makeHomeWorktreeEntry(baseDir));
+    return true;
+  }
+  if (existing.path !== baseDir) {
+    existing.path = baseDir;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * リポジトリ擬似ワークツリー移行 (冪等):
+ * 1. settings.repositories の各リポジトリに対応する isRepository エントリを、ホームの直後に挿入する
+ * 2. 既存エントリの name / repositoryName / path をリポジトリ側へ追従させる
+ * 3. 対応するリポジトリが無くなった isRepository エントリを除去する (prune)
+ *
+ * 除去した擬似ワークツリー ID (pruned) と、settings に変更を加えたか (changed) を返す。
+ * migrateWorkgroups より前に呼ぶこと（workgroupId の補完を任せるため）。
+ */
+export function migrateRepositoryWorktrees(
+  loaded: AppSettings,
+): { changed: boolean; pruned: string[] } {
+  const repositories = loaded.repositories ?? [];
+  const wanted = new Map(repositories.map((r) => [makeRepositoryWorktreeId(r.id), r]));
+  let changed = false;
+
+  // 1-2. 既存エントリの追従 + 消えたリポジトリの prune
+  //
+  // 判定はフラグではなく ID で行う。isRepository を知らない旧バージョンで settings.json を
+  // 保存すると serde が未知フィールドを落とすため、フラグだけを見ると擬似エントリが
+  // 通常ワークツリーとして残り続けて二度と回収できなくなる。ID は決定論的なので復元できる。
+  const pruned: string[] = [];
+  const kept = loaded.worktrees.filter((entry) => {
+    const repo = wanted.get(entry.id);
+    if (!repo) {
+      if (!isRepositoryWorktree(entry)) return true;
+      pruned.push(entry.id);
+      return false;
+    }
+    // 擬似ワークツリーとしての不変条件も併せて強制する（手編集・旧バージョン保存への防御）
+    if (
+      entry.isRepository !== true ||
+      entry.name !== repo.name ||
+      entry.repositoryId !== repo.id ||
+      entry.repositoryName !== repo.name ||
+      entry.path !== repo.path ||
+      entry.branchName !== ""
+    ) {
+      entry.isRepository = true;
+      entry.name = repo.name;
+      entry.repositoryId = repo.id;
+      entry.repositoryName = repo.name;
+      entry.path = repo.path;
+      entry.branchName = "";
+      changed = true;
+    }
+    return true;
+  });
+
+  if (pruned.length > 0) {
+    loaded.worktrees = kept;
+    changed = true;
+    if (loaded.detachedWorktreeIds) {
+      const before = loaded.detachedWorktreeIds.length;
+      loaded.detachedWorktreeIds = loaded.detachedWorktreeIds.filter((id) => !pruned.includes(id));
+      if (loaded.detachedWorktreeIds.length !== before) changed = true;
+    }
+  }
+
+  // 3. 未登録のリポジトリ分を挿入する。ホームの直後（= 擬似エントリ群の先頭側）に置く
+  const existingIds = new Set(loaded.worktrees.map((w) => w.id));
+  const missing = repositories.filter((r) => !existingIds.has(makeRepositoryWorktreeId(r.id)));
+  if (missing.length > 0) {
+    const insertAt = loaded.worktrees.findIndex(isHomeWorktree) + 1;
+    loaded.worktrees.splice(insertAt, 0, ...missing.map(makeRepositoryWorktreeEntry));
+    changed = true;
+  }
+
+  return { changed, pruned };
+}
+
+/** prune された擬似ワークツリーの残骸（セッションファイル・アーティファクト）を掃除する */
+export function cleanupPrunedWorktrees(worktreeIds: string[]): void {
+  for (const worktreeId of worktreeIds) {
+    void invoke("delete_terminal_session", { worktreeId }).catch(() => {
+      /* 存在しない場合は無視 */
+    });
+    void invoke("delete_artifacts", { worktreeId }).catch(() => {
+      /* 存在しない場合は無視 */
+    });
+  }
+}
+
+/**
+ * 現在の settings.value に対してリポジトリ擬似ワークツリーを再同期する。
+ * リポジトリの追加/削除直後に呼ぶ（自ウィンドウ発の settings-changed は無視されるため自動追随しない）。
+ * 呼び出し側で syncWorktreesFromSettings() + scheduleSave() をセットで実行すること。
+ */
+export function syncRepositoryWorktrees(): string[] {
+  const { pruned } = migrateRepositoryWorktrees(settings.value);
+  cleanupPrunedWorktrees(pruned);
+  return pruned;
+}
+
+/**
+ * ホームの .claude/ (プラグイン設定 + 同梱スキル) を用意する。
+ * overwrite=false なので既存のスキルファイルは温存され、ユーザーの編集を壊さない。
+ * 失敗してもアプリの動作は続行させる（ログのみ）。
+ */
+export async function setupHomeClaudeDir(homePath: string, overwrite = false): Promise<void> {
+  if (!homePath.trim()) return;
+  try {
+    await invoke("setup_home_claude_dir", { homePath, overwrite });
+  } catch (e) {
+    console.error("ホームの .claude/ 準備に失敗:", e);
+  }
+}
+
 const settings = ref<AppSettings>({
   repositories: [],
   worktreeBaseDir: "",
@@ -133,16 +270,25 @@ async function loadSettingsOnce() {
   if (loaded.alwaysOnTop === undefined) {
     loaded.alwaysOnTop = false;
   }
-  // ホットキー・ワークグループ マイグレーション (冪等)
+  // ホットキー・ホーム・リポジトリ・ワークグループ マイグレーション (冪等)
+  // ホーム/リポジトリはワークグループより先に入れる（workgroupId の補完を migrateWorkgroups に任せるため）
   const hotkeyChanged = migrateHotkeys(loaded.hotkeys);
+  const homeChanged = migrateHomeWorktree(loaded);
+  const { changed: repositoryChanged, pruned: prunedRepoIds } = migrateRepositoryWorktrees(loaded);
   const workgroupChanged = migrateWorkgroups(loaded);
-  if (hotkeyChanged || workgroupChanged) {
+  if (hotkeyChanged || homeChanged || repositoryChanged || workgroupChanged) {
     try {
       await invoke("save_settings", { settings: loaded });
     } catch (e) {
       console.error("マイグレーション保存に失敗:", e);
     }
   }
+  // ホームを新規作成 or パス変更したときだけ .claude/ を用意する（待たない）
+  if (homeChanged) {
+    void setupHomeClaudeDir(loaded.worktreeBaseDir);
+  }
+  // 他ウィンドウ発の削除や手編集された settings.json で消えたリポジトリの残骸を掃除する
+  cleanupPrunedWorktrees(prunedRepoIds);
   if (loaded.locale) {
     setLocale(loaded.locale as "en" | "ja");
   }

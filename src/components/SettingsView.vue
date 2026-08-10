@@ -156,13 +156,8 @@ async function copyApiKey() {
 
 onMounted(fetchMcpStatus);
 
-async function selectWorktreeBaseDir() {
-  const selected = await open({ directory: true, multiple: false });
-  if (typeof selected === "string") {
-    settings.value.worktreeBaseDir = selected;
-    scheduleSave();
-  }
-}
+// ワークツリー追加先ディレクトリとホームの管理エージェント設定は、
+// ワークグループバーの「リポジトリ」チップから開く HomeSettingsDialog.vue へ移設した。
 
 // ─── 外観 ─────────────────────────────────────────────────────────────────────
 
@@ -530,19 +525,8 @@ function getSoundLabel(sound: string | null | undefined): string {
       </template>
     </div>
 
-    <!-- ワークツリー追加先ディレクトリ -->
-    <div class="field-group">
-      <label class="field-label">{{ t('worktreeBaseDir.label') }}</label>
-      <div class="row-input">
-        <input
-          class="text-input"
-          :value="settings.worktreeBaseDir"
-          readonly
-          :placeholder="t('common.notConfigured')"
-        />
-        <button class="btn-secondary" @click="selectWorktreeBaseDir">{{ t('worktreeBaseDir.select') }}</button>
-      </div>
-    </div>
+    <!-- ワークツリー追加先ディレクトリ / ホームの管理エージェントは
+         ワークグループバーの「リポジトリ」チップ → HomeSettingsDialog.vue へ移設 -->
 
     <!-- ワークツリー追加時のデフォルト動作 -->
     <div class="field-group">
@@ -1198,10 +1182,6 @@ function getSoundLabel(sound: string | null | undefined): string {
       "moveToSubWindowOnMcpSpawn": "Move worktree to sub-window when MCP adds a terminal",
       "moveToSubWindowOnMcpSpawnDesc": "If the worktree is not yet in a sub-window, automatically move it after MCP spawns a terminal. Stabilizes terminal sizing for long-running background commands. All other terminals in the worktree will move together."
     },
-    "worktreeBaseDir": {
-      "label": "Worktree base directory",
-      "select": "Select"
-    },
     "worktreeDefaults": {
       "label": "Default worktree behavior",
       "openInSubWindow": "Open in sub window",
@@ -1306,10 +1286,6 @@ function getSoundLabel(sound: string | null | undefined): string {
       "useOretachiTerminalForBackgroundDesc": "OFF の場合、AI Agent は pnpm dev / vite / nodemon 等を oretachi のターミナルタブではなく Claude Code の bash run_in_background で起動します。",
       "moveToSubWindowOnMcpSpawn": "MCP からターミナルが追加されたらサブウィンドウへ自動移行する",
       "moveToSubWindowOnMcpSpawnDesc": "ワークツリーがメインウィンドウにある場合、MCP のターミナル追加直後に自動でサブウィンドウへ移行します。バックグラウンドコマンドの表示サイズを安定させるための設定です。ワークツリー内の他のターミナルも一緒に移動します。"
-    },
-    "worktreeBaseDir": {
-      "label": "ワークツリーの追加先ディレクトリ",
-      "select": "選択"
     },
     "worktreeDefaults": {
       "label": "ワークツリー追加時のデフォルト動作",

@@ -16,6 +16,12 @@ const props = defineProps<{
   isWindowFocused: boolean;
   showWindowControls?: boolean;
   taskTooltip?: string;
+  /** ホームワークツリー: ブランチ表示の代わりにパスを出す */
+  isHome?: boolean;
+  /** リポジトリ擬似ワークツリー: ホームと同じくブランチの代わりにパスを出す */
+  isRepository?: boolean;
+  /** ホーム / リポジトリのときに branchName の代わりに表示するパス */
+  homePath?: string;
 }>();
 
 defineEmits<{
@@ -62,12 +68,30 @@ async function closeWindow() {
         @maximize="toggleMaximize"
       />
       <span
+        v-if="props.isRepository"
+        class="pi pi-folder shrink-0"
+        style="font-size: 12px; color: #fab387"
+      />
+      <span
         class="text-sm font-semibold transition-colors duration-200"
         :class="props.isWindowFocused ? 'text-[#cba6f7]' : 'text-[#6c7086]'"
       >
         {{ props.worktreeName }}
       </span>
       <span
+        v-if="props.isHome"
+        class="text-[10px] px-1.5 py-0.5 rounded font-mono font-bold"
+        style="background: rgba(203,166,247,0.15); color: #cba6f7; border: 1px solid rgba(203,166,247,0.3)"
+      >HOME</span>
+      <span
+        v-if="props.isHome || props.isRepository"
+        class="flex items-center gap-1 text-xs font-mono text-[#9399b2]"
+      >
+        <span class="pi pi-map-marker" style="font-size: 10px" />
+        {{ props.homePath }}
+      </span>
+      <span
+        v-else
         v-tooltip.bottom="props.taskTooltip ? { value: props.taskTooltip, escape: false, showDelay: 300, class: 'task-tooltip-sm' } : undefined"
         class="flex items-center gap-1 text-xs font-mono text-[#9399b2]"
         :class="{ 'cursor-help': props.taskTooltip }"

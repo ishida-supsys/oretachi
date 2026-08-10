@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Worktree, WorktreeTerminal, SavedTerminal, TerminalSessionFile } from "../types/worktree";
 import type { WorktreeEntry } from "../types/settings";
 import { useSettings } from "./useSettings";
+import { isHomeWorktree } from "../utils/homeWorktree";
+import { isPseudoWorktree, isRepositoryWorktree, sortPseudoFirst } from "../utils/repositoryWorktree";
 import { logWarn } from "../utils/log";
 
 const worktrees = ref<Worktree[]>([]);
@@ -99,6 +101,16 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
   if (index === -1) return;
 
   const worktree = worktrees.value[index];
+
+  // ホーム/リポジトリは git ワークツリーではなく、path がワークツリー追加先ディレクトリまたは
+  // リポジトリのルートそのもの。削除すると親ごと消えるため、UI で隠すだけでなくここでも止める。
+  // 静かに return すると呼び出し側が成功扱いでカード/ターミナル状態を破棄してしまうので必ず throw する。
+  if (isHomeWorktree(worktree)) {
+    throw new Error("ホームワークツリーは削除できません");
+  }
+  if (isRepositoryWorktree(worktree)) {
+    throw new Error("リポジトリは削除できません");
+  }
 
   // リポジトリパスを取得（id = リポジトリパスとして使用）
   const repoEntry = settings.value.repositories.find(
@@ -225,6 +237,8 @@ function reorderWorktree(fromId: string, toId: string): void {
   const fromIdx = worktrees.value.findIndex((w) => w.id === fromId);
   const toIdx = worktrees.value.findIndex((w) => w.id === toId);
   if (fromIdx === -1 || toIdx === -1) return;
+  // ホーム/リポジトリは常に先頭固定。掴んでの移動も、その前への差し込みも受け付けない
+  if (isPseudoWorktree(worktrees.value[fromIdx]) || isPseudoWorktree(worktrees.value[toIdx])) return;
 
   const [item] = worktrees.value.splice(fromIdx, 1);
   worktrees.value.splice(toIdx, 0, item);
@@ -242,7 +256,10 @@ function saveWorktreeOrder(): void {
   scheduleSave();
 }
 
-/** ワークツリーの順序を指定された ID 順に復元する。スナップショット外の ID は末尾に追加 */
+/**
+ * ワークツリーの順序を指定された ID 順に復元する。スナップショット外の ID は末尾に追加。
+ * ホーム/リポジトリは順序スナップショットに関わらず常に先頭へ戻す。
+ */
 function restoreWorktreeOrder(orderIds: string[]): void {
   const orderSet = new Set(orderIds);
 
@@ -250,13 +267,13 @@ function restoreWorktreeOrder(orderIds: string[]): void {
     .map((id) => worktrees.value.find((w) => w.id === id))
     .filter((w): w is typeof worktrees.value[number] => w !== undefined);
   const extra = worktrees.value.filter((w) => !orderSet.has(w.id));
-  worktrees.value = [...sorted, ...extra];
+  worktrees.value = sortPseudoFirst([...sorted, ...extra]);
 
   const sortedSettings = orderIds
     .map((id) => settings.value.worktrees.find((w) => w.id === id))
     .filter((w): w is typeof settings.value.worktrees[number] => w !== undefined);
   const extraSettings = settings.value.worktrees.filter((w) => !orderSet.has(w.id));
-  settings.value.worktrees = [...sortedSettings, ...extraSettings];
+  settings.value.worktrees = sortPseudoFirst([...sortedSettings, ...extraSettings]);
 }
 
 /** ローカルブランチ一覧を取得 */

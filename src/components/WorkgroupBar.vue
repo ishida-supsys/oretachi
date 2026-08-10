@@ -1,11 +1,30 @@
 <script setup lang="ts">
-import { ref } from "vue";
+import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { useWorkgroups } from "../composables/useWorkgroups";
+import { useHomePanel } from "../composables/useHomePanel";
+import { useSettings } from "../composables/useSettings";
 import WorkgroupEditDialog from "./WorkgroupEditDialog.vue";
+import HomeSettingsDialog from "./HomeSettingsDialog.vue";
 import type { Workgroup } from "../types/settings";
 
 const { t } = useI18n();
+const { listMode } = useHomePanel();
+const { settings } = useSettings();
+
+const repositoryCount = computed(() => settings.value.repositories.length);
+const repositoryActive = computed(() => listMode.value === "repository");
+const showHomeSettings = ref(false);
+
+// リポジトリチップも通常のグループチップと同じ挙動:
+// 非アクティブならリポジトリ一覧へ切替、アクティブ時の再クリック（と ✎）で設定ダイアログを開く
+function onRepositoryChipClick() {
+  if (repositoryActive.value) {
+    showHomeSettings.value = true;
+  } else {
+    listMode.value = "repository";
+  }
+}
 
 const emit = defineEmits<{
   removeWorkgroup: [groupId: string];
@@ -27,11 +46,13 @@ const draggingId = ref<string | null>(null);
 
 function select(id: string) {
   activeWorkgroupId.value = id;
+  // リポジトリ一覧を出している最中にグループを選んだらワークツリー一覧へ戻す
+  listMode.value = "worktree";
 }
 
 function onChipClick(id: string) {
-  // 既にアクティブなチップを再クリックで編集ダイアログを開く
-  if (activeWorkgroupId.value === id) {
+  // リポジトリ一覧の表示中は、アクティブなチップでも「まず一覧を戻す」のが自然なので編集に入らない
+  if (activeWorkgroupId.value === id && !repositoryActive.value) {
     editingId.value = id;
   } else {
     select(id);
@@ -83,12 +104,33 @@ function onDragEnd() {
 
 <template>
   <div class="workgroup-bar">
+    <!-- リポジトリ一覧チップ: グループチップと同一デザイン。
+         アイコン・固定色の左罫・直後の区切り線でグループと区別する -->
+    <button
+      class="wg-chip wg-chip-repository"
+      :class="{ active: repositoryActive }"
+      :title="t('repositoryChipTitle')"
+      @click="onRepositoryChipClick"
+    >
+      <i class="pi pi-folder wg-repo-icon" />
+      <!-- ワークツリー一覧を見ているあいだは場所を取らないようアイコンと設定ボタンだけにし、
+           リポジトリ一覧を開いているあいだだけラベルと件数を出す -->
+      <template v-if="repositoryActive">
+        <span class="wg-name">{{ t('repositoryChip') }}</span>
+        <span class="wg-count">{{ repositoryCount }}</span>
+      </template>
+      <span class="wg-edit" :title="t('homeSettings')" @click.stop="showHomeSettings = true">
+        <i class="pi pi-pencil" style="font-size: 10px" />
+      </span>
+    </button>
+    <div class="wg-sep" />
+
     <button
       v-for="g in groups"
       :key="g.id"
       class="wg-chip"
-      :class="{ active: g.id === activeWorkgroupId, notified: notifiedGroupIds.has(g.id) }"
-      :style="{ borderLeftColor: g.color || '#9399b2', ...(g.id === activeWorkgroupId && g.color ? { background: g.color + '30', borderColor: g.color } : {}) }"
+      :class="{ active: g.id === activeWorkgroupId && !repositoryActive, notified: notifiedGroupIds.has(g.id) }"
+      :style="{ borderLeftColor: g.color || '#9399b2', ...(g.id === activeWorkgroupId && !repositoryActive && g.color ? { background: g.color + '30', borderColor: g.color } : {}) }"
       draggable="true"
       :title="t('chipTitle')"
       @click="onChipClick(g.id)"
@@ -99,7 +141,7 @@ function onDragEnd() {
     >
       <span class="wg-name">{{ displayName(g) }}</span>
       <span class="wg-count">{{ worktreeCount(g.id) }}</span>
-      <span v-if="g.id === activeWorkgroupId" class="wg-edit" @click.stop="editingId = g.id">
+      <span v-if="g.id === activeWorkgroupId && !repositoryActive" class="wg-edit" @click.stop="editingId = g.id">
         <i class="pi pi-pencil" style="font-size: 10px" />
       </span>
     </button>
@@ -116,6 +158,8 @@ function onDragEnd() {
       @remove="onRemove"
       @cancel="editingId = null"
     />
+
+    <HomeSettingsDialog v-if="showHomeSettings" @close="showHomeSettings = false" />
   </div>
 </template>
 
@@ -186,6 +230,31 @@ function onDragEnd() {
   color: #cdd6f4;
 }
 
+/* リポジトリチップ: 寸法・角丸・フォントは .wg-chip をそのまま使い、
+   左罫の固定色とアイコンだけでグループチップと区別する */
+.wg-chip-repository {
+  border-left-color: #fab387;
+}
+
+.wg-chip-repository.active {
+  background: #fab38730;
+  border-color: #fab387;
+  color: #cdd6f4;
+}
+
+.wg-repo-icon {
+  font-size: 11px;
+  color: #fab387;
+}
+
+.wg-sep {
+  width: 1px;
+  height: 18px;
+  background: #45475a;
+  margin: 0 2px;
+  flex-shrink: 0;
+}
+
 .wg-edit {
   display: inline-flex;
   align-items: center;
@@ -221,11 +290,17 @@ function onDragEnd() {
 {
   "en": {
     "addGroup": "Add group",
-    "chipTitle": "Click to switch / click again to edit"
+    "chipTitle": "Click to switch / click again to edit",
+    "repositoryChip": "Repositories",
+    "repositoryChipTitle": "Show repositories",
+    "homeSettings": "Home & management agent settings"
   },
   "ja": {
     "addGroup": "グループを追加",
-    "chipTitle": "クリックで切替 / 再クリックで編集"
+    "chipTitle": "クリックで切替 / 再クリックで編集",
+    "repositoryChip": "リポジトリ",
+    "repositoryChipTitle": "リポジトリ一覧を表示",
+    "homeSettings": "ホーム・管理エージェント設定"
   }
 }
 </i18n>

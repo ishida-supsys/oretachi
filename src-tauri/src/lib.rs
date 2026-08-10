@@ -7,6 +7,7 @@ mod claude_plugin;
 mod claude_plugin_skills;
 mod fs_watcher;
 mod git_worktree;
+mod home_skills;
 mod ide_launcher;
 mod job_object;
 mod main_thread_watch;
@@ -336,6 +337,37 @@ async fn write_claude_plugin_config(
         claude_plugin::write_plugin_config(&worktree_path, &worktree_name, hooks, &marketplace_dir)
     })
     .await
+}
+
+/// ホームワークツリーの `.claude/` を用意する。
+/// 1. settings.local.json に oretachi プラグイン設定を書く（MCP ツールを使えるようにするため必須）
+/// 2. `.claude/skills/` に同梱スキルをシードとして書き出す
+///    （`overwrite == false` なら既存ファイルは温存し、ユーザーの編集を壊さない）
+///
+/// 戻り値は書き出したスキルファイル数。
+#[tauri::command]
+async fn setup_home_claude_dir(
+    app_handle: tauri::AppHandle,
+    home_path: String,
+    overwrite: bool,
+) -> Result<usize, String> {
+    if home_path.trim().is_empty() {
+        return Err("ワークツリー追加先ディレクトリが未設定です".to_string());
+    }
+    let marketplace_dir = claude_plugin::marketplace_dir(&app_handle)?
+        .to_string_lossy()
+        .replace('\\', "/");
+    run_git(move || {
+        claude_plugin::write_plugin_config(&home_path, "home", Vec::new(), &marketplace_dir)?;
+        home_skills::write_home_skill_files(&home_path, overwrite)
+    })
+    .await
+}
+
+/// ホームに注入する管理エージェントプロンプトの既定値。設定画面のプレースホルダ表示用。
+#[tauri::command]
+fn get_default_home_agent_prompt() -> String {
+    home_skills::DEFAULT_HOME_AGENT_PROMPT.to_string()
 }
 
 #[tauri::command]
@@ -1314,6 +1346,8 @@ pub fn run() {
             detect_tsbuildinfo_files,
             copy_gitignore_targets,
             write_claude_plugin_config,
+            setup_home_claude_dir,
+            get_default_home_agent_prompt,
             copy_claude_session_data,
             copy_working_changes,
             git_merge_branch,

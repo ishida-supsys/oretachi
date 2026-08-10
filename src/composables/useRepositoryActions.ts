@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useSettings } from "./useSettings";
+import { useSettings, syncRepositoryWorktrees } from "./useSettings";
+import { useWorktrees } from "./useWorktrees";
 
 export type AddRepositoryResult = "added" | "cancelled" | "notARepo" | "alreadyRegistered";
 
@@ -11,6 +12,7 @@ export type AddRepositoryResult = "added" | "cancelled" | "notARepo" | "alreadyR
  */
 export function useRepositoryActions() {
   const { settings, scheduleSave } = useSettings();
+  const { syncWorktreesFromSettings } = useWorktrees();
 
   async function addRepository(): Promise<AddRepositoryResult> {
     const selected = await open({ directory: true, multiple: false });
@@ -33,6 +35,11 @@ export function useRepositoryActions() {
       name,
       path: selected,
     });
+    // リポジトリ擬似ワークツリーを生成してランタイム配列にも反映する。
+    // 自ウィンドウ発の settings-changed は無視されるためここで明示的に同期しないと、
+    // 追加直後のカード/タブにターミナル追加ボタンが出ない。
+    syncRepositoryWorktrees();
+    syncWorktreesFromSettings();
     scheduleSave();
     return "added";
   }

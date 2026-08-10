@@ -403,6 +403,21 @@ export function useTaskExecution(deps: {
       return;
     }
 
+    await launchAgentInTerminal(wt, terminal.id, code.prompt, { remoteExec: code.remoteExec });
+  }
+
+  /**
+   * 指定ワークツリーの指定ターミナルでエージェントを起動する。
+   * プロンプトは一時ファイル経由で渡し、シェルに応じたコマンドへラップする。
+   * detached（サブウィンドウ）と メインウィンドウ の両方に対応。
+   */
+  async function launchAgentInTerminal(
+    wt: Worktree,
+    terminalId: number,
+    prompt: string,
+    opts?: { remoteExec?: boolean },
+  ): Promise<void> {
+    const remoteExec = opts?.remoteExec ?? false;
     // タスク実行エージェント・モード・実行プロンプトは所属ワークグループ単位
     const group = groupOf(wt);
     const agentKind = group?.taskAddAgent ?? settings.value.aiAgent?.taskAddAgent ?? settings.value.aiAgent?.approvalAgent ?? "claudeCode";
@@ -415,13 +430,13 @@ export function useTaskExecution(deps: {
       (shell === undefined && isWindows);
 
     // 実行プロンプトテンプレート ({{PROMPT}}) を適用してから一時ファイルへ書き出し
-    const finalPrompt = applyExecPrompt(group?.execPrompt, code.prompt);
+    const finalPrompt = applyExecPrompt(group?.execPrompt, prompt);
     const tempPath = await invoke<string>("write_temp_prompt", { content: finalPrompt });
 
     const claudeMode = claudeModeFlag(group?.claudeCodeMode);
     let agentCmd: string;
     switch (agentKind) {
-      case "claudeCode": agentCmd = code.remoteExec ? `claude --remote ${claudeMode}` : `claude ${claudeMode}`; break;
+      case "claudeCode": agentCmd = remoteExec ? `claude --remote ${claudeMode}` : `claude ${claudeMode}`; break;
       case "geminiCli":  agentCmd = "gemini"; break;
       case "codexCli":   agentCmd = "codex"; break;
       case "clineCli":   agentCmd = "cline"; break;
@@ -473,17 +488,17 @@ export function useTaskExecution(deps: {
 
     if (isDetached(wt.id)) {
       // サブウィンドウに移動済みの場合: pty_write で直接PTYに書き込む
-      const sid = getDetachedSessionId(terminal.id);
+      const sid = getDetachedSessionId(terminalId);
       if (sid === null) {
         throw new Error(`セッションIDが見つかりません: ${wt.name}`);
       }
       const bytes = Array.from(new TextEncoder().encode(command));
       await invoke("pty_write", { sessionId: sid, data: bytes });
       await invoke("pty_set_ai_agent", { sessionId: sid, isAgent: true });
-      if (code.remoteExec) listenForWebSession(sid, terminal.id);
+      if (remoteExec) listenForWebSession(sid, terminalId);
     } else {
       // メインウィンドウ: terminalRef 経由で書き込む
-      const termRef = getTerminalRef(terminal.id);
+      const termRef = getTerminalRef(terminalId);
       if (!termRef) {
         throw new Error(`ターミナルが見つかりません: ${wt.name}`);
       }
@@ -492,7 +507,7 @@ export function useTaskExecution(deps: {
       const sid = termRef.sessionId;
       if (sid != null) {
         await invoke("pty_set_ai_agent", { sessionId: sid, isAgent: true });
-        if (code.remoteExec) listenForWebSession(sid, terminal.id);
+        if (remoteExec) listenForWebSession(sid, terminalId);
       }
     }
   }
@@ -500,6 +515,7 @@ export function useTaskExecution(deps: {
   return {
     executeAddWorktree,
     executeAgentWorktree,
+    launchAgentInTerminal,
     resolveShell,
     buildScriptCommand,
     buildPendingCommand,
