@@ -5,6 +5,7 @@ import type { WorktreeEntry } from "../types/settings";
 import { useSettings } from "./useSettings";
 import { isHomeWorktree } from "../utils/homeWorktree";
 import { isPseudoWorktree, isRepositoryWorktree, sortPseudoFirst } from "../utils/repositoryWorktree";
+import { logWarn } from "../utils/log";
 
 const worktrees = ref<Worktree[]>([]);
 let terminalCounter = 0;
@@ -75,6 +76,19 @@ function rollbackWorktree(worktreeId: string): void {
   }
 }
 
+/**
+ * ワークツリー自体の削除は完了したが、そのあとのブランチ削除に失敗したことを表すエラー。
+ * 呼び出し側はこれを「部分的失敗」として扱い、専用のメッセージを表示する。
+ */
+export class BranchDeleteAfterRemoveError extends Error {
+  readonly reason: unknown;
+  constructor(reason: unknown) {
+    super(String(reason));
+    this.name = "BranchDeleteAfterRemoveError";
+    this.reason = reason;
+  }
+}
+
 interface RemoveWorktreeOptions {
   mergeTo?: string;
   deleteBranch?: boolean;
@@ -103,6 +117,24 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
     (r) => r.id === worktree.repositoryId
   );
   if (repoEntry) {
+    // 診断用: settings の branchName とワークツリーの実 HEAD が食い違っていないかを
+    // ワークツリー削除前（パスがまだ存在するうち）に確認する。削除対象は settings の値のまま
+    // （ユーザーが意図的に別ブランチへ切り替えている場合に別ブランチを消さないため）。
+    if (options?.deleteBranch) {
+      try {
+        const actualBranch = await invoke<string | null>("git_worktree_current_branch", {
+          worktreePath: worktree.path,
+        });
+        if (actualBranch !== null && actualBranch !== worktree.branchName) {
+          logWarn(
+            `[worktree] branch mismatch: settings=${worktree.branchName} actual=${actualBranch} path=${worktree.path}`
+          );
+        }
+      } catch {
+        // 取得失敗（既にパスが無い等）は診断目的なので無視
+      }
+    }
+
     if (options?.mergeTo) {
       await invoke("git_merge_branch", {
         repoPath: repoEntry.path,
@@ -122,11 +154,15 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
     let branchDeleteError: unknown = null;
     if (options?.deleteBranch) {
       try {
-        await invoke("git_delete_branch", {
+        // 戻り値 false = ブランチが既に存在せずスキップ（成功扱い・UI には出さない）
+        const deleted = await invoke<boolean>("git_delete_branch", {
           repoPath: repoEntry.path,
           branchName: worktree.branchName,
           force: options.forceBranch ?? false,
         });
+        if (!deleted) {
+          logWarn(`[worktree] branch ${worktree.branchName} was already absent, skipped delete`);
+        }
       } catch (e) {
         // ワークツリーを復元して、削除前の状態に戻す
         let restored = false;
@@ -148,7 +184,11 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
       }
     }
 
-    if (onBeforeSplice) await onBeforeSplice();
+    // カード演出などの UI 処理。ここでの失敗が「ブランチだけ削除済みでエントリが残る」
+    // 中途半端な状態を生まないよう、例外は握りつぶす。
+    if (onBeforeSplice) {
+      try { await onBeforeSplice(); } catch { /* アニメーション失敗は削除の成否に影響させない */ }
+    }
     worktrees.value.splice(index, 1);
     settings.value.worktrees = settings.value.worktrees.filter(
       (w) => w.id !== worktreeId
@@ -160,11 +200,14 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
     try { await invoke("delete_artifacts", { worktreeId }); } catch { /* 存在しない場合は無視 */ }
 
     // クリーンアップ完了後にブランチ削除エラーを伝播
-    if (branchDeleteError) throw branchDeleteError;
+    // （ワークツリーは削除済みなので、呼び出し側が部分的失敗として扱えるようマークする）
+    if (branchDeleteError) throw new BranchDeleteAfterRemoveError(branchDeleteError);
     return;
   }
 
-  if (onBeforeSplice) await onBeforeSplice();
+  if (onBeforeSplice) {
+    try { await onBeforeSplice(); } catch { /* アニメーション失敗は削除の成否に影響させない */ }
+  }
 
   worktrees.value.splice(index, 1);
   settings.value.worktrees = settings.value.worktrees.filter(
