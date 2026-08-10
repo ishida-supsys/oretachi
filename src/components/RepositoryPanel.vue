@@ -46,6 +46,11 @@ const props = defineProps<{
   hotkeyChars: Map<string, string>;
   detachedWorktrees: Set<string>;
   autoApprovals: Map<string, boolean>;
+  aiJudgingWorktrees: Set<string>;
+  /** ホームカードの description / タスク一覧（ワークツリー一覧と同じ内容を出す） */
+  cardTooltips?: Map<string, string | undefined>;
+  descriptionOpens?: Map<string, boolean>;
+  showAllDescriptions?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -58,6 +63,8 @@ const emit = defineEmits<{
   focusSubWindow: [worktreeId: string];
   setHotkeyChar: [worktreeId: string];
   toggleAutoApproval: [worktreeId: string];
+  toggleDescription: [worktreeId: string];
+  cancelAiJudging: [worktreeId: string];
   removeRepository: [repositoryId: string];
 }>();
 
@@ -206,6 +213,11 @@ defineExpose({ addRepository });
             :hotkey-char="hotkeyChars.get(item.worktree.id)"
             :artifact-count="artifactCounts.get(item.worktree.id) ?? 0"
             :auto-approval="autoApprovals.get(item.worktree.id) ?? false"
+            :ai-judging="aiJudgingWorktrees.has(item.worktree.id)"
+            :tooltip="cardTooltips?.get(item.worktree.id)"
+            :description-open="showAllDescriptions || (descriptionOpens?.get(item.worktree.id) ?? false)"
+            @toggle-description="emit('toggleDescription', $event)"
+            @cancel-ai-judging="emit('cancelAiJudging', $event)"
             @select-terminal="emit('selectTerminal', $event)"
             @add-terminal="emit('addTerminal', $event)"
             @open-in-ide="emit('openInIde', $event)"

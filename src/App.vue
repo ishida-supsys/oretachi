@@ -59,6 +59,7 @@ import { useUiZoom } from "./composables/useUiZoom";
 import { consumeMaxBlockedMs, startEventLoopMonitor } from "./utils/eventLoopMonitor";
 import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
 import { ask } from "@tauri-apps/plugin-dialog";
+import { cancelApproval } from "./utils/autoApproval";
 import { useUpdater } from "./composables/useUpdater";
 import Toast from "primevue/toast";
 import Popover from "primevue/popover";
@@ -785,16 +786,33 @@ async function onRemoveRepository(repositoryId: string) {
   if (hasWorktrees) return;
 
   const pseudoId = makeRepositoryWorktreeId(repositoryId);
+  const worktree = worktrees.value.find((w) => w.id === pseudoId);
+  const repositoryName =
+    settings.value.repositories.find((r) => r.id === repositoryId)?.name ?? repositoryId;
 
-  // サブウィンドウに出 している場合はメインへ戻してから片付ける
+  // ターミナルの停止とアーティファクト削除は取り消せないので必ず確認を取る。
+  // 特にアーティファクトはカードに出ていない（バッジは list_repo_artifacts 由来の別データ）ため、
+  // 何が消えるのかを明示しないとユーザーからは見えない。
+  const confirmed = await ask(
+    t("removeRepositoryConfirm", {
+      name: repositoryName,
+      terminals: worktree?.terminals.length ?? 0,
+    }),
+    { title: t("removeRepositoryTitle"), kind: "warning" },
+  );
+  if (!confirmed) return;
+
+  // サブウィンドウに出している場合はメインへ戻してから片付ける
   if (isDetached(pseudoId)) {
     await moveToMainWindow(pseudoId);
     subWindowEvents.subWindowFocusMap.delete(pseudoId);
   }
   await closeArtifactWindow(pseudoId);
+  // 進行中の自動承認 AI 判定を止める。cancel_approval は判定用の子プロセスを
+  // kill する唯一の経路なので、呼ばないと孤児プロセスが残る。
+  await cancelApproval(pseudoId);
 
   // ターミナルプロセスを停止し、terminalId 単位の状態をすべて掃除する
-  const worktree = worktrees.value.find((w) => w.id === pseudoId);
   const bundle = worktreeFrameBundles.get(pseudoId);
   for (const terminal of worktree ? [...worktree.terminals] : []) {
     const term = bundle?.terminalRefs.get(terminal.id) ?? getTerminalRef(terminal.id);
@@ -815,6 +833,12 @@ async function onRemoveRepository(repositoryId: string) {
   clearNotification(pseudoId);
   artifactCounts.delete(pseudoId);
   descriptionOpenMap.delete(pseudoId);
+  // 擬似ワークツリーの ID は決定論的で再登録時に同じ値になるため、ランタイム状態を
+  // 残すと同じリポジトリを登録し直したときに自動承認が無言で復活してしまう
+  // （settings には残っていないので再起動すると OFF に戻り、表示と実体が食い違う）。
+  autoApprovalMap.delete(pseudoId);
+  autoApprovalPromptMap.delete(pseudoId);
+  lastJudgedCommandMap.delete(pseudoId);
   if (activeWorktreeId.value === pseudoId) goHome();
 
   // settings から外し、擬似ワークツリーの prune とセッションファイル掃除を syncRepositoryWorktrees に任せる
@@ -2222,7 +2246,9 @@ onMounted(async () => {
     "minimize": "Minimize",
     "maximize": "Maximize",
     "close": "Close",
-    "homeMenuTitle": "Home & repositories"
+    "homeMenuTitle": "Home & repositories",
+    "removeRepositoryTitle": "Unregister repository",
+    "removeRepositoryConfirm": "Unregister \"{name}\"?\n\nThis closes its {terminals} terminal(s) and permanently deletes the artifacts and saved terminal sessions created there. The repository folder itself is not touched."
   },
   "ja": {
     "taskAddSummary": "タスク追加",
@@ -2255,7 +2281,9 @@ onMounted(async () => {
     "minimize": "最小化",
     "maximize": "最大化",
     "close": "閉じる",
-    "homeMenuTitle": "ホーム・リポジトリ"
+    "homeMenuTitle": "ホーム・リポジトリ",
+    "removeRepositoryTitle": "リポジトリの登録を解除",
+    "removeRepositoryConfirm": "「{name}」の登録を解除しますか？\n\nこのリポジトリのターミナル {terminals} 個を終了し、そこで作成したアーティファクトと保存済みターミナルセッションを完全に削除します。リポジトリのフォルダ自体は削除されません。"
   }
 }
 </i18n>

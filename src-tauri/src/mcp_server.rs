@@ -1157,10 +1157,12 @@ impl NotifyService {
             ));
         };
 
-        // ホームは git ワークツリーではないので git 状態を持たない
-        if wt.is_home {
+        // ホーム / リポジトリは git ワークツリーではないので、ワークツリーとしての git 状態を持たない
+        // （リポジトリ root で git は動くが branchName が空の擬似エントリなので結果が噛み合わない）
+        if wt.is_home || wt.is_repository {
+            let kind = if wt.is_home { "home worktree" } else { "repository" };
             return Err(McpError::invalid_params(
-                format!("worktree '{}' is the home worktree and has no git state", wt.name),
+                format!("worktree '{}' is the {} and has no worktree git state", wt.name, kind),
                 None,
             ));
         }
