@@ -532,6 +532,9 @@ pub struct ArtifactModuleParams {
 pub struct ListRepositoryParams {}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListWorkgroupsParams {}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetWorktreeStatusParams {
     #[schemars(description = "絞り込みキーワード（name / branchName / description の部分一致、大文字小文字は区別しない）。省略時は全件")]
     pub query: Option<String>,
@@ -556,12 +559,18 @@ pub struct AddTaskParams {
     pub prompt: String,
     #[schemars(description = "リモート実行するかどうか (省略時は false)")]
     pub remote_exec: Option<bool>,
+    #[schemars(description = "追加先ワークグループのID (oretachi_list_workgroups の id)。省略時はUIで現在選択中のワークグループに入る (isDefault のグループとは限らない)")]
+    pub workgroup_id: Option<String>,
+    #[schemars(description = "追加先ワークグループの表示名 (oretachi_list_workgroups の name)。workgroup_id 指定時は無視される")]
+    pub workgroup_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
 struct AddTaskEvent {
     prompt: String,
     remote_exec: bool,
+    /// 追加先ワークグループID。None ならフロントに委ね、UI で現在選択中の WG に入る。
+    workgroup_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1341,6 +1350,35 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
+    #[tool(description = "登録済みワークグループの一覧を返す。各エントリは id・表示名(name)・色(color)・タスク実行エージェント(taskAddAgent)・isDefault を含む。oretachi_add_task で追加先ワークグループを指定する前に、利用可能なワークグループを確認するために使う。isDefault は「ワークグループ未設定のワークツリーが表示上フォールバックする先頭グループ」を意味し、oretachi_add_task で指定を省略したときの追加先ではない (省略時はUIで現在選択中のワークグループに入る)", annotations(read_only_hint = true))]
+    fn oretachi_list_workgroups(
+        &self,
+        Parameters(_params): Parameters<ListWorkgroupsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+        // 先頭グループが既定（未所属ワークツリーのフォールバック先）。
+        // resolve_workgroup / フロントの useWorkgroups.resolvedGroupId と同じ規則。
+        let groups: Vec<serde_json::Value> = settings
+            .workgroups
+            .iter()
+            .enumerate()
+            .map(|(i, g)| {
+                serde_json::json!({
+                    "id": g.id,
+                    "name": workgroup_display_name(&settings, g),
+                    "color": g.color,
+                    "taskAddAgent": g.task_add_agent,
+                    "isDefault": i == 0,
+                })
+            })
+            .collect();
+        let json = serde_json::to_string_pretty(&groups)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        log::info!("[mcp] oretachi_list_workgroups: {} groups", groups.len());
+        Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
     #[tool(description = "アーティファクトを検索する。queryを省略すると全件返却。title/content/type/languageを対象に部分一致検索。結果はcontentを除いたメタデータのみ。検索対象は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は project_dir が必須", annotations(read_only_hint = true))]
     async fn search_artifact(
         &self,
@@ -1435,24 +1473,36 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "タスク追加リクエストを送信する。AIがタスクコードを生成し、ワークツリー作成やエージェント実行を非同期で行う")]
+    #[tool(description = "タスク追加リクエストを送信する。AIがタスクコードを生成し、ワークツリー作成やエージェント実行を非同期で行う。追加先ワークグループを指定したい場合は oretachi_list_workgroups で一覧を取得してから workgroup_id / workgroup_name を渡す")]
     fn oretachi_add_task(
         &self,
-        Parameters(AddTaskParams { prompt, remote_exec }): Parameters<AddTaskParams>,
+        Parameters(AddTaskParams { prompt, remote_exec, workgroup_id, workgroup_name }): Parameters<AddTaskParams>,
     ) -> Result<CallToolResult, McpError> {
         let prompt = prompt.trim().to_string();
         if prompt.is_empty() {
             return Err(McpError::invalid_params("prompt must not be empty", None));
         }
+        let resolved_workgroup_id = {
+            let settings_manager = self.app_handle.state::<SettingsManager>();
+            let settings = settings_manager.get();
+            resolve_workgroup_target(&settings, workgroup_id.as_deref(), workgroup_name.as_deref())
+                .map_err(|e| McpError::invalid_params(e, None))?
+        };
         let remote = remote_exec.unwrap_or(false);
         let event = AddTaskEvent {
             prompt: prompt.clone(),
             remote_exec: remote,
+            workgroup_id: resolved_workgroup_id.clone(),
         };
         self.app_handle
             .emit("mcp-add-task", &event)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-        log::info!("[mcp] oretachi_add_task: prompt={} remote_exec={}", prompt, remote);
+        log::info!(
+            "[mcp] oretachi_add_task: prompt={} remote_exec={} workgroup_id={}",
+            prompt,
+            remote,
+            resolved_workgroup_id.as_deref().unwrap_or("(default)")
+        );
         Ok(CallToolResult::success(vec![Content::text(
             "タスク追加リクエストを送信しました。タスクの生成・実行は非同期に行われます。",
         )]))
@@ -2178,6 +2228,69 @@ fn workgroup_display_name(settings: &AppSettings, group: &Workgroup) -> String {
     match settings.locale.as_deref() {
         Some("en") => format!("Group ({})", n),
         _ => format!("グループ({})", n),
+    }
+}
+
+/// MCP から指定された workgroup_id / workgroup_name を settings 上のワークグループIDに解決する。
+/// どちらも未指定なら `Ok(None)` を返し、追加先はフロントに委ねる
+/// （UI で現在選択中の WG = useWorkgroups.activeWorkgroupId に入る）。
+/// 解決できない・曖昧な場合は先頭 WG へ暗黙にフォールバックせずエラーにする
+/// （意図しないワークグループへタスクが入るのを防ぐため）。
+fn resolve_workgroup_target(
+    settings: &AppSettings,
+    workgroup_id: Option<&str>,
+    workgroup_name: Option<&str>,
+) -> Result<Option<String>, String> {
+    fn non_empty(s: Option<&str>) -> Option<&str> {
+        s.map(str::trim).filter(|v| !v.is_empty())
+    }
+    let id = non_empty(workgroup_id);
+    let name = non_empty(workgroup_name);
+
+    // エージェントが自己修復できるよう、エラー時は利用可能な WG を列挙する。
+    let available = || {
+        if settings.workgroups.is_empty() {
+            return "(ワークグループが未定義です)".to_string();
+        }
+        settings
+            .workgroups
+            .iter()
+            .map(|g| format!("{} ({})", workgroup_display_name(settings, g), g.id))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+
+    if let Some(id) = id {
+        return match settings.workgroups.iter().find(|g| g.id == id) {
+            Some(g) => Ok(Some(g.id.clone())),
+            None => Err(format!(
+                "workgroup_id '{}' に一致するワークグループがありません。利用可能: {}",
+                id,
+                available()
+            )),
+        };
+    }
+
+    let Some(name) = name else {
+        return Ok(None);
+    };
+    let matched: Vec<&Workgroup> = settings
+        .workgroups
+        .iter()
+        .filter(|g| workgroup_display_name(settings, g).trim().eq_ignore_ascii_case(name))
+        .collect();
+    match matched.as_slice() {
+        [g] => Ok(Some(g.id.clone())),
+        [] => Err(format!(
+            "workgroup_name '{}' に一致するワークグループがありません。利用可能: {}",
+            name,
+            available()
+        )),
+        _ => Err(format!(
+            "workgroup_name '{}' に一致するワークグループが複数あります。workgroup_id で指定してください。利用可能: {}",
+            name,
+            available()
+        )),
     }
 }
 
@@ -3056,6 +3169,79 @@ mod tests {
         assert_eq!(workgroup_display_name(&settings, &settings.workgroups[0]), "Group (1)");
     }
 
+    fn wg_settings() -> AppSettings {
+        let mut settings = AppSettings::default();
+        settings.workgroups = vec![
+            Workgroup { id: "wg-1".into(), name: None, ..Default::default() },
+            Workgroup { id: "wg-2".into(), name: Some("リリース準備".into()), ..Default::default() },
+            Workgroup { id: "wg-3".into(), name: Some("Bug Fix".into()), ..Default::default() },
+        ];
+        settings
+    }
+
+    /// 未指定なら追加先はフロント既定の WG に委ねる（従来挙動の維持）。
+    #[test]
+    fn resolve_workgroup_target_defaults_to_none() {
+        let settings = wg_settings();
+        assert_eq!(resolve_workgroup_target(&settings, None, None), Ok(None));
+        // 空文字・空白のみは未指定扱い
+        assert_eq!(resolve_workgroup_target(&settings, Some(""), Some("  ")), Ok(None));
+    }
+
+    #[test]
+    fn resolve_workgroup_target_matches_id_and_name() {
+        let settings = wg_settings();
+        // id 優先（name が別グループを指していても id が勝つ）
+        assert_eq!(
+            resolve_workgroup_target(&settings, Some("wg-2"), Some("Bug Fix")),
+            Ok(Some("wg-2".into()))
+        );
+        // 表示名の完全一致
+        assert_eq!(
+            resolve_workgroup_target(&settings, None, Some("リリース準備")),
+            Ok(Some("wg-2".into()))
+        );
+        // 前後空白と大文字小文字は無視
+        assert_eq!(
+            resolve_workgroup_target(&settings, None, Some("  bug fix  ")),
+            Ok(Some("wg-3".into()))
+        );
+        // 自動生成された表示名でも指定できる
+        assert_eq!(
+            resolve_workgroup_target(&settings, None, Some("グループ(1)")),
+            Ok(Some("wg-1".into()))
+        );
+    }
+
+    /// 解決できない指定は先頭 WG へ暗黙フォールバックせずエラーにし、
+    /// エージェントが言い直せるよう利用可能な WG を列挙する。
+    #[test]
+    fn resolve_workgroup_target_errors_instead_of_falling_back() {
+        let settings = wg_settings();
+
+        let err = resolve_workgroup_target(&settings, Some("wg-404"), None).unwrap_err();
+        assert!(err.contains("wg-404"), "{}", err);
+        assert!(err.contains("リリース準備 (wg-2)"), "{}", err);
+
+        let err = resolve_workgroup_target(&settings, None, Some("存在しない")).unwrap_err();
+        assert!(err.contains("存在しない"), "{}", err);
+        assert!(err.contains("グループ(1) (wg-1)"), "{}", err);
+    }
+
+    /// 同名 WG が複数ある場合は、どちらに入るか予測できないのでエラーにする。
+    #[test]
+    fn resolve_workgroup_target_rejects_ambiguous_name() {
+        let mut settings = wg_settings();
+        settings.workgroups.push(Workgroup {
+            id: "wg-4".into(),
+            name: Some("リリース準備".into()),
+            ..Default::default()
+        });
+        let err = resolve_workgroup_target(&settings, None, Some("リリース準備")).unwrap_err();
+        assert!(err.contains("複数"), "{}", err);
+        assert!(err.contains("workgroup_id"), "{}", err);
+    }
+
     /// Claude Code は plan モードで `readOnlyHint` が立っていない MCP ツールを
     /// permissions.allow に関わらず一律 ask にする。ここで advertise 内容を固定しておく。
     #[test]
@@ -3068,6 +3254,7 @@ mod tests {
             "oretachi_inspect_worktree",
             "oretachi_get_app_options",
             "oretachi_list_repository",
+            "oretachi_list_workgroups",
             "oretachi_list_terminals",
             "oretachi_read_terminal",
             "oretachi_show_worktree",
