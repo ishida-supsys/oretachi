@@ -22,14 +22,15 @@ $ARGUMENTS: <artifact-id> [--repo <repo>] [--branch <branch>]
 ```
 
 - `artifact-id`（必須）: 作成するアーティファクトID（例: `kickoff-deck`）
-- `--repo`（省略時: `oretachi`）: リポジトリ名
-- `--branch`（省略時: `git branch --show-current`）: ブランチ名
+- `--repo` / `--branch`（任意）: 保存先ワークツリーを明示したい場合のみ、両方セットで指定
 
 ## ワークフロー
 
 ### Step 1: パラメータ確定
 
-引数を解析する。`--branch` が省略された場合は `git branch --show-current` で現在ブランチを取得。
+引数を解析する。保存先ワークツリーは、artifact 系ツールに **`project_dir`（現在の作業ディレクトリ）を渡して解決させる**のが既定。HOME タブやリポジトリルートは git ワークツリーではないため `git branch --show-current` が使えず、`--repo`/`--branch` では特定できない。
+
+`--repo` と `--branch` が両方明示された場合のみ、`project_dir` の代わりにそれを渡す。`--repo` だけ与えられた場合は `git branch --show-current` でブランチを補う。
 
 ### Step 2: テンプレートを読み込む
 
