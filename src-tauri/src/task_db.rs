@@ -110,6 +110,47 @@ pub async fn list(
     Ok(TaskListResult { items: rows, has_more })
 }
 
+/// 指定ワークツリー（repository + branch）宛のステップを含むタスクのプロンプトを新しい順に返す。
+///
+/// `tasks` テーブルはワークツリー ID を持たず、`steps` JSON の `code.repository` /
+/// `code.branch` でしか紐付かない（`src/types/task.ts` の `TaskStep`）。SQL では表現しづらいので
+/// 直近 `LIMIT` 件を取り出して Rust 側で突合する。
+pub async fn list_prompts_for_worktree(
+    pool: &SqlitePool,
+    repository: &str,
+    branch: &str,
+    limit: i64,
+) -> Result<Vec<String>, String> {
+    let rows: Vec<TaskRow> = sqlx::query_as::<_, TaskRow>(
+        "SELECT * FROM tasks ORDER BY created_at DESC LIMIT ?",
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(rows
+        .into_iter()
+        .filter(|row| steps_match_worktree(&row.steps, repository, branch))
+        .map(|row| row.prompt)
+        .collect())
+}
+
+/// `steps` JSON に該当ワークツリー宛のステップが含まれるか。
+fn steps_match_worktree(steps_json: &str, repository: &str, branch: &str) -> bool {
+    let Ok(steps) = serde_json::from_str::<serde_json::Value>(steps_json) else {
+        return false;
+    };
+    let Some(arr) = steps.as_array() else {
+        return false;
+    };
+    arr.iter().any(|step| {
+        let code = step.get("code").unwrap_or(step);
+        code.get("repository").and_then(|v| v.as_str()) == Some(repository)
+            && code.get("branch").and_then(|v| v.as_str()) == Some(branch)
+    })
+}
+
 pub async fn delete(pool: &SqlitePool, id: &str) -> Result<(), String> {
     sqlx::query("DELETE FROM tasks WHERE id = ?")
         .bind(id)

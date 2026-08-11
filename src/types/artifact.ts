@@ -1,3 +1,13 @@
+/** URL アーティファクトの content_type（Rust 側は artifact_url.rs の URL_ARTIFACT_CONTENT_TYPE） */
+export const URL_ARTIFACT_CONTENT_TYPE = "text/uri-list";
+
+/** アイコンボタンのドロップダウンに並べる URL アーティファクト */
+export interface UrlArtifactEntry {
+  id: string;
+  title: string;
+  url: string;
+}
+
 export interface ArtifactMeta {
   id: string;
   title: string;

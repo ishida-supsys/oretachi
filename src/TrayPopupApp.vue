@@ -11,6 +11,11 @@ import { useSettings } from "./composables/useSettings";
 import { useHotkeyListener } from "./composables/useHotkeys";
 import { useIdeSelect } from "./composables/useIdeSelect";
 import { useArtifactWindow } from "./composables/useArtifactWindow";
+import ArtifactUrlHoverMenu from "./components/ArtifactUrlHoverMenu.vue";
+import ArtifactIcon from "./components/ArtifactIcon.vue";
+import { extractUrlArtifacts } from "./utils/artifactUrl";
+import type { UrlArtifactEntry } from "./types/artifact";
+import { invoke } from "@tauri-apps/api/core";
 import type { TrayWorktreeData } from "./composables/useTrayPopup";
 import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
 import type { FrameNode } from "./types/frame";
@@ -110,6 +115,10 @@ async function applyWindowSize(data: TrayWorktreeData) {
 async function showWorktree(data: TrayWorktreeData) {
   terminalEntries.clear();
   terminalRefs.clear();
+  // 前のワークツリーの URL が残ったままにならないよう先にクリアしてから、
+  // 表示切り替えを待たせないよう取得自体は投げっぱなしにする
+  artifactUrls.value = [];
+  void refreshArtifactUrls(data.worktreeId);
 
   // 情報バー(description)が現在の worktree の内容で描画されてから高さを計測する。
   // currentWorktree (= allWorktrees[currentIndex]) は呼び出し側で更新済みのため nextTick で DOM 反映を待つ。
@@ -197,6 +206,21 @@ const { openArtifactViewer } = useArtifactWindow();
 async function onOpenArtifacts() {
   if (!currentWorktree.value) return;
   await openArtifactViewer(currentWorktree.value.worktreeId, currentWorktree.value.worktreeName);
+}
+
+/** 表示中ワークツリーの URL アーティファクト（アイコン隣のドロップダウン用） */
+const artifactUrls = ref<UrlArtifactEntry[]>([]);
+
+async function refreshArtifactUrls(worktreeId: string) {
+  try {
+    const list = await invoke<unknown[]>("list_artifacts", { worktreeId });
+    // 取得中に別ワークツリーへ切り替わっていたら破棄する（表示中と一覧の不一致を防ぐ）
+    if (currentWorktree.value?.worktreeId !== worktreeId) return;
+    artifactUrls.value = extractUrlArtifacts(list);
+  } catch {
+    if (currentWorktree.value?.worktreeId !== worktreeId) return;
+    artifactUrls.value = [];
+  }
 }
 
 async function onOpenInIde() {
@@ -316,9 +340,16 @@ useHotkeyListener(() => {
 
 let unlistenInit: UnlistenFn | null = null;
 let unlistenSettings: UnlistenFn | null = null;
+let unlistenArtifact: UnlistenFn | null = null;
 
 onMounted(async () => {
   await loadSettings();
+
+  // 表示中ワークツリーにアーティファクトが登録されたら URL 一覧を追従させる
+  unlistenArtifact = await listen<{ worktreeId: string }>("artifact-changed", async (event) => {
+    if (event.payload.worktreeId !== currentWorktree.value?.worktreeId) return;
+    await refreshArtifactUrls(event.payload.worktreeId);
+  });
 
   // トレイ表示中の uiScale / ターミナル設定変更に追従
   unlistenSettings = await listen("settings-changed", async () => {
@@ -355,6 +386,7 @@ onMounted(async () => {
 onUnmounted(() => {
   unlistenInit?.();
   unlistenSettings?.();
+  unlistenArtifact?.();
 });
 </script>
 
@@ -426,14 +458,15 @@ onUnmounted(() => {
         >
           <span class="pi pi-code text-xs" />
         </button>
-        <button
-          v-if="currentWorktree"
-          class="pointer-events-auto w-6 h-6 flex items-center justify-center rounded hover:bg-[#313244] text-[#6c7086] hover:text-[#cdd6f4] transition-colors"
-          :title="t('openArtifacts')"
-          @click="onOpenArtifacts"
-        >
-          <span class="pi pi-box text-xs" />
-        </button>
+        <ArtifactUrlHoverMenu v-if="currentWorktree" :urls="artifactUrls">
+          <button
+            class="pointer-events-auto w-6 h-6 flex items-center justify-center rounded hover:bg-[#313244] text-[#6c7086] hover:text-[#cdd6f4] transition-colors"
+            :title="t('openArtifacts')"
+            @click="onOpenArtifacts"
+          >
+            <ArtifactIcon :has-url="artifactUrls.length > 0" class="text-xs" />
+          </button>
+        </ArtifactUrlHoverMenu>
         <button
           v-if="!isMac"
           class="pointer-events-auto w-6 h-6 flex items-center justify-center rounded hover:bg-[#313244] text-[#6c7086] hover:text-[#f38ba8] transition-colors"

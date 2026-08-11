@@ -24,7 +24,7 @@ use crate::settings::{AppSettings, SettingsManager, Workgroup, WorktreeEntry};
 /// これらのツールは read_only_hint = true を宣言しているため Claude Code 側が
 /// isConcurrencySafe = true とみなし、同一アーティファクトに対して並列に呼び出しうる。
 /// NotifyService は接続ごとに生成されるためプロセス共有の static で持つ。
-static ARTIFACT_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static ARTIFACT_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// 一時ファイル名の衝突を避けるための連番。
 static ARTIFACT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -36,7 +36,10 @@ static ARTIFACT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Claude Code が読み書きを並列実行しうるため、一時ファイル + rename にする。
 /// rename は同一ディレクトリ内なら Windows/Unix ともに既存ファイルを置換する。
 /// 一時ファイルの拡張子は `.json` にならないため search_artifact の走査対象外。
-async fn write_artifact_atomic(path: &std::path::Path, contents: &str) -> Result<(), McpError> {
+pub(crate) async fn write_artifact_atomic(
+    path: &std::path::Path,
+    contents: &str,
+) -> Result<(), McpError> {
     let seq = ARTIFACT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
     tmp_name.push(format!(".tmp-{}-{}", std::process::id(), seq));
@@ -393,7 +396,7 @@ pub struct ArtifactParams {
     pub repository: Option<String>,
     #[schemars(description = "ブランチ名。project_dir を渡す場合は不要。指定する場合は repository と両方セットで")]
     pub branch: Option<String>,
-    #[schemars(description = "コンテンツの種類 (create時必須): application/vnd.ant.code, text/markdown, text/html, image/svg+xml, application/vnd.ant.mermaid, application/vnd.ant.react (Tailwind CSSユーティリティクラス利用可), text/csv, text/tab-separated-values (1行目をヘッダとするテーブルビューアで表示)")]
+    #[schemars(description = "コンテンツの種類 (create時必須): application/vnd.ant.code, text/markdown, text/html, image/svg+xml, application/vnd.ant.mermaid, application/vnd.ant.react (Tailwind CSSユーティリティクラス利用可), text/csv, text/tab-separated-values (1行目をヘッダとするテーブルビューアで表示), text/uri-list (content に URL を1行だけ書く。ビューアには「ブラウザで開く」ボタンだけが出る)")]
     #[serde(rename = "type")]
     pub content_type: Option<String>,
     #[schemars(description = "アーティファクトのタイトル (create時必須)")]
@@ -1951,6 +1954,28 @@ async fn notify_handler(
             }
         },
     };
+
+    // URL アーティファクトの自動登録。通知フックの設定有無とは独立に動かしたいので、
+    // 通知フック未設定リポジトリの早期 return より前に処理する。
+    // ツール呼び出しごとに走るため "http" を含まない body は即スキップし、
+    // 実処理は spawn へ逃がして通知パス（サイドカーの read timeout 500ms）を塞がない。
+    if let (Some(w), Some(ev), Some(body)) = (worktree, payload.event.as_deref(), payload.body.as_deref())
+    {
+        if matches!(ev, "PreToolUse" | "PostToolUse") && body.contains("http") {
+            let hook_wt = crate::artifact_url::HookWorktree {
+                id: w.id.clone(),
+                repository_name: w.repository_name.clone(),
+                branch_name: w.branch_name.clone(),
+                path: w.path.clone(),
+            };
+            let handle = app_handle.clone();
+            let event_name = ev.to_string();
+            let body_owned = body.to_string();
+            tokio::spawn(async move {
+                crate::artifact_url::handle_tool_hook(handle, hook_wt, event_name, body_owned).await;
+            });
+        }
+    }
 
     // ライフサイクルフック由来（event 指定・kind 明示なし）の通知は、通知フックが1件も
     // 設定されていないリポジトリでは破棄する。プラグインは全ワークツリーで無条件有効化される

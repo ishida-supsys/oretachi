@@ -33,6 +33,8 @@ import { useWindowFocus } from "./composables/useWindowFocus";
 import { useTasks } from "./composables/useTasks";
 import type { TrayWorktreeData, TrayTerminalData } from "./composables/useTrayPopup";
 import type { WorktreeEntry } from "./types/settings";
+import type { UrlArtifactEntry } from "./types/artifact";
+import { extractUrlArtifacts } from "./utils/artifactUrl";
 import { useAddTaskDialog } from "./composables/useAddTaskDialog";
 import { useTaskExecution } from "./composables/useTaskExecution";
 import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
@@ -114,6 +116,9 @@ const notificationCounts = computed(() => {
 // ワークツリーごとのアーティファクト数
 const artifactCounts = reactive(new Map<string, number>());
 
+// ワークツリーごとの URL アーティファクト（アイコン隣のドロップダウン用）
+const artifactUrls = reactive(new Map<string, UrlArtifactEntry[]>());
+
 // ホームカードの description 開閉状態（ワークツリー毎・settings.json に永続化）
 const descriptionOpenMap = reactive(new Map<string, boolean>());
 
@@ -135,8 +140,10 @@ async function refreshArtifactCount(worktreeId: string) {
   try {
     const list = await invoke<unknown[]>("list_artifacts", { worktreeId });
     artifactCounts.set(worktreeId, list.length);
+    artifactUrls.set(worktreeId, extractUrlArtifacts(list));
   } catch {
     artifactCounts.set(worktreeId, 0);
+    artifactUrls.set(worktreeId, []);
   }
 }
 
@@ -832,6 +839,7 @@ async function onRemoveRepository(repositoryId: string) {
   worktreeFrameBundles.delete(pseudoId);
   clearNotification(pseudoId);
   artifactCounts.delete(pseudoId);
+  artifactUrls.delete(pseudoId);
   descriptionOpenMap.delete(pseudoId);
   // 擬似ワークツリーの ID は決定論的で再登録時に同じ値になるため、ランタイム状態を
   // 残すと同じリポジトリを登録し直したときに自動承認が無言で復活してしまう
@@ -1584,11 +1592,13 @@ onMounted(async () => {
   });
 
   // アーティファクト変更時の処理
-  await listen<{ worktreeId: string; artifactId: string; command: string }>("artifact-changed", async (event) => {
-    const { worktreeId: wid, command } = event.payload;
+  await listen<{ worktreeId: string; artifactId: string; command: string; autoOpen?: boolean }>("artifact-changed", async (event) => {
+    const { worktreeId: wid, command, autoOpen } = event.payload;
     // アーティファクト数を更新
     refreshArtifactCount(wid);
-    // 追加時に自動でビューアを開く
+    // 追加時に自動でビューアを開く。
+    // フックによる URL 自動登録は作業の副産物なので autoOpen: false で割り込ませない。
+    if (autoOpen === false) return;
     if (command !== "create") return;
     if (settings.value.worktreeDefaults?.autoOpenArtifact === false) return;
     const wt = worktrees.value.find((w) => w.id === wid);
@@ -2000,6 +2010,7 @@ onMounted(async () => {
         :notifications="notificationCounts"
         :hotkey-chars="hotkeyChars"
         :artifact-counts="artifactCounts"
+        :artifact-urls="artifactUrls"
         :loading-worktrees="loadingWorktrees"
         :cancellable-worktrees="cancellableWorktrees"
         :auto-approvals="autoApprovalMap"
@@ -2050,6 +2061,7 @@ onMounted(async () => {
             :branch-name="wt.branchName"
             :hotkey-char="hotkeyChars.get(wt.id)"
             :artifact-count="artifactCounts.get(wt.id) ?? 0"
+            :artifact-urls="artifactUrls.get(wt.id) ?? []"
             :auto-approval="autoApprovalMap.get(wt.id) ?? false"
             :ai-judging="aiJudgingWorktrees.has(wt.id)"
             :is-window-focused="isWindowFocused"

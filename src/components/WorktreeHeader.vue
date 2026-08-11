@@ -2,7 +2,10 @@
 import { useI18n } from "vue-i18n";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import MacTrafficLights from "./MacTrafficLights.vue";
+import ArtifactUrlHoverMenu from "./ArtifactUrlHoverMenu.vue";
+import ArtifactIcon from "./ArtifactIcon.vue";
 import { isMac } from "../composables/usePlatform";
+import type { UrlArtifactEntry } from "../types/artifact";
 
 const { t } = useI18n();
 
@@ -11,6 +14,8 @@ const props = defineProps<{
   branchName: string;
   hotkeyChar?: string;
   artifactCount?: number;
+  /** 登録済み URL アーティファクト（アイコン隣のドロップダウン用） */
+  artifactUrls?: UrlArtifactEntry[];
   autoApproval: boolean;
   aiJudging: boolean;
   isWindowFocused: boolean;
@@ -120,16 +125,20 @@ async function closeWindow() {
         <span class="pi pi-spin pi-spinner" style="font-size: 9px" />
         {{ t('aiJudgingBadge') }}
       </button>
-      <button
+      <ArtifactUrlHoverMenu
         v-if="props.artifactCount && props.artifactCount > 0"
-        class="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium cursor-pointer border-none"
-        style="background: rgba(137, 180, 250, 0.15); color: #89b4fa; border: 1px solid rgba(137, 180, 250, 0.3)"
-        :title="t('openArtifacts')"
-        @click="$emit('open-artifacts')"
+        :urls="props.artifactUrls ?? []"
       >
-        <span class="pi pi-box" style="font-size: 9px" />
-        {{ props.artifactCount }}
-      </button>
+        <button
+          class="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium cursor-pointer border-none"
+          style="background: rgba(137, 180, 250, 0.15); color: #89b4fa; border: 1px solid rgba(137, 180, 250, 0.3)"
+          :title="t('openArtifacts')"
+          @click="$emit('open-artifacts')"
+        >
+          <ArtifactIcon :has-url="(props.artifactUrls?.length ?? 0) > 0" style="font-size: 9px" />
+          {{ props.artifactCount }}
+        </button>
+      </ArtifactUrlHoverMenu>
     </div>
     <div class="flex items-center">
       <button
@@ -139,14 +148,18 @@ async function closeWindow() {
       >
         <span class="pi pi-code text-sm" />
       </button>
-      <button
-        class="flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
+      <ArtifactUrlHoverMenu
+        :urls="props.artifactUrls ?? []"
         :class="props.showWindowControls && !isMac ? 'mr-4' : ''"
-        :title="t('openArtifacts')"
-        @click="$emit('open-artifacts')"
       >
-        <span class="pi pi-box text-sm" />
-      </button>
+        <button
+          class="flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
+          :title="t('openArtifacts')"
+          @click="$emit('open-artifacts')"
+        >
+          <ArtifactIcon :has-url="(props.artifactUrls?.length ?? 0) > 0" class="text-sm" />
+        </button>
+      </ArtifactUrlHoverMenu>
       <template v-if="props.showWindowControls && !isMac">
         <button
           class="flex items-center justify-center h-8 hover:bg-[#313244] text-[#6c7086] hover:text-[#cdd6f4] transition-colors"
