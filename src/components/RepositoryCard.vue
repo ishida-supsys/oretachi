@@ -6,8 +6,11 @@ import { applyPluginConfig } from "../composables/useSettings";
 import type { Repository } from "../types/settings";
 import type { Worktree } from "../types/worktree";
 import TerminalThumbnail from "./TerminalThumbnail.vue";
+import ArtifactUrlHoverMenu from "./ArtifactUrlHoverMenu.vue";
+import ArtifactIcon from "./ArtifactIcon.vue";
 import Popover from "primevue/popover";
 import Badge from "primevue/badge";
+import type { UrlArtifactEntry } from "../types/artifact";
 
 const { t } = useI18n();
 
@@ -17,6 +20,8 @@ const props = defineProps<{
   worktree?: Worktree;
   thumbnailUrls: Map<number, string>;
   artifactCount?: number;
+  /** 登録済み URL アーティファクト（バッジ隣のドロップダウン用） */
+  artifactUrls?: UrlArtifactEntry[];
   notificationCount?: number;
   hotkeyChar?: string;
   detached?: boolean;
@@ -124,15 +129,16 @@ async function reapplyPluginConfig() {
     />
     <div v-if="hotkeyChar || (artifactCount && artifactCount > 0)" class="top-left-badges">
       <div v-if="hotkeyChar" class="hotkey-badge">Alt+{{ hotkeyChar }}</div>
-      <button
-        v-if="artifactCount && artifactCount > 0"
-        class="artifact-count-badge"
-        :title="t('artifactsTooltip')"
-        @click="emit('openArtifacts', repo.id)"
-      >
-        <span class="pi pi-box" style="font-size: 9px" />
-        {{ artifactCount }}
-      </button>
+      <ArtifactUrlHoverMenu v-if="artifactCount && artifactCount > 0" :urls="artifactUrls ?? []">
+        <button
+          class="artifact-count-badge"
+          :title="t('artifactsTooltip')"
+          @click="emit('openArtifacts', repo.id)"
+        >
+          <ArtifactIcon :has-url="(artifactUrls?.length ?? 0) > 0" style="font-size: 9px" />
+          {{ artifactCount }}
+        </button>
+      </ArtifactUrlHoverMenu>
     </div>
 
     <div class="card-header">

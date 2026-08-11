@@ -11,8 +11,11 @@ import { useSettings, applyPluginConfig } from "../composables/useSettings";
 const { t } = useI18n();
 const { displayName: workgroupDisplayName } = useWorkgroups();
 import TerminalThumbnail from "./TerminalThumbnail.vue";
+import ArtifactUrlHoverMenu from "./ArtifactUrlHoverMenu.vue";
+import ArtifactIcon from "./ArtifactIcon.vue";
 import Popover from "primevue/popover";
 import Badge from "primevue/badge";
+import type { UrlArtifactEntry } from "../types/artifact";
 
 const props = defineProps<{
   worktree: Worktree;
@@ -21,6 +24,8 @@ const props = defineProps<{
   notificationCount?: number;
   hotkeyChar?: string;
   artifactCount?: number;
+  /** 登録済み URL アーティファクト（バッジ隣のドロップダウン用） */
+  artifactUrls?: UrlArtifactEntry[];
   loading?: boolean;
   loadingText?: string;
   cancellable?: boolean;
@@ -180,10 +185,16 @@ const terminalList = computed(() =>
     <Badge v-if="notificationCount && notificationCount > 0" :value="notificationCount" severity="danger" class="notification-badge" />
     <div v-if="hotkeyChar || (artifactCount && artifactCount > 0)" class="top-left-badges">
       <div v-if="hotkeyChar" class="hotkey-badge">Alt+{{ hotkeyChar }}</div>
-      <div v-if="artifactCount && artifactCount > 0" class="artifact-count-badge">
-        <span class="pi pi-box" style="font-size: 9px" />
-        {{ artifactCount }}
-      </div>
+      <ArtifactUrlHoverMenu v-if="artifactCount && artifactCount > 0" :urls="artifactUrls ?? []">
+        <button
+          class="artifact-count-badge"
+          :title="t('openArtifacts')"
+          @click="emit('openArtifacts', worktree.id)"
+        >
+          <ArtifactIcon :has-url="(artifactUrls?.length ?? 0) > 0" style="font-size: 9px" />
+          {{ artifactCount }}
+        </button>
+      </ArtifactUrlHoverMenu>
     </div>
     <div class="card-header">
       <div class="card-info">
@@ -372,6 +383,11 @@ const terminalList = computed(() =>
   font-size: 10px;
   color: #89b4fa;
   white-space: nowrap;
+  cursor: pointer;
+}
+
+.artifact-count-badge:hover {
+  border-color: #89b4fa;
 }
 
 .card-detached {

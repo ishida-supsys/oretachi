@@ -24,7 +24,7 @@ use crate::settings::{AppSettings, SettingsManager, Workgroup, WorktreeEntry};
 /// これらのツールは read_only_hint = true を宣言しているため Claude Code 側が
 /// isConcurrencySafe = true とみなし、同一アーティファクトに対して並列に呼び出しうる。
 /// NotifyService は接続ごとに生成されるためプロセス共有の static で持つ。
-static ARTIFACT_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+pub(crate) static ARTIFACT_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// 一時ファイル名の衝突を避けるための連番。
 static ARTIFACT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -36,7 +36,10 @@ static ARTIFACT_TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 /// Claude Code が読み書きを並列実行しうるため、一時ファイル + rename にする。
 /// rename は同一ディレクトリ内なら Windows/Unix ともに既存ファイルを置換する。
 /// 一時ファイルの拡張子は `.json` にならないため search_artifact の走査対象外。
-async fn write_artifact_atomic(path: &std::path::Path, contents: &str) -> Result<(), McpError> {
+pub(crate) async fn write_artifact_atomic(
+    path: &std::path::Path,
+    contents: &str,
+) -> Result<(), McpError> {
     let seq = ARTIFACT_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let mut tmp_name = path.file_name().unwrap_or_default().to_os_string();
     tmp_name.push(format!(".tmp-{}-{}", std::process::id(), seq));
@@ -441,11 +444,15 @@ pub struct ArtifactParams {
     pub command: String,
     #[schemars(description = "アーティファクトを識別する一意なID")]
     pub id: String,
-    #[schemars(description = "リポジトリ名")]
-    pub repository: String,
-    #[schemars(description = "ブランチ名")]
-    pub branch: String,
-    #[schemars(description = "コンテンツの種類 (create時必須): application/vnd.ant.code, text/markdown, text/html, image/svg+xml, application/vnd.ant.mermaid, application/vnd.ant.react (Tailwind CSSユーティリティクラス利用可), text/csv, text/tab-separated-values (1行目をヘッダとするテーブルビューアで表示)")]
+    #[schemars(description = "現在の作業ディレクトリ。これを渡すのが最も確実。HOMEタブやリポジトリルートで作業している場合は repository/branch では特定できないため必須")]
+    pub project_dir: Option<String>,
+    #[schemars(description = "対象ワークツリーID（project_dir で特定できない場合に指定）")]
+    pub worktree_id: Option<String>,
+    #[schemars(description = "リポジトリ名。project_dir を渡す場合は不要。指定する場合は branch と両方セットで")]
+    pub repository: Option<String>,
+    #[schemars(description = "ブランチ名。project_dir を渡す場合は不要。指定する場合は repository と両方セットで")]
+    pub branch: Option<String>,
+    #[schemars(description = "コンテンツの種類 (create時必須): application/vnd.ant.code, text/markdown, text/html, image/svg+xml, application/vnd.ant.mermaid, application/vnd.ant.react (Tailwind CSSユーティリティクラス利用可), text/csv, text/tab-separated-values (1行目をヘッダとするテーブルビューアで表示), text/uri-list (content に URL を1行だけ書く。ビューアには「ブラウザで開く」ボタンだけが出る)")]
     #[serde(rename = "type")]
     pub content_type: Option<String>,
     #[schemars(description = "アーティファクトのタイトル (create時必須)")]
@@ -481,10 +488,14 @@ struct ArtifactData {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SearchArtifactParams {
-    #[schemars(description = "リポジトリ名")]
-    pub repository: String,
-    #[schemars(description = "ブランチ名")]
-    pub branch: String,
+    #[schemars(description = "現在の作業ディレクトリ。これを渡すのが最も確実。HOMEタブやリポジトリルートで作業している場合は repository/branch では特定できないため必須")]
+    pub project_dir: Option<String>,
+    #[schemars(description = "対象ワークツリーID（project_dir で特定できない場合に指定）")]
+    pub worktree_id: Option<String>,
+    #[schemars(description = "リポジトリ名。project_dir を渡す場合は不要。指定する場合は branch と両方セットで")]
+    pub repository: Option<String>,
+    #[schemars(description = "ブランチ名。project_dir を渡す場合は不要。指定する場合は repository と両方セットで")]
+    pub branch: Option<String>,
     #[schemars(description = "検索キーワード (省略時は全件返却)。title, content, type, language を対象に部分一致検索")]
     pub query: Option<String>,
 }
@@ -495,10 +506,14 @@ pub struct ArtifactModuleParams {
     pub command: String,
     #[schemars(description = "アーティファクトID")]
     pub id: String,
-    #[schemars(description = "リポジトリ名")]
-    pub repository: String,
-    #[schemars(description = "ブランチ名")]
-    pub branch: String,
+    #[schemars(description = "現在の作業ディレクトリ。これを渡すのが最も確実。HOMEタブやリポジトリルートで作業している場合は repository/branch では特定できないため必須")]
+    pub project_dir: Option<String>,
+    #[schemars(description = "対象ワークツリーID（project_dir で特定できない場合に指定）")]
+    pub worktree_id: Option<String>,
+    #[schemars(description = "リポジトリ名。project_dir を渡す場合は不要。指定する場合は branch と両方セットで")]
+    pub repository: Option<String>,
+    #[schemars(description = "ブランチ名。project_dir を渡す場合は不要。指定する場合は repository と両方セットで")]
+    pub branch: Option<String>,
     #[schemars(description = "モジュール名 (例: \"components/Header\", \"screens/Login\")。list時は省略可")]
     pub module_name: Option<String>,
     #[schemars(description = "モジュールのソースコード (create/rewrite時必須)")]
@@ -680,12 +695,14 @@ impl NotifyService {
         }
     }
 
-    #[tool(description = "アーティファクトを操作する。create: 新規作成, update: 差分更新(old_str→new_str), rewrite: 全置換, get: 1件取得(offset/limitで行範囲指定可)", annotations(read_only_hint = true))]
+    #[tool(description = "アーティファクトを操作する。create: 新規作成, update: 差分更新(old_str→new_str), rewrite: 全置換, get: 1件取得(offset/limitで行範囲指定可)。保存先は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は repository/branch では特定できないため project_dir が必須", annotations(read_only_hint = true))]
     async fn artifact(
         &self,
         Parameters(ArtifactParams {
             command,
             id,
+            project_dir,
+            worktree_id: target_worktree_id,
             repository,
             branch,
             content_type,
@@ -700,19 +717,13 @@ impl NotifyService {
     ) -> Result<CallToolResult, McpError> {
         let settings_manager = self.app_handle.state::<SettingsManager>();
         let settings = settings_manager.get();
-        let wt = settings
-            .worktrees
-            .iter()
-            .find(|wt| wt.repository_name == repository && wt.branch_name == branch)
-            .ok_or_else(|| {
-                McpError::invalid_params(
-                    format!(
-                        "repository='{}', branch='{}' に一致するワークツリーが存在しません",
-                        repository, branch
-                    ),
-                    None,
-                )
-            })?;
+        let wt = resolve_artifact_worktree(
+            &settings,
+            target_worktree_id.as_deref(),
+            project_dir.as_deref(),
+            repository.as_deref(),
+            branch.as_deref(),
+        )?;
         let worktree_id = wt.id.clone();
 
         // artifact ID のパストラバーサル防止
@@ -898,11 +909,13 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Reactアーティファクトのモジュールを操作する。大規模アーティファクトをファイル単位で管理するために使用。list: モジュール一覧(行数のみ), get: 1モジュール取得(offset/limitで行範囲指定可), create: 追加, update: 差分更新, rewrite: 全置換, delete: 削除", annotations(read_only_hint = true))]
+    #[tool(description = "Reactアーティファクトのモジュールを操作する。大規模アーティファクトをファイル単位で管理するために使用。list: モジュール一覧(行数のみ), get: 1モジュール取得(offset/limitで行範囲指定可), create: 追加, update: 差分更新, rewrite: 全置換, delete: 削除。対象は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は project_dir が必須", annotations(read_only_hint = true))]
     async fn artifact_module(
         &self,
         Parameters(ArtifactModuleParams {
-            command, id, repository, branch,
+            command, id,
+            project_dir, worktree_id: target_worktree_id,
+            repository, branch,
             module_name, content, old_str, new_str,
             offset, limit,
         }): Parameters<ArtifactModuleParams>,
@@ -919,14 +932,13 @@ impl NotifyService {
 
         let settings_manager = self.app_handle.state::<SettingsManager>();
         let settings = settings_manager.get();
-        let wt = settings
-            .worktrees
-            .iter()
-            .find(|wt| wt.repository_name == repository && wt.branch_name == branch)
-            .ok_or_else(|| McpError::invalid_params(
-                format!("repository='{}', branch='{}' に一致するワークツリーが存在しません", repository, branch),
-                None,
-            ))?;
+        let wt = resolve_artifact_worktree(
+            &settings,
+            target_worktree_id.as_deref(),
+            project_dir.as_deref(),
+            repository.as_deref(),
+            branch.as_deref(),
+        )?;
         let worktree_id = wt.id.clone();
 
         // artifact ID のパストラバーサル防止
@@ -1329,26 +1341,26 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "アーティファクトを検索する。queryを省略すると全件返却。title/content/type/languageを対象に部分一致検索。結果はcontentを除いたメタデータのみ", annotations(read_only_hint = true))]
+    #[tool(description = "アーティファクトを検索する。queryを省略すると全件返却。title/content/type/languageを対象に部分一致検索。結果はcontentを除いたメタデータのみ。検索対象は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は project_dir が必須", annotations(read_only_hint = true))]
     async fn search_artifact(
         &self,
-        Parameters(SearchArtifactParams { repository, branch, query }): Parameters<SearchArtifactParams>,
+        Parameters(SearchArtifactParams {
+            project_dir,
+            worktree_id: target_worktree_id,
+            repository,
+            branch,
+            query,
+        }): Parameters<SearchArtifactParams>,
     ) -> Result<CallToolResult, McpError> {
         let settings_manager = self.app_handle.state::<SettingsManager>();
         let settings = settings_manager.get();
-        let wt = settings
-            .worktrees
-            .iter()
-            .find(|wt| wt.repository_name == repository && wt.branch_name == branch)
-            .ok_or_else(|| {
-                McpError::invalid_params(
-                    format!(
-                        "repository='{}', branch='{}' に一致するワークツリーが存在しません",
-                        repository, branch
-                    ),
-                    None,
-                )
-            })?;
+        let wt = resolve_artifact_worktree(
+            &settings,
+            target_worktree_id.as_deref(),
+            project_dir.as_deref(),
+            repository.as_deref(),
+            branch.as_deref(),
+        )?;
         let worktree_id = wt.id.clone();
 
         let artifacts_dir = self
@@ -2011,6 +2023,16 @@ fn worktree_name_from_path(path: &str) -> String {
         .to_string()
 }
 
+/// 登録済みワークツリー名を列挙する（エラーメッセージ用）。
+fn available_worktree_names(settings: &AppSettings) -> String {
+    settings
+        .worktrees
+        .iter()
+        .map(|w| w.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// worktree_id / worktree_name / project_dir のいずれかからワークツリーを1件に確定する。
 /// 優先順位は id > name > project_dir。同名が複数ある場合は ID を列挙したエラーを返し、
 /// 呼び出し元（AI agent）に worktree_id での指定をやり直させる。
@@ -2022,15 +2044,6 @@ fn resolve_worktree<'a>(
     project_dir: Option<&str>,
     missing_hint: &str,
 ) -> Result<&'a WorktreeEntry, McpError> {
-    let available = || {
-        settings
-            .worktrees
-            .iter()
-            .map(|w| w.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
     if let Some(id) = worktree_id.map(str::trim).filter(|s| !s.is_empty()) {
         return settings.worktrees.iter().find(|w| w.id == id).ok_or_else(|| {
             McpError::invalid_params(format!("worktree id '{}' not found", id), None)
@@ -2041,7 +2054,11 @@ fn resolve_worktree<'a>(
         let matches: Vec<_> = settings.worktrees.iter().filter(|w| w.name == name).collect();
         return match matches.len() {
             0 => Err(McpError::invalid_params(
-                format!("worktree '{}' not found. available: [{}]", name, available()),
+                format!(
+                    "worktree '{}' not found. available: [{}]",
+                    name,
+                    available_worktree_names(settings)
+                ),
                 None,
             )),
             1 => Ok(matches[0]),
@@ -2065,7 +2082,7 @@ fn resolve_worktree<'a>(
                 format!(
                     "no worktree matches project_dir '{}'. available: [{}]",
                     dir,
-                    available()
+                    available_worktree_names(settings)
                 ),
                 None,
             )
@@ -2073,6 +2090,66 @@ fn resolve_worktree<'a>(
     }
 
     Err(McpError::invalid_params(missing_hint.to_string(), None))
+}
+
+/// artifact 系ツール（artifact / artifact_module / search_artifact）の保存先ワークツリーを解決する。
+/// 優先順位: worktree_id > project_dir 逆引き > repository + branch。
+/// HOME / リポジトリ擬似ワークツリーは repository_name / branch_name が空なので
+/// repository+branch では当たらない。project_dir(= エージェントの cwd) で解決させる。
+fn resolve_artifact_worktree<'a>(
+    settings: &'a AppSettings,
+    worktree_id: Option<&str>,
+    project_dir: Option<&str>,
+    repository: Option<&str>,
+    branch: Option<&str>,
+) -> Result<&'a WorktreeEntry, McpError> {
+    if let Some(id) = worktree_id.map(str::trim).filter(|s| !s.is_empty()) {
+        return settings.worktrees.iter().find(|w| w.id == id).ok_or_else(|| {
+            McpError::invalid_params(format!("worktree id '{}' が存在しません", id), None)
+        });
+    }
+
+    if let Some(dir) = project_dir.map(str::trim).filter(|s| !s.is_empty()) {
+        return resolve_worktree_by_dir(settings, dir).ok_or_else(|| {
+            McpError::invalid_params(
+                format!(
+                    "project_dir '{}' に一致するワークツリーが存在しません。available: [{}]",
+                    dir,
+                    available_worktree_names(settings)
+                ),
+                None,
+            )
+        });
+    }
+
+    let repository = repository.map(str::trim).filter(|s| !s.is_empty());
+    let branch = branch.map(str::trim).filter(|s| !s.is_empty());
+    match (repository, branch) {
+        (Some(repository), Some(branch)) => settings
+            .worktrees
+            .iter()
+            .find(|wt| wt.repository_name == repository && wt.branch_name == branch)
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    format!(
+                        "repository='{}', branch='{}' に一致するワークツリーが存在しません。HOMEタブやリポジトリルートで作業している場合は project_dir を指定してください",
+                        repository, branch
+                    ),
+                    None,
+                )
+            }),
+        (None, None) => Err(McpError::invalid_params(
+            format!(
+                "project_dir / worktree_id / repository+branch のいずれかを指定してください。available: [{}]",
+                available_worktree_names(settings)
+            ),
+            None,
+        )),
+        _ => Err(McpError::invalid_params(
+            "repository と branch は両方セットで指定してください（片方のみでは解決できません）。作業ディレクトリが分かる場合は project_dir を指定してください",
+            None,
+        )),
+    }
 }
 
 /// ワークツリーの所属ワークグループを解決する。workgroup_id が未設定/不明な場合は
@@ -2162,6 +2239,28 @@ async fn notify_handler(
             }
         },
     };
+
+    // URL アーティファクトの自動登録。通知フックの設定有無とは独立に動かしたいので、
+    // 通知フック未設定リポジトリの早期 return より前に処理する。
+    // ツール呼び出しごとに走るため "http" を含まない body は即スキップし、
+    // 実処理は spawn へ逃がして通知パス（サイドカーの read timeout 500ms）を塞がない。
+    if let (Some(w), Some(ev), Some(body)) = (worktree, payload.event.as_deref(), payload.body.as_deref())
+    {
+        if matches!(ev, "PreToolUse" | "PostToolUse") && body.contains("http") {
+            let hook_wt = crate::artifact_url::HookWorktree {
+                id: w.id.clone(),
+                repository_name: w.repository_name.clone(),
+                branch_name: w.branch_name.clone(),
+                path: w.path.clone(),
+            };
+            let handle = app_handle.clone();
+            let event_name = ev.to_string();
+            let body_owned = body.to_string();
+            tokio::spawn(async move {
+                crate::artifact_url::handle_tool_hook(handle, hook_wt, event_name, body_owned).await;
+            });
+        }
+    }
 
     // ライフサイクルフック由来（event 指定・kind 明示なし）の通知は、通知フックが1件も
     // 設定されていないリポジトリでは破棄する。プラグインは全ワークツリーで無条件有効化される

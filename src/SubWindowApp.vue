@@ -17,6 +17,8 @@ import { runApprovalLoop } from "./utils/autoApproval";
 import type { TerminalForApproval } from "./utils/autoApproval";
 import { useIdeSelect } from "./composables/useIdeSelect";
 import { useArtifactWindow } from "./composables/useArtifactWindow";
+import { extractUrlArtifacts } from "./utils/artifactUrl";
+import type { UrlArtifactEntry } from "./types/artifact";
 import { invoke } from "@tauri-apps/api/core";
 import { logDebug } from "./utils/log";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
@@ -69,13 +71,16 @@ const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect()
 // アーティファクト
 const { openArtifactViewer } = useArtifactWindow();
 const artifactCount = ref(0);
+const artifactUrls = ref<UrlArtifactEntry[]>([]);
 
 async function refreshArtifactCount() {
   try {
     const list = await invoke<unknown[]>("list_artifacts", { worktreeId });
     artifactCount.value = list.length;
+    artifactUrls.value = extractUrlArtifacts(list);
   } catch {
     artifactCount.value = 0;
+    artifactUrls.value = [];
   }
 }
 
@@ -576,6 +581,7 @@ async function onCancelAiJudging() {
         :branch-name="branchName"
         :hotkey-char="hotkeyChar"
         :artifact-count="artifactCount"
+        :artifact-urls="artifactUrls"
         :auto-approval="autoApproval"
         :ai-judging="aiJudging"
         :is-window-focused="isWindowFocused"

@@ -3,6 +3,7 @@ mod ai_description;
 mod ai_judge;
 mod ai_provider;
 mod archive_db;
+mod artifact_url;
 mod claude_plugin;
 mod claude_plugin_skills;
 mod fs_watcher;
@@ -736,6 +737,8 @@ fn resolve_worktree_repository(
 
 /// リポジトリのアーティファクト一覧を返す。
 /// 一覧・件数バッジ用途のため content / modules は落としてメタのみ返す。
+/// 例外は URL アーティファクト（`text/uri-list`）で、content が URL 1 行しかなく
+/// アイコン隣のドロップダウンがこの値を必要とするため落とさない。
 #[tauri::command]
 async fn list_repo_artifacts(
     app_handle: tauri::AppHandle,
@@ -770,7 +773,11 @@ async fn list_repo_artifacts(
                 }
             };
             if let Some(obj) = val.as_object_mut() {
-                obj.remove("content");
+                let is_url_artifact = obj.get("type").and_then(|v| v.as_str())
+                    == Some(artifact_url::URL_ARTIFACT_CONTENT_TYPE);
+                if !is_url_artifact {
+                    obj.remove("content");
+                }
                 obj.remove("modules");
             }
             artifacts.push(val);

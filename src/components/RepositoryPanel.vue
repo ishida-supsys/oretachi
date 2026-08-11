@@ -12,7 +12,8 @@ import { useMasonryLayout } from "../composables/useMasonryLayout";
 import { computeNaturalCardWidth } from "../utils/cardWidth";
 import { isHomeWorktree } from "../utils/homeWorktree";
 import { isRepositoryWorktree, makeRepositoryWorktreeId } from "../utils/repositoryWorktree";
-import type { RepoArtifactChangedEvent } from "../types/artifact";
+import { extractUrlArtifacts } from "../utils/artifactUrl";
+import type { RepoArtifactChangedEvent, UrlArtifactEntry } from "../types/artifact";
 import type { Repository } from "../types/settings";
 import type { Worktree } from "../types/worktree";
 import PostAddSettingsDialog from "./PostAddSettingsDialog.vue";
@@ -42,6 +43,8 @@ const props = defineProps<{
   thumbnailUrls: Map<number, string>;
   /** ワークツリー単位のアーティファクト件数（ホームカード用） */
   artifactCounts: Map<string, number>;
+  /** ワークツリー単位の URL アーティファクト（ホームカード用） */
+  artifactUrls: Map<string, UrlArtifactEntry[]>;
   notifications: Map<string, number>;
   hotkeyChars: Map<string, string>;
   detachedWorktrees: Set<string>;
@@ -70,14 +73,18 @@ const emit = defineEmits<{
 
 /** リポジトリ ID → 恒久保存アーティファクト件数 */
 const repoArtifactCounts = ref(new Map<string, number>());
+/** リポジトリ ID → 恒久保存の URL アーティファクト */
+const repoArtifactUrls = ref(new Map<string, UrlArtifactEntry[]>());
 let unlisten: UnlistenFn | null = null;
 
 async function refreshArtifactCount(repoId: string) {
   try {
     const list = await invoke<unknown[]>("list_repo_artifacts", { repositoryId: repoId });
     repoArtifactCounts.value.set(repoId, list.length);
+    repoArtifactUrls.value.set(repoId, extractUrlArtifacts(list));
     // Map の変異は追跡されないため、再代入して再描画させる
     repoArtifactCounts.value = new Map(repoArtifactCounts.value);
+    repoArtifactUrls.value = new Map(repoArtifactUrls.value);
   } catch {
     /* 件数バッジは補助情報なので失敗しても無視 */
   }
@@ -212,6 +219,7 @@ defineExpose({ addRepository });
             :notification-count="notifications.get(item.worktree.id) ?? 0"
             :hotkey-char="hotkeyChars.get(item.worktree.id)"
             :artifact-count="artifactCounts.get(item.worktree.id) ?? 0"
+            :artifact-urls="artifactUrls.get(item.worktree.id) ?? []"
             :auto-approval="autoApprovals.get(item.worktree.id) ?? false"
             :ai-judging="aiJudgingWorktrees.has(item.worktree.id)"
             :tooltip="cardTooltips?.get(item.worktree.id)"
@@ -234,6 +242,7 @@ defineExpose({ addRepository });
             :worktree="item.worktree"
             :thumbnail-urls="thumbnailUrls"
             :artifact-count="repoArtifactCounts.get(item.repo.id) ?? 0"
+            :artifact-urls="repoArtifactUrls.get(item.repo.id) ?? []"
             :notification-count="item.worktree ? notifications.get(item.worktree.id) ?? 0 : 0"
             :hotkey-char="item.worktree ? hotkeyChars.get(item.worktree.id) : undefined"
             :detached="item.worktree ? detachedWorktrees.has(item.worktree.id) : false"

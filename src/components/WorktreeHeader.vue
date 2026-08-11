@@ -2,7 +2,10 @@
 import { useI18n } from "vue-i18n";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import MacTrafficLights from "./MacTrafficLights.vue";
+import ArtifactUrlHoverMenu from "./ArtifactUrlHoverMenu.vue";
+import ArtifactIcon from "./ArtifactIcon.vue";
 import { isMac } from "../composables/usePlatform";
+import type { UrlArtifactEntry } from "../types/artifact";
 
 const { t } = useI18n();
 
@@ -11,6 +14,8 @@ const props = defineProps<{
   branchName: string;
   hotkeyChar?: string;
   artifactCount?: number;
+  /** 登録済み URL アーティファクト（アイコン隣のドロップダウン用） */
+  artifactUrls?: UrlArtifactEntry[];
   autoApproval: boolean;
   aiJudging: boolean;
   isWindowFocused: boolean;
@@ -120,16 +125,20 @@ async function closeWindow() {
         <span class="pi pi-spin pi-spinner" style="font-size: 9px" />
         {{ t('aiJudgingBadge') }}
       </button>
-      <button
+      <ArtifactUrlHoverMenu
         v-if="props.artifactCount && props.artifactCount > 0"
-        class="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium cursor-pointer border-none"
-        style="background: rgba(137, 180, 250, 0.15); color: #89b4fa; border: 1px solid rgba(137, 180, 250, 0.3)"
-        :title="t('openArtifacts')"
-        @click="$emit('open-artifacts')"
+        :urls="props.artifactUrls ?? []"
       >
-        <span class="pi pi-box" style="font-size: 9px" />
-        {{ props.artifactCount }}
-      </button>
+        <button
+          class="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium cursor-pointer border-none"
+          style="background: rgba(137, 180, 250, 0.15); color: #89b4fa; border: 1px solid rgba(137, 180, 250, 0.3)"
+          :title="t('openArtifacts')"
+          @click="$emit('open-artifacts')"
+        >
+          <ArtifactIcon :has-url="(props.artifactUrls?.length ?? 0) > 0" style="font-size: 9px" />
+          {{ props.artifactCount }}
+        </button>
+      </ArtifactUrlHoverMenu>
     </div>
     <!-- 右端のボタン列。5つとも hdr-btn で同一寸法・同一アイコンサイズに揃える
          （個別に w-*/h-*/font-size を書くと必ずどれかがずれるため、寸法はここに集約する） -->
@@ -141,13 +150,16 @@ async function closeWindow() {
       >
         <span class="pi pi-code" />
       </button>
-      <button
-        class="hdr-btn bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4]"
-        :title="t('openArtifacts')"
-        @click="$emit('open-artifacts')"
-      >
-        <span class="pi pi-box" />
-      </button>
+      <!-- ウィンドウ操作との間隔は下の spacer が持つので、ここでは mr-* を付けない -->
+      <ArtifactUrlHoverMenu :urls="props.artifactUrls ?? []">
+        <button
+          class="hdr-btn bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4]"
+          :title="t('openArtifacts')"
+          @click="$emit('open-artifacts')"
+        >
+          <ArtifactIcon :has-url="(props.artifactUrls?.length ?? 0) > 0" />
+        </button>
+      </ArtifactUrlHoverMenu>
       <template v-if="props.showWindowControls && !isMac">
         <!-- アプリ機能ボタンとウィンドウ操作の区切り（誤クリック防止の間隔） -->
         <span class="w-2 shrink-0" aria-hidden="true" />
@@ -194,8 +206,11 @@ async function closeWindow() {
   transition: background-color 0.15s, color 0.15s;
 }
 
-/* アイコンの実寸も揃える。pi の既定 font-size (1rem) と line-height を上書きして中央に置く */
-.hdr-btn .pi {
+/* アイコンの実寸も揃える。pi の既定 font-size (1rem) と line-height を上書きして中央に置く。
+   ArtifactIcon はルートが .pi ではなく .artifact-icon で、中の実アイコンが font-size: 1em で
+   呼び出し元に追従する作りなので、こちらにも同じサイズを渡す。 */
+.hdr-btn .pi,
+.hdr-btn .artifact-icon {
   font-size: 0.875rem;
   line-height: 1;
 }
