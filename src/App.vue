@@ -1004,6 +1004,8 @@ async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string,
         id: entry.id,
         name: entry.name,
         branchName: entry.branchName,
+        repositoryName: entry.repositoryName,
+        workgroupId: entry.workgroupId,
       });
     } catch {
       // 通知失敗はワークツリー追加の成否に影響しない

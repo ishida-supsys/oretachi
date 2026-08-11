@@ -64,11 +64,20 @@ const SPAWN_MAX_LIVE_SESSIONS: usize = 12;
 /// 自動承認が有効なワークツリーへ押し込み / spawn してよいイベント種別（#120 §5.5）。
 ///
 /// 自動承認が有効な宛先へは、別のワークツリーから注入された内容が**人間の確認なしに
-/// 実行される**。oretachi が定型文で組み立てるイベント（`worktree.closed`）だけを許可し、
-/// 自由文（`worktree.message`, #126）は押し込まず inbox に残して人間の確認を要求する。
-/// 現時点では対応種別が `worktree.closed` のみなので挙動は変わらないが、自由文が入った
-/// 瞬間に default-deny になるのが目的。
-const AUTO_APPROVAL_PUSHABLE_KINDS: &[&str] = &[event_db::KIND_WORKTREE_CLOSED];
+/// 実行される**。
+///
+/// 許可の基準は「**本文を誰が書いたか**」:
+/// - 許可: oretachi 自身が定型 JSON として組み立てるイベント
+///   （`worktree.closed` / `worktree.created`）。可変部分はワークツリー名・ブランチ名だけで、
+///   いずれも `sanitize_for_pty` を通る
+/// - 不許可: エージェントが本文を書けるイベント（`worktree.message`, #126）。押し込まず
+///   inbox に残し、人間が UI で確認して手動で渡すか、自動承認を切ることを要求する
+///
+/// **新しい種別を足すときは必ずこの基準で判断すること。** 迷ったら入れない（default-deny）。
+const AUTO_APPROVAL_PUSHABLE_KINDS: &[&str] = &[
+    event_db::KIND_WORKTREE_CLOSED,
+    event_db::KIND_WORKTREE_CREATED,
+];
 
 // ─── ハンドル ─────────────────────────────────────────────────────────────────
 
@@ -989,15 +998,21 @@ async fn spawn_for_closed_tabs(
     state: &mut WorkerState,
     now: i64,
 ) {
-    let candidates = match event_db::list_spawn_candidates(pool, now, event_db::PUSH_TTL_MS).await {
+    let rows = match event_db::list_spawn_candidates(pool, now, event_db::PUSH_TTL_MS).await {
         Ok(c) => c,
         Err(e) => {
             log::warn!("[delivery] list_spawn_candidates failed: {}", e);
             return;
         }
     };
-    if candidates.is_empty() {
+    if rows.is_empty() {
         return;
+    }
+    // 種別ごとの内訳のままワークツリー単位にまとめ直す。**件数だけに潰さない**のは、
+    // 自動承認が有効な宛先で「押し込めない種別の未読」を根拠に spawn してしまわないため。
+    let mut candidates: HashMap<String, Vec<(String, i64)>> = HashMap::new();
+    for (worktree_id, kind, count) in rows {
+        candidates.entry(worktree_id).or_default().push((kind, count));
     }
     let sessions = app.state::<crate::pty_manager::PtyManager>().list_sessions();
     // 同じ tick で複数ワークツリーが spawn 候補になったときに上限を素通りしないよう、
@@ -1007,7 +1022,7 @@ async fn spawn_for_closed_tabs(
         + state.inflight_spawn.len();
     let settings = app.state::<SettingsManager>().get();
 
-    for (worktree_id, pending) in candidates {
+    for (worktree_id, by_kind) in candidates {
         if state.inflight_spawn.contains_key(&worktree_id) {
             continue;
         }
@@ -1033,10 +1048,19 @@ async fn spawn_for_closed_tabs(
         if has_agent {
             continue;
         }
-        if !auto_approval_allows(Some(worktree), event_db::KIND_WORKTREE_CLOSED) {
+        // 自動承認が有効な宛先では、押し込みが許される種別の未読だけを spawn の根拠にする。
+        // 種別を無視して合計件数で判断すると、自由文の `worktree.message` が
+        // 「新しいタブを立てさせる」ところまでは通ってしまう（#126）。
+        let pending: i64 = by_kind
+            .iter()
+            .filter(|(kind, _)| auto_approval_allows(Some(worktree), kind))
+            .map(|(_, count)| *count)
+            .sum();
+        if pending == 0 {
             log::info!(
-                "[delivery] 自動承認が有効なため spawn を見送った worktree={}",
-                worktree.name
+                "[delivery] 自動承認が有効な宛先のため spawn を見送った worktree={} 保留種別={:?}",
+                worktree.name,
+                by_kind.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>()
             );
             continue;
         }
@@ -1094,6 +1118,8 @@ async fn spawn_for_closed_tabs(
 
 // ─── UI 向け Tauri コマンド（#120 §7） ────────────────────────────────────────
 
+use crate::mcp_server::describe_target;
+
 /// 購読一覧の1行。DB の生の行に、人間が読むための解決済みの名前と生存状況を足したもの。
 #[derive(serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -1106,8 +1132,19 @@ pub struct SubscriptionView {
     pub subscriber_session_id: Option<u32>,
     /// `claude` / `gemini` / `codex` / `cline`。非 CC は Stop フック経路が存在しない
     pub agent_name: Option<String>,
+    /// DB に入っている生の `target`。ワイルドカードの場合は `*` / `workgroup:<id>` /
+    /// `repo:<name>` がそのまま入る（#126）
     pub target_worktree_id: String,
+    /// 厳密一致 target のワークツリー名。クローズ済み / ワイルドカードでは None
     pub target_worktree_name: Option<String>,
+    /// `worktree` | `all` | `workgroup` | `repo`（#126）。UI はこれを見て
+    /// 「クローズ済み」バッジを出すかどうかを決める。**種別を渡さずに
+    /// `target_worktree_name` が None であることだけで判断すると、ワイルドカード購読が
+    /// すべて「クローズ済み」と誤表示される。**
+    pub target_kind: String,
+    /// 人間向けの表示名。ワークグループは表示名、リポジトリは名前、`*` は None
+    /// （UI 側でローカライズした文言を出す）
+    pub target_label: Option<String>,
     pub event_kinds: Vec<String>,
     pub delivery: String,
     pub spawn_if_closed: bool,
@@ -1174,11 +1211,14 @@ pub async fn event_list_subscriptions(
                 .find(|(t, _, _)| *t == r.subscriber_terminal_id)
                 .map(|(_, a, b)| (*a, *b))
                 .unwrap_or((0, 0));
+            let (target_kind, target_label) = describe_target(&settings, &r.target);
             SubscriptionView {
                 subscriber_worktree_name: r.subscriber_worktree_id.as_deref().and_then(name_of),
                 subscriber_session_id: session.map(|s| s.session_id),
                 agent_name: session.and_then(|s| s.agent_name.clone()),
                 target_worktree_name: name_of(&r.target),
+                target_kind,
+                target_label,
                 target_worktree_id: r.target,
                 event_kinds: serde_json::from_str(&r.event_kinds).unwrap_or_default(),
                 delivery: r.delivery,
@@ -1469,9 +1509,13 @@ mod tests {
     #[test]
     fn test_auto_approval_allows_canned_kinds_only() {
         let on = worktree(Some(true));
+        // oretachi 自身が定型 JSON で組み立てるイベントは許可
         assert!(auto_approval_allows(Some(&on), event_db::KIND_WORKTREE_CLOSED));
-        // 自由文（#126 で入る予定）は自動承認宛には押し込まない
-        assert!(!auto_approval_allows(Some(&on), "worktree.message"));
+        assert!(auto_approval_allows(Some(&on), event_db::KIND_WORKTREE_CREATED));
+        // エージェントが本文を書ける自由文（#126）は自動承認宛には押し込まない
+        assert!(!auto_approval_allows(Some(&on), event_db::KIND_WORKTREE_MESSAGE));
+        // 知らない種別も default-deny
+        assert!(!auto_approval_allows(Some(&on), "worktree.unknown"));
     }
 
     #[test]
@@ -1481,6 +1525,53 @@ mod tests {
         let unset = worktree(None);
         assert!(auto_approval_allows(Some(&unset), "worktree.message"));
         assert!(auto_approval_allows(None, "worktree.message"));
+    }
+
+    /// `push_pending` / `filter_for_turn_end` の仕分けと同じ形。自動承認が有効な宛先では、
+    /// 同じタブに定型と自由文が混ざっていても**自由文だけが保留**され、定型は通る（#126）。
+    #[test]
+    fn test_auto_approval_partition_blocks_only_free_form() {
+        let on = worktree(Some(true));
+        let items = vec![
+            item("a", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_CLOSED),
+            item("b", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_CREATED),
+            item("c", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_MESSAGE),
+        ];
+        let (allowed, blocked): (Vec<_>, Vec<_>) = items
+            .into_iter()
+            .partition(|i| auto_approval_allows(Some(&on), &i.kind));
+        assert_eq!(ids(&allowed), vec!["a", "b"]);
+        assert_eq!(ids(&blocked), vec!["c"]);
+    }
+
+    /// `spawn_for_closed_tabs` の判定と同じ形。自由文の未読しか無い宛先では、自動承認が
+    /// 有効なら spawn しない（押し込めない未読を根拠にタブを立てない）。
+    #[test]
+    fn test_spawn_pending_count_ignores_blocked_kinds() {
+        let on = worktree(Some(true));
+        let off = worktree(Some(false));
+        let by_kind = vec![
+            (event_db::KIND_WORKTREE_MESSAGE.to_string(), 3i64),
+            (event_db::KIND_WORKTREE_CLOSED.to_string(), 2i64),
+        ];
+        let count = |wt: &WorktreeEntry| -> i64 {
+            by_kind
+                .iter()
+                .filter(|(kind, _)| auto_approval_allows(Some(wt), kind))
+                .map(|(_, c)| *c)
+                .sum()
+        };
+        assert_eq!(count(&on), 2, "自動承認 ON では自由文を数えない");
+        assert_eq!(count(&off), 5, "自動承認 OFF なら従来どおり全部数える");
+
+        // 自由文だけの宛先は spawn 対象にならない（pending == 0）
+        let only_message = vec![(event_db::KIND_WORKTREE_MESSAGE.to_string(), 3i64)];
+        let pending: i64 = only_message
+            .iter()
+            .filter(|(kind, _)| auto_approval_allows(Some(&on), kind))
+            .map(|(_, c)| *c)
+            .sum();
+        assert_eq!(pending, 0);
     }
 
     // ─── ターン境界配送（#124） ──────────────────────────────────────────────

@@ -17,9 +17,16 @@ export interface SubscriptionView {
   subscriberSessionId: number | null;
   /** "claude" / "gemini" / "codex" / "cline"。null は AI エージェント未検出 */
   agentName: string | null;
+  /** DB に入っている生の target。ワイルドカードなら "*" / "workgroup:<id>" / "repo:<name>" */
   targetWorktreeId: string;
-  /** クローズ済みの対象は null になる */
+  /** 厳密一致 target のワークツリー名。クローズ済み・ワイルドカードでは null */
   targetWorktreeName: string | null;
+  /** "worktree" | "all" | "workgroup" | "repo"（#126）。
+   *  **「クローズ済み」の判定はこれを見ること。** targetWorktreeName が null であることだけを
+   *  根拠にすると、ワイルドカード購読がすべて「クローズ済み」と誤表示される。 */
+  targetKind: string;
+  /** 人間向けの表示名。"*" は null（UI 側でローカライズする） */
+  targetLabel: string | null;
   eventKinds: string[];
   /** "turn_end" | "interrupt" | "passive" */
   delivery: string;

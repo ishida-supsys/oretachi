@@ -1020,13 +1020,47 @@ async fn save_archive(
 /// 呼び出し元は `git worktree remove` の成功確認後の経路だけ。フロントの
 /// `useWorktreeRemove.ts` は失敗・キャンセル・多重実行では afterRemove に到達しないため、
 /// `Cancelled` / `Busy` / `Failed` では構造的に発火しない。
+/// イベントの target 照合に必要な、ワークツリーの所属情報を解決する（#126）。
+///
+/// 呼び出し元から渡された値を優先し、無ければ settings から引く。**closed 経路では
+/// settings 側の実体が既に消えている**（`removeWorktree` が afterRemove より先に
+/// settings を書き換える）ため、フロントが持っている値を渡してもらうのが本筋で、
+/// settings 参照はそれが無い場合のフォールバック。
+///
+/// ワークグループは未設定なら先頭グループへフォールバックする（`resolve_workgroup` /
+/// フロントの `resolvedGroupId` と同じ規則。購読側の `workgroup:<id>` 解決と一致させる）。
+fn resolve_event_scope(
+    app_handle: &tauri::AppHandle,
+    worktree_id: &str,
+    repository_name: Option<String>,
+    workgroup_id: Option<String>,
+) -> (Option<String>, Option<String>) {
+    let settings = app_handle.state::<SettingsManager>().get();
+    let entry = settings.worktrees.iter().find(|w| w.id == worktree_id);
+    let repo = repository_name
+        .map(|r| r.trim().to_string())
+        .filter(|r| !r.is_empty())
+        .or_else(|| entry.map(|w| w.repository_name.clone()));
+    let group_hint = workgroup_id
+        .map(|g| g.trim().to_string())
+        .filter(|g| !g.is_empty())
+        .or_else(|| entry.and_then(|w| w.workgroup_id.clone()));
+    let group = mcp_server::resolve_workgroup_by_id(&settings, group_hint.as_deref())
+        .map(|g| g.id.clone());
+    (repo, group)
+}
+
 fn fire_worktree_closed(
     app_handle: &tauri::AppHandle,
     id: String,
     name: String,
     branch_name: String,
+    repository_name: Option<String>,
+    workgroup_id: Option<String>,
     actor: &'static str,
 ) {
+    let (repository_name, workgroup_id) =
+        resolve_event_scope(app_handle, &id, repository_name, workgroup_id);
     let handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
         let Some(pool) = handle.try_state::<event_db::EventPool>() else {
@@ -1060,12 +1094,18 @@ fn fire_worktree_closed(
             log::warn!("[event] failed to record worktree.closed for {}: {}", name, e);
             return;
         }
-        match event_db::fanout(&pool.0, &event, now).await {
+        let targets = event_db::matching_targets(
+            &id,
+            workgroup_id.as_deref(),
+            repository_name.as_deref(),
+        );
+        match event_db::fanout(&pool.0, &event, &targets, now).await {
             Ok(count) => {
                 log::info!(
-                    "[event] worktree.closed worktree={} actor={} delivered={}",
+                    "[event] worktree.closed worktree={} actor={} targets={:?} delivered={}",
                     name,
                     actor,
+                    targets,
                     count
                 );
                 if count > 0 {
@@ -1106,14 +1146,103 @@ fn fire_worktree_closed(
     });
 }
 
+/// `worktree.created` イベントを event_db へ発行する（issue #126）。
+///
+/// `fire_worktree_closed` と対称で fire-and-forget。発火点は `notify_worktree_added`
+/// —— 手動作成（`App.vue`）とタスク実行（`useTaskExecution.ts`）の**両経路が必ず通る
+/// 唯一の Tauri コマンド**で、`notify_worktree_archived` と同じチョークポイント原則に従う。
+///
+/// #126 本文は `mcp_server.rs` の `worktree-added` リスナー（`broadcast_worktree_added` と
+/// 同じ場所）を提案しているが、そのリスナーは `start_mcp_server` でしか登録されず、
+/// MCP サーバが停止中 / 再起動中には発火しない穴が残るため、こちらを選んだ。
+fn fire_worktree_created(
+    app_handle: &tauri::AppHandle,
+    id: String,
+    name: String,
+    branch_name: String,
+    repository_name: Option<String>,
+    workgroup_id: Option<String>,
+) {
+    let (repository_name, workgroup_id) =
+        resolve_event_scope(app_handle, &id, repository_name, workgroup_id);
+    let handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(pool) = handle.try_state::<event_db::EventPool>() else {
+            log::debug!("[event] Event DB not initialized; skipping worktree.created for {}", name);
+            return;
+        };
+        // `created` はワークツリーごとに一度きりの意味を持つが、`useTaskExecution.ts` は
+        // セットアップ成功時と失敗時の両分岐から `notify_worktree_added` を呼ぶ形なので、
+        // 経路次第で二度叩かれうる。二重に積むと購読者が同じ作成を2回読むことになる。
+        match event_db::has_event(&pool.0, &id, event_db::KIND_WORKTREE_CREATED).await {
+            Ok(true) => {
+                log::debug!("[event] worktree.created は既に発行済み worktree={}", name);
+                return;
+            }
+            Ok(false) => {}
+            Err(e) => log::warn!("[event] has_event failed for {}: {}", name, e),
+        }
+        let now = event_db::now_ms();
+        let body = serde_json::json!({
+            "worktreeId": id,
+            "worktreeName": name,
+            "branchName": branch_name,
+            "repositoryName": repository_name,
+            "workgroupId": workgroup_id,
+        })
+        .to_string();
+        let event = event_db::EventRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            source_worktree_id: id.clone(),
+            // 作成経路も terminal_id を運んでいない（作成を実行したタブは特定できない）。
+            source_terminal_id: None,
+            kind: event_db::KIND_WORKTREE_CREATED.to_string(),
+            body,
+            actor: Some("worktree-add".to_string()),
+            created_at: now,
+            // ユーザー操作 / タスク実行が起点なので連鎖の深さは 0。
+            depth: 0,
+            origin: Some("worktree-add".to_string()),
+        };
+        if let Err(e) = event_db::insert_event(&pool.0, &event).await {
+            log::warn!("[event] failed to record worktree.created for {}: {}", name, e);
+            return;
+        }
+        let targets = event_db::matching_targets(
+            &id,
+            workgroup_id.as_deref(),
+            repository_name.as_deref(),
+        );
+        match event_db::fanout(&pool.0, &event, &targets, now).await {
+            Ok(count) => {
+                log::info!(
+                    "[event] worktree.created worktree={} targets={:?} delivered={}",
+                    name,
+                    targets,
+                    count
+                );
+                if count > 0 {
+                    event_delivery::notify_event_queued(&handle);
+                }
+            }
+            Err(e) => log::warn!("[event] fanout failed for {}: {}", name, e),
+        }
+    });
+}
+
 /// ワークツリーのアーカイブ（削除）が完了した後にMCPクライアントへ通知する。
 /// git worktree remove の成功確認後にフロントエンドから呼び出す。
+///
+/// `repository_name` / `workgroup_id` は `repo:` / `workgroup:` 購読の照合用（#126）。
+/// この時点で settings 上の実体は既に消えているためフロントから渡してもらう（省略可）。
 #[tauri::command]
 fn notify_worktree_archived(
     app_handle: tauri::AppHandle,
     id: String,
     name: String,
     branch_name: String,
+    repository_name: Option<String>,
+    workgroup_id: Option<String>,
 ) {
     let _bc = main_thread_watch::enter(main_thread_watch::Activity::NotifyWorktreeArchived);
     let _ = app_handle.emit("worktree-archived", serde_json::json!({
@@ -1121,7 +1250,7 @@ fn notify_worktree_archived(
         "name": name,
         "branchName": branch_name,
     }));
-    fire_worktree_closed(&app_handle, id, name, branch_name, "archive");
+    fire_worktree_closed(&app_handle, id, name, branch_name, repository_name, workgroup_id, "archive");
 }
 
 /// アーカイブせずにワークツリーを削除したときの `worktree.closed` 発行用。
@@ -1133,19 +1262,26 @@ fn notify_worktree_closed(
     id: String,
     name: String,
     branch_name: String,
+    repository_name: Option<String>,
+    workgroup_id: Option<String>,
 ) {
     let _bc = main_thread_watch::enter(main_thread_watch::Activity::NotifyWorktreeClosed);
-    fire_worktree_closed(&app_handle, id, name, branch_name, "delete");
+    fire_worktree_closed(&app_handle, id, name, branch_name, repository_name, workgroup_id, "delete");
 }
 
 /// ワークツリーの追加が完了した後にMCPクライアントへ通知する。
 /// git worktree add の成功確認後にフロントエンドから呼び出す。
+///
+/// `worktree.created` の発火点でもある（#126）。MCP ピアへの broadcast は
+/// `worktree-added` リスナー側が担当し、購読配送はこちらの経路で行う。
 #[tauri::command]
 fn notify_worktree_added(
     app_handle: tauri::AppHandle,
     id: String,
     name: String,
     branch_name: String,
+    repository_name: Option<String>,
+    workgroup_id: Option<String>,
 ) {
     let _bc = main_thread_watch::enter(main_thread_watch::Activity::NotifyWorktreeAdded);
     let _ = app_handle.emit("worktree-added", serde_json::json!({
@@ -1153,6 +1289,7 @@ fn notify_worktree_added(
         "name": name,
         "branchName": branch_name,
     }));
+    fire_worktree_created(&app_handle, id, name, branch_name, repository_name, workgroup_id);
 }
 
 #[tauri::command]
