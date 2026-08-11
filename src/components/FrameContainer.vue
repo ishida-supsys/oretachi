@@ -13,6 +13,8 @@ const props = defineProps<{
   terminalAgentStatus?: Map<number, boolean>;
   terminalWebSessions?: Map<number, WebSessionInfo>;
   terminalAiSessions?: Map<number, AiSessionInfo>;
+  /** タブ → 未 ack のワークツリーイベント件数（#120 §7） */
+  terminalUnread?: Map<number, number>;
 }>();
 
 const emit = defineEmits<{
@@ -52,6 +54,7 @@ function onResizeEnd(event: { sizes: number[] }) {
     :terminal-agent-status="terminalAgentStatus"
     :terminal-web-sessions="terminalWebSessions"
     :terminal-ai-sessions="terminalAiSessions"
+    :terminal-unread="terminalUnread"
     @switch-terminal="(leafId, terminalId) => emit('switchTerminal', leafId, terminalId)"
     @close-terminal="(leafId, terminalId) => emit('closeTerminal', leafId, terminalId)"
     @title-change="(terminalId, title) => emit('titleChange', terminalId, title)"
@@ -86,6 +89,7 @@ function onResizeEnd(event: { sizes: number[] }) {
         :terminal-agent-status="terminalAgentStatus"
         :terminal-web-sessions="terminalWebSessions"
         :terminal-ai-sessions="terminalAiSessions"
+        :terminal-unread="terminalUnread"
         @switch-terminal="(leafId, terminalId) => emit('switchTerminal', leafId, terminalId)"
         @close-terminal="(leafId, terminalId) => emit('closeTerminal', leafId, terminalId)"
         @title-change="(terminalId, title) => emit('titleChange', terminalId, title)"

@@ -32,12 +32,20 @@ pub const KIND_WORKTREE_CLOSED: &str = "worktree.closed";
 /// Phase 1 で受け付けるイベント種別。`worktree.created` / `worktree.message` は #126。
 pub const SUPPORTED_EVENT_KINDS: &[&str] = &[KIND_WORKTREE_CLOSED];
 
-/// 配送戦略。`interrupt`（即 PTY 押し込み）は #125 で追加する。
+/// 配送戦略。
+/// - `turn_end`: 既定。`Stop` フック / `SessionStart` 回収でターン境界に届ける
+/// - `interrupt`: 待機中なら即 PTY へ押し込む（#125）
+/// - `passive`: 積むだけ。エージェントが `oretachi_poll_inbox` で自分から取る
 pub const DELIVERY_TURN_END: &str = "turn_end";
+pub const DELIVERY_INTERRUPT: &str = "interrupt";
 pub const DELIVERY_PASSIVE: &str = "passive";
-pub const SUPPORTED_DELIVERIES: &[&str] = &[DELIVERY_TURN_END, DELIVERY_PASSIVE];
+pub const SUPPORTED_DELIVERIES: &[&str] =
+    &[DELIVERY_TURN_END, DELIVERY_INTERRUPT, DELIVERY_PASSIVE];
 
 pub const STATE_ACTIVE: &str = "active";
+/// 購読者タブが生存していない状態。**配送（inbox への蓄積）は続けるが押し込みはしない**。
+/// 同じワークツリーで新しい AI タブが立った時点で `rebind_next_orphaned_group` が引き継ぐ。
+pub const STATE_ORPHANED: &str = "orphaned";
 pub const STATE_PENDING: &str = "pending";
 pub const STATE_ACKED: &str = "acked";
 
@@ -45,6 +53,29 @@ pub const STATE_ACKED: &str = "acked";
 /// ack 済み・未 ack を問わず `created_at` からこの期間で削除する。
 pub const INBOX_RETENTION_DAYS: i64 = 30;
 pub const INBOX_RETENTION_MS: i64 = INBOX_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
+/// orphaned に落ちてから引き継がれずに残った購読 / inbox の保持期限。
+///
+/// active な購読は無期限（#120 本文どおり）だが、到達不能なまま残る行は有界にする必要がある。
+/// アプリを再起動して二度と開かないワークツリーの購読が単調増加するのを防ぐ。
+pub const ORPHANED_RETENTION_DAYS: i64 = 7;
+pub const ORPHANED_RETENTION_MS: i64 = ORPHANED_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
+/// イベント連鎖の深さ上限（#120 §5.4 / #125 §3）。これを超えたイベントは配送せず破棄する。
+///
+/// 現状 `worktree.closed` はワークツリー削除操作からしか発火せず、配送がイベントを生む経路は
+/// 存在しないため実際には常に 0。自由文の `worktree.message`（#126）でエージェント同士が
+/// 往復し始めたときに効かせるためのガードを、#125 の要求どおり後付けではなく先に入れておく。
+pub const MAX_EVENT_DEPTH: i64 = 3;
+
+/// PTY 押し込みを許すイベントの鮮度。これより古いイベントは押し込まない。
+///
+/// 再起動直後に何日も前の未配送分が一斉に割り込むのを防ぐ。inbox には残るので
+/// `SessionStart` 回収 / `oretachi_poll_inbox` では取れる（取りこぼしにはならない）。
+pub const PUSH_TTL_MS: i64 = 10 * 60 * 1000;
+
+/// PTY へ流す1メッセージの最大文字数。`sanitize_for_pty` で切り詰める。
+const PTY_TEXT_MAX_CHARS: usize = 600;
 
 /// sqlite の書き込みロック待ち上限。SessionStart フックのリクエストパスから触るため、
 /// サイドカーの読み取りタイムアウト（2 秒）より短くする。
@@ -64,13 +95,16 @@ pub struct SubscriptionRow {
     /// JSON string: string[]
     pub event_kinds: String,
     pub delivery: String,
-    /// 0 / 1。Phase 1 では保存するだけで消費しない（#125 で spawn する）
+    /// 0 / 1。タブが死んでいる宛先へ新しいタブを立てて配送してよいか（明示オプトイン）
     pub spawn_if_closed: i64,
     pub created_at: i64,
     /// None は無期限
     pub expires_at: Option<i64>,
-    /// active | orphaned（orphaned への遷移は #125）
+    /// active | orphaned
     pub state: String,
+    /// orphaned に落ちた時刻。active なら None。保持期限と引き継ぎ順序に使う
+    #[sqlx(default)]
+    pub orphaned_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
@@ -84,6 +118,12 @@ pub struct EventRow {
     pub body: String,
     pub actor: Option<String>,
     pub created_at: i64,
+    /// 連鎖の深さ。`MAX_EVENT_DEPTH` を超えたら配送しない
+    #[sqlx(default)]
+    pub depth: i64,
+    /// 発生源の種別（`archive` / `mcp` / `delivery:<terminal_id>` 等）。監査とループ解析用
+    #[sqlx(default)]
+    pub origin: Option<String>,
 }
 
 /// inbox 1件と、それが指すイベントを結合した配送単位。
@@ -98,11 +138,37 @@ pub struct InboxItem {
     pub created_at: i64,
     pub delivered_at: Option<i64>,
     pub acked_at: Option<i64>,
+    /// 購読者タブが死んで宙に浮いた時刻。**inbox 側にも持つのが要点**:
+    /// `worktree.closed` は `fanout` 直後に `delete_subscriptions_for_target` で購読行が
+    /// 消えるため（`lib.rs` の `fire_worktree_closed`）、再起動を挟んだ回収を購読テーブル
+    /// 起点で行うと何も残っていない。再バインドの駆動元はこちら。
+    #[sqlx(default)]
+    pub orphaned_at: Option<i64>,
+    /// 積んだ時点の購読の配送戦略。購読行は先に消えるのでここに焼き付ける
+    #[sqlx(default)]
+    pub delivery: String,
+    /// 積んだ時点の `spawn_if_closed`（0 / 1）。同上
+    #[sqlx(default)]
+    pub spawn_if_closed: i64,
     // events からの結合分
     pub kind: String,
     pub body: String,
     pub source_worktree_id: String,
     pub actor: Option<String>,
+}
+
+/// 引き継ぎ待ちの1グループ（死亡した1タブが残した購読と未読）。
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow, Clone)]
+pub struct OrphanedGroup {
+    /// 死亡したタブの terminal_id
+    pub terminal_id: String,
+    pub worktree_id: String,
+    pub orphaned_at: i64,
+    /// グループ内の最も古い購読の作成時刻（引き継ぎ順序の tie-break 用）
+    pub created_at: i64,
+    pub subscriptions: i64,
+    /// 未 ack の inbox 件数
+    pub pending: i64,
 }
 
 /// UNIX epoch からのミリ秒。task/archive DB と同じ `i64` 流儀で時刻を持つ。
@@ -145,11 +211,16 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             spawn_if_closed          INTEGER NOT NULL DEFAULT 0,
             created_at               INTEGER NOT NULL,
             expires_at               INTEGER,
-            state                    TEXT NOT NULL DEFAULT 'active'
+            state                    TEXT NOT NULL DEFAULT 'active',
+            orphaned_at              INTEGER
         )"#,
     )
     .execute(pool)
     .await?;
+    // 既存 DB 向け（#125）。既にあればエラーを握りつぶす。
+    let _ = sqlx::query("ALTER TABLE subscriptions ADD COLUMN orphaned_at INTEGER")
+        .execute(pool)
+        .await;
     // 同じタブが同じ対象を二重購読しないようにする（再 subscribe は上書き）
     sqlx::query(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_subs_terminal_target ON subscriptions(subscriber_terminal_id, target)",
@@ -173,11 +244,20 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             kind               TEXT NOT NULL,
             body               TEXT NOT NULL DEFAULT '{}',
             actor              TEXT,
-            created_at         INTEGER NOT NULL
+            created_at         INTEGER NOT NULL,
+            depth              INTEGER NOT NULL DEFAULT 0,
+            origin             TEXT
         )"#,
     )
     .execute(pool)
     .await?;
+    // 既存 DB 向け（#125 の暴走防止）。既にあればエラーを握りつぶす。
+    let _ = sqlx::query("ALTER TABLE events ADD COLUMN depth INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE events ADD COLUMN origin TEXT")
+        .execute(pool)
+        .await;
     sqlx::query("CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at DESC)")
         .execute(pool)
         .await?;
@@ -192,6 +272,9 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             created_at             INTEGER NOT NULL,
             delivered_at           INTEGER,
             acked_at               INTEGER,
+            orphaned_at            INTEGER,
+            delivery               TEXT NOT NULL DEFAULT 'turn_end',
+            spawn_if_closed        INTEGER NOT NULL DEFAULT 0,
             UNIQUE(subscriber_terminal_id, event_id)
         )"#,
     )
@@ -200,6 +283,19 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     // 既存 DB 向けマイグレーション: 購読者ワークツリー（購読行が先に消えても掃除できるように
     // inbox 側にも持たせる）。既にあればエラーを握りつぶす。
     let _ = sqlx::query("ALTER TABLE inbox ADD COLUMN subscriber_worktree_id TEXT")
+        .execute(pool)
+        .await;
+    // 同（#125）。再バインドの駆動元は購読ではなく inbox 側のこの列。
+    let _ = sqlx::query("ALTER TABLE inbox ADD COLUMN orphaned_at INTEGER")
+        .execute(pool)
+        .await;
+    // 配送戦略と spawn 可否は購読側にもあるが、`worktree.closed` は fanout 直後に
+    // `delete_subscriptions_for_target` で購読行が消えるため、積んだ時点の値を inbox に
+    // 焼き付けておかないと後から配送方法を決められない（#125）。
+    let _ = sqlx::query("ALTER TABLE inbox ADD COLUMN delivery TEXT NOT NULL DEFAULT 'turn_end'")
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("ALTER TABLE inbox ADD COLUMN spawn_if_closed INTEGER NOT NULL DEFAULT 0")
         .execute(pool)
         .await;
     sqlx::query(
@@ -230,7 +326,7 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 /// 既存の id が返るので、呼び出し元はこれをエージェントへ返すこと。
 pub async fn upsert_subscription(pool: &SqlitePool, sub: &SubscriptionRow) -> Result<String, String> {
     sqlx::query(
-        "INSERT INTO subscriptions (id, subscriber_terminal_id, subscriber_worktree_id, subscriber_agent_session, target, event_kinds, delivery, spawn_if_closed, created_at, expires_at, state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+        "INSERT INTO subscriptions (id, subscriber_terminal_id, subscriber_worktree_id, subscriber_agent_session, target, event_kinds, delivery, spawn_if_closed, created_at, expires_at, state, orphaned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(subscriber_terminal_id, target) DO UPDATE SET \
            subscriber_worktree_id = excluded.subscriber_worktree_id, \
            subscriber_agent_session = excluded.subscriber_agent_session, \
@@ -238,7 +334,8 @@ pub async fn upsert_subscription(pool: &SqlitePool, sub: &SubscriptionRow) -> Re
            delivery = excluded.delivery, \
            spawn_if_closed = excluded.spawn_if_closed, \
            expires_at = excluded.expires_at, \
-           state = excluded.state",
+           state = excluded.state, \
+           orphaned_at = excluded.orphaned_at",
     )
     .bind(&sub.id)
     .bind(&sub.subscriber_terminal_id)
@@ -251,6 +348,7 @@ pub async fn upsert_subscription(pool: &SqlitePool, sub: &SubscriptionRow) -> Re
     .bind(sub.created_at)
     .bind(sub.expires_at)
     .bind(&sub.state)
+    .bind(sub.orphaned_at)
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -320,7 +418,7 @@ pub async fn list_subscriptions(
 
 pub async fn insert_event(pool: &SqlitePool, event: &EventRow) -> Result<(), String> {
     sqlx::query(
-        "INSERT OR REPLACE INTO events (id, source_worktree_id, source_terminal_id, kind, body, actor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO events (id, source_worktree_id, source_terminal_id, kind, body, actor, created_at, depth, origin) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&event.id)
     .bind(&event.source_worktree_id)
@@ -329,6 +427,8 @@ pub async fn insert_event(pool: &SqlitePool, event: &EventRow) -> Result<(), Str
     .bind(&event.body)
     .bind(&event.actor)
     .bind(event.created_at)
+    .bind(event.depth)
+    .bind(&event.origin)
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -368,12 +468,27 @@ pub fn is_self_echo(sub: &SubscriptionRow, event: &EventRow) -> bool {
 ///
 /// 複数の購読が同じイベントを拾ったときの重複は `inbox` の
 /// `UNIQUE(subscriber_terminal_id, event_id)` + `INSERT OR IGNORE` でマージされる。
+///
+/// **`orphaned` な購読にも積む**（#125）。タブが死んでいた / アプリが止まっていた間に届いた
+/// イベントを捨てると、「別ワークツリーの対応がクローズしたのを後で検知したい」という
+/// #120 の動機②そのものが成立しない。押し込み（PTY 注入 / spawn）だけを保留する。
 pub async fn fanout(pool: &SqlitePool, event: &EventRow, now: i64) -> Result<usize, String> {
+    // 暴走防止（#120 §5.4）: 連鎖が深すぎるイベントは配送しない。
+    if event.depth > MAX_EVENT_DEPTH {
+        log::warn!(
+            "[event-db] depth {} > {} のイベントを破棄: id={} kind={} origin={:?}",
+            event.depth,
+            MAX_EVENT_DEPTH,
+            event.id,
+            event.kind,
+            event.origin
+        );
+        return Ok(0);
+    }
     let candidates = sqlx::query_as::<_, SubscriptionRow>(
-        "SELECT * FROM subscriptions WHERE target = ? AND state = ? AND (expires_at IS NULL OR expires_at > ?)",
+        "SELECT * FROM subscriptions WHERE target = ? AND state IN ('active', 'orphaned') AND (expires_at IS NULL OR expires_at > ?)",
     )
     .bind(&event.source_worktree_id)
-    .bind(STATE_ACTIVE)
     .bind(now)
     .fetch_all(pool)
     .await
@@ -393,8 +508,20 @@ pub async fn fanout(pool: &SqlitePool, event: &EventRow, now: i64) -> Result<usi
             );
             continue;
         }
+        // orphaned な購読へ積む行は最初から orphaned として印を付ける。そうしないと
+        // 「タブが死んでいる間に届いた分」が再バインドの対象から漏れる。
+        //
+        // **時刻は購読の `orphaned_at` ではなく `now`。** 購読側の時刻を継承すると、
+        // 6日前に orphaned になった購読へ今届いたメッセージが「6日前から待っている」扱いに
+        // なり、保持期限（7日）まで数時間しか残らないまま消える。引き継ぎ順序
+        // （`orphaned_at DESC`）でも最後尾に回り、本命のメッセージほど後回しになる。
+        let orphaned_at = if sub.state == STATE_ORPHANED {
+            Some(now)
+        } else {
+            None
+        };
         let result = sqlx::query(
-            "INSERT OR IGNORE INTO inbox (id, subscriber_terminal_id, subscriber_worktree_id, event_id, state, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO inbox (id, subscriber_terminal_id, subscriber_worktree_id, event_id, state, created_at, orphaned_at, delivery, spawn_if_closed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(&sub.subscriber_terminal_id)
@@ -402,6 +529,9 @@ pub async fn fanout(pool: &SqlitePool, event: &EventRow, now: i64) -> Result<usi
         .bind(&event.id)
         .bind(STATE_PENDING)
         .bind(now)
+        .bind(orphaned_at)
+        .bind(&sub.delivery)
+        .bind(sub.spawn_if_closed)
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -446,7 +576,7 @@ pub async fn list_inbox(
     filter: InboxFilter,
 ) -> Result<Vec<InboxItem>, String> {
     let sql = format!(
-        "SELECT i.id, i.subscriber_terminal_id, i.subscriber_worktree_id, i.event_id, i.state, i.created_at, i.delivered_at, i.acked_at, e.kind, e.body, e.source_worktree_id, e.actor \
+        "SELECT i.id, i.subscriber_terminal_id, i.subscriber_worktree_id, i.event_id, i.state, i.created_at, i.delivered_at, i.acked_at, i.orphaned_at, i.delivery, i.spawn_if_closed, e.kind, e.body, e.source_worktree_id, e.actor \
          FROM inbox i JOIN events e ON e.id = i.event_id \
          WHERE i.subscriber_terminal_id = ?{} ORDER BY i.created_at ASC",
         filter.where_clause()
@@ -516,6 +646,410 @@ pub async fn ack(
     Ok(q.execute(pool).await.map_err(|e| e.to_string())?.rows_affected())
 }
 
+// ─── orphaned 遷移と再バインド（#125） ────────────────────────────────────────
+
+/// 生存タブに紐づかない購読と未 ack の inbox を `orphaned` にする（**削除しない**）。
+///
+/// `terminal_id` は PTY spawn ごとの発番で永続化されないため、アプリを再起動すると
+/// 前回の購読はどのタブからも到達できなくなる。Phase 1 はこれを全削除していたが、
+/// それでは #120 の動機②（数時間〜数日待って別ワークツリーのクローズを検知する）が
+/// 再起動を挟んだ瞬間に壊れる。行は保持し、同じワークツリーで新しい AI タブが立った
+/// 時点で `rebind_next_orphaned_group` が引き継ぐ。
+///
+/// `subscriber_worktree_id` が NULL の行だけは引き継ぎ先を解決できないので削除する
+/// （現行の `subscribe` は `Some` を強制するので実質レガシー行のみ）。
+///
+/// 起動時は生存タブが 0 件なので全行が orphaned になる。これは意図どおり。
+///
+/// 戻り値は (orphaned にした購読数, orphaned にした inbox 数, 削除した到達不能行数)。
+pub async fn mark_orphaned_subscribers(
+    pool: &SqlitePool,
+    live_terminal_ids: &[String],
+    now: i64,
+) -> Result<(u64, u64, u64), String> {
+    let not_live = if live_terminal_ids.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " AND subscriber_terminal_id NOT IN ({})",
+            placeholders(live_terminal_ids.len())
+        )
+    };
+    // 引き継ぎ先を解決できない行は保持しても永久に到達できないので削除する。
+    let sql = format!(
+        "DELETE FROM inbox WHERE subscriber_worktree_id IS NULL{}",
+        not_live
+    );
+    let mut q = sqlx::query(&sql);
+    for id in live_terminal_ids {
+        q = q.bind(id);
+    }
+    let mut deleted = q.execute(pool).await.map_err(|e| e.to_string())?.rows_affected();
+
+    let sql = format!(
+        "DELETE FROM subscriptions WHERE subscriber_worktree_id IS NULL{}",
+        not_live
+    );
+    let mut q = sqlx::query(&sql);
+    for id in live_terminal_ids {
+        q = q.bind(id);
+    }
+    deleted += q.execute(pool).await.map_err(|e| e.to_string())?.rows_affected();
+
+    let sql = format!(
+        "UPDATE subscriptions SET state = ?, orphaned_at = ? WHERE state = ?{}",
+        not_live
+    );
+    let mut q = sqlx::query(&sql)
+        .bind(STATE_ORPHANED)
+        .bind(now)
+        .bind(STATE_ACTIVE);
+    for id in live_terminal_ids {
+        q = q.bind(id);
+    }
+    let subs = q.execute(pool).await.map_err(|e| e.to_string())?.rows_affected();
+
+    // ack 済みの行は引き継ぐ意味がない（監査証跡としてそのまま残す）。
+    let sql = format!(
+        "UPDATE inbox SET orphaned_at = ? WHERE orphaned_at IS NULL AND acked_at IS NULL{}",
+        not_live
+    );
+    let mut q = sqlx::query(&sql).bind(now);
+    for id in live_terminal_ids {
+        q = q.bind(id);
+    }
+    let inbox = q.execute(pool).await.map_err(|e| e.to_string())?.rows_affected();
+
+    // 逆遷移: 生存しているタブの行が orphaned のまま残っていたら active に戻す。
+    //
+    // ポーリングは生存タブ一覧をスナップショットしてから非同期に投げるため、その隙に
+    // spawn されたタブが subscribe すると**古い一覧**で orphaned に落とされうる。戻す道が
+    // 無いと、そのタブは生存しているのに `rebind_next_orphaned_group` が自分自身のグループを
+    // 除外する（`terminal_id != new_terminal_id`）ので永久に引き継げず、押し込みも
+    // `list_pushable` の `orphaned_at IS NULL` から外れて一切来なくなる。
+    if !live_terminal_ids.is_empty() {
+        let in_live = format!(
+            " AND subscriber_terminal_id IN ({})",
+            placeholders(live_terminal_ids.len())
+        );
+        let sql = format!(
+            "UPDATE subscriptions SET state = ?, orphaned_at = NULL WHERE state = ?{}",
+            in_live
+        );
+        let mut q = sqlx::query(&sql).bind(STATE_ACTIVE).bind(STATE_ORPHANED);
+        for id in live_terminal_ids {
+            q = q.bind(id);
+        }
+        let restored = q.execute(pool).await.map_err(|e| e.to_string())?.rows_affected();
+
+        let sql = format!(
+            "UPDATE inbox SET orphaned_at = NULL WHERE orphaned_at IS NOT NULL AND acked_at IS NULL{}",
+            in_live
+        );
+        let mut q = sqlx::query(&sql);
+        for id in live_terminal_ids {
+            q = q.bind(id);
+        }
+        let restored_inbox = q.execute(pool).await.map_err(|e| e.to_string())?.rows_affected();
+        if restored > 0 || restored_inbox > 0 {
+            log::info!(
+                "[event-db] 生存タブの引き継ぎ待ちを解除: 購読 {} 件 / 未読 {} 件",
+                restored,
+                restored_inbox
+            );
+        }
+    }
+
+    Ok((subs, inbox, deleted))
+}
+
+/// 指定ワークツリーの引き継ぎ待ちグループを、引き継ぎ順（先頭が次に引き継がれる）で返す。
+///
+/// **購読と inbox の和集合**をグループの母集合にするのが要点。`worktree.closed` は
+/// `fanout` 直後に `delete_subscriptions_for_target` で購読行が消えるため、本命シナリオ
+/// （待っていた対象がクローズしてから再起動）では inbox 行しか残っていない。
+///
+/// 並び順は `orphaned_at DESC, created_at DESC, terminal_id ASC` の**安定な全順序**。
+/// 起動時の一括遷移では `orphaned_at` が全グループで同値になるため tie-break が必須。
+pub async fn list_orphaned_groups(
+    pool: &SqlitePool,
+    worktree_id: &str,
+) -> Result<Vec<OrphanedGroup>, String> {
+    sqlx::query_as::<_, OrphanedGroup>(
+        "SELECT terminal_id, ? AS worktree_id, MAX(orphaned_at) AS orphaned_at, MIN(created_at) AS created_at, \
+                SUM(is_sub) AS subscriptions, SUM(1 - is_sub) AS pending \
+         FROM ( \
+           SELECT subscriber_terminal_id AS terminal_id, orphaned_at, created_at, 1 AS is_sub \
+             FROM subscriptions \
+            WHERE state = 'orphaned' AND orphaned_at IS NOT NULL AND subscriber_worktree_id = ? \
+           UNION ALL \
+           SELECT subscriber_terminal_id AS terminal_id, orphaned_at, created_at, 0 AS is_sub \
+             FROM inbox \
+            WHERE orphaned_at IS NOT NULL AND acked_at IS NULL AND subscriber_worktree_id = ? \
+         ) \
+         GROUP BY terminal_id \
+         ORDER BY orphaned_at DESC, created_at DESC, terminal_id ASC",
+    )
+    .bind(worktree_id)
+    .bind(worktree_id)
+    .bind(worktree_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// 死亡タブ1つ分の購読と未読を、生存している新しいタブへ引き継ぐ。
+///
+/// 粒度が「死亡タブ単位」なのは、同一ワークツリーの複数タブがそれぞれ別の対象を購読して
+/// いた場合に、新タブ1つが全部を吸い上げてタブ間の宛先分離が消えるのを避けるため
+/// （#120 §2 の「A タブ宛を B タブが抜き取らない」原則）。引き継がれずに残ったグループは
+/// UI に「引き継ぎ待ち」として出し、人間が任意のタブへ手動で引き継げるようにする。
+///
+/// 2つの UNIQUE 制約（`subscriptions(terminal_id, target)` / `inbox(terminal_id, event_id)`）
+/// と衝突しうるので `UPDATE OR IGNORE` + 残骸の DELETE にする。**孤児側を捨てるのが
+/// 両方向で正しい**:
+///
+/// | 生存側(新タブ) | 孤児側(旧タブ) | 孤児を捨てると |
+/// |---|---|---|
+/// | 配送済み | 未配送 | 新タブは既に本文を見ている。正しい |
+/// | 未配送 | 配送済み | 新タブは次の SessionStart で見る。正しい |
+/// | ack 済み | 任意 | 処理済み。正しい |
+///
+/// 一連の UPDATE / DELETE は1トランザクションで行う。分割すると、隙間に走った `fanout`
+/// （orphaned な購読にも積む）が死んだ terminal_id 宛の行を差し込んで取り残す。
+pub async fn rebind_orphaned_group(
+    pool: &SqlitePool,
+    worktree_id: &str,
+    dead_terminal_id: &str,
+    new_terminal_id: &str,
+) -> Result<(u64, u64), String> {
+    if dead_terminal_id == new_terminal_id {
+        return Ok((0, 0));
+    }
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+
+    let subs = sqlx::query(
+        "UPDATE OR IGNORE subscriptions SET subscriber_terminal_id = ?, state = ?, orphaned_at = NULL \
+         WHERE state = ? AND subscriber_worktree_id = ? AND subscriber_terminal_id = ?",
+    )
+    .bind(new_terminal_id)
+    .bind(STATE_ACTIVE)
+    .bind(STATE_ORPHANED)
+    .bind(worktree_id)
+    .bind(dead_terminal_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?
+    .rows_affected();
+
+    // UNIQUE(subscriber_terminal_id, target) に負けた残骸 = 新タブが既に同じ対象を購読済み
+    sqlx::query(
+        "DELETE FROM subscriptions WHERE state = ? AND subscriber_worktree_id = ? AND subscriber_terminal_id = ?",
+    )
+    .bind(STATE_ORPHANED)
+    .bind(worktree_id)
+    .bind(dead_terminal_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let inbox = sqlx::query(
+        "UPDATE OR IGNORE inbox SET subscriber_terminal_id = ?, orphaned_at = NULL \
+         WHERE orphaned_at IS NOT NULL AND acked_at IS NULL AND subscriber_worktree_id = ? AND subscriber_terminal_id = ?",
+    )
+    .bind(new_terminal_id)
+    .bind(worktree_id)
+    .bind(dead_terminal_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?
+    .rows_affected();
+
+    // UNIQUE(subscriber_terminal_id, event_id) に負けた残骸（上表の理由で捨ててよい）
+    sqlx::query(
+        "DELETE FROM inbox WHERE orphaned_at IS NOT NULL AND acked_at IS NULL AND subscriber_worktree_id = ? AND subscriber_terminal_id = ?",
+    )
+    .bind(worktree_id)
+    .bind(dead_terminal_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok((subs, inbox))
+}
+
+/// 引き継ぎ待ちの先頭グループ1つを新しいタブへ引き継ぐ。自動トリガ（SessionStart /
+/// AI エージェント検出）はこちらを使う。引き継ぐものが無ければ `(0, 0)`（冪等なので
+/// 複数の経路から同時に呼ばれても無害）。
+pub async fn rebind_next_orphaned_group(
+    pool: &SqlitePool,
+    worktree_id: &str,
+    new_terminal_id: &str,
+) -> Result<(u64, u64), String> {
+    let groups = list_orphaned_groups(pool, worktree_id).await?;
+    let Some(group) = groups
+        .into_iter()
+        .find(|g| g.terminal_id != new_terminal_id)
+    else {
+        return Ok((0, 0));
+    };
+    rebind_orphaned_group(pool, worktree_id, &group.terminal_id, new_terminal_id).await
+}
+
+/// 引き継がれないまま保持期限を過ぎた orphaned 行を削除する。
+/// active な購読は無期限（#120 本文どおり）なので触らない。
+pub async fn purge_orphaned_expired(
+    pool: &SqlitePool,
+    now: i64,
+    orphaned_retention_ms: i64,
+) -> Result<(u64, u64), String> {
+    let deadline = now - orphaned_retention_ms;
+    let inbox = sqlx::query("DELETE FROM inbox WHERE orphaned_at IS NOT NULL AND orphaned_at <= ?")
+        .bind(deadline)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .rows_affected();
+    let subs = sqlx::query(
+        "DELETE FROM subscriptions WHERE state = ? AND orphaned_at IS NOT NULL AND orphaned_at <= ?",
+    )
+    .bind(STATE_ORPHANED)
+    .bind(deadline)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?
+    .rows_affected();
+    Ok((subs, inbox))
+}
+
+// ─── 押し込み対象の抽出（#125） ───────────────────────────────────────────────
+
+/// PTY 押し込みの候補（未配送・未 ack・鮮度内・引き継ぎ済み）をタブごとにまとめて返す。
+///
+/// `orphaned_at IS NOT NULL` の行は宛先タブが存在しないので対象外（`spawn_if_closed` の
+/// 判断は購読側を見る）。`created_at` が `push_ttl_ms` より古いものも外す —— 再起動直後に
+/// 何日も前の未配送分が一斉に割り込むのを防ぐ。inbox には残るので `SessionStart` 回収や
+/// `oretachi_poll_inbox` では取れる。
+pub async fn list_pushable(
+    pool: &SqlitePool,
+    now: i64,
+    push_ttl_ms: i64,
+) -> Result<Vec<InboxItem>, String> {
+    sqlx::query_as::<_, InboxItem>(
+        "SELECT i.id, i.subscriber_terminal_id, i.subscriber_worktree_id, i.event_id, i.state, i.created_at, i.delivered_at, i.acked_at, i.orphaned_at, i.delivery, i.spawn_if_closed, e.kind, e.body, e.source_worktree_id, e.actor \
+         FROM inbox i JOIN events e ON e.id = i.event_id \
+         WHERE i.delivered_at IS NULL AND i.acked_at IS NULL AND i.orphaned_at IS NULL AND i.created_at > ? \
+         ORDER BY i.created_at ASC",
+    )
+    .bind(now - push_ttl_ms)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// 宛先タブが居ないまま未読が溜まっており、かつ `spawn_if_closed` が立っている
+/// ワークツリーと件数を返す（新しいタブを立てて配送する候補）。
+///
+/// 購読テーブルではなく inbox を見るのは、`worktree.closed` では購読行が fanout 直後に
+/// 消えているため。`spawn_if_closed` は積んだ時点の値が inbox に焼き付けてある。
+pub async fn list_spawn_candidates(
+    pool: &SqlitePool,
+    now: i64,
+    push_ttl_ms: i64,
+) -> Result<Vec<(String, i64)>, String> {
+    let rows: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT subscriber_worktree_id, COUNT(*) FROM inbox \
+         WHERE orphaned_at IS NOT NULL AND acked_at IS NULL AND delivered_at IS NULL \
+           AND spawn_if_closed = 1 AND subscriber_worktree_id IS NOT NULL AND created_at > ? \
+         GROUP BY subscriber_worktree_id",
+    )
+    .bind(now - push_ttl_ms)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+// ─── UI 向けの読み出し（#120 §7） ─────────────────────────────────────────────
+
+/// 全タブ分の有効な購読を返す。UI の購読一覧用（MCP 経由の `list_subscriptions` は
+/// 呼び出し元タブのぶんだけ返すので、人間向けには横断の一覧が要る）。
+pub async fn list_all_subscriptions(
+    pool: &SqlitePool,
+    now: i64,
+) -> Result<Vec<SubscriptionRow>, String> {
+    sqlx::query_as::<_, SubscriptionRow>(
+        "SELECT * FROM subscriptions WHERE expires_at IS NULL OR expires_at > ? ORDER BY created_at DESC",
+    )
+    .bind(now)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// タブごとの (未 ack 件数, うち未配送件数)。タブの未読バッジに使う。
+pub async fn count_unacked_by_terminal(pool: &SqlitePool) -> Result<Vec<(String, i64, i64)>, String> {
+    sqlx::query_as(
+        "SELECT subscriber_terminal_id, COUNT(*), COALESCE(SUM(CASE WHEN delivered_at IS NULL THEN 1 ELSE 0 END), 0) \
+         FROM inbox WHERE acked_at IS NULL GROUP BY subscriber_terminal_id",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// 全ワークツリーの引き継ぎ待ちグループ。UI の「引き継ぎ待ち」表示と手動引き継ぎ用。
+pub async fn list_all_orphaned_groups(pool: &SqlitePool) -> Result<Vec<OrphanedGroup>, String> {
+    sqlx::query_as::<_, OrphanedGroup>(
+        "SELECT terminal_id, worktree_id, MAX(orphaned_at) AS orphaned_at, MIN(created_at) AS created_at, \
+                SUM(is_sub) AS subscriptions, SUM(1 - is_sub) AS pending \
+         FROM ( \
+           SELECT subscriber_terminal_id AS terminal_id, subscriber_worktree_id AS worktree_id, orphaned_at, created_at, 1 AS is_sub \
+             FROM subscriptions \
+            WHERE state = 'orphaned' AND orphaned_at IS NOT NULL AND subscriber_worktree_id IS NOT NULL \
+           UNION ALL \
+           SELECT subscriber_terminal_id AS terminal_id, subscriber_worktree_id AS worktree_id, orphaned_at, created_at, 0 AS is_sub \
+             FROM inbox \
+            WHERE orphaned_at IS NOT NULL AND acked_at IS NULL AND subscriber_worktree_id IS NOT NULL \
+         ) \
+         GROUP BY terminal_id, worktree_id \
+         ORDER BY orphaned_at DESC, created_at DESC, terminal_id ASC",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// 指定タブの未 ack を全件 ack する。UI の「既読にする」用。
+///
+/// エージェントが ack しないまま忘れた分を人間が畳めるようにする。MCP 側の `ack` が
+/// ID 指定なのは「読んだものだけ確認済みにする」ためだが、人間は一覧で件数を見ているので
+/// ID を持っていない。
+pub async fn ack_all(pool: &SqlitePool, terminal_id: &str, now: i64) -> Result<u64, String> {
+    Ok(sqlx::query(
+        "UPDATE inbox SET acked_at = ?, state = ? WHERE subscriber_terminal_id = ? AND acked_at IS NULL",
+    )
+    .bind(now)
+    .bind(STATE_ACKED)
+    .bind(terminal_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?
+    .rows_affected())
+}
+
+/// UI からの購読解除。MCP 経由（`delete_subscription`）と違い呼び出し元タブに
+/// 縛られない —— 人間は引き継ぎ待ちの（＝どのタブからも触れない）購読も消せる必要がある。
+pub async fn delete_subscription_by_id(pool: &SqlitePool, id: &str) -> Result<u64, String> {
+    Ok(sqlx::query("DELETE FROM subscriptions WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .rows_affected())
+}
+
 // ─── 掃除 ─────────────────────────────────────────────────────────────────────
 
 /// 購読者ワークツリーがクローズされたときに、そのワークツリーのタブが持っていた
@@ -571,46 +1105,6 @@ pub async fn delete_subscriptions_for_target(
         .await
         .map_err(|e| e.to_string())?
         .rows_affected())
-}
-
-/// 生存しているターミナルに紐づかない購読とその inbox を削除する。
-///
-/// `terminal_id` は PTY spawn ごとに発番され永続化されないため、**アプリを再起動すると
-/// 既存の全購読はどのターミナルにも到達できなくなる**（`resolve_subscriber` が
-/// 生存セッションしか受け付けないので list / unsubscribe / poll すべて不能）。
-/// そのまま残すと `fanout` が死んだ宛先へ inbox を積み続け、既定が無期限の購読は
-/// 単調増加する。到達不能な行は掃除して `list_subscriptions` を実態に合わせる。
-///
-/// 起動時は生存セッションが 0 件なので全購読が対象になる（これは仕様どおり:
-/// 再起動を挟んだ購読は復活できない。タブ死亡時の復活は #125 の担当）。
-pub async fn purge_orphaned_subscribers(
-    pool: &SqlitePool,
-    live_terminal_ids: &[String],
-) -> Result<(u64, u64), String> {
-    let keep = if live_terminal_ids.is_empty() {
-        String::new()
-    } else {
-        format!(
-            " AND subscriber_terminal_id NOT IN ({})",
-            placeholders(live_terminal_ids.len())
-        )
-    };
-
-    let inbox_sql = format!("DELETE FROM inbox WHERE 1=1{}", keep);
-    let mut q = sqlx::query(&inbox_sql);
-    for id in live_terminal_ids {
-        q = q.bind(id);
-    }
-    let inbox_deleted = q.execute(pool).await.map_err(|e| e.to_string())?.rows_affected();
-
-    let subs_sql = format!("DELETE FROM subscriptions WHERE 1=1{}", keep);
-    let mut q = sqlx::query(&subs_sql);
-    for id in live_terminal_ids {
-        q = q.bind(id);
-    }
-    let subs_deleted = q.execute(pool).await.map_err(|e| e.to_string())?.rows_affected();
-
-    Ok((subs_deleted, inbox_deleted))
 }
 
 /// 失効した購読と保持期限切れの inbox / 参照されなくなった events を削除する。
@@ -697,6 +1191,80 @@ pub fn format_inbox_line(item: &InboxItem) -> String {
     format!("- [{}] {}", item.id, detail)
 }
 
+/// PTY へ流す文字列から制御文字を落とし、長さを切り詰める。
+///
+/// ワークツリー名 / ブランチ名は利用者が自由に付けられる文字列で、`format_inbox_line` を
+/// 経由してそのまま PTY へ流れる。押し込みは `ESC[200~ … ESC[201~CR` のブラケットペーストで
+/// 囲むため、本文に `ESC[201~` や生の CR が混ざるとペーストを脱出して**任意のコマンドが
+/// そのまま実行される**。ESC と C0 制御文字を全部落として構造的に潰す。
+pub fn sanitize_for_pty(s: &str) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| {
+            if c == '\n' || c == '\r' || c == '\t' {
+                ' '
+            } else {
+                c
+            }
+        })
+        // ESC(0x1b) を含む C0 制御文字と DEL を除去する
+        .filter(|c| !c.is_control())
+        .collect();
+    // 連続空白を1つに畳んでから長さで切る（改行を空白にした分が伸びるため）
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.chars().count() <= PTY_TEXT_MAX_CHARS {
+        return collapsed;
+    }
+    let truncated: String = collapsed.chars().take(PTY_TEXT_MAX_CHARS).collect();
+    format!("{}…", truncated)
+}
+
+/// 待機中のエージェントへ PTY で押し込む1行テキストを組み立てる。
+///
+/// SessionStart 用の `format_inbox_digest` と分けているのは、押し込みは**1行**でなければ
+/// ならないため（改行はそのままターン送信になる）。本文は `sanitize_for_pty` を通す。
+///
+/// 戻り値は `(本文, 本文に載せた件数)`。**載らなかった分は呼び出し元が打刻してはいけない。**
+/// 全件の ID を `mark_delivered` に渡すと、長さ上限で切り落とされた分が「配送済みだが
+/// 本文は誰も見ていない」状態になり、再送しない方針（#120 §5.2）のせいで二度と出てこない。
+/// 載らなかった分は未配送のまま残り、次の押し込み / SessionStart 回収で拾われる。
+pub fn format_inbox_push_text(items: &[InboxItem]) -> Option<(String, usize)> {
+    if items.is_empty() {
+        return None;
+    }
+    let head = "[oretachi] 購読していたワークツリーイベントが届きました。";
+    let tail = " 購読していた作業が完了したということなので、必要な動作確認や後続作業を進めてください。\
+                確認したら oretachi_ack_message に [] 内の ID を渡して ack してください。";
+    // 固定文言のぶんを引いた残りに、入る行だけを詰める（最低1件は必ず載せる）。
+    // 残件の告知（`more`）も後ろに付くので、そのぶんの余白も先に引いておく。引かないと
+    // 全体が上限を超え、`sanitize_for_pty` が**末尾から**切るせいで
+    // 「oretachi_ack_message で ack してください」という一番効かせたい指示が欠ける。
+    const MORE_ALLOWANCE: usize = 48;
+    let budget = PTY_TEXT_MAX_CHARS
+        .saturating_sub(head.chars().count() + tail.chars().count() + MORE_ALLOWANCE);
+    let mut body = String::new();
+    let mut used = 0usize;
+    for item in items {
+        let line = sanitize_for_pty(&format_inbox_line(item));
+        let sep = if used == 0 { "" } else { " / " };
+        if used > 0 && body.chars().count() + sep.len() + line.chars().count() > budget {
+            break;
+        }
+        body.push_str(sep);
+        body.push_str(&line);
+        used += 1;
+    }
+    let more = if used < items.len() {
+        format!("（ほかに {} 件あります。oretachi_poll_inbox で取得できます）", items.len() - used)
+    } else {
+        String::new()
+    };
+    Some((
+        sanitize_for_pty(&format!("{}{}{}{}", head, body, more, tail)),
+        used,
+    ))
+}
+
 /// SessionStart 注入用のテキストを組み立てる。
 ///
 /// - `items`: 今回初めて配送する未配送分。本文を列挙する
@@ -753,6 +1321,7 @@ mod tests {
             created_at: 0,
             expires_at: None,
             state: STATE_ACTIVE.to_string(),
+            orphaned_at: None,
         }
     }
 
@@ -766,6 +1335,8 @@ mod tests {
                 .to_string(),
             actor: Some("archive".to_string()),
             created_at: 100,
+            depth: 0,
+            origin: Some("archive".to_string()),
         }
     }
 
@@ -823,6 +1394,9 @@ mod tests {
             created_at: 100,
             delivered_at: None,
             acked_at: None,
+            orphaned_at: None,
+            delivery: DELIVERY_TURN_END.to_string(),
+            spawn_if_closed: 0,
             kind: kind.to_string(),
             body: body.to_string(),
             source_worktree_id: "wt-target".to_string(),
@@ -1126,9 +1700,10 @@ mod tests {
         });
     }
 
-    /// 生存ターミナルに紐づかない購読と inbox は掃除される（再起動後の到達不能行）。
+    /// 生存ターミナルに紐づかない購読と inbox は**削除されず** orphaned になる。
+    /// 生存しているタブのぶんは触られない。
     #[test]
-    fn test_roundtrip_purge_orphaned_subscribers() {
+    fn test_roundtrip_mark_orphaned_spares_live_terminals() {
         with_pool(async {
             let pool = memory_pool().await;
             let now = 1_000_000i64;
@@ -1143,17 +1718,479 @@ mod tests {
             assert_eq!(fanout(&pool, &e, now).await.unwrap(), 2);
 
             // term-a だけ生存している
-            let (subs, inbox) =
-                purge_orphaned_subscribers(&pool, &["term-a".to_string()]).await.unwrap();
-            assert_eq!((subs, inbox), (1, 1));
-            assert_eq!(list_subscriptions(&pool, "term-a", now).await.unwrap().len(), 1);
-            assert!(list_subscriptions(&pool, "term-b", now).await.unwrap().is_empty());
-            assert_eq!(list_inbox(&pool, "term-a", InboxFilter::All).await.unwrap().len(), 1);
-            assert!(list_inbox(&pool, "term-b", InboxFilter::All).await.unwrap().is_empty());
+            let (subs, inbox, deleted) =
+                mark_orphaned_subscribers(&pool, &["term-a".to_string()], now).await.unwrap();
+            assert_eq!((subs, inbox, deleted), (1, 1, 0));
 
-            // 生存 0 件（起動直後）なら全部消える
-            let (subs, inbox) = purge_orphaned_subscribers(&pool, &[]).await.unwrap();
+            let live = list_subscriptions(&pool, "term-a", now).await.unwrap();
+            assert_eq!(live[0].state, STATE_ACTIVE);
+            assert_eq!(live[0].orphaned_at, None);
+            let dead = list_subscriptions(&pool, "term-b", now).await.unwrap();
+            assert_eq!(dead[0].state, STATE_ORPHANED, "削除ではなく orphaned へ遷移する");
+            assert_eq!(dead[0].orphaned_at, Some(now));
+            // inbox も両方残る（死んだ側は引き継ぎ待ちの印が付く）
+            assert_eq!(list_inbox(&pool, "term-a", InboxFilter::All).await.unwrap()[0].orphaned_at, None);
+            assert_eq!(
+                list_inbox(&pool, "term-b", InboxFilter::All).await.unwrap()[0].orphaned_at,
+                Some(now)
+            );
+        });
+    }
+
+    /// 起動直後（生存 0 件）は全行が orphaned になるが、**1行も消えない**。
+    /// Phase 1 はここで全削除しており、それが「再起動を挟むと購読が消える」の直接原因だった。
+    #[test]
+    fn test_roundtrip_mark_orphaned_at_startup_keeps_everything() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-a", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            fanout(&pool, &e, now).await.unwrap();
+
+            let (subs, inbox, deleted) = mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+            assert_eq!((subs, inbox, deleted), (1, 1, 0));
+            assert_eq!(list_subscriptions(&pool, "term-a", now).await.unwrap().len(), 1);
+            assert_eq!(list_inbox(&pool, "term-a", InboxFilter::All).await.unwrap().len(), 1);
+
+            // 冪等: 二度目は既に orphaned なので 0 件
+            let (subs, inbox, _) = mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+            assert_eq!((subs, inbox), (0, 0));
+        });
+    }
+
+    /// ワークツリーを逆引きできない行は引き継ぎ先が決まらないので削除する。
+    #[test]
+    fn test_roundtrip_mark_orphaned_deletes_rows_without_worktree() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-a", None, r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+
+            let (subs, inbox, deleted) = mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+            assert_eq!((subs, inbox, deleted), (0, 0, 1));
+            assert!(list_subscriptions(&pool, "term-a", now).await.unwrap().is_empty());
+        });
+    }
+
+    /// 引き継がれないまま保持期限を過ぎた orphaned 行は削除される（単調増加の防止）。
+    #[test]
+    fn test_roundtrip_purge_orphaned_expired() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-a", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            fanout(&pool, &e, now).await.unwrap();
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+
+            // 期限内は消えない
+            let (subs, inbox) = purge_orphaned_expired(&pool, now + 1000, ORPHANED_RETENTION_MS)
+                .await
+                .unwrap();
+            assert_eq!((subs, inbox), (0, 0));
+
+            let (subs, inbox) =
+                purge_orphaned_expired(&pool, now + ORPHANED_RETENTION_MS + 1, ORPHANED_RETENTION_MS)
+                    .await
+                    .unwrap();
             assert_eq!((subs, inbox), (1, 1));
+        });
+    }
+
+    /// **本 issue の核心**: `worktree.closed` は fanout 直後に購読行が消えるため、
+    /// 再起動を挟んだ回収は inbox 行だけを頼りに行う必要がある。
+    #[test]
+    fn test_rebind_recovers_inbox_without_subscription() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-old", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            assert_eq!(fanout(&pool, &e, now).await.unwrap(), 1);
+            // 対象がクローズされたので購読行は消える（fire_worktree_closed と同じ順序）
+            delete_subscriptions_for_target(&pool, "wt-target").await.unwrap();
+            assert!(list_subscriptions(&pool, "term-old", now).await.unwrap().is_empty());
+
+            // アプリ再起動
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+
+            // 同じワークツリーで新しいタブが立つ
+            let (subs, inbox) =
+                rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new").await.unwrap();
+            assert_eq!((subs, inbox), (0, 1), "購読は既に無いが未読は引き継がれる");
+            let recovered = list_inbox(&pool, "term-new", InboxFilter::Undelivered).await.unwrap();
+            assert_eq!(recovered.len(), 1);
+            assert_eq!(recovered[0].orphaned_at, None, "引き継ぎ後は押し込み対象になる");
+            assert!(list_inbox(&pool, "term-old", InboxFilter::All).await.unwrap().is_empty());
+        });
+    }
+
+    /// 引き継ぎは死亡タブ単位で1グループずつ。新タブ1つが全部を吸い上げない。
+    #[test]
+    fn test_rebind_claims_one_group_at_a_time() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            for (i, term) in ["term-1", "term-2", "term-3"].iter().enumerate() {
+                let mut s = sub(term, Some("wt-subscriber"), r#"["worktree.closed"]"#);
+                s.id = format!("sub-{}", i);
+                s.target = format!("wt-target-{}", i);
+                upsert_subscription(&pool, &s).await.unwrap();
+            }
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+            assert_eq!(list_orphaned_groups(&pool, "wt-subscriber").await.unwrap().len(), 3);
+
+            let (subs, _) = rebind_next_orphaned_group(&pool, "wt-subscriber", "new-a").await.unwrap();
+            assert_eq!(subs, 1);
+            assert_eq!(list_orphaned_groups(&pool, "wt-subscriber").await.unwrap().len(), 2);
+
+            let (subs, _) = rebind_next_orphaned_group(&pool, "wt-subscriber", "new-b").await.unwrap();
+            assert_eq!(subs, 1);
+            assert_eq!(list_orphaned_groups(&pool, "wt-subscriber").await.unwrap().len(), 1);
+            // 引き継ぎ先の購読は active に戻っている
+            assert_eq!(
+                list_subscriptions(&pool, "new-a", now).await.unwrap()[0].state,
+                STATE_ACTIVE
+            );
+        });
+    }
+
+    /// 引き継ぎは購読者ワークツリーの中に閉じる（他ワークツリーの分を奪わない）。
+    #[test]
+    fn test_rebind_scoped_to_worktree() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let mut a = sub("term-a", Some("wt-a"), r#"["worktree.closed"]"#);
+            a.id = "sub-a".to_string();
+            upsert_subscription(&pool, &a).await.unwrap();
+            let mut b = sub("term-b", Some("wt-b"), r#"["worktree.closed"]"#);
+            b.id = "sub-b".to_string();
+            upsert_subscription(&pool, &b).await.unwrap();
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+
+            rebind_next_orphaned_group(&pool, "wt-a", "new-a").await.unwrap();
+            assert_eq!(list_subscriptions(&pool, "new-a", now).await.unwrap().len(), 1);
+            assert_eq!(list_orphaned_groups(&pool, "wt-b").await.unwrap().len(), 1);
+        });
+    }
+
+    /// 生存タブ（active）の購読は引き継ぎで奪われない。
+    #[test]
+    fn test_rebind_does_not_steal_from_active_subscription() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-live", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+
+            let (subs, inbox) =
+                rebind_next_orphaned_group(&pool, "wt-subscriber", "new-a").await.unwrap();
+            assert_eq!((subs, inbox), (0, 0));
+            assert_eq!(list_subscriptions(&pool, "term-live", now).await.unwrap().len(), 1);
+        });
+    }
+
+    /// 引き継ぐものが無ければ (0,0)。冪等なので複数経路から同時に呼ばれても無害。
+    #[test]
+    fn test_rebind_returns_zero_when_nothing_orphaned() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            assert_eq!(
+                rebind_next_orphaned_group(&pool, "wt-subscriber", "new-a").await.unwrap(),
+                (0, 0)
+            );
+        });
+    }
+
+    /// 新タブが既に同じ対象を購読していた場合、UNIQUE(terminal_id, target) に負けた
+    /// 孤児側を捨て、生存側の設定を保つ。
+    #[test]
+    fn test_rebind_subscription_unique_conflict_keeps_live_row() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let old = sub("term-old", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &old).await.unwrap();
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+
+            // 新タブが同じ target を購読（delivery が違う）
+            let mut new = sub("term-new", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            new.id = "sub-new".to_string();
+            new.delivery = DELIVERY_INTERRUPT.to_string();
+            upsert_subscription(&pool, &new).await.unwrap();
+
+            rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new").await.unwrap();
+            let rows = list_subscriptions(&pool, "term-new", now).await.unwrap();
+            assert_eq!(rows.len(), 1, "重複せず1行だけ残る");
+            assert_eq!(rows[0].delivery, DELIVERY_INTERRUPT, "生存側の設定が勝つ");
+            assert!(list_subscriptions(&pool, "term-old", now).await.unwrap().is_empty());
+        });
+    }
+
+    /// 新タブが既に同じイベントを持っていた場合、UNIQUE(terminal_id, event_id) に負けた
+    /// 孤児側を捨てる。生存側の delivered_at が保たれる。
+    #[test]
+    fn test_rebind_inbox_unique_conflict_drops_orphan() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let old = sub("term-old", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &old).await.unwrap();
+            let mut new = sub("term-new", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            new.id = "sub-new".to_string();
+            upsert_subscription(&pool, &new).await.unwrap();
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            assert_eq!(fanout(&pool, &e, now).await.unwrap(), 2);
+
+            // term-new は既に本文を受け取っている
+            let new_ids: Vec<String> = list_inbox(&pool, "term-new", InboxFilter::All)
+                .await
+                .unwrap()
+                .iter()
+                .map(|i| i.id.clone())
+                .collect();
+            mark_delivered(&pool, &new_ids, now).await.unwrap();
+            // term-old だけ死亡
+            mark_orphaned_subscribers(&pool, &["term-new".to_string()], now).await.unwrap();
+
+            rebind_orphaned_group(&pool, "wt-subscriber", "term-old", "term-new").await.unwrap();
+            let rows = list_inbox(&pool, "term-new", InboxFilter::All).await.unwrap();
+            assert_eq!(rows.len(), 1, "同じイベントが二重にならない");
+            assert_eq!(rows[0].delivered_at, Some(now), "生存側の打刻が保たれる");
+            assert!(list_inbox(&pool, "term-old", InboxFilter::All).await.unwrap().is_empty());
+        });
+    }
+
+    /// ack 済みの inbox は監査証跡なので引き継ぎでも動かさない / 消さない。
+    #[test]
+    fn test_rebind_ignores_acked_rows() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-old", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            fanout(&pool, &e, now).await.unwrap();
+            let ids: Vec<String> = list_inbox(&pool, "term-old", InboxFilter::All)
+                .await
+                .unwrap()
+                .iter()
+                .map(|i| i.id.clone())
+                .collect();
+            ack(&pool, &ids, "term-old", now).await.unwrap();
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+
+            let (_, inbox) =
+                rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new").await.unwrap();
+            assert_eq!(inbox, 0);
+            assert_eq!(list_inbox(&pool, "term-old", InboxFilter::All).await.unwrap().len(), 1);
+        });
+    }
+
+    /// orphaned な購読にも配送は続ける（タブが死んでいた間のイベントを失わない）。
+    #[test]
+    fn test_fanout_delivers_to_orphaned_subscription() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-a", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            assert_eq!(fanout(&pool, &e, now).await.unwrap(), 1);
+            // 積まれた行も引き継ぎ待ちの印が付いている（＝押し込みはされない）
+            let items = list_inbox(&pool, "term-a", InboxFilter::All).await.unwrap();
+            assert_eq!(items[0].orphaned_at, Some(now));
+            assert!(list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap().is_empty());
+
+            // 引き継げば押し込み対象になる
+            rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new").await.unwrap();
+            assert_eq!(list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap().len(), 1);
+        });
+    }
+
+    /// 古いイベントは押し込まない（再起動直後の一斉割り込みを防ぐ）。inbox には残る。
+    #[test]
+    fn test_list_pushable_excludes_stale_events() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-a", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            fanout(&pool, &e, now).await.unwrap();
+
+            assert_eq!(list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap().len(), 1);
+            let later = now + PUSH_TTL_MS + 1;
+            assert!(list_pushable(&pool, later, PUSH_TTL_MS).await.unwrap().is_empty());
+            assert_eq!(list_inbox(&pool, "term-a", InboxFilter::Unacked).await.unwrap().len(), 1);
+        });
+    }
+
+    /// 連鎖が深すぎるイベントは配送しない（#120 §5.4）。
+    #[test]
+    fn test_fanout_drops_over_max_depth() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-a", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+            let mut e = event("wt-target", None);
+            e.depth = MAX_EVENT_DEPTH + 1;
+            insert_event(&pool, &e).await.unwrap();
+            assert_eq!(fanout(&pool, &e, now).await.unwrap(), 0);
+        });
+    }
+
+    /// `spawn_if_closed` と `delivery` は積んだ時点の値が inbox に焼き付く
+    /// （購読行は fanout 直後に消えるので、後から参照できない）。
+    #[test]
+    fn test_spawn_candidates_use_inbox_snapshot() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let mut s = sub("term-a", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            s.spawn_if_closed = 1;
+            s.delivery = DELIVERY_INTERRUPT.to_string();
+            upsert_subscription(&pool, &s).await.unwrap();
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            fanout(&pool, &e, now).await.unwrap();
+            delete_subscriptions_for_target(&pool, "wt-target").await.unwrap();
+
+            let items = list_inbox(&pool, "term-a", InboxFilter::All).await.unwrap();
+            assert_eq!(items[0].spawn_if_closed, 1);
+            assert_eq!(items[0].delivery, DELIVERY_INTERRUPT);
+
+            // タブが死ねば spawn 候補になる
+            assert!(list_spawn_candidates(&pool, now, PUSH_TTL_MS).await.unwrap().is_empty());
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+            let candidates = list_spawn_candidates(&pool, now, PUSH_TTL_MS).await.unwrap();
+            assert_eq!(candidates, vec![("wt-subscriber".to_string(), 1)]);
+        });
+    }
+
+    /// ブランチ名にペースト終端シーケンスを埋め込んでも脱出できない。
+    #[test]
+    fn test_sanitize_for_pty_strips_escape_sequences() {
+        let evil = "feature/x\x1b[201~\rrm -rf /\r";
+        let cleaned = sanitize_for_pty(evil);
+        assert!(!cleaned.contains('\x1b'));
+        assert!(!cleaned.contains('\r'));
+        assert!(!cleaned.contains('\n'));
+        assert!(cleaned.contains("feature/x"));
+    }
+
+    #[test]
+    fn test_sanitize_for_pty_caps_length() {
+        let long = "あ".repeat(5000);
+        let cleaned = sanitize_for_pty(&long);
+        assert!(cleaned.chars().count() <= PTY_TEXT_MAX_CHARS + 1);
+    }
+
+    /// 押し込み用テキストは1行（改行が混ざるとその場でターン送信になる）。
+    #[test]
+    fn test_format_inbox_push_text_is_single_line() {
+        let items = vec![inbox_item(
+            KIND_WORKTREE_CLOSED,
+            r#"{"worktreeId":"a","worktreeName":"wt-a","branchName":"feature/x"}"#,
+        )];
+        let (text, used) = format_inbox_push_text(&items).unwrap();
+        assert!(!text.contains('\n') && !text.contains('\r'));
+        assert!(text.contains("wt-a"));
+        assert_eq!(used, 1);
+        assert!(format_inbox_push_text(&[]).is_none());
+    }
+
+    /// 長さ上限で本文に載らなかった分の件数は返さない。
+    /// 全件を配送済みにすると、切り落とされた分は「再送しない」方針のせいで二度と出ない。
+    #[test]
+    fn test_format_inbox_push_text_reports_only_what_fits() {
+        let items: Vec<InboxItem> = (0..40)
+            .map(|i| {
+                let mut item = inbox_item(
+                    KIND_WORKTREE_CLOSED,
+                    r#"{"worktreeId":"a","worktreeName":"very-long-worktree-name-for-truncation","branchName":"feature/quite-long-branch-name"}"#,
+                );
+                item.id = format!("inbox-{:02}", i);
+                item
+            })
+            .collect();
+        let (text, used) = format_inbox_push_text(&items).unwrap();
+        assert!(used > 0 && used < items.len(), "一部だけ載る想定 (used={})", used);
+        assert!(text.chars().count() <= PTY_TEXT_MAX_CHARS + 1);
+        // 残件告知を足しても上限を超えず、末尾の ack 指示が切られていないこと
+        assert!(text.ends_with("ack してください。"), "末尾が切れている: {}", text);
+        // 載った分だけが本文にあり、載らなかった分は残件として告知される
+        assert!(text.contains(&format!("inbox-{:02}", used - 1)));
+        assert!(!text.contains(&format!("inbox-{:02}", used)));
+        assert!(text.contains(&format!("ほかに {} 件", items.len() - used)));
+    }
+
+    /// 引き継ぎ待ちの購読へ後から届いたメッセージは、購読が orphaned になった時刻ではなく
+    /// **届いた時刻**で保持期限を数える（数時間で消えないように）。
+    #[test]
+    fn test_fanout_stamps_inbox_with_arrival_time_not_subscription_time() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let long_ago = 1_000_000i64;
+            let s = sub("term-a", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+            mark_orphaned_subscribers(&pool, &[], long_ago).await.unwrap();
+
+            // 6日後にイベントが届く
+            let arrival = long_ago + 6 * 24 * 60 * 60 * 1000;
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            fanout(&pool, &e, arrival).await.unwrap();
+
+            let items = list_inbox(&pool, "term-a", InboxFilter::All).await.unwrap();
+            assert_eq!(items[0].orphaned_at, Some(arrival));
+            // 到着から7日以内なので保持期限では消えない
+            let (_, purged) =
+                purge_orphaned_expired(&pool, arrival + 1000, ORPHANED_RETENTION_MS).await.unwrap();
+            assert_eq!(purged, 0);
+        });
+    }
+
+    /// 生存しているタブが（古い生存一覧のせいで）orphaned に落ちたら active へ戻す。
+    /// 戻す道が無いと、そのタブは生存しているのに引き継ぎ対象からも押し込み対象からも外れる。
+    #[test]
+    fn test_mark_orphaned_restores_live_terminals() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-a", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            fanout(&pool, &e, now).await.unwrap();
+
+            // 古い生存一覧で誤って orphaned に落ちる
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+            assert_eq!(list_subscriptions(&pool, "term-a", now).await.unwrap()[0].state, STATE_ORPHANED);
+            assert!(list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap().is_empty());
+
+            // 次の tick で生存が確認されれば戻る
+            mark_orphaned_subscribers(&pool, &["term-a".to_string()], now).await.unwrap();
+            let rows = list_subscriptions(&pool, "term-a", now).await.unwrap();
+            assert_eq!(rows[0].state, STATE_ACTIVE);
+            assert_eq!(rows[0].orphaned_at, None);
+            assert_eq!(list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap().len(), 1);
         });
     }
 

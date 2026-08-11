@@ -31,6 +31,8 @@ const props = defineProps<{
   terminalAgentStatus?: Map<number, boolean>;
   terminalWebSessions?: Map<number, WebSessionInfo>;
   terminalAiSessions?: Map<number, AiSessionInfo>;
+  /** タブ（フロントの terminalId）→ 未 ack のワークツリーイベント件数（#120 §7） */
+  terminalUnread?: Map<number, number>;
 }>();
 
 const emit = defineEmits<{
@@ -263,6 +265,11 @@ function overlayStyle(zone: DropZone): Record<string, string> {
           @click="emit('switchTerminal', leaf.id, tid)"
         >
           <span class="tab-title">{{ terminalEntries.get(tid)?.title ?? `Terminal ${tid}` }}</span>
+          <!-- 未 ack のワークツリーイベント件数。押し込みや引き継ぎで届いた分が
+               読まれないまま埋もれるのを防ぐ（#120 §7） -->
+          <span v-if="terminalUnread?.get(tid)" class="tab-unread" :title="t('unreadEvents')">
+            {{ terminalUnread.get(tid) }}
+          </span>
           <span
             v-if="terminalAgentStatus?.get(tid)"
             class="pi pi-microchip text-[10px] text-[#a6e3a1] shrink-0"
@@ -396,6 +403,19 @@ function overlayStyle(zone: DropZone): Record<string, string> {
   white-space: nowrap;
 }
 
+.tab-unread {
+  flex-shrink: 0;
+  min-width: 14px;
+  text-align: center;
+  background: #f38ba8;
+  color: #11111b;
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 14px;
+  padding: 0 4px;
+  border-radius: 7px;
+}
+
 .tab-close {
   font-size: 10px;
   opacity: 0;
@@ -502,13 +522,15 @@ function overlayStyle(zone: DropZone): Record<string, string> {
     "addTerminal": "Add terminal",
     "noTerminals": "No terminals",
     "openWebSession": "Open web session",
-    "teleportSession": "Teleport (resume locally)"
+    "teleportSession": "Teleport (resume locally)",
+    "unreadEvents": "Unread worktree events"
   },
   "ja": {
     "addTerminal": "ターミナルを追加",
     "noTerminals": "ターミナルがありません",
     "openWebSession": "Webセッションを開く",
-    "teleportSession": "テレポート（ローカルで再開）"
+    "teleportSession": "テレポート（ローカルで再開）",
+    "unreadEvents": "未読のワークツリーイベント"
   }
 }
 </i18n>

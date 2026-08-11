@@ -38,6 +38,15 @@ struct PtySession {
     /// `agent_name == "claude"` のときポーリングが取得する Claude Code のセッション UUID。
     /// hook の stdin JSON の `session_id` と同一値（#120 で実測済み）。
     agent_session_id: Option<String>,
+    /// `~/.claude/sessions/<pid>.json` の `status`（`"busy"` | `"idle"`）。Claude Code 以外の
+    /// エージェントには対応するファイルが無いので常に `None`（#125 の PTY 押し込み判定用）。
+    agent_status: Option<String>,
+    /// 上の値をポーリングがサンプルした時刻（epoch ms）。鮮度判定はこちらで行う。
+    agent_status_sampled_at: Option<i64>,
+    /// 直前のポーリング tick から PTY 出力が1バイトも増えていないか。
+    /// `idle` でも最大10秒古いので、押し込み直前の第二の安全弁として使う
+    /// （人間が入力中の行にブラケットペーストを重ねて破壊するのを避ける）。
+    output_quiescent: bool,
     cwd: Option<String>,
     output_history: Arc<Mutex<VecDeque<u8>>>,
     /// flush ループへ渡す未配送バッファ。reader が append し、16ms 周期の flush が
@@ -117,6 +126,12 @@ pub struct SessionInfo {
     pub is_ai_agent: bool,
     pub agent_name: Option<String>,
     pub agent_session_id: Option<String>,
+    /// `"busy"` | `"idle"`。Claude Code 以外は `None`（#125）
+    pub agent_status: Option<String>,
+    /// `agent_status` をサンプルした時刻（epoch ms）
+    pub agent_status_sampled_at: Option<i64>,
+    /// 直前の tick から PTY 出力が増えていない
+    pub output_quiescent: bool,
     pub exit_code: Option<i64>,
     pub last_command_exit_code: Option<i64>,
 }
@@ -349,8 +364,21 @@ fn find_ai_agent_in_subtree(
     None
 }
 
-/// Claude Code の PID から ~/.claude/sessions/<pid>.json を読んでセッション UUID を返す
-fn get_claude_session_id_by_pid(pid: u32) -> Option<String> {
+/// `~/.claude/sessions/<pid>.json` から読み取る値。
+pub struct ClaudeSessionFile {
+    /// hook の stdin JSON の `session_id` と同一値（#120 で実測済み）
+    pub session_id: Option<String>,
+    /// `"busy"` | `"idle"`。走行中 / 待機中の判定に使う（#121 で実測）
+    pub status: Option<String>,
+}
+
+/// Claude Code の PID から ~/.claude/sessions/<pid>.json を読む。
+///
+/// `status` は「走行中か待機中か」の唯一の一次情報。ファイル側の `statusUpdatedAt` は
+/// 鮮度判定に**使わない** —— 長いターンは正当に古い `busy` を残すので「古い＝不明」と
+/// 扱うと押し込んではいけない場面で押し込むことになる。鮮度はこちらがサンプルした
+/// 時刻（`agent_status_sampled_at`）で見る。
+fn read_claude_session_file(pid: u32) -> Option<ClaudeSessionFile> {
     let home = std::env::var("USERPROFILE")
         .or_else(|_| std::env::var("HOME"))
         .ok()?;
@@ -360,7 +388,18 @@ fn get_claude_session_id_by_pid(pid: u32) -> Option<String> {
         .join(format!("{}.json", pid));
     let content = std::fs::read_to_string(&session_file).ok()?;
     let v: serde_json::Value = serde_json::from_str(&content).ok()?;
-    v.get("sessionId")?.as_str().map(|s| s.to_string())
+    Some(ClaudeSessionFile {
+        session_id: v.get("sessionId").and_then(|s| s.as_str()).map(str::to_string),
+        status: v.get("status").and_then(|s| s.as_str()).map(str::to_string),
+    })
+}
+
+/// UNIX epoch からのミリ秒（`event_db::now_ms` と同じ流儀。依存を増やさないため再実装）。
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
 }
 
 impl PtyManagerCore {
@@ -429,6 +468,8 @@ impl PtyManagerCore {
         std::thread::spawn(move || {
             // (is_agent, session_id) のペアで差分検出
             let mut last_status: HashMap<u32, (bool, Option<String>)> = HashMap::new();
+            // 前 tick の PTY 累積出力量。押し込み前の静穏判定に使う
+            let mut last_bytes: HashMap<u32, u64> = HashMap::new();
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(10));
 
@@ -436,18 +477,37 @@ impl PtyManagerCore {
                     break;
                 }
 
-                // セッション情報を取得
-                let session_pids: Vec<(u32, Option<u32>)> = {
+                // セッション情報を取得（terminal_id と出力量も一緒に拾う）
+                let session_pids: Vec<(u32, Option<u32>, String, u64)> = {
                     let mut sessions = match sessions_arc.lock() {
                         Ok(s) => s,
                         Err(_) => continue,
                     };
                     sweep_exited(&mut sessions);
-                    sessions.iter().map(|(&id, s)| (id, s.child_pid)).collect()
+                    sessions
+                        .iter()
+                        .map(|(&id, s)| {
+                            (
+                                id,
+                                s.child_pid,
+                                s.terminal_id.clone(),
+                                s.total_bytes_written.load(std::sync::atomic::Ordering::Relaxed),
+                            )
+                        })
+                        .collect()
                 };
+
+                // 生存タブの terminal_id を購読側へ通知して、死んだタブの購読を orphaned に
+                // 落とす（#125）。exited セッションも EXITED_SESSION_TTL の間はここに含まれる。
+                // 一瞬の再起動で orphaned へフラップさせないよう、あえて除外しない。
+                crate::event_delivery::reconcile_live_terminals(
+                    &app_handle,
+                    session_pids.iter().map(|(_, _, tid, _)| tid.clone()).collect(),
+                );
 
                 if session_pids.is_empty() {
                     last_status.clear();
+                    last_bytes.clear();
                     continue;
                 }
 
@@ -460,31 +520,56 @@ impl PtyManagerCore {
 
                 // pty_session_id → AiAgentInfo のマップを構築
                 let mut current_status: HashMap<u32, (bool, Option<String>)> = HashMap::new();
-                let mut new_infos: Vec<(u32, bool, AiAgentInfo)> = Vec::new();
+                let mut current_bytes: HashMap<u32, u64> = HashMap::new();
+                // (session_id, is_agent, info, claude_status, quiescent, terminal_id)
+                let mut new_infos: Vec<(u32, bool, AiAgentInfo, Option<String>, bool, String)> =
+                    Vec::new();
+                let sampled_at = now_ms();
 
-                for (session_id, child_pid) in session_pids {
-                    let (is_agent, info) = if let Some(pid) = child_pid {
+                for (session_id, child_pid, terminal_id, bytes) in session_pids {
+                    let (is_agent, info, claude_status) = if let Some(pid) = child_pid {
                         match find_ai_agent_in_subtree(pid, &children_map, 4) {
                             Some((agent_name, agent_pid)) => {
-                                let claude_session_id = if agent_name == "claude" {
-                                    get_claude_session_id_by_pid(agent_pid)
+                                // Claude Code 以外（gemini / codex / cline）は
+                                // ~/.claude/sessions/<pid>.json を持たないため status を取れない。
+                                // 「非 CC は busy/idle 判定不能」という #125 §5 の仕様の実体がここ。
+                                let file = if agent_name == "claude" {
+                                    read_claude_session_file(agent_pid)
                                 } else {
                                     None
                                 };
-                                (true, AiAgentInfo {
-                                    is_agent: true,
-                                    agent_name: Some(agent_name),
-                                    session_id: claude_session_id,
-                                })
+                                let (sid, status) = match file {
+                                    Some(f) => (f.session_id, f.status),
+                                    None => (None, None),
+                                };
+                                (
+                                    true,
+                                    AiAgentInfo {
+                                        is_agent: true,
+                                        agent_name: Some(agent_name),
+                                        session_id: sid,
+                                    },
+                                    status,
+                                )
                             }
-                            None => (false, AiAgentInfo { is_agent: false, agent_name: None, session_id: None }),
+                            None => (
+                                false,
+                                AiAgentInfo { is_agent: false, agent_name: None, session_id: None },
+                                None,
+                            ),
                         }
                     } else {
-                        (false, AiAgentInfo { is_agent: false, agent_name: None, session_id: None })
+                        (
+                            false,
+                            AiAgentInfo { is_agent: false, agent_name: None, session_id: None },
+                            None,
+                        )
                     };
+                    let quiescent = last_bytes.get(&session_id) == Some(&bytes);
+                    current_bytes.insert(session_id, bytes);
                     let session_id_val = info.session_id.clone();
                     current_status.insert(session_id, (is_agent, session_id_val));
-                    new_infos.push((session_id, is_agent, info));
+                    new_infos.push((session_id, is_agent, info, claude_status, quiescent, terminal_id));
                 }
 
                 // 内部状態を更新。
@@ -493,7 +578,7 @@ impl PtyManagerCore {
                 // 最終ログを参照できるという既存方針に合わせ、エージェント情報も最終値を凍結する。
                 let mut exited_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
                 if let Ok(mut sessions) = sessions_arc.lock() {
-                    for (id, is_agent, info) in &new_infos {
+                    for (id, is_agent, info, status, quiescent, _) in &new_infos {
                         if let Some(session) = sessions.get_mut(id) {
                             if session.exited_at.lock().ok().and_then(|g| *g).is_some() {
                                 exited_ids.insert(*id);
@@ -502,7 +587,23 @@ impl PtyManagerCore {
                             session.is_ai_agent = *is_agent;
                             session.agent_name = info.agent_name.clone();
                             session.agent_session_id = info.session_id.clone();
+                            session.agent_status = status.clone();
+                            session.agent_status_sampled_at = Some(sampled_at);
+                            session.output_quiescent = *quiescent;
                         }
+                    }
+                }
+
+                // AI エージェントが立ち上がったタブは、そのワークツリーの引き継ぎ待ち購読を
+                // 受け取れる。SessionStart フックが無いエージェント（gemini / codex / cline）や
+                // ユーザーが手で `claude` と打った場合もここで拾える（最大10秒の遅延）。
+                for (id, is_agent, _, _, _, terminal_id) in &new_infos {
+                    if !*is_agent || exited_ids.contains(id) {
+                        continue;
+                    }
+                    let was_agent = last_status.get(id).map(|(a, _)| *a).unwrap_or(false);
+                    if !was_agent {
+                        crate::event_delivery::request_rebind(&app_handle, terminal_id.clone());
                     }
                 }
 
@@ -512,7 +613,7 @@ impl PtyManagerCore {
                 // （タブ自体は pty-exit で既に消えているので通知する相手も居ない）。
                 let changed: HashMap<u32, AiAgentInfo> = new_infos
                     .into_iter()
-                    .filter(|(id, _, info)| {
+                    .filter(|(id, _, info, _, _, _)| {
                         if exited_ids.contains(id) {
                             return false;
                         }
@@ -524,7 +625,7 @@ impl PtyManagerCore {
                             }
                         }
                     })
-                    .map(|(id, _, info)| (id, info))
+                    .map(|(id, _, info, _, _, _)| (id, info))
                     .collect();
 
                 if !changed.is_empty() {
@@ -532,6 +633,7 @@ impl PtyManagerCore {
                 }
 
                 last_status = current_status;
+                last_bytes = current_bytes;
             }
         });
     }
@@ -863,6 +965,9 @@ impl PtyManagerCore {
             is_ai_agent: false,
             agent_name: None,
             agent_session_id: None,
+            agent_status: None,
+            agent_status_sampled_at: None,
+            output_quiescent: false,
             cwd,
             output_history,
             output_pending,
@@ -1185,6 +1290,9 @@ impl PtyManagerCore {
                 is_ai_agent: s.is_ai_agent,
                 agent_name: s.agent_name.clone(),
                 agent_session_id: s.agent_session_id.clone(),
+                agent_status: s.agent_status.clone(),
+                agent_status_sampled_at: s.agent_status_sampled_at,
+                output_quiescent: s.output_quiescent,
                 exit_code: s.exit_status.lock().ok().and_then(|g| *g),
                 last_command_exit_code: s.last_command_exit_code.lock().ok().and_then(|g| *g),
             })

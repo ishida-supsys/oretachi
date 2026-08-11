@@ -7,6 +7,7 @@ const { t } = useI18n();
 import WorktreeCard from "./WorktreeCard.vue";
 import TaskCard from "./TaskCard.vue";
 import ArchiveTable from "./ArchiveTable.vue";
+import SubscriptionTable from "./SubscriptionTable.vue";
 import RepositoryPanel from "./RepositoryPanel.vue";
 import HomeCatTerminal from "./HomeCatTerminal.vue";
 import WorkgroupBar from "./WorkgroupBar.vue";
@@ -19,6 +20,17 @@ import { useTaskPersistence } from "../composables/useTaskPersistence";
 import { useTaskSearch } from "../composables/useTaskSearch";
 import { useInfiniteScroll } from "../composables/useInfiniteScroll";
 import { useArchivePersistence, deleteArchive } from "../composables/useArchivePersistence";
+import {
+  ackAll,
+  agentTerminals,
+  isLoading as subscriptionsLoading,
+  lastActionError,
+  loadSubscriptions,
+  orphanedGroups,
+  rebindGroup,
+  subscriptions,
+  unsubscribe,
+} from "../composables/useEventSubscriptions";
 import { isPseudoWorktree } from "../utils/repositoryWorktree";
 import { computeNaturalCardWidth } from "../utils/cardWidth";
 import { computed, nextTick, reactive, ref, watch } from "vue";
@@ -290,6 +302,8 @@ watch(panelMode, async (mode, oldMode) => {
   } else if (mode === "archive") {
     await loadArchives(true);
     nextTick(() => setupArchiveScroll());
+  } else if (mode === "subscription") {
+    await loadSubscriptions();
   }
 });
 
@@ -371,6 +385,7 @@ watch(
         <option value="worktree">{{ t('worktreeTitle') }}</option>
         <option value="task">{{ t('taskTitle') }}</option>
         <option value="archive">{{ t('archiveTitle') }}</option>
+        <option value="subscription">{{ t('subscriptionTitle') }}</option>
       </select>
       <WorkgroupBar
         v-if="panelMode === 'worktree'"
@@ -421,7 +436,8 @@ watch(
             <i class="pi pi-plus"></i>
           </button>
         </template>
-        <template v-else>
+        <!-- アーカイブ検索。`v-else` にすると購読パネルでも出てしまうので種別を明示する -->
+        <template v-else-if="panelMode === 'archive'">
           <div class="task-search">
             <i class="pi pi-search search-icon" />
             <input
@@ -555,6 +571,28 @@ watch(
       <div ref="scrollSentinelRef" class="scroll-sentinel">
         <i v-if="isLoading" class="pi pi-spinner pi-spin loading-spinner" />
       </div>
+    </template>
+
+    <!-- 購読パネル（ワークツリー間イベントの購読・未読・引き継ぎ待ち） -->
+    <template v-else-if="panelMode === 'subscription'">
+      <div
+        v-if="subscriptions.length === 0 && orphanedGroups.length === 0 && !subscriptionsLoading"
+        class="empty-state"
+      >
+        {{ t('subscriptionEmpty') }}
+      </div>
+
+      <!-- 引き継ぎは候補一覧が古いと正当に失敗する。黙って捨てず理由を出す -->
+      <div v-if="lastActionError" class="subscription-error">{{ lastActionError }}</div>
+
+      <SubscriptionTable
+        :items="subscriptions"
+        :orphaned-groups="orphanedGroups"
+        :agent-terminals="agentTerminals"
+        @unsubscribe="unsubscribe"
+        @rebind="(p) => rebindGroup(p.worktreeId, p.deadTerminalId, p.sessionId)"
+        @ack-all="ackAll"
+      />
     </template>
 
     <!-- アーカイブパネル -->
@@ -761,6 +799,15 @@ watch(
   color: #6c7086;
   font-size: 14px;
 }
+
+.subscription-error {
+  margin: 8px 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #45324a;
+  color: #f38ba8;
+  font-size: 12px;
+}
 </style>
 
 <i18n lang="json">
@@ -778,6 +825,8 @@ watch(
     "addTaskButton": "Add task",
     "archiveTitle": "Archives",
     "archiveEmpty": "No archives.",
+    "subscriptionTitle": "Subscriptions",
+    "subscriptionEmpty": "No worktree event subscriptions.",
     "archiveSearchPlaceholder": "Search archives...",
     "repositoryTitle": "Repositories",
     "addRepositoryButton": "Add repository"
@@ -795,6 +844,8 @@ watch(
     "addTaskButton": "タスクを追加",
     "archiveTitle": "アーカイブ",
     "archiveEmpty": "アーカイブがありません。",
+    "subscriptionTitle": "購読",
+    "subscriptionEmpty": "ワークツリーイベントの購読がありません。",
     "archiveSearchPlaceholder": "アーカイブを検索...",
     "repositoryTitle": "リポジトリ",
     "addRepositoryButton": "リポジトリを追加"

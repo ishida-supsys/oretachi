@@ -59,6 +59,17 @@ import { isHomeWorktree } from "./utils/homeWorktree";
 import { isPseudoWorktree, makeRepositoryWorktreeId, sortPseudoFirst } from "./utils/repositoryWorktree";
 import { useUiZoom } from "./composables/useUiZoom";
 import { consumeMaxBlockedMs, startEventLoopMonitor } from "./utils/eventLoopMonitor";
+import { useToast } from "primevue/usetoast";
+import {
+  initEventSubscriptions,
+  reportSpawnResult,
+  terminalUnread,
+} from "./composables/useEventSubscriptions";
+import type {
+  DeliveredPayload,
+  SpawnRejectedPayload,
+  SpawnTerminalRequest,
+} from "./types/event";
 import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { cancelApproval } from "./utils/autoApproval";
@@ -69,6 +80,8 @@ import MacTrafficLights from "./components/MacTrafficLights.vue";
 import { isMac, isWindows } from "./composables/usePlatform";
 
 const { t } = useI18n();
+// 購読イベントの配送を知らせるトースト（#120 §7）。outlet はテンプレート末尾の <Toast>。
+const toast = useToast();
 
 // ウィンドウのフォーカス状態
 const { isWindowFocused } = useWindowFocus();
@@ -161,6 +174,23 @@ const terminalAiSessions = reactive(new Map<number, import("./types/terminal").A
 
 // terminalId → Webセッション情報（claude --remote で起動したターミナル）
 const terminalWebSessions = reactive(new Map<number, import("./types/terminal").WebSessionInfo>());
+
+// タブ（フロントの terminalId）→ 未 ack のワークツリーイベント件数（#120 §7）。
+// バックエンドは pty の session_id で数えるので、AI エージェントインジケータと同じ
+// session_id → terminalId の逆引きで詰め替える。
+const terminalUnreadByTab = computed(() => {
+  const result = new Map<number, number>();
+  if (terminalUnread.value.size === 0) return result;
+  for (const [, bundle] of worktreeFrameBundles) {
+    for (const [tid, termRef] of bundle.terminalRefs) {
+      const sid = termRef?.sessionId;
+      if (sid == null) continue;
+      const count = terminalUnread.value.get(sid);
+      if (count) result.set(tid, count);
+    }
+  }
+  return result;
+});
 
 // terminalId → worktreeId のマッピング（ターミナルがどのワークツリーに属するか）
 const terminalWorktreeMap = new Map<number, string>();
@@ -1497,6 +1527,93 @@ onMounted(async () => {
     },
   );
 
+  // 購読イベントの配送（issue #120 §7 / #125）。
+  // 配送を画面に出さないと「勝手にエージェントが動き出した」ように見えるので、
+  // PTY へ押し込んだ瞬間にトーストで知らせる。
+  await listen<DeliveredPayload>("event-delivered", (event) => {
+    const p = event.payload;
+    // 本文は最大 600 字。トーストは幅 260px なので、そのまま出すと画面を埋める。
+    // 全文はエージェント側の画面と購読パネルで読めるので、ここは要約で足りる。
+    const detail = p.text.length > 120 ? `${p.text.slice(0, 120)}…` : p.text;
+    toast.add({
+      severity: "success",
+      summary: t("eventDeliveredSummary", { name: p.worktreeName ?? "", count: p.count }),
+      detail,
+      life: 8000,
+    });
+  });
+
+  // 自動 spawn が端末数上限で拒否された。黙って落とすと「spawn すると言ったのに
+  // 何も起きない」になるので必ず出す。
+  await listen<SpawnRejectedPayload>("event-spawn-rejected", (event) => {
+    const p = event.payload;
+    toast.add({
+      severity: "warn",
+      summary: t("eventSpawnRejectedSummary"),
+      detail: t("eventSpawnRejectedDetail", {
+        name: p.worktreeName,
+        live: p.liveSessions,
+        limit: p.limit,
+        pending: p.pending,
+      }),
+      life: 10000,
+    });
+  });
+
+  // 購読者タブが無いワークツリーへ、配送のために新しいタブを立てる（spawn_if_closed）。
+  // **成否にかかわらず event_spawn_result を返す**こと。返さないと Rust 側の単一フライトが
+  // 60 秒解放されないが、逆に返さないからといって撃ち直しループにはならない。
+  await listen<SpawnTerminalRequest>("event-spawn-terminal", async (event) => {
+    const { requestId, worktreeId, command } = event.payload;
+    const targetWt = worktrees.value.find((w) => w.id === worktreeId);
+    if (!targetWt) {
+      logDebug(`[event] event-spawn-terminal: worktree ${worktreeId} not found`);
+      await reportSpawnResult(requestId, null);
+      return;
+    }
+    const cmd = command.endsWith("\r") ? command : command + "\r";
+    // detached（サブウィンドウ化済み）は session_id を回収できないので、タブだけ立てて
+    // 引き継ぎは AI エージェント検出のポーリング（10秒周期）に任せる。
+    if (isDetached(worktreeId)) {
+      try {
+        await handleSubAddTerminalRequest(worktreeId, { title: null, pendingCommand: cmd });
+      } catch (e) {
+        logDebug(`[event] event-spawn-terminal: sub window spawn failed: ${e}`);
+      }
+      await reportSpawnResult(requestId, null);
+      return;
+    }
+    const beforeIds = new Set(targetWt.terminals.map((tm) => tm.id));
+    try {
+      await onAddTerminal(worktreeId, { background: true, pendingCommand: cmd });
+    } catch (e) {
+      logDebug(`[event] event-spawn-terminal: onAddTerminal failed: ${e}`);
+      await reportSpawnResult(requestId, null);
+      return;
+    }
+    const wtAfter = worktrees.value.find((w) => w.id === worktreeId);
+    const newTerm = wtAfter?.terminals.find((tm) => !beforeIds.has(tm.id));
+    let sessionId: number | null = null;
+    if (newTerm) {
+      try {
+        await waitForTerminalReady(newTerm.id);
+        sessionId = getTerminalRef(newTerm.id)?.sessionId ?? null;
+      } catch (e) {
+        logDebug(`[event] event-spawn-terminal: waitForTerminalReady failed: ${e}`);
+      }
+    }
+    await reportSpawnResult(requestId, sessionId);
+    toast.add({
+      // `info` は共通テンプレートがスピナーを出す（進行中を意味する）ので使わない
+      severity: "success",
+      summary: t("eventSpawnedSummary"),
+      detail: t("eventSpawnedDetail", { name: targetWt.name, count: event.payload.pending }),
+      life: 8000,
+    });
+  });
+
+  await initEventSubscriptions();
+
   // MCP: 指定ワークツリーをフォーカスする
   await listen<{ worktree_id: string }>("mcp-show-worktree", async (event) => {
     const { worktree_id } = event.payload;
@@ -2200,6 +2317,7 @@ onMounted(async () => {
               :terminal-agent-status="terminalAgentStatus"
               :terminal-web-sessions="terminalWebSessions"
               :terminal-ai-sessions="terminalAiSessions"
+              :terminal-unread="terminalUnreadByTab"
               @switch-terminal="(leafId, tid) => onFrameSwitch(wt.id, leafId, tid)"
               @close-terminal="(leafId, tid) => onFrameClose(wt.id, leafId, tid)"
               @tab-drop="(sl, tid, tl, idx) => onFrameTabDrop(wt.id, sl, tid, tl, idx)"
@@ -2350,6 +2468,11 @@ onMounted(async () => {
 <i18n lang="json">
 {
   "en": {
+    "eventDeliveredSummary": "Worktree event delivered ({count})",
+    "eventSpawnRejectedSummary": "Auto spawn declined",
+    "eventSpawnRejectedDetail": "{name} has {pending} unread message(s) but {live} terminals are open (limit {limit}). Close some terminals or open the worktree manually.",
+    "eventSpawnedSummary": "Agent started for a subscription",
+    "eventSpawnedDetail": "Opened a tab in {name} to deliver {count} unread message(s).",
     "taskAddSummary": "Add Task",
     "taskAddDetail": "Generating code...",
     "taskExecutingSummary": "Executing Task",
@@ -2386,6 +2509,11 @@ onMounted(async () => {
     "removeRepositoryConfirm": "Unregister \"{name}\"?\n\nThis closes its {terminals} terminal(s) and permanently deletes the artifacts and saved terminal sessions created there. The repository folder itself is not touched."
   },
   "ja": {
+    "eventDeliveredSummary": "ワークツリーイベントを配送しました ({count}件)",
+    "eventSpawnRejectedSummary": "自動 spawn を見送りました",
+    "eventSpawnRejectedDetail": "{name} に未読が {pending} 件ありますが、ターミナルが {live} 個開いています（上限 {limit}）。ターミナルを整理するか、手動でワークツリーを開いてください",
+    "eventSpawnedSummary": "購読のためエージェントを起動しました",
+    "eventSpawnedDetail": "{name} に未読 {count} 件を届けるためタブを開きました",
     "taskAddSummary": "タスク追加",
     "taskAddDetail": "コード生成中...",
     "taskExecutingSummary": "タスク実行中",
