@@ -90,6 +90,11 @@ describe('detectOretachiToolPrompt', () => {
       .toBe('oretachi_read_terminal')
   })
 
+  it('detects read-only list_workgroups', () => {
+    expect(detectOretachiToolPrompt(ccPrompt('plugin:oretachi:oretachi - oretachi_list_workgroups')))
+      .toBe('oretachi_list_workgroups')
+  })
+
   it('returns null for destructive close_worktree', () => {
     expect(detectOretachiToolPrompt(ccPrompt('plugin:oretachi:oretachi - oretachi_close_worktree')))
       .toBeNull()

@@ -1368,9 +1368,16 @@ onMounted(async () => {
   });
 
   // MCPからのタスク追加
-  await listen<{ prompt: string; remote_exec: boolean }>("mcp-add-task", (event) => {
-    onAddTaskConfirm(event.payload.prompt, event.payload.remote_exec);
-  });
+  await listen<{ prompt: string; remote_exec: boolean; workgroup_id?: string | null }>(
+    "mcp-add-task",
+    (event) => {
+      onAddTaskConfirm(
+        event.payload.prompt,
+        event.payload.remote_exec,
+        event.payload.workgroup_id ?? undefined,
+      );
+    },
+  );
 
   // ワークツリーの description セット
   // - plan あり (ExitPlanMode フック由来): AI 要約してからセット

@@ -65,6 +65,7 @@ export const ORETACHI_AUTO_APPROVE_TOOLS = [
   "oretachi_get_app_options",
   "oretachi_show_worktree",
   "oretachi_list_repository",
+  "oretachi_list_workgroups",
   "oretachi_list_terminals",
   "oretachi_read_terminal",
 ] as const;
