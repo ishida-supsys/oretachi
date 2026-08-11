@@ -320,7 +320,31 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
     removeOptions: RemoveOptions,
     onSettled?: OnRemoveSettled,
   ): Promise<WorktreeRemoveResult> {
-    return await _execute(worktreeId, removeOptions, t("deletingText"), undefined, undefined, undefined, onSettled);
+    // アーカイブしていないので worktree-archived の MCP 通知は出さないが、
+    // 購読者にとっては「作業が終わった」という同じ意味を持つので
+    // worktree.closed イベントだけは発行する (issue #123)
+    const fireClosed = async (worktree: Worktree) => {
+      await invoke("notify_worktree_closed", {
+        id: worktree.id,
+        name: worktree.name,
+        branchName: worktree.branchName,
+      }).catch(() => { /* 通知失敗は削除の成否に影響しない */ });
+    };
+    return await _execute(
+      worktreeId,
+      removeOptions,
+      t("deletingText"),
+      undefined,
+      async (worktree) => {
+        // git 操作失敗時: ワークツリーが既に消えている（ブランチ削除失敗などの部分的失敗）
+        // ケースでは afterRemove に到達しないため、ここで発火する。
+        // archiveWorktree の onRemoveFailed と同じ判定。
+        const pathStillExists = await invoke<boolean>("path_exists", { path: worktree.path }).catch(() => false);
+        if (!pathStillExists) await fireClosed(worktree);
+      },
+      fireClosed,
+      onSettled,
+    );
   }
 
   return {

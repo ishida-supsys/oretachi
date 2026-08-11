@@ -696,6 +696,70 @@ pub struct WriteTerminalParams {
     pub submit: Option<bool>,
 }
 
+// ─── 購読 / inbox 系ツールのパラメータ (issue #123) ───────────────────────────
+
+// 各ツールの terminal_id / project_dir パラメータの説明文は schemars が文字列リテラルしか
+// 受け付けないため各構造体に直接書いている（定数に切り出せない）。
+// エージェントは自分の terminal_id を SessionStart の additionalContext から知る。
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SubscribeWorktreeParams {
+    #[schemars(description = "購読対象のワークツリー名または ID。このワークツリーがクローズされたら通知が届く")]
+    pub target: String,
+    #[schemars(description = "購読するイベント種別。現状 \"worktree.closed\" のみ対応（省略時 [\"worktree.closed\"]）")]
+    pub event_kinds: Option<Vec<String>>,
+    #[schemars(description = "配送戦略: \"turn_end\"(既定) / \"passive\"。現状どちらもセッション開始時の回収と oretachi_poll_inbox でのみ配送される（ターン境界での即時注入は未実装）")]
+    pub delivery: Option<String>,
+    #[schemars(description = "自分のターミナルが閉じていた場合に新しいターミナルを起動して通知するか（既定 false）。現状は記録のみで未実装")]
+    pub spawn_if_closed: Option<bool>,
+    #[schemars(description = "購読の有効期間（秒）。省略時は無期限")]
+    pub expires_in: Option<i64>,
+    #[schemars(description = "自分が動いているターミナルの terminal_id。セッション開始時に oretachi から注入されている値をそのまま渡す。省略時は project_dir から AI エージェント端末が1つだけのワークツリーとして推測する")]
+    pub terminal_id: Option<String>,
+    #[schemars(description = "自分の作業ディレクトリ絶対パス。terminal_id 省略時の推測に使う")]
+    pub project_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UnsubscribeWorktreeParams {
+    #[schemars(description = "解除する購読 ID（oretachi_list_subscriptions で取得）")]
+    pub subscription_id: Option<String>,
+    #[schemars(description = "解除する購読対象のワークツリー名または ID（subscription_id を指定しない場合）")]
+    pub target: Option<String>,
+    #[schemars(description = "自分が動いているターミナルの terminal_id。セッション開始時に oretachi から注入されている値をそのまま渡す。省略時は project_dir から AI エージェント端末が1つだけのワークツリーとして推測する")]
+    pub terminal_id: Option<String>,
+    #[schemars(description = "自分の作業ディレクトリ絶対パス。terminal_id 省略時の推測に使う")]
+    pub project_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListSubscriptionsParams {
+    #[schemars(description = "自分が動いているターミナルの terminal_id。セッション開始時に oretachi から注入されている値をそのまま渡す。省略時は project_dir から AI エージェント端末が1つだけのワークツリーとして推測する")]
+    pub terminal_id: Option<String>,
+    #[schemars(description = "自分の作業ディレクトリ絶対パス。terminal_id 省略時の推測に使う")]
+    pub project_dir: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PollInboxParams {
+    #[schemars(description = "自分が動いているターミナルの terminal_id。セッション開始時に oretachi から注入されている値をそのまま渡す。省略時は project_dir から AI エージェント端末が1つだけのワークツリーとして推測する")]
+    pub terminal_id: Option<String>,
+    #[schemars(description = "自分の作業ディレクトリ絶対パス。terminal_id 省略時の推測に使う")]
+    pub project_dir: Option<String>,
+    #[schemars(description = "true なら ack 済みも含めて返す（既定 false = 未 ack のみ）")]
+    pub include_acked: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AckMessageParams {
+    #[schemars(description = "ack する inbox メッセージ ID。複数まとめて渡せる")]
+    pub ids: Vec<String>,
+    #[schemars(description = "自分が動いているターミナルの terminal_id。セッション開始時に oretachi から注入されている値をそのまま渡す。省略時は project_dir から AI エージェント端末が1つだけのワークツリーとして推測する")]
+    pub terminal_id: Option<String>,
+    #[schemars(description = "自分の作業ディレクトリ絶対パス。terminal_id 省略時の推測に使う")]
+    pub project_dir: Option<String>,
+}
+
 // ─── MCP Service ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -1626,6 +1690,388 @@ impl NotifyService {
         }
     }
 
+    #[tool(description = "指定ワークツリーのクローズを購読する。別ワークツリーで進めている関連作業が完了（クローズ）したことを、自分のセッションで検知したいときに使う。届いた通知は次のセッション開始時に自動で提示され、oretachi_poll_inbox でも取得できる")]
+    async fn oretachi_subscribe_worktree(
+        &self,
+        Parameters(SubscribeWorktreeParams {
+            target,
+            event_kinds,
+            delivery,
+            spawn_if_closed,
+            expires_in,
+            terminal_id,
+            project_dir,
+        }): Parameters<SubscribeWorktreeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let target = target.trim().to_string();
+        if target.is_empty() {
+            return Err(McpError::invalid_params("target must not be empty", None));
+        }
+
+        // 現状 Phase 1 では worktree.closed のみ。未対応種別を黙って受け付けると
+        // 「購読したのに来ない」という分かりにくい失敗になるので明示的に弾く。
+        let kinds = event_kinds
+            .unwrap_or_else(|| vec![crate::event_db::KIND_WORKTREE_CLOSED.to_string()]);
+        if kinds.is_empty() {
+            return Err(McpError::invalid_params(
+                "event_kinds must not be empty",
+                None,
+            ));
+        }
+        for k in &kinds {
+            if !crate::event_db::SUPPORTED_EVENT_KINDS.contains(&k.as_str()) {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "event_kind '{}' は未対応です。対応種別: [{}]",
+                        k,
+                        crate::event_db::SUPPORTED_EVENT_KINDS.join(", ")
+                    ),
+                    None,
+                ));
+            }
+        }
+
+        let delivery = delivery
+            .map(|d| d.trim().to_string())
+            .filter(|d| !d.is_empty())
+            .unwrap_or_else(|| crate::event_db::DELIVERY_TURN_END.to_string());
+        if !crate::event_db::SUPPORTED_DELIVERIES.contains(&delivery.as_str()) {
+            return Err(McpError::invalid_params(
+                format!(
+                    "delivery '{}' は未対応です。対応値: [{}]",
+                    delivery,
+                    crate::event_db::SUPPORTED_DELIVERIES.join(", ")
+                ),
+                None,
+            ));
+        }
+
+        if let Some(secs) = expires_in {
+            if secs <= 0 {
+                return Err(McpError::invalid_params(
+                    "expires_in must be a positive number of seconds (省略すると無期限)",
+                    None,
+                ));
+            }
+        }
+
+        // await をまたいで State / settings の参照を保持しないよう、ここで所有権のある値へ確定させる
+        let (subscriber, target_id, target_name) = {
+            let subscriber = resolve_subscriber(
+                &self.app_handle,
+                terminal_id.as_deref(),
+                project_dir.as_deref(),
+            )?;
+            let settings = self.app_handle.state::<SettingsManager>().get();
+            let wt = resolve_worktree_by_name_or_id(&settings, target.as_str())?;
+            // ホーム / リポジトリ擬似ワークツリーは削除自体が禁止されているので
+            // worktree.closed は構造的に永久に発火しない。購読を受け付けると
+            // 「購読成功したのに一生通知が来ない」状態になるため拒否する。
+            if wt.is_home || wt.is_repository {
+                let kind = if wt.is_home { "ホーム" } else { "リポジトリ" };
+                return Err(McpError::invalid_params(
+                    format!(
+                        "'{}' は{}擬似ワークツリーでクローズされることがないため購読できません",
+                        wt.name, kind
+                    ),
+                    None,
+                ));
+            }
+            (subscriber, wt.id.clone(), wt.name.clone())
+        };
+
+        // 逆引きできないと自己エコー抑止も購読者クローズ時の掃除も効かないため受け付けない
+        let Some(subscriber_worktree_id) = subscriber.worktree_id.clone() else {
+            return Err(McpError::invalid_params(
+                "呼び出し元ターミナルの作業ディレクトリから oretachi 管理下のワークツリーを特定できませんでした。oretachi が管理しているワークツリー内で実行してください",
+                None,
+            ));
+        };
+        if subscriber_worktree_id == target_id {
+            return Err(McpError::invalid_params(
+                format!(
+                    "自分自身が居るワークツリー '{}' のクローズは購読できません（クローズされた時点でこのセッションも消えるため通知先がありません）",
+                    target_name
+                ),
+                None,
+            ));
+        }
+
+        let pool = event_pool(&self.app_handle)?;
+        let now = crate::event_db::now_ms();
+        let sub = crate::event_db::SubscriptionRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            subscriber_terminal_id: subscriber.terminal_id.clone(),
+            subscriber_worktree_id: Some(subscriber_worktree_id),
+            subscriber_agent_session: subscriber.agent_session.clone(),
+            target: target_id.clone(),
+            event_kinds: serde_json::to_string(&kinds)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+            delivery: delivery.clone(),
+            spawn_if_closed: i64::from(spawn_if_closed.unwrap_or(false)),
+            created_at: now,
+            // 巨大な値を渡されても panic させない（debug ビルドのオーバーフロー検査対策）
+            expires_at: expires_in.map(|secs| now.saturating_add(secs.saturating_mul(1000))),
+            state: crate::event_db::STATE_ACTIVE.to_string(),
+        };
+        // 既存の購読を更新した場合は既存の id が返る（再購読で解除手段を失わせない）
+        let subscription_id = crate::event_db::upsert_subscription(&pool, &sub)
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+        log::info!(
+            "[mcp] oretachi_subscribe_worktree: target={} ({}) terminal={} kinds={:?} delivery={} expires_at={:?} subscription_id={}",
+            target_name, target_id, subscriber.terminal_id, kinds, delivery, sub.expires_at, subscription_id
+        );
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({
+                "subscriptionId": subscription_id,
+                "target": target_name,
+                "targetWorktreeId": target_id,
+                "eventKinds": kinds,
+                "delivery": delivery,
+                "expiresAt": sub.expires_at,
+                "subscriberTerminalId": subscriber.terminal_id,
+                "message": format!(
+                    "ワークツリー '{}' のクローズを購読しました。クローズされると次のセッション開始時に通知が提示されます（oretachi_poll_inbox でも取得できます）。",
+                    target_name
+                ),
+            })
+            .to_string(),
+        )]))
+    }
+
+    #[tool(description = "ワークツリーのクローズ購読を解除する。subscription_id か target のどちらかを指定する", annotations(idempotent_hint = true))]
+    async fn oretachi_unsubscribe_worktree(
+        &self,
+        Parameters(UnsubscribeWorktreeParams { subscription_id, target, terminal_id, project_dir }): Parameters<UnsubscribeWorktreeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let subscription_id = subscription_id.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        let target = target.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+        if subscription_id.is_none() && target.is_none() {
+            return Err(McpError::invalid_params(
+                "subscription_id または target を指定してください",
+                None,
+            ));
+        }
+
+        let (subscriber, target_id) = {
+            let subscriber = resolve_subscriber(
+                &self.app_handle,
+                terminal_id.as_deref(),
+                project_dir.as_deref(),
+            )?;
+            // 購読対象が既にクローズ済みで settings から消えている場合もあるため、
+            // 逆引きできなければ渡された文字列をそのまま ID として扱う
+            let target_id = target.as_ref().map(|t| {
+                let settings = self.app_handle.state::<SettingsManager>().get();
+                resolve_worktree_by_name_or_id(&settings, t.as_str())
+                    .map(|w| w.id.clone())
+                    .unwrap_or_else(|_| t.clone())
+            });
+            (subscriber, target_id)
+        };
+
+        let pool = event_pool(&self.app_handle)?;
+        let deleted = if let Some(id) = subscription_id.as_deref() {
+            crate::event_db::delete_subscription(&pool, id, &subscriber.terminal_id).await
+        } else {
+            crate::event_db::delete_subscription_by_target(
+                &pool,
+                &subscriber.terminal_id,
+                target_id.as_deref().unwrap_or_default(),
+            )
+            .await
+        }
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        log::info!(
+            "[mcp] oretachi_unsubscribe_worktree: terminal={} subscription_id={:?} target={:?} deleted={}",
+            subscriber.terminal_id, subscription_id, target_id, deleted
+        );
+        Ok(CallToolResult::success(vec![Content::text(if deleted > 0 {
+            format!("購読を解除しました（{} 件）。", deleted)
+        } else {
+            "該当する購読はありませんでした（既に解除済み、または別のターミナルの購読です）。oretachi_list_subscriptions で確認してください。".to_string()
+        })]))
+    }
+
+    #[tool(description = "自分のターミナルが登録しているワークツリー購読の一覧と、未確認メッセージ件数を返す。自分が何を購読中か分からなくなったときに使う", annotations(read_only_hint = true))]
+    async fn oretachi_list_subscriptions(
+        &self,
+        Parameters(ListSubscriptionsParams { terminal_id, project_dir }): Parameters<ListSubscriptionsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let subscriber = resolve_subscriber(
+            &self.app_handle,
+            terminal_id.as_deref(),
+            project_dir.as_deref(),
+        )?;
+        let pool = event_pool(&self.app_handle)?;
+        let now = crate::event_db::now_ms();
+        let subs = crate::event_db::list_subscriptions(&pool, &subscriber.terminal_id, now)
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+        let (unacked, undelivered) = crate::event_db::count_unacked(&pool, &subscriber.terminal_id)
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+        // ワークツリー名の付与は表示目的のみ。既にクローズ済みなら ID だけになる。
+        let settings = self.app_handle.state::<SettingsManager>().get();
+        let items: Vec<serde_json::Value> = subs
+            .iter()
+            .map(|s| {
+                let name = settings
+                    .worktrees
+                    .iter()
+                    .find(|w| w.id == s.target)
+                    .map(|w| w.name.clone());
+                serde_json::json!({
+                    "subscriptionId": s.id,
+                    "targetWorktreeId": s.target,
+                    "targetWorktreeName": name,
+                    "eventKinds": serde_json::from_str::<serde_json::Value>(&s.event_kinds).unwrap_or(serde_json::Value::Null),
+                    "delivery": s.delivery,
+                    "spawnIfClosed": s.spawn_if_closed != 0,
+                    "createdAt": s.created_at,
+                    "expiresAt": s.expires_at,
+                    "state": s.state,
+                })
+            })
+            .collect();
+
+        log::info!(
+            "[mcp] oretachi_list_subscriptions: terminal={} count={} unacked={}",
+            subscriber.terminal_id, items.len(), unacked
+        );
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({
+                "terminalId": subscriber.terminal_id,
+                "subscriptions": items,
+                "unackedMessages": unacked,
+                "undeliveredMessages": undelivered,
+            })
+            .to_string(),
+        )]))
+    }
+
+    // `read_only_hint = true` は artifact 系ツール（本ファイル冒頭のコメント参照）と同じ理由で
+    // 意図的に付けている: plan モードで一律 ask になるのを避けるため。実際には
+    // `delivered_at` を UPDATE するが、`WHERE delivered_at IS NULL` ガード付きの冪等更新なので
+    // 並列実行されても破損しない。
+    #[tool(description = "購読していたワークツリーイベントの未確認メッセージを取得する。セッション開始時の自動提示を取りこぼした場合や、走行中に届いた分を自分で取りに行く場合に使う。読んだら oretachi_ack_message で ack すること", annotations(read_only_hint = true))]
+    async fn oretachi_poll_inbox(
+        &self,
+        Parameters(PollInboxParams { terminal_id, project_dir, include_acked }): Parameters<PollInboxParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let subscriber = resolve_subscriber(
+            &self.app_handle,
+            terminal_id.as_deref(),
+            project_dir.as_deref(),
+        )?;
+        let pool = event_pool(&self.app_handle)?;
+        // 明示的な pull なので未 ack 全件を返す（自動注入を取りこぼしてもここで必ず回収できる）
+        let filter = if include_acked.unwrap_or(false) {
+            crate::event_db::InboxFilter::All
+        } else {
+            crate::event_db::InboxFilter::Unacked
+        };
+        let mut items = crate::event_db::list_inbox(&pool, &subscriber.terminal_id, filter)
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+        // 取得した時点で「送った」印を打つ。ack とは分けているので、ack されない限り
+        // 行は残り、UI や再 poll から人間が気づける（#120 §5.2）。
+        let now = crate::event_db::now_ms();
+        let ids: Vec<String> = items
+            .iter()
+            .filter(|i| i.delivered_at.is_none())
+            .map(|i| i.id.clone())
+            .collect();
+        if let Err(e) = crate::event_db::mark_delivered(&pool, &ids, now).await {
+            log::warn!("[mcp] oretachi_poll_inbox: mark_delivered failed: {}", e);
+        } else {
+            // 打刻した値をレスポンスにも反映する（DB と表示のズレを残さない）
+            for item in items.iter_mut().filter(|i| i.delivered_at.is_none()) {
+                item.delivered_at = Some(now);
+            }
+        }
+
+        log::info!(
+            "[mcp] oretachi_poll_inbox: terminal={} count={}",
+            subscriber.terminal_id,
+            items.len()
+        );
+        let messages: Vec<serde_json::Value> = items
+            .iter()
+            .map(|i| {
+                serde_json::json!({
+                    "id": i.id,
+                    "kind": i.kind,
+                    "sourceWorktreeId": i.source_worktree_id,
+                    "body": serde_json::from_str::<serde_json::Value>(&i.body).unwrap_or(serde_json::Value::Null),
+                    "actor": i.actor,
+                    "createdAt": i.created_at,
+                    "deliveredAt": i.delivered_at,
+                    "ackedAt": i.acked_at,
+                    "text": crate::event_db::format_inbox_line(i),
+                })
+            })
+            .collect();
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::json!({
+                "terminalId": subscriber.terminal_id,
+                "messages": messages,
+                "hint": if messages.is_empty() {
+                    "未確認メッセージはありません。".to_string()
+                } else {
+                    "内容を確認したら oretachi_ack_message に id を渡して ack してください。ack しない限りこの一覧に残り続けます（セッション開始時の自動提示は一度だけなので、以後はこのツールで取り直します）。".to_string()
+                },
+            })
+            .to_string(),
+        )]))
+    }
+
+    #[tool(description = "受け取ったワークツリーイベントのメッセージを確認済み（ack）にする。ack しない限りセッション開始ごとに再掲される。既に ack 済みの ID を渡してもエラーにならない", annotations(idempotent_hint = true))]
+    async fn oretachi_ack_message(
+        &self,
+        Parameters(AckMessageParams { ids, terminal_id, project_dir }): Parameters<AckMessageParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let ids: Vec<String> = ids
+            .into_iter()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if ids.is_empty() {
+            return Err(McpError::invalid_params("ids must not be empty", None));
+        }
+        let subscriber = resolve_subscriber(
+            &self.app_handle,
+            terminal_id.as_deref(),
+            project_dir.as_deref(),
+        )?;
+        let pool = event_pool(&self.app_handle)?;
+        let acked = crate::event_db::ack(
+            &pool,
+            &ids,
+            &subscriber.terminal_id,
+            crate::event_db::now_ms(),
+        )
+        .await
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+        log::info!(
+            "[mcp] oretachi_ack_message: terminal={} requested={} acked={}",
+            subscriber.terminal_id,
+            ids.len(),
+            acked
+        );
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "{} 件を確認済みにしました（要求 {} 件。差分は既に ack 済みか、別のターミナル宛のメッセージです）。",
+            acked,
+            ids.len()
+        ))]))
+    }
+
     #[tool(description = "指定ワークツリーに新しいターミナルタブを追加し、与えられたコマンドを流し込む。pnpm dev / tauri dev / vite / next dev など長時間常駐するバックグラウンドコマンドを oretachi UI 上で起動するために使う")]
     fn oretachi_spawn_terminal(
         &self,
@@ -1898,16 +2344,10 @@ impl NotifyService {
 
         let mut items: Vec<serde_json::Value> = Vec::new();
         for info in raw {
-            // ホームの path はワークツリー追加先ディレクトリ = 全ワークツリーの祖先なので、
-            // 先頭一致で拾うと全ターミナルがホーム所属になってしまう。最長一致を採用する。
-            let matched_wt = info.cwd.as_deref().and_then(|c| {
-                let cp = std::path::Path::new(c);
-                settings
-                    .worktrees
-                    .iter()
-                    .filter(|w| cp.starts_with(std::path::Path::new(&w.path)))
-                    .max_by_key(|w| std::path::Path::new(&w.path).components().count())
-            });
+            let matched_wt = info
+                .cwd
+                .as_deref()
+                .and_then(|c| resolve_worktree_by_cwd(&settings, c));
             let matched_wt_id = matched_wt.map(|w| w.id.clone());
             if let Some(ref fid) = filter_id {
                 if matched_wt_id.as_deref() != Some(fid.as_str()) {
@@ -2076,6 +2516,21 @@ fn resolve_worktree_by_dir<'a>(settings: &'a AppSettings, dir: &str) -> Option<&
         .find(|w| normalize_path_for_match(&w.path) == target)
 }
 
+/// ターミナルの cwd からワークツリーを逆引きする（**前方一致＋最長一致**）。
+///
+/// `resolve_worktree_by_dir` の完全一致と違い、ワークツリーのサブディレクトリで
+/// エージェントを起動した場合も解決できる。ホームの path はワークツリー追加先
+/// ディレクトリ = 全ワークツリーの祖先なので、先頭一致だけで拾うと全ターミナルが
+/// ホーム所属になってしまう。最長一致を採用する。
+fn resolve_worktree_by_cwd<'a>(settings: &'a AppSettings, cwd: &str) -> Option<&'a WorktreeEntry> {
+    let cp = std::path::Path::new(cwd);
+    settings
+        .worktrees
+        .iter()
+        .filter(|w| cp.starts_with(std::path::Path::new(&w.path)))
+        .max_by_key(|w| std::path::Path::new(&w.path).components().count())
+}
+
 /// ワークツリーのパスから表示名（末尾ディレクトリ名）を取り出す。
 /// フロントのリポジトリ名導出（`path.split(/[/\\]/).pop()`）と同じ規則。
 fn worktree_name_from_path(path: &str) -> String {
@@ -2154,6 +2609,136 @@ fn resolve_worktree<'a>(
     }
 
     Err(McpError::invalid_params(missing_hint.to_string(), None))
+}
+
+/// 購読系ツールを呼んでいるタブの同定結果（issue #123）。
+struct SubscriberIdentity {
+    /// 購読の主キー。PTY spawn 時に発番された UUID
+    terminal_id: String,
+    /// タブの cwd からの逆引き。管理外ディレクトリなら None
+    worktree_id: Option<String>,
+    /// 最後に見た Claude Code の session UUID（監査用）
+    agent_session: Option<String>,
+}
+
+/// 購読系ツールの呼び出し元タブを同定する。
+///
+/// MCP ツール呼び出しからは呼び出し元セッションを特定できず、`project_dir` (cwd) は
+/// 同一ワークツリーの全タブで同じなので cwd では絞れない。そのため
+/// `ORETACHI_TERMINAL_ID`（SessionStart の additionalContext で本人に伝えている）を
+/// 渡してもらうのが本筋で、省略時のみ「そのワークツリーで走行中の AI エージェント端末が
+/// 1つだけ」という条件下で推測する。
+fn resolve_subscriber(
+    app_handle: &AppHandle,
+    terminal_id: Option<&str>,
+    project_dir: Option<&str>,
+) -> Result<SubscriberIdentity, McpError> {
+    let pty = app_handle.state::<crate::pty_manager::PtyManager>();
+    let sessions = pty.list_sessions();
+    let settings = app_handle.state::<SettingsManager>().get();
+
+    let resolve = |info: &crate::pty_manager::SessionInfo| SubscriberIdentity {
+        terminal_id: info.terminal_id.clone(),
+        worktree_id: info
+            .cwd
+            .as_deref()
+            .and_then(|c| resolve_worktree_by_cwd(&settings, c))
+            .map(|w| w.id.clone()),
+        agent_session: info.agent_session_id.clone(),
+    };
+
+    // 注意: ここで検証できるのは「その terminal_id が実在するか」だけで、呼び出し元本人か
+    // どうかは分からない（MCP ツール呼び出しから発信セッションを特定する手段が無い）。
+    // つまり terminal_id を差し替えれば他タブの inbox を読み・ack し、購読を解除できる。
+    // ローカルの信頼境界内なので許容しているが、`event_db` 側の
+    // 「自分のタブの購読しか消せない」は SQL のスコープ制約であって本人性の保証ではない。
+    if let Some(id) = terminal_id.map(str::trim).filter(|s| !s.is_empty()) {
+        return sessions
+            .iter()
+            .find(|s| s.terminal_id == id)
+            .map(resolve)
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    format!(
+                        "terminal_id '{}' に一致するターミナルがありません。セッション開始時に oretachi から注入された terminal_id をそのまま渡すか、oretachi_list_terminals で確認してください",
+                        id
+                    ),
+                    None,
+                )
+            });
+    }
+
+    // terminal_id 省略時のフォールバック: project_dir のワークツリーで走行中の AI 端末が
+    // 1つだけならそれを採用する。複数タブがある場合は誤配送に直結するので推測しない。
+    let Some(dir) = project_dir.map(str::trim).filter(|s| !s.is_empty()) else {
+        return Err(McpError::invalid_params(
+            "terminal_id または project_dir を指定してください。terminal_id はセッション開始時に oretachi から注入されています",
+            None,
+        ));
+    };
+    let Some(wt) = resolve_worktree_by_cwd(&settings, dir) else {
+        return Err(McpError::invalid_params(
+            format!(
+                "project_dir '{}' に一致するワークツリーがありません。available: [{}]",
+                dir,
+                available_worktree_names(&settings)
+            ),
+            None,
+        ));
+    };
+    let candidates: Vec<&crate::pty_manager::SessionInfo> = sessions
+        .iter()
+        .filter(|s| s.exit_code.is_none() && s.is_ai_agent)
+        .filter(|s| {
+            s.cwd
+                .as_deref()
+                .and_then(|c| resolve_worktree_by_cwd(&settings, c))
+                .map(|w| w.id == wt.id)
+                .unwrap_or(false)
+        })
+        .collect();
+    match candidates.len() {
+        1 => Ok(resolve(candidates[0])),
+        0 => Err(McpError::invalid_params(
+            format!(
+                "ワークツリー '{}' に走行中の AI エージェント端末が見つかりません。terminal_id を明示してください（セッション開始時に oretachi から注入されています）",
+                wt.name
+            ),
+            None,
+        )),
+        n => Err(McpError::invalid_params(
+            format!(
+                "ワークツリー '{}' に AI エージェント端末が {} 個あるため呼び出し元を特定できません。terminal_id を明示してください（セッション開始時に oretachi から注入されています）",
+                wt.name, n
+            ),
+            None,
+        )),
+    }
+}
+
+/// 1つの文字列をワークツリー ID としても名前としても解決する（購読の `target` 用）。
+/// エージェントに「ID か名前か」を意識させないため両方試す。ID を優先する。
+fn resolve_worktree_by_name_or_id<'a>(
+    settings: &'a AppSettings,
+    value: &str,
+) -> Result<&'a WorktreeEntry, McpError> {
+    if let Some(wt) = settings.worktrees.iter().find(|w| w.id == value) {
+        return Ok(wt);
+    }
+    resolve_worktree(settings, None, Some(value), None, "specify a worktree name or id")
+}
+
+/// event_db のプールを取り出す。未初期化なら AI に伝わるエラーにする。
+fn event_pool(app_handle: &AppHandle) -> Result<sqlx::SqlitePool, McpError> {
+    app_handle
+        .try_state::<crate::event_db::EventPool>()
+        .map(|p| p.0.clone())
+        .ok_or_else(|| {
+            McpError::internal_error(
+                "イベント DB が初期化されていないため購読機能を利用できません（oretachi のログを確認してください）",
+                None,
+            )
+        })
 }
 
 /// artifact 系ツール（artifact / artifact_module / search_artifact）の保存先ワークツリーを解決する。
@@ -2556,6 +3141,10 @@ async fn set_description_handler(
 
 // ─── Simple REST endpoint (/session-context) ─────────────────────────────────
 
+/// SessionStart の inbox 取得に許す時間。サイドカーの読み取りタイムアウト（2 秒）より
+/// 十分に短くして、DB が詰まっても systemPrompt の注入まで巻き込まないようにする。
+const INBOX_DIGEST_BUDGET_MS: u64 = 1200;
+
 /// SessionStart フックから呼ばれ、ワークツリー所属グループの systemPrompt を返す。
 /// 解決を毎回ここで行うため、グループ設定の変更は次のセッション開始から自動反映される。
 /// 未解決（管理外ディレクトリ・プロンプト未設定）は prompt: null を返し、注入は行われない。
@@ -2583,15 +3172,84 @@ async fn session_context_handler(
             }
         })
         .filter(|s| !s.trim().is_empty());
-    // terminal_id はサイドカーが env から拾って送ってくる。additionalContext への
-    // 自己 ID 注入はサイドカー側で行うため、ここではログのみ（発火元タブの確認用）。
+    // terminal_id はサイドカーが env から拾って送ってくる。自己 ID そのものの
+    // additionalContext 注入はサイドカー側で行うが、購読メッセージの回収はここで行う。
+    // アプリ停止中に溜まった分もセッション開始のこのタイミングで回収できる（issue #123）。
+    // サイドカーの読み取りタイムアウトは 2 秒。それを超えるとレスポンス自体が捨てられ
+    // グループ systemPrompt の注入まで失う（`notify/src/main.rs` の Err → default 経路）。
+    // DB が詰まっている場合は inbox を諦めて prompt だけでも返す。諦めた分は打刻していない
+    // ので次のセッション開始で再度提示される。
+    let inbox = match tokio::time::timeout(
+        std::time::Duration::from_millis(INBOX_DIGEST_BUDGET_MS),
+        collect_inbox_digest(&app_handle, payload.terminal_id.as_deref()),
+    )
+    .await
+    {
+        Ok(inbox) => inbox,
+        Err(_) => {
+            log::warn!(
+                "[session-context] inbox の取得が {}ms を超えたため今回は注入を見送る (terminal={:?})",
+                INBOX_DIGEST_BUDGET_MS,
+                payload.terminal_id
+            );
+            None
+        }
+    };
     log::info!(
-        "[session-context] projectDir={:?} terminal={:?} prompt_len={:?}",
+        "[session-context] projectDir={:?} terminal={:?} prompt_len={:?} inbox_len={:?}",
         payload.project_dir,
         payload.terminal_id,
-        prompt.as_ref().map(|p| p.len())
+        prompt.as_ref().map(|p| p.len()),
+        inbox.as_ref().map(|s| s.len())
     );
-    Json(serde_json::json!({ "prompt": prompt }))
+    Json(serde_json::json!({ "prompt": prompt, "inbox": inbox }))
+}
+
+/// 指定タブ宛の inbox を SessionStart 注入用テキストにまとめ、本文を出した分に
+/// `delivered_at` を打つ。
+///
+/// terminal_id が無い（oretachi 管理外のターミナルから起動されたエージェント）場合や
+/// イベント DB が未初期化の場合は None を返し、既存の挙動を一切変えない。
+///
+/// 本文を列挙するのは **未配送のみ**。未 ack 全件を毎回再掲すると「再送はしない」方針
+/// （#120 §5.2）に反する。ただしそれだけだと、注入が失われたとき（サイドカーの読み取り
+/// タイムアウト等）にエージェントも人間も気づけなくなる（Phase 1 には UI が無い）。
+/// そこで**未 ack の残存件数だけは毎回伝える**。件数を見れば `oretachi_poll_inbox` で
+/// 取り直せるので、注入喪失が恒久的な取りこぼしにならない。
+async fn collect_inbox_digest(app_handle: &AppHandle, terminal_id: Option<&str>) -> Option<String> {
+    let terminal_id = terminal_id.map(str::trim).filter(|s| !s.is_empty())?;
+    let pool = app_handle
+        .try_state::<crate::event_db::EventPool>()
+        .map(|p| p.0.clone())?;
+    let items = match crate::event_db::list_inbox(
+        &pool,
+        terminal_id,
+        crate::event_db::InboxFilter::Undelivered,
+    )
+    .await
+    {
+        Ok(items) => items,
+        Err(e) => {
+            log::warn!("[session-context] inbox 取得に失敗: {}", e);
+            return None;
+        }
+    };
+    // 配送済みだが未 ack のまま残っている件数（今回本文を出す分は差し引く）
+    let carryover = match crate::event_db::count_unacked(&pool, terminal_id).await {
+        Ok((unacked, _)) => (unacked - items.len() as i64).max(0),
+        Err(e) => {
+            log::warn!("[session-context] 未 ack 件数の取得に失敗: {}", e);
+            0
+        }
+    };
+    let digest = crate::event_db::format_inbox_digest(&items, carryover)?;
+    let ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
+    if let Err(e) = crate::event_db::mark_delivered(&pool, &ids, crate::event_db::now_ms()).await {
+        // 打刻に失敗しても本文は返す。未配送のまま残るので次回のセッション開始で再度出る
+        // （取りこぼすより一度重複するほうが安全）。
+        log::warn!("[session-context] mark_delivered に失敗: {}", e);
+    }
+    Some(digest)
 }
 
 // ─── Simple REST endpoint (/prompt-context) ──────────────────────────────────
