@@ -17,6 +17,10 @@ const OUTPUT_HISTORY_BYTES: usize = 65_536;
 const EXITED_SESSION_TTL: Duration = Duration::from_secs(30);
 
 struct PtySession {
+    /// oretachi が spawn 時に発番する UUID。タブと 1:1 で、`ORETACHI_TERMINAL_ID` として
+    /// PTY の子プロセス（シェル → エージェント → hook）へ env 継承される。
+    /// hook 通知や MCP からの同定に使う。`session_id` (u32) と違いアプリ再起動を跨いで衝突しない。
+    terminal_id: String,
     /// PTY 入力の送信キュー。書き込み本体はセッション毎の writer スレッドが行う。
     /// ConPTY の入力パイプへの write は子プロセスが stdin を読まないと無期限に
     /// ブロックしうるため、Tauri コマンド（メインスレッド）からは enqueue のみ行い、
@@ -29,6 +33,11 @@ struct PtySession {
     alive: Arc<Mutex<bool>>,
     watcher_handle: Option<std::thread::JoinHandle<()>>,
     is_ai_agent: bool,
+    /// ポーリング (`start_polling`) が検出した AI エージェント名（"claude" 等）。未検出なら `None`。
+    agent_name: Option<String>,
+    /// `agent_name == "claude"` のときポーリングが取得する Claude Code のセッション UUID。
+    /// hook の stdin JSON の `session_id` と同一値（#120 で実測済み）。
+    agent_session_id: Option<String>,
     cwd: Option<String>,
     output_history: Arc<Mutex<VecDeque<u8>>>,
     /// flush ループへ渡す未配送バッファ。reader が append し、16ms 周期の flush が
@@ -102,8 +111,12 @@ fn flush_session_output(app: &AppHandle, session_id: u32, pending: &Arc<Mutex<Ve
 #[derive(Clone)]
 pub struct SessionInfo {
     pub session_id: u32,
+    /// spawn 時に発番した UUID（`ORETACHI_TERMINAL_ID`）。hook 側が運んでくる値と突合できる。
+    pub terminal_id: String,
     pub cwd: Option<String>,
     pub is_ai_agent: bool,
+    pub agent_name: Option<String>,
+    pub agent_session_id: Option<String>,
     pub exit_code: Option<i64>,
     pub last_command_exit_code: Option<i64>,
 }
@@ -474,11 +487,20 @@ impl PtyManagerCore {
                     new_infos.push((session_id, is_agent, info));
                 }
 
-                // 内部状態を更新
+                // 内部状態を更新。
+                // exited セッション（EXITED_SESSION_TTL の間 map に残る死体）は子プロセスが
+                // 既に居ないため検出結果が必ず「エージェント無し」になる。TTL 中は exit code /
+                // 最終ログを参照できるという既存方針に合わせ、エージェント情報も最終値を凍結する。
                 if let Ok(mut sessions) = sessions_arc.lock() {
-                    for (id, is_agent, _) in &new_infos {
+                    for (id, is_agent, info) in &new_infos {
                         if let Some(session) = sessions.get_mut(id) {
+                            let exited = session.exited_at.lock().ok().and_then(|g| *g).is_some();
+                            if exited {
+                                continue;
+                            }
                             session.is_ai_agent = *is_agent;
+                            session.agent_name = info.agent_name.clone();
+                            session.agent_session_id = info.session_id.clone();
                         }
                     }
                 }
@@ -550,8 +572,23 @@ impl PtyManagerCore {
             }
         });
 
+        // セッション ID / terminal_id は CommandBuilder より **前** に確定させる。
+        // terminal_id を子プロセスの env に載せる必要があるため、spawn 後の採番では間に合わない。
+        // spawn に失敗するとこの session_id は空費されるが、単調増加カウンタなので実害はない。
+        let session_id = {
+            let mut id = self.next_id.lock().map_err(|e| format!("lock error: {}", e))?;
+            let current = *id;
+            *id += 1;
+            current
+        };
+        let terminal_id = uuid::Uuid::new_v4().to_string();
+
         let mut cmd = CommandBuilder::new(&shell_cmd);
         cmd.env("TERM", "xterm-256color");
+        // タブ（シェル）が親なので、ユーザーが手で `claude` と打っても、MCP 経由で
+        // コマンドを流し込んでも、その先の hook まで env として継承される。
+        // CC 2.1.207 以降 hook へ oretachi 由来の情報を渡せる経路はこれだけ。
+        cmd.env("ORETACHI_TERMINAL_ID", &terminal_id);
 
         // シェル統合: OSC 777 で終了コードをフロントエンドに通知
         let shell_name = std::path::Path::new(&shell_cmd)
@@ -623,13 +660,6 @@ impl PtyManagerCore {
             .master
             .try_clone_reader()
             .map_err(|e| format!("Reader error: {}", e))?;
-
-        let session_id = {
-            let mut id = self.next_id.lock().map_err(|e| format!("lock error: {}", e))?;
-            let current = *id;
-            *id += 1;
-            current
-        };
 
         let alive = Arc::new(Mutex::new(true));
 
@@ -816,6 +846,7 @@ impl PtyManagerCore {
         });
 
         let session = PtySession {
+            terminal_id: terminal_id.clone(),
             input_tx,
             master: master_arc,
             child_killer,
@@ -823,6 +854,8 @@ impl PtyManagerCore {
             alive,
             watcher_handle: Some(watcher_handle),
             is_ai_agent: false,
+            agent_name: None,
+            agent_session_id: None,
             cwd,
             output_history,
             output_pending,
@@ -834,7 +867,10 @@ impl PtyManagerCore {
 
         self.sessions.lock().map_err(|e| format!("lock error: {}", e))?.insert(session_id, session);
 
-        log::debug!("[Terminal] pty_manager::spawn done session_id={} rows={} cols={}", session_id, rows, cols);
+        log::debug!(
+            "[Terminal] pty_manager::spawn done session_id={} terminal_id={} rows={} cols={}",
+            session_id, terminal_id, rows, cols
+        );
         Ok(session_id)
     }
 
@@ -1137,8 +1173,11 @@ impl PtyManagerCore {
             .iter()
             .map(|(id, s)| SessionInfo {
                 session_id: *id,
+                terminal_id: s.terminal_id.clone(),
                 cwd: s.cwd.clone(),
                 is_ai_agent: s.is_ai_agent,
+                agent_name: s.agent_name.clone(),
+                agent_session_id: s.agent_session_id.clone(),
                 exit_code: s.exit_status.lock().ok().and_then(|g| *g),
                 last_command_exit_code: s.last_command_exit_code.lock().ok().and_then(|g| *g),
             })

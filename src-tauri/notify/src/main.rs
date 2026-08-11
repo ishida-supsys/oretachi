@@ -28,6 +28,12 @@ use std::path::PathBuf;
 
 const SERVER_INFO_FILE: &str = "mcp-server.json";
 
+/// oretachi が PTY spawn 時に発番してタブのシェルへ注入する terminal_id の env 名。
+/// hook は「PTY シェル → エージェント → hook」と辿る子孫プロセスなので env を継承する。
+/// CC 2.1.207 以降 hook へ oretachi 由来の情報を渡せる経路はこれだけ（`${user_config.*}` は
+/// 拒否され `pluginConfigs` も読まれない）。
+const TERMINAL_ID_ENV: &str = "ORETACHI_TERMINAL_ID";
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
@@ -52,21 +58,19 @@ fn main() {
     // 出さないよう何も出力せず必ず exit 0 する（--notify の exit(1) とは異なる方針）。
     if has_flag(&args, "--session-context", "-s") {
         let dir = resolve_project_dir(&args);
-        match fetch_session_context(&dir) {
-            Ok(Some(prompt)) => {
-                let out = serde_json::json!({
-                    "hookSpecificOutput": {
-                        "hookEventName": "SessionStart",
-                        "additionalContext": prompt
-                    }
-                });
-                println!("{}", out);
-            }
-            Ok(None) => {}
+        let terminal_id = read_terminal_id();
+        // サーバへの問い合わせが失敗しても、terminal_id だけは注入する（自己同定は
+        // グループ systemPrompt の設定有無やサーバ稼働状況と独立に成立させたい）。
+        let prompt = match fetch_session_context(&dir) {
+            Ok(p) => p,
             Err(_e) => {
                 #[cfg(debug_assertions)]
                 eprintln!("Session context fetch failed: {}", _e);
+                None
             }
+        };
+        if let Some(out) = build_session_context_output(prompt.as_deref(), terminal_id.as_deref()) {
+            println!("{}", out);
         }
         std::process::exit(0);
     }
@@ -150,6 +154,22 @@ fn resolve_project_dir(args: &[String]) -> String {
     }
 }
 
+/// env から自分が属する oretachi ターミナルタブの terminal_id を読む。
+/// oretachi 管理外のターミナルから起動された場合は未設定なので `None`。
+fn read_terminal_id() -> Option<String> {
+    std::env::var(TERMINAL_ID_ENV)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+/// payload に terminalId を付ける（未取得なら何もしない）。
+fn attach_terminal_id(payload: &mut serde_json::Value, terminal_id: Option<&str>) {
+    if let Some(id) = terminal_id {
+        payload["terminalId"] = serde_json::Value::String(id.to_string());
+    }
+}
+
 /// stdin がパイプ（非 TTY）の場合のみ読み取り、タイムアウト付きで返す。
 /// Claude Code ライフサイクルフックのコンテキスト JSON を body として受け取るために使用。
 fn read_stdin_if_piped() -> Option<String> {
@@ -191,6 +211,7 @@ fn send_notification(
     if let Some(a) = agent {
         payload["agent"] = serde_json::Value::String(a.to_string());
     }
+    attach_terminal_id(&mut payload, read_terminal_id().as_deref());
     post_json("/notify", &payload)
 }
 
@@ -210,7 +231,8 @@ fn send_set_description(project_dir: &str, hook_json: Option<&str>) -> Result<()
 /// /session-context からワークツリー所属グループの systemPrompt を取得する。
 /// 未管理ディレクトリやプロンプト未設定の場合はサーバーが prompt: null を返すので Ok(None)。
 fn fetch_session_context(project_dir: &str) -> Result<Option<String>, String> {
-    let payload = serde_json::json!({ "projectDir": project_dir });
+    let mut payload = serde_json::json!({ "projectDir": project_dir });
+    attach_terminal_id(&mut payload, read_terminal_id().as_deref());
     let body = post_json_read_body("/session-context", &payload)?;
     let v: serde_json::Value =
         serde_json::from_str(&body).map_err(|e| format!("Invalid response JSON: {}", e))?;
@@ -223,11 +245,40 @@ fn fetch_session_context(project_dir: &str) -> Result<Option<String>, String> {
 /// UserPromptSubmit フック用。/prompt-context から現在の description を取得し、
 /// stdout に出力すべき additionalContext JSON を返す。skip 時は Ok(None)。
 fn send_prompt_context(project_dir: &str) -> Result<Option<String>, String> {
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "projectDir": project_dir,
     });
+    attach_terminal_id(&mut payload, read_terminal_id().as_deref());
     let body = post_json_read_body("/prompt-context", &payload)?;
     Ok(build_prompt_context_output(&body))
+}
+
+/// SessionStart 用の additionalContext JSON を組み立てる。
+/// グループの systemPrompt と、自分が属するタブの terminal_id を続けて注入する。
+/// terminal_id を伝えるのは、エージェントが oretachi_list_terminals 等で
+/// 「自分自身のターミナル」を同定できるようにするため（同一ワークツリーに複数タブが
+/// あると cwd だけでは区別できない）。どちらも無ければ `None`（何も出力しない）。
+fn build_session_context_output(prompt: Option<&str>, terminal_id: Option<&str>) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(p) = prompt.map(str::trim).filter(|s| !s.is_empty()) {
+        parts.push(p.to_string());
+    }
+    if let Some(id) = terminal_id.map(str::trim).filter(|s| !s.is_empty()) {
+        parts.push(format!(
+            "[oretachi] このセッションが動いているターミナルの terminal_id は「{}」です。oretachi_list_terminals が返す terminalId と突合すれば自分自身のターミナルを同定できます（同一ワークツリーに複数タブがある場合、cwd だけでは区別できません）。",
+            id
+        ));
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    let output = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": parts.join("\n\n"),
+        }
+    });
+    Some(output.to_string())
 }
 
 /// /prompt-context のレスポンスボディから UserPromptSubmit 用の
@@ -453,6 +504,55 @@ mod tests {
         let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
         assert!(ctx.contains("未設定"));
         assert!(ctx.contains("oretachi_set_description"));
+    }
+
+    #[test]
+    fn test_attach_terminal_id_present() {
+        let mut payload = serde_json::json!({ "projectDir": "X:/wt/foo" });
+        attach_terminal_id(&mut payload, Some("11111111-2222-3333-4444-555555555555"));
+        assert_eq!(payload["terminalId"], "11111111-2222-3333-4444-555555555555");
+    }
+
+    #[test]
+    fn test_attach_terminal_id_absent() {
+        let mut payload = serde_json::json!({ "projectDir": "X:/wt/foo" });
+        attach_terminal_id(&mut payload, None);
+        assert!(payload.get("terminalId").is_none());
+    }
+
+    #[test]
+    fn test_build_session_context_output_prompt_only() {
+        let out = build_session_context_output(Some("グループのプロンプト"), None).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
+        let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert_eq!(ctx, "グループのプロンプト");
+    }
+
+    #[test]
+    fn test_build_session_context_output_terminal_id_only() {
+        // グループ systemPrompt が未設定でも terminal_id だけは注入する
+        let out = build_session_context_output(None, Some("abc-123")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(ctx.contains("abc-123"));
+        assert!(ctx.contains("terminal_id"));
+    }
+
+    #[test]
+    fn test_build_session_context_output_both() {
+        let out = build_session_context_output(Some("グループのプロンプト"), Some("abc-123")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(ctx.starts_with("グループのプロンプト"));
+        assert!(ctx.contains("abc-123"));
+    }
+
+    #[test]
+    fn test_build_session_context_output_none() {
+        assert_eq!(build_session_context_output(None, None), None);
+        // 空白のみは未指定と同じ扱い
+        assert_eq!(build_session_context_output(Some("  "), Some("")), None);
     }
 
     #[test]
