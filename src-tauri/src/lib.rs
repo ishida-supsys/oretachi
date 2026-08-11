@@ -6,6 +6,7 @@ mod archive_db;
 mod artifact_url;
 mod claude_plugin;
 mod claude_plugin_skills;
+mod event_db;
 mod fs_watcher;
 mod git_worktree;
 mod home_skills;
@@ -1009,6 +1010,90 @@ async fn save_archive(
     archive_db::save(&pool.0, &archive).await
 }
 
+/// `worktree.closed` イベントを event_db へ発行する（issue #123）。
+///
+/// **fire-and-forget**。close フローは既に oneshot + timeout の複雑な経路
+/// （`CloseWorktreeAckRegistry`、ack タイムアウト 45 秒）なので、DB 書き込みと照合で
+/// クローズ処理をブロックしない。DB 未初期化・書き込み失敗はログのみで握りつぶす。
+///
+/// 呼び出し元は `git worktree remove` の成功確認後の経路だけ。フロントの
+/// `useWorktreeRemove.ts` は失敗・キャンセル・多重実行では afterRemove に到達しないため、
+/// `Cancelled` / `Busy` / `Failed` では構造的に発火しない。
+fn fire_worktree_closed(
+    app_handle: &tauri::AppHandle,
+    id: String,
+    name: String,
+    branch_name: String,
+    actor: &'static str,
+) {
+    let handle = app_handle.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(pool) = handle.try_state::<event_db::EventPool>() else {
+            log::debug!("[event] Event DB not initialized; skipping worktree.closed for {}", name);
+            return;
+        };
+        let now = event_db::now_ms();
+        let body = serde_json::json!({
+            "worktreeId": id,
+            "worktreeName": name,
+            "branchName": branch_name,
+        })
+        .to_string();
+        let event = event_db::EventRow {
+            id: uuid::Uuid::new_v4().to_string(),
+            source_worktree_id: id.clone(),
+            // close 経路は terminal_id を運んでいない（クローズ実行者のタブは特定できない）。
+            // 自己エコー抑止は subscriber_worktree_id == source_worktree_id 側で効く。
+            source_terminal_id: None,
+            kind: event_db::KIND_WORKTREE_CLOSED.to_string(),
+            body,
+            actor: Some(actor.to_string()),
+            created_at: now,
+        };
+        if let Err(e) = event_db::insert_event(&pool.0, &event).await {
+            log::warn!("[event] failed to record worktree.closed for {}: {}", name, e);
+            return;
+        }
+        match event_db::fanout(&pool.0, &event, now).await {
+            Ok(count) => log::info!(
+                "[event] worktree.closed worktree={} actor={} delivered={}",
+                name,
+                actor,
+                count
+            ),
+            Err(e) => log::warn!("[event] fanout failed for {}: {}", name, e),
+        }
+        // このワークツリーを購読していた行はもう二度とマッチしない（ID は再利用されない）。
+        // 配送を終えた後に消して `list_subscriptions` に死んだ行を残さない。
+        match event_db::delete_subscriptions_for_target(&pool.0, &id).await {
+            Ok(n) if n > 0 => log::info!(
+                "[event] removed {} subscription(s) targeting closed worktree={}",
+                n,
+                name
+            ),
+            Ok(_) => {}
+            Err(e) => log::warn!("[event] delete_subscriptions_for_target failed for {}: {}", name, e),
+        }
+        // 購読者側がこのワークツリーだった場合のゴミ掃除。fanout の後に行う
+        // （自己エコー抑止があるため相互に干渉しない）。
+        match event_db::purge_subscriber_worktree(&pool.0, &id).await {
+            Ok((subs, inbox)) if subs > 0 || inbox > 0 => log::info!(
+                "[event] purged subscriber rows for closed worktree={} subscriptions={} inbox={}",
+                name,
+                subs,
+                inbox
+            ),
+            Ok(_) => {}
+            Err(e) => log::warn!("[event] purge_subscriber_worktree failed for {}: {}", name, e),
+        }
+        if let Err(e) =
+            event_db::purge_expired(&pool.0, now, event_db::INBOX_RETENTION_MS).await
+        {
+            log::warn!("[event] purge_expired failed: {}", e);
+        }
+    });
+}
+
 /// ワークツリーのアーカイブ（削除）が完了した後にMCPクライアントへ通知する。
 /// git worktree remove の成功確認後にフロントエンドから呼び出す。
 #[tauri::command]
@@ -1024,6 +1109,21 @@ fn notify_worktree_archived(
         "name": name,
         "branchName": branch_name,
     }));
+    fire_worktree_closed(&app_handle, id, name, branch_name, "archive");
+}
+
+/// アーカイブせずにワークツリーを削除したときの `worktree.closed` 発行用。
+/// `worktree-archived` の MCP ブロードキャストは行わない（アーカイブしていないため）が、
+/// 購読者にとっては「作業が終わった」という同じ意味を持つのでイベントは発行する。
+#[tauri::command]
+fn notify_worktree_closed(
+    app_handle: tauri::AppHandle,
+    id: String,
+    name: String,
+    branch_name: String,
+) {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::NotifyWorktreeClosed);
+    fire_worktree_closed(&app_handle, id, name, branch_name, "delete");
 }
 
 /// ワークツリーの追加が完了した後にMCPクライアントへ通知する。
@@ -1431,6 +1531,7 @@ pub fn run() {
             path_exists,
             save_archive,
             notify_worktree_archived,
+            notify_worktree_closed,
             notify_worktree_added,
             list_archives,
             delete_archive,
@@ -1515,6 +1616,56 @@ pub fn run() {
                         }
                         Err(e) => {
                             log::warn!("[ArchiveDB] Failed to initialize: {}", e);
+                        }
+                    }
+                });
+            }
+
+            // イベント / 購読 / inbox DB を同期的に初期化（issue #123）。
+            // 失敗しても起動は続行する（購読機能だけが無効になる）。
+            {
+                let handle = app.handle().clone();
+                tauri::async_runtime::block_on(async move {
+                    match event_db::init_event_db(&handle).await {
+                        Ok(pool) => {
+                            // `terminal_id` は PTY spawn ごとに発番され永続化されないため、
+                            // 前回起動時の購読はどのターミナルからも到達できない
+                            // （list / unsubscribe / poll がすべて不能になる）。放置すると
+                            // 死んだ宛先へ inbox を積み続け、既定が無期限の購読は単調増加する。
+                            // ここでは生存セッションが 0 件なので前回分がすべて対象になる。
+                            // 再起動を挟んだ購読の復活は #125（orphaned 遷移と再バインド）の担当。
+                            match event_db::purge_orphaned_subscribers(&pool, &[]).await {
+                                Ok((subs, inbox)) if subs > 0 || inbox > 0 => log::info!(
+                                    "[EventDB] purged unreachable subscriptions={} inbox={} (terminal_id は再起動で再発番されるため前回分は復活できない)",
+                                    subs, inbox
+                                ),
+                                Ok(_) => {}
+                                Err(e) => {
+                                    log::warn!("[EventDB] purge_orphaned_subscribers failed: {}", e)
+                                }
+                            }
+                            // 保持期限切れの inbox / 参照されない events をここで掃除する
+                            match event_db::purge_expired(
+                                &pool,
+                                event_db::now_ms(),
+                                event_db::INBOX_RETENTION_MS,
+                            )
+                            .await
+                            {
+                                Ok((subs, inbox, events)) if subs > 0 || inbox > 0 || events > 0 => {
+                                    log::info!(
+                                        "[EventDB] purged expired subscriptions={} inbox={} events={}",
+                                        subs, inbox, events
+                                    );
+                                }
+                                Ok(_) => {}
+                                Err(e) => log::warn!("[EventDB] purge_expired failed: {}", e),
+                            }
+                            handle.manage(event_db::EventPool(pool));
+                            log::debug!("[EventDB] Initialized successfully");
+                        }
+                        Err(e) => {
+                            log::warn!("[EventDB] Failed to initialize: {}", e);
                         }
                     }
                 });

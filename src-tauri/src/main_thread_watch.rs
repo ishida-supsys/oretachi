@@ -45,6 +45,7 @@ pub enum Activity {
     GetMcpStatus,
     PathExists,
     NotifyWorktreeArchived,
+    NotifyWorktreeClosed,
     NotifyWorktreeAdded,
     StartFsWatch,
     StopFsWatch,
@@ -55,7 +56,7 @@ pub enum Activity {
 }
 
 /// [`Activity`] の discriminant 順に並んだ表示ラベル。enum と順序を一致させること。
-const LABELS: [&str; 25] = [
+const LABELS: [&str; 26] = [
     "idle",
     "run-event",
     "watchdog-probe",
@@ -74,6 +75,7 @@ const LABELS: [&str; 25] = [
     "cmd:get_mcp_status",
     "cmd:path_exists",
     "cmd:notify_worktree_archived",
+    "cmd:notify_worktree_closed",
     "cmd:notify_worktree_added",
     "cmd:start_fs_watch",
     "cmd:stop_fs_watch",

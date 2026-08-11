@@ -61,15 +61,19 @@ fn main() {
         let terminal_id = read_terminal_id();
         // サーバへの問い合わせが失敗しても、terminal_id だけは注入する（自己同定は
         // グループ systemPrompt の設定有無やサーバ稼働状況と独立に成立させたい）。
-        let prompt = match fetch_session_context(&dir) {
-            Ok(p) => p,
+        let ctx = match fetch_session_context(&dir) {
+            Ok(c) => c,
             Err(_e) => {
                 #[cfg(debug_assertions)]
                 eprintln!("Session context fetch failed: {}", _e);
-                None
+                SessionContext::default()
             }
         };
-        if let Some(out) = build_session_context_output(prompt.as_deref(), terminal_id.as_deref()) {
+        if let Some(out) = build_session_context_output(
+            ctx.prompt.as_deref(),
+            terminal_id.as_deref(),
+            ctx.inbox.as_deref(),
+        ) {
             println!("{}", out);
         }
         std::process::exit(0);
@@ -228,18 +232,37 @@ fn send_set_description(project_dir: &str, hook_json: Option<&str>) -> Result<()
     post_json("/set-description", &payload)
 }
 
-/// /session-context からワークツリー所属グループの systemPrompt を取得する。
-/// 未管理ディレクトリやプロンプト未設定の場合はサーバーが prompt: null を返すので Ok(None)。
-fn fetch_session_context(project_dir: &str) -> Result<Option<String>, String> {
+/// /session-context のレスポンス。
+/// - `prompt`: ワークツリー所属グループの systemPrompt（未管理ディレクトリ・未設定なら None）
+/// - `inbox`: 購読していたワークツリーイベントの未確認メッセージ（無ければ None）
+#[derive(Debug, Default, PartialEq)]
+struct SessionContext {
+    prompt: Option<String>,
+    inbox: Option<String>,
+}
+
+/// /session-context からグループの systemPrompt と未確認の購読メッセージを取得する。
+fn fetch_session_context(project_dir: &str) -> Result<SessionContext, String> {
     let mut payload = serde_json::json!({ "projectDir": project_dir });
     attach_terminal_id(&mut payload, read_terminal_id().as_deref());
     let body = post_json_read_body("/session-context", &payload)?;
+    Ok(parse_session_context(&body)?)
+}
+
+/// /session-context のレスポンスボディをパースする。
+fn parse_session_context(body: &str) -> Result<SessionContext, String> {
     let v: serde_json::Value =
-        serde_json::from_str(&body).map_err(|e| format!("Invalid response JSON: {}", e))?;
-    Ok(v.get("prompt")
-        .and_then(|p| p.as_str())
-        .map(str::to_string)
-        .filter(|s| !s.trim().is_empty()))
+        serde_json::from_str(body).map_err(|e| format!("Invalid response JSON: {}", e))?;
+    let field = |key: &str| {
+        v.get(key)
+            .and_then(|p| p.as_str())
+            .map(str::to_string)
+            .filter(|s| !s.trim().is_empty())
+    };
+    Ok(SessionContext {
+        prompt: field("prompt"),
+        inbox: field("inbox"),
+    })
 }
 
 /// UserPromptSubmit フック用。/prompt-context から現在の description を取得し、
@@ -257,8 +280,15 @@ fn send_prompt_context(project_dir: &str) -> Result<Option<String>, String> {
 /// グループの systemPrompt と、自分が属するタブの terminal_id を続けて注入する。
 /// terminal_id を伝えるのは、エージェントが oretachi_list_terminals 等で
 /// 「自分自身のターミナル」を同定できるようにするため（同一ワークツリーに複数タブが
-/// あると cwd だけでは区別できない）。どちらも無ければ `None`（何も出力しない）。
-fn build_session_context_output(prompt: Option<&str>, terminal_id: Option<&str>) -> Option<String> {
+/// あると cwd だけでは区別できない）。いずれも無ければ `None`（何も出力しない）。
+///
+/// 購読メッセージ (`inbox`) を最後に置くのは、それが「今このターンで着手すべきこと」であり
+/// 前段の systemPrompt / 自己 ID より新しい指示だから。
+fn build_session_context_output(
+    prompt: Option<&str>,
+    terminal_id: Option<&str>,
+    inbox: Option<&str>,
+) -> Option<String> {
     let mut parts: Vec<String> = Vec::new();
     if let Some(p) = prompt.map(str::trim).filter(|s| !s.is_empty()) {
         parts.push(p.to_string());
@@ -268,6 +298,9 @@ fn build_session_context_output(prompt: Option<&str>, terminal_id: Option<&str>)
             "[oretachi] このセッションが動いているターミナルの terminal_id は「{}」です。oretachi_list_terminals が返す terminalId と突合すれば自分自身のターミナルを同定できます（同一ワークツリーに複数タブがある場合、cwd だけでは区別できません）。",
             id
         ));
+    }
+    if let Some(i) = inbox.map(str::trim).filter(|s| !s.is_empty()) {
+        parts.push(i.to_string());
     }
     if parts.is_empty() {
         return None;
@@ -522,7 +555,7 @@ mod tests {
 
     #[test]
     fn test_build_session_context_output_prompt_only() {
-        let out = build_session_context_output(Some("グループのプロンプト"), None).unwrap();
+        let out = build_session_context_output(Some("グループのプロンプト"), None, None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         assert_eq!(v["hookSpecificOutput"]["hookEventName"], "SessionStart");
         let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
@@ -532,7 +565,7 @@ mod tests {
     #[test]
     fn test_build_session_context_output_terminal_id_only() {
         // グループ systemPrompt が未設定でも terminal_id だけは注入する
-        let out = build_session_context_output(None, Some("abc-123")).unwrap();
+        let out = build_session_context_output(None, Some("abc-123"), None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
         assert!(ctx.contains("abc-123"));
@@ -541,7 +574,8 @@ mod tests {
 
     #[test]
     fn test_build_session_context_output_both() {
-        let out = build_session_context_output(Some("グループのプロンプト"), Some("abc-123")).unwrap();
+        let out =
+            build_session_context_output(Some("グループのプロンプト"), Some("abc-123"), None).unwrap();
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
         let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
         assert!(ctx.starts_with("グループのプロンプト"));
@@ -549,10 +583,61 @@ mod tests {
     }
 
     #[test]
+    fn test_build_session_context_output_inbox_only() {
+        // グループ systemPrompt も terminal_id も無くても購読メッセージだけは注入する
+        let out = build_session_context_output(None, None, Some("[oretachi] 1 件届いています")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(ctx.contains("1 件届いています"));
+    }
+
+    #[test]
+    fn test_build_session_context_output_inbox_comes_last() {
+        let out = build_session_context_output(
+            Some("グループのプロンプト"),
+            Some("abc-123"),
+            Some("[oretachi] 購読メッセージ"),
+        )
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(ctx.starts_with("グループのプロンプト"));
+        assert!(ctx.ends_with("[oretachi] 購読メッセージ"));
+        // terminal_id は inbox より前
+        assert!(ctx.find("abc-123").unwrap() < ctx.find("購読メッセージ").unwrap());
+    }
+
+    #[test]
     fn test_build_session_context_output_none() {
-        assert_eq!(build_session_context_output(None, None), None);
+        assert_eq!(build_session_context_output(None, None, None), None);
         // 空白のみは未指定と同じ扱い
-        assert_eq!(build_session_context_output(Some("  "), Some("")), None);
+        assert_eq!(build_session_context_output(Some("  "), Some(""), Some(" ")), None);
+    }
+
+    #[test]
+    fn test_parse_session_context_full() {
+        let ctx = parse_session_context(r#"{"prompt":"p","inbox":"i"}"#).unwrap();
+        assert_eq!(ctx.prompt.as_deref(), Some("p"));
+        assert_eq!(ctx.inbox.as_deref(), Some("i"));
+    }
+
+    #[test]
+    fn test_parse_session_context_nulls_and_blanks() {
+        let ctx = parse_session_context(r#"{"prompt":null,"inbox":"   "}"#).unwrap();
+        assert_eq!(ctx, SessionContext::default());
+    }
+
+    #[test]
+    fn test_parse_session_context_missing_inbox_field() {
+        // inbox を返さない旧サーバとの後方互換
+        let ctx = parse_session_context(r#"{"prompt":"p"}"#).unwrap();
+        assert_eq!(ctx.prompt.as_deref(), Some("p"));
+        assert_eq!(ctx.inbox, None);
+    }
+
+    #[test]
+    fn test_parse_session_context_invalid_json() {
+        assert!(parse_session_context("not json").is_err());
     }
 
     #[test]
