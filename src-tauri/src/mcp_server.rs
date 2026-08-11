@@ -708,11 +708,11 @@ pub struct SubscribeWorktreeParams {
     pub target: String,
     #[schemars(description = "購読するイベント種別。現状 \"worktree.closed\" のみ対応（省略時 [\"worktree.closed\"]）")]
     pub event_kinds: Option<Vec<String>>,
-    #[schemars(description = "配送戦略: \"turn_end\"(既定) / \"passive\"。現状どちらもセッション開始時の回収と oretachi_poll_inbox でのみ配送される（ターン境界での即時注入は未実装）")]
+    #[schemars(description = "配送戦略: \"turn_end\"(既定。待機中なら PTY へ押し込み、走行中はターン境界を待つ) / \"interrupt\"(走行中でも即 PTY へ割り込む) / \"passive\"(押し込まない。oretachi_poll_inbox で自分から取りに来る)。どの戦略でもセッション開始時の回収と oretachi_poll_inbox は使える")]
     pub delivery: Option<String>,
-    #[schemars(description = "自分のターミナルが閉じていた場合に新しいターミナルを起動して通知するか（既定 false）。現状は記録のみで未実装")]
+    #[schemars(description = "自分のターミナルが閉じていた場合に新しいターミナルを起動して通知するか（既定 false）。true にすると未読が溜まった時点で oretachi が自動でタブを立ててエージェントを起動する")]
     pub spawn_if_closed: Option<bool>,
-    #[schemars(description = "購読の有効期間（秒）。省略時は無期限")]
+    #[schemars(description = "購読の有効期間（秒）。省略時は無期限。ターミナルが閉じても購読は引き継ぎ待ちとして7日間保持され、同じワークツリーで次に AI エージェントが立ち上がったときに引き継がれる")]
     pub expires_in: Option<i64>,
     #[schemars(description = "自分が動いているターミナルの terminal_id。セッション開始時に oretachi から注入されている値をそのまま渡す。省略時は project_dir から AI エージェント端末が1つだけのワークツリーとして推測する")]
     pub terminal_id: Option<String>,
@@ -1690,7 +1690,7 @@ impl NotifyService {
         }
     }
 
-    #[tool(description = "指定ワークツリーのクローズを購読する。別ワークツリーで進めている関連作業が完了（クローズ）したことを、自分のセッションで検知したいときに使う。届いた通知は次のセッション開始時に自動で提示され、oretachi_poll_inbox でも取得できる")]
+    #[tool(description = "指定ワークツリーのクローズを購読する。別ワークツリーで進めている関連作業が完了（クローズ）したことを、自分のセッションで検知したいときに使う。届いた通知は待機中なら PTY へ押し込まれ、次のセッション開始時にも自動で提示され、oretachi_poll_inbox でも取得できる。ターミナルを閉じたりアプリを再起動したりしても購読は引き継ぎ待ちとして保持され、同じワークツリーで次に AI エージェントが立ち上がったときに引き継がれる")]
     async fn oretachi_subscribe_worktree(
         &self,
         Parameters(SubscribeWorktreeParams {
@@ -1813,6 +1813,9 @@ impl NotifyService {
             // 巨大な値を渡されても panic させない（debug ビルドのオーバーフロー検査対策）
             expires_at: expires_in.map(|secs| now.saturating_add(secs.saturating_mul(1000))),
             state: crate::event_db::STATE_ACTIVE.to_string(),
+            // 呼び出し元のタブは生存しているので引き継ぎ待ちではない。再購読で orphaned な
+            // 行を上書きしたときも、ここで active + None に戻るのが正しい。
+            orphaned_at: None,
         };
         // 既存の購読を更新した場合は既存の id が返る（再購読で解除手段を失わせない）
         let subscription_id = crate::event_db::upsert_subscription(&pool, &sub)
@@ -1935,6 +1938,7 @@ impl NotifyService {
                     "createdAt": s.created_at,
                     "expiresAt": s.expires_at,
                     "state": s.state,
+                    "orphanedAt": s.orphaned_at,
                 })
             })
             .collect();
@@ -2522,7 +2526,10 @@ fn resolve_worktree_by_dir<'a>(settings: &'a AppSettings, dir: &str) -> Option<&
 /// エージェントを起動した場合も解決できる。ホームの path はワークツリー追加先
 /// ディレクトリ = 全ワークツリーの祖先なので、先頭一致だけで拾うと全ターミナルが
 /// ホーム所属になってしまう。最長一致を採用する。
-fn resolve_worktree_by_cwd<'a>(settings: &'a AppSettings, cwd: &str) -> Option<&'a WorktreeEntry> {
+pub fn resolve_worktree_by_cwd<'a>(
+    settings: &'a AppSettings,
+    cwd: &str,
+) -> Option<&'a WorktreeEntry> {
     let cp = std::path::Path::new(cwd);
     settings
         .worktrees
@@ -2653,6 +2660,9 @@ fn resolve_subscriber(
     // ローカルの信頼境界内なので許容しているが、`event_db` 側の
     // 「自分のタブの購読しか消せない」は SQL のスコープ制約であって本人性の保証ではない。
     if let Some(id) = terminal_id.map(str::trim).filter(|s| !s.is_empty()) {
+        // 購読系ツールを叩けている＝このタブでエージェントが走っている。ついでに
+        // 引き継ぎ待ちを引き取らせる（非ブロッキング。SessionStart を取り逃した場合の保険）。
+        crate::event_delivery::request_rebind(app_handle, id.to_string());
         return sessions
             .iter()
             .find(|s| s.terminal_id == id)
@@ -3221,6 +3231,23 @@ async fn collect_inbox_digest(app_handle: &AppHandle, terminal_id: Option<&str>)
     let pool = app_handle
         .try_state::<crate::event_db::EventPool>()
         .map(|p| p.0.clone())?;
+    // このタブが立ち上がったので、同じワークツリーの引き継ぎ待ち（アプリ再起動や
+    // タブ死亡で宙に浮いた購読と未読）を引き継ぐ。**回収より先に行う**必要がある。
+    // 引き継ぎ前に list_inbox すると、前回の terminal_id 宛のままの行が見えない。
+    // ワーカーが詰まっていれば None が返り「今回は引き継がない」に劣化するだけで、
+    // 上位の INBOX_DIGEST_BUDGET_MS タイムアウトを食い潰さない（#125）。
+    if let Some((subs, inbox)) =
+        crate::event_delivery::rebind_and_wait(app_handle, terminal_id).await
+    {
+        if subs > 0 || inbox > 0 {
+            log::info!(
+                "[session-context] 引き継ぎ待ちを回収した terminal={} 購読={} 未読={}",
+                terminal_id,
+                subs,
+                inbox
+            );
+        }
+    }
     let items = match crate::event_db::list_inbox(
         &pool,
         terminal_id,

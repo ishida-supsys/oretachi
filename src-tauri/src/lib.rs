@@ -7,6 +7,7 @@ mod artifact_url;
 mod claude_plugin;
 mod claude_plugin_skills;
 mod event_db;
+mod event_delivery;
 mod fs_watcher;
 mod git_worktree;
 mod home_skills;
@@ -1049,18 +1050,29 @@ fn fire_worktree_closed(
             body,
             actor: Some(actor.to_string()),
             created_at: now,
+            // ユーザー操作が起点なので連鎖の深さは 0。配送がイベントを生む経路は
+            // 現状存在しないが、#126 の自由文メッセージで往復が起きたときに
+            // `MAX_EVENT_DEPTH` で止められるよう最初から持たせておく（#125 §3）。
+            depth: 0,
+            origin: Some(format!("worktree-remove:{}", actor)),
         };
         if let Err(e) = event_db::insert_event(&pool.0, &event).await {
             log::warn!("[event] failed to record worktree.closed for {}: {}", name, e);
             return;
         }
         match event_db::fanout(&pool.0, &event, now).await {
-            Ok(count) => log::info!(
-                "[event] worktree.closed worktree={} actor={} delivered={}",
-                name,
-                actor,
-                count
-            ),
+            Ok(count) => {
+                log::info!(
+                    "[event] worktree.closed worktree={} actor={} delivered={}",
+                    name,
+                    actor,
+                    count
+                );
+                if count > 0 {
+                    // 待機中の宛先への押し込み / spawn は配送ワーカーが直列に処理する。
+                    event_delivery::notify_event_queued(&handle);
+                }
+            }
             Err(e) => log::warn!("[event] fanout failed for {}: {}", name, e),
         }
         // このワークツリーを購読していた行はもう二度とマッチしない（ID は再利用されない）。
@@ -1535,6 +1547,13 @@ pub fn run() {
             notify_worktree_added,
             list_archives,
             delete_archive,
+            event_delivery::event_list_subscriptions,
+            event_delivery::event_list_orphaned_groups,
+            event_delivery::event_rebind_group,
+            event_delivery::event_unsubscribe,
+            event_delivery::event_ack,
+            event_delivery::event_terminal_unread,
+            event_delivery::event_spawn_result,
             set_debug_mode,
             get_debug_mode,
             get_force_wizard,
@@ -1628,26 +1647,43 @@ pub fn run() {
                 tauri::async_runtime::block_on(async move {
                     match event_db::init_event_db(&handle).await {
                         Ok(pool) => {
+                            let now = event_db::now_ms();
                             // `terminal_id` は PTY spawn ごとに発番され永続化されないため、
-                            // 前回起動時の購読はどのターミナルからも到達できない
-                            // （list / unsubscribe / poll がすべて不能になる）。放置すると
-                            // 死んだ宛先へ inbox を積み続け、既定が無期限の購読は単調増加する。
-                            // ここでは生存セッションが 0 件なので前回分がすべて対象になる。
-                            // 再起動を挟んだ購読の復活は #125（orphaned 遷移と再バインド）の担当。
-                            match event_db::purge_orphaned_subscribers(&pool, &[]).await {
-                                Ok((subs, inbox)) if subs > 0 || inbox > 0 => log::info!(
-                                    "[EventDB] purged unreachable subscriptions={} inbox={} (terminal_id は再起動で再発番されるため前回分は復活できない)",
-                                    subs, inbox
+                            // 起動直後は前回の購読がどのタブからも到達できない。ただし
+                            // **削除はしない**（#125）。数時間〜数日待って別ワークツリーの
+                            // クローズを検知する、という #120 の動機②が再起動を挟んだ瞬間に
+                            // 壊れるため。`orphaned` として保持し、同じワークツリーで次に
+                            // AI タブが立った時点で引き継ぐ。
+                            // 起動時は生存セッションが 0 件なので前回分がすべて対象になる。
+                            match event_db::mark_orphaned_subscribers(&pool, &[], now).await {
+                                Ok((subs, inbox, deleted)) if subs > 0 || inbox > 0 || deleted > 0 => log::info!(
+                                    "[EventDB] 前回起動分を引き継ぎ待ちにした subscriptions={} inbox={} (逆引き不能で削除={}) — 同じワークツリーで AI タブが立てば引き継ぐ",
+                                    subs, inbox, deleted
                                 ),
                                 Ok(_) => {}
                                 Err(e) => {
-                                    log::warn!("[EventDB] purge_orphaned_subscribers failed: {}", e)
+                                    log::warn!("[EventDB] mark_orphaned_subscribers failed: {}", e)
                                 }
+                            }
+                            // 引き継がれないまま保持期限を過ぎた分を掃除する（単調増加の防止）
+                            match event_db::purge_orphaned_expired(
+                                &pool,
+                                now,
+                                event_db::ORPHANED_RETENTION_MS,
+                            )
+                            .await
+                            {
+                                Ok((subs, inbox)) if subs > 0 || inbox > 0 => log::info!(
+                                    "[EventDB] purged stale orphaned subscriptions={} inbox={}",
+                                    subs, inbox
+                                ),
+                                Ok(_) => {}
+                                Err(e) => log::warn!("[EventDB] purge_orphaned_expired failed: {}", e),
                             }
                             // 保持期限切れの inbox / 参照されない events をここで掃除する
                             match event_db::purge_expired(
                                 &pool,
-                                event_db::now_ms(),
+                                now,
                                 event_db::INBOX_RETENTION_MS,
                             )
                             .await
@@ -1661,6 +1697,9 @@ pub fn run() {
                                 Ok(_) => {}
                                 Err(e) => log::warn!("[EventDB] purge_expired failed: {}", e),
                             }
+                            // 配送ワーカー。`EventPool` と同じアームで manage するので、
+                            // DB 初期化に失敗すればハンドルも登録されず全経路が no-op になる。
+                            handle.manage(event_delivery::start(handle.clone(), pool.clone()));
                             handle.manage(event_db::EventPool(pool));
                             log::debug!("[EventDB] Initialized successfully");
                         }

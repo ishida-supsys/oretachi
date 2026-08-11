@@ -1,8 +1,8 @@
 import { ref } from "vue";
 
-export type HomePanelMode = "worktree" | "task" | "archive";
+export type HomePanelMode = "worktree" | "task" | "archive" | "subscription";
 
-/** ホームタブのパネル表示モード（worktree 一覧 / task / archive）。
+/** ホームタブのパネル表示モード（worktree 一覧 / task / archive / subscription）。
  *  HomeView がローカルに持っていた状態を、App.vue 等からも参照できるようモジュールシングトンとして共有する。 */
 const panelMode = ref<HomePanelMode>("worktree");
 

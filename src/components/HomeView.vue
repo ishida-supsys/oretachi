@@ -7,6 +7,7 @@ const { t } = useI18n();
 import WorktreeCard from "./WorktreeCard.vue";
 import TaskCard from "./TaskCard.vue";
 import ArchiveTable from "./ArchiveTable.vue";
+import SubscriptionTable from "./SubscriptionTable.vue";
 import RepositoryPanel from "./RepositoryPanel.vue";
 import HomeCatTerminal from "./HomeCatTerminal.vue";
 import WorkgroupBar from "./WorkgroupBar.vue";
@@ -19,6 +20,15 @@ import { useTaskPersistence } from "../composables/useTaskPersistence";
 import { useTaskSearch } from "../composables/useTaskSearch";
 import { useInfiniteScroll } from "../composables/useInfiniteScroll";
 import { useArchivePersistence, deleteArchive } from "../composables/useArchivePersistence";
+import {
+  agentTerminals,
+  isLoading as subscriptionsLoading,
+  loadSubscriptions,
+  orphanedGroups,
+  rebindGroup,
+  subscriptions,
+  unsubscribe,
+} from "../composables/useEventSubscriptions";
 import { isPseudoWorktree } from "../utils/repositoryWorktree";
 import { computeNaturalCardWidth } from "../utils/cardWidth";
 import { computed, nextTick, reactive, ref, watch } from "vue";
@@ -290,6 +300,8 @@ watch(panelMode, async (mode, oldMode) => {
   } else if (mode === "archive") {
     await loadArchives(true);
     nextTick(() => setupArchiveScroll());
+  } else if (mode === "subscription") {
+    await loadSubscriptions();
   }
 });
 
@@ -371,6 +383,7 @@ watch(
         <option value="worktree">{{ t('worktreeTitle') }}</option>
         <option value="task">{{ t('taskTitle') }}</option>
         <option value="archive">{{ t('archiveTitle') }}</option>
+        <option value="subscription">{{ t('subscriptionTitle') }}</option>
       </select>
       <WorkgroupBar
         v-if="panelMode === 'worktree'"
@@ -555,6 +568,24 @@ watch(
       <div ref="scrollSentinelRef" class="scroll-sentinel">
         <i v-if="isLoading" class="pi pi-spinner pi-spin loading-spinner" />
       </div>
+    </template>
+
+    <!-- 購読パネル（ワークツリー間イベントの購読・未読・引き継ぎ待ち） -->
+    <template v-else-if="panelMode === 'subscription'">
+      <div
+        v-if="subscriptions.length === 0 && orphanedGroups.length === 0 && !subscriptionsLoading"
+        class="empty-state"
+      >
+        {{ t('subscriptionEmpty') }}
+      </div>
+
+      <SubscriptionTable
+        :items="subscriptions"
+        :orphaned-groups="orphanedGroups"
+        :agent-terminals="agentTerminals"
+        @unsubscribe="unsubscribe"
+        @rebind="(p) => rebindGroup(p.worktreeId, p.deadTerminalId, p.sessionId)"
+      />
     </template>
 
     <!-- アーカイブパネル -->
@@ -778,6 +809,8 @@ watch(
     "addTaskButton": "Add task",
     "archiveTitle": "Archives",
     "archiveEmpty": "No archives.",
+    "subscriptionTitle": "Subscriptions",
+    "subscriptionEmpty": "No worktree event subscriptions.",
     "archiveSearchPlaceholder": "Search archives...",
     "repositoryTitle": "Repositories",
     "addRepositoryButton": "Add repository"
@@ -795,6 +828,8 @@ watch(
     "addTaskButton": "タスクを追加",
     "archiveTitle": "アーカイブ",
     "archiveEmpty": "アーカイブがありません。",
+    "subscriptionTitle": "購読",
+    "subscriptionEmpty": "ワークツリーイベントの購読がありません。",
     "archiveSearchPlaceholder": "アーカイブを検索...",
     "repositoryTitle": "リポジトリ",
     "addRepositoryButton": "リポジトリを追加"
