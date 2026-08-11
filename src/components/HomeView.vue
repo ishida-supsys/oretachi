@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import type { Worktree } from "../types/worktree";
+import type { UrlArtifactEntry } from "../types/artifact";
 import { useI18n } from "vue-i18n";
 
 const { t } = useI18n();
@@ -190,6 +191,8 @@ const props = defineProps<{
   notifications: Map<string, number>;
   hotkeyChars: Map<string, string>;
   artifactCounts: Map<string, number>;
+  /** ワークツリー単位の URL アーティファクト（アイコン隣のドロップダウン用） */
+  artifactUrls: Map<string, UrlArtifactEntry[]>;
   loadingWorktrees: Map<string, string>;
   cancellableWorktrees: Set<string>;
   autoApprovals: Map<string, boolean>;
@@ -466,6 +469,7 @@ watch(
               :notification-count="notifications.get(worktree.id) ?? 0"
               :hotkey-char="hotkeyChars.get(worktree.id)"
               :artifact-count="artifactCounts.get(worktree.id) ?? 0"
+              :artifact-urls="artifactUrls.get(worktree.id) ?? []"
               :loading="loadingWorktrees.has(worktree.id)"
               :loading-text="loadingWorktrees.get(worktree.id)"
               :cancellable="cancellableWorktrees.has(worktree.id)"
@@ -505,6 +509,7 @@ watch(
         :worktrees="worktrees"
         :thumbnail-urls="thumbnailUrls"
         :artifact-counts="artifactCounts"
+        :artifact-urls="artifactUrls"
         :notifications="notifications"
         :hotkey-chars="hotkeyChars"
         :detached-worktrees="detachedWorktrees"

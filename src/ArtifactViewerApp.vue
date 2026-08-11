@@ -13,7 +13,9 @@ import ArtifactSvgView from "./components/artifact/ArtifactSvgView.vue";
 import ArtifactMermaidView from "./components/artifact/ArtifactMermaidView.vue";
 import ArtifactReactView from "./components/artifact/ArtifactReactView.vue";
 import ArtifactTableView from "./components/artifact/ArtifactTableView.vue";
+import ArtifactUrlView from "./components/artifact/ArtifactUrlView.vue";
 import { isTableContentType } from "./utils/csvArtifact";
+import { URL_ARTIFACT_CONTENT_TYPE } from "./types/artifact";
 import type {
   ArtifactMeta,
   ArtifactData,
@@ -53,6 +55,7 @@ const typeIcons: Record<string, string> = {
   "application/vnd.ant.react": "pi-play",
   "text/csv": "pi-table",
   "text/tab-separated-values": "pi-table",
+  [URL_ARTIFACT_CONTENT_TYPE]: "pi-link",
 };
 
 function typeIcon(contentType: string): string {
@@ -320,6 +323,10 @@ onUnmounted(() => {
             v-else-if="selectedArtifact.content_type === 'application/vnd.ant.react'"
             :content="selectedArtifact.content"
             :modules="selectedArtifact.modules"
+          />
+          <ArtifactUrlView
+            v-else-if="selectedArtifact.content_type === URL_ARTIFACT_CONTENT_TYPE"
+            :content="selectedArtifact.content"
           />
           <ArtifactTableView
             v-else-if="isTableContentType(selectedArtifact.content_type)"
