@@ -1226,6 +1226,15 @@ pub fn run() {
         let _ = dotenvy::from_filename_override(".env.development.local");
     }
 
+    // 継承した ORETACHI_TERMINAL_ID を自プロセスの env から除去する。
+    // oretachi 自身を oretachi のターミナルタブから起動した場合（`pnpm run tauri dev` の
+    // 開発フローなど）、親タブの terminal_id がアプリの env に残る。子プロセスの spawn は
+    // すべて親 env を継承する（process_utils::make_command / make_async_command）ため、
+    // そのままだと AI 判定やタスク生成でヘッドレス起動される claude とその hook が、
+    // 無関係な別タブの terminal_id を自分の ID として報告してしまう。
+    // PTY タブ自身は spawn 時に cmd.env で必ず上書きするので、ここで消して困る経路はない。
+    std::env::remove_var("ORETACHI_TERMINAL_ID");
+
     // ORETACHI_DEBUG 環境変数でデバッグモードを判定（起動時点で確定）
     let env_debug = std::env::var("ORETACHI_DEBUG")
         .map(|v| v == "true" || v == "1")

@@ -370,6 +370,11 @@ pub struct NotifyPayload {
     pub kind: Option<String>,
     pub body: Option<String>,
     pub agent: Option<String>,
+    /// 発火元 PTY タブの `terminal_id`。サイドカーが env `ORETACHI_TERMINAL_ID` から拾って付ける。
+    /// 同一ワークツリーに複数タブがある場合に発火元を確定するために使う。
+    /// oretachi 管理外のターミナルから起動されたエージェントでは付かない（`None`）。
+    #[serde(default, rename = "terminalId")]
+    pub terminal_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -390,6 +395,9 @@ pub struct SessionContextPayload {
     /// SessionStart フックの oretachi-notify が送る ${CLAUDE_PROJECT_DIR}。
     #[serde(default, rename = "projectDir")]
     pub project_dir: Option<String>,
+    /// 発火元 PTY タブの `terminal_id`（env `ORETACHI_TERMINAL_ID` 由来）。
+    #[serde(default, rename = "terminalId")]
+    pub terminal_id: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -406,6 +414,9 @@ pub struct SetWorktreeDescriptionEvent {
 pub struct PromptContextPayload {
     #[serde(default, rename = "projectDir")]
     pub project_dir: Option<String>,
+    /// 発火元 PTY タブの `terminal_id`（env `ORETACHI_TERMINAL_ID` 由来）。
+    #[serde(default, rename = "terminalId")]
+    pub terminal_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1855,7 +1866,7 @@ impl NotifyService {
         }
     }
 
-    #[tool(description = "現在の PTY セッション一覧を返す。session_id, cwd, isAiAgent, ワークツリー名/ID を含む。oretachi_kill_terminal を呼ぶ前の確認に使う", annotations(read_only_hint = true))]
+    #[tool(description = "現在の PTY セッション一覧を返す。sessionId, terminalId, cwd, isAiAgent, agentName, agentSessionId, ワークツリー名/ID を含む。terminalId は oretachi がタブ毎に発番する UUID で、SessionStart 時に自分の terminal_id が伝えられているので、それと突合すれば自分自身のターミナルを同定できる。oretachi_kill_terminal を呼ぶ前の確認に使う", annotations(read_only_hint = true))]
     fn oretachi_list_terminals(
         &self,
         Parameters(ListTerminalsParams { worktree_name, worktree_id }): Parameters<ListTerminalsParams>,
@@ -1906,8 +1917,11 @@ impl NotifyService {
             let status = if info.exit_code.is_some() { "exited" } else { "running" };
             items.push(serde_json::json!({
                 "sessionId": info.session_id,
+                "terminalId": info.terminal_id,
                 "cwd": info.cwd,
                 "isAiAgent": info.is_ai_agent,
+                "agentName": info.agent_name,
+                "agentSessionId": info.agent_session_id,
                 "worktreeId": matched_wt_id,
                 "worktreeName": matched_wt.map(|w| w.name.clone()),
                 "status": status,
@@ -2405,7 +2419,13 @@ async fn notify_handler(
         body: payload.body,
         agent: payload.agent,
     };
-    log::info!("[notify] worktree={} kind={}", event.worktree_name, event.kind);
+    // terminal_id は現状ログのみ（発火元タブの同定に使う）。購読機構 (#123 以降) で消費する。
+    log::info!(
+        "[notify] worktree={} kind={} terminal={:?}",
+        event.worktree_name,
+        event.kind,
+        payload.terminal_id
+    );
 
     let manager = app_handle.state::<McpServerManager>();
     // hook: 3秒 / approval: 1秒 で (worktree, kind) 単位に送信制限。
@@ -2563,13 +2583,14 @@ async fn session_context_handler(
             }
         })
         .filter(|s| !s.trim().is_empty());
-    if let Some(p) = &prompt {
-        log::info!(
-            "[session-context] projectDir={:?} prompt_len={}",
-            payload.project_dir,
-            p.len()
-        );
-    }
+    // terminal_id はサイドカーが env から拾って送ってくる。additionalContext への
+    // 自己 ID 注入はサイドカー側で行うため、ここではログのみ（発火元タブの確認用）。
+    log::info!(
+        "[session-context] projectDir={:?} terminal={:?} prompt_len={:?}",
+        payload.project_dir,
+        payload.terminal_id,
+        prompt.as_ref().map(|p| p.len())
+    );
     Json(serde_json::json!({ "prompt": prompt }))
 }
 
@@ -2614,8 +2635,9 @@ async fn prompt_context_handler(
     }
 
     log::info!(
-        "[prompt-context] worktree={} description={:?}",
+        "[prompt-context] worktree={} terminal={:?} description={:?}",
         wt.name,
+        payload.terminal_id,
         wt.description
     );
     Json(serde_json::json!({
