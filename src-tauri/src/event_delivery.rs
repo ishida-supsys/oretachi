@@ -366,6 +366,12 @@ fn decide_push(
     if delivery == event_db::DELIVERY_PASSIVE {
         return PushDecision::Skip("delivery=passive（エージェントが自分で取りに来る）");
     }
+    // 出力が動いている間は誰にも押し込まない。人間が入力中の行にブラケットペーストを
+    // 重ねるとその行を壊すため、エージェント種別や `interrupt` 指定より優先する
+    // （`idle` の判定は最大10秒古いので、これが最後の砦になる）。
+    if !session.output_quiescent {
+        return PushDecision::Skip("出力が動いている（入力中の可能性）");
+    }
     // `interrupt` は「走行中でも割り込んでよい」という購読側の明示的なオプトイン。
     if delivery == event_db::DELIVERY_INTERRUPT {
         return PushDecision::Push;
@@ -391,11 +397,6 @@ fn decide_push(
     match session.agent_status_sampled_at {
         Some(at) if now - at <= STATUS_MAX_AGE_MS => {}
         _ => return PushDecision::Skip("状態のサンプルが古い"),
-    }
-    if !session.output_quiescent {
-        // idle でも最大10秒古い。人間が入力中の行にブラケットペーストを重ねると
-        // その行を壊すので、直前 tick から出力が動いていないことも要求する。
-        return PushDecision::Skip("出力が動いている（入力中の可能性）");
     }
     PushDecision::Push
 }
@@ -486,7 +487,16 @@ async fn push_pending(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerStat
                 continue;
             }
         }
-        // 同じタブに複数戦略が混ざったら最も強いもの（interrupt > turn_end > passive）に従う。
+        // `passive` は「押し込まないでほしい」という購読側の明示指定なので、同じタブに
+        // 他の戦略が混ざっていても巻き込んで押し込んではいけない。先に除外する。
+        let items: Vec<_> = items
+            .into_iter()
+            .filter(|i| i.delivery != event_db::DELIVERY_PASSIVE)
+            .collect();
+        if items.is_empty() {
+            continue;
+        }
+        // 残りに interrupt が混ざっていれば走行中でも割り込む。
         let delivery = strongest_delivery(&items);
         let decision = decide_push(session, &delivery, now);
         if let PushDecision::Skip(reason) = decision {
@@ -542,6 +552,9 @@ async fn push_pending(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerStat
             );
             continue;
         }
+        // ペーストが通った時点でレート制限を進める。この後の Enter が失敗しても本文は
+        // 既に入力欄にあるので、次の tick で同じ本文を重ねて貼らないようにする。
+        state.last_push.insert(terminal_id.clone(), Instant::now());
         tokio::time::sleep(SUBMIT_DELAY).await;
         if let Err(e) = app
             .state::<crate::pty_manager::PtyManager>()
@@ -557,7 +570,6 @@ async fn push_pending(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerStat
             );
             continue;
         }
-        state.last_push.insert(terminal_id.clone(), Instant::now());
         let ids: Vec<String> = allowed.iter().map(|i| i.id.clone()).collect();
         if let Err(e) = event_db::mark_delivered(pool, &ids, now).await {
             log::warn!("[delivery] mark_delivered failed: {}", e);
@@ -622,7 +634,11 @@ async fn spawn_for_closed_tabs(
         return;
     }
     let sessions = app.state::<crate::pty_manager::PtyManager>().list_sessions();
-    let live = sessions.iter().filter(|s| s.exit_code.is_none()).count();
+    // 同じ tick で複数ワークツリーが spawn 候補になったときに上限を素通りしないよう、
+    // 発行した要求ぶんを足し込みながら判定する（`live` を1回だけ数えて全件に使うと、
+    // 候補が5件あれば一気に5タブ増えて webview ハングの領域に入る）。
+    let mut projected_live = sessions.iter().filter(|s| s.exit_code.is_none()).count()
+        + state.inflight_spawn.len();
     let settings = app.state::<SettingsManager>().get();
 
     for (worktree_id, pending) in candidates {
@@ -653,10 +669,10 @@ async fn spawn_for_closed_tabs(
             );
             continue;
         }
-        if live >= SPAWN_MAX_LIVE_SESSIONS {
+        if projected_live >= SPAWN_MAX_LIVE_SESSIONS {
             log::warn!(
                 "[delivery] ターミナルが {} 個あるため自動 spawn を拒否した（上限 {}）worktree={} 未読={}",
-                live,
+                projected_live,
                 SPAWN_MAX_LIVE_SESSIONS,
                 worktree.name,
                 pending
@@ -666,7 +682,7 @@ async fn spawn_for_closed_tabs(
                 serde_json::json!({
                     "worktreeId": worktree_id,
                     "worktreeName": worktree.name,
-                    "liveSessions": live,
+                    "liveSessions": projected_live,
                     "limit": SPAWN_MAX_LIVE_SESSIONS,
                     "pending": pending,
                 }),
@@ -697,6 +713,7 @@ async fn spawn_for_closed_tabs(
             worktree.name,
             request_id
         );
+        projected_live += 1;
         state
             .inflight_spawn
             .insert(worktree_id, (request_id, Instant::now()));
@@ -873,14 +890,11 @@ pub async fn event_unsubscribe(app_handle: AppHandle, subscription_id: String) -
 }
 
 /// UI からの既読化。エージェントが ack しないまま放置した分を人間が畳めるようにする。
+/// 対象は指定タブの未 ack 全件（人間は一覧で件数しか見ていないので ID を持っていない）。
 #[tauri::command]
-pub async fn event_ack(
-    app_handle: AppHandle,
-    terminal_id: String,
-    ids: Vec<String>,
-) -> Result<u64, String> {
+pub async fn event_ack_all(app_handle: AppHandle, terminal_id: String) -> Result<u64, String> {
     let pool = pool_of(&app_handle)?;
-    let acked = event_db::ack(&pool, &ids, &terminal_id, event_db::now_ms()).await?;
+    let acked = event_db::ack_all(&pool, &terminal_id, event_db::now_ms()).await?;
     let _ = app_handle.emit("event-inbox-changed", ());
     Ok(acked)
 }
@@ -974,8 +988,27 @@ mod tests {
     /// `interrupt` は「走行中でも割り込む」という購読側の明示オプトイン。
     #[test]
     fn test_interrupt_pushes_even_when_busy() {
-        let s = session(Some("claude"), Some("busy"), false);
+        let s = session(Some("claude"), Some("busy"), true);
         assert!(is_push(decide_push(&s, event_db::DELIVERY_INTERRUPT, 1_000_000)));
+    }
+
+    /// 出力が動いている間は誰にも押し込まない。人間が入力中の行を壊さないための最後の砦で、
+    /// エージェント種別や `interrupt` 指定より優先する。
+    #[test]
+    fn test_output_quiescence_overrides_everything() {
+        for (agent, status, delivery) in [
+            (Some("claude"), Some("idle"), event_db::DELIVERY_TURN_END),
+            (Some("claude"), Some("busy"), event_db::DELIVERY_INTERRUPT),
+            (Some("codex"), None, event_db::DELIVERY_TURN_END),
+        ] {
+            let s = session(agent, status, false);
+            assert!(
+                !is_push(decide_push(&s, delivery, 1_000_000)),
+                "agent={:?} delivery={} は出力継続中なら押し込まない",
+                agent,
+                delivery
+            );
+        }
     }
 
     #[test]
@@ -995,7 +1028,7 @@ mod tests {
     #[test]
     fn test_push_for_non_claude_agent_without_status() {
         for name in ["gemini", "codex", "cline"] {
-            let s = session(Some(name), None, false);
+            let s = session(Some(name), None, true);
             assert!(
                 is_push(decide_push(&s, event_db::DELIVERY_TURN_END, 1_000_000)),
                 "{} は押し込み対象",

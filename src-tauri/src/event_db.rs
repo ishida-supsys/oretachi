@@ -976,6 +976,24 @@ pub async fn list_all_orphaned_groups(pool: &SqlitePool) -> Result<Vec<OrphanedG
     .map_err(|e| e.to_string())
 }
 
+/// 指定タブの未 ack を全件 ack する。UI の「既読にする」用。
+///
+/// エージェントが ack しないまま忘れた分を人間が畳めるようにする。MCP 側の `ack` が
+/// ID 指定なのは「読んだものだけ確認済みにする」ためだが、人間は一覧で件数を見ているので
+/// ID を持っていない。
+pub async fn ack_all(pool: &SqlitePool, terminal_id: &str, now: i64) -> Result<u64, String> {
+    Ok(sqlx::query(
+        "UPDATE inbox SET acked_at = ?, state = ? WHERE subscriber_terminal_id = ? AND acked_at IS NULL",
+    )
+    .bind(now)
+    .bind(STATE_ACKED)
+    .bind(terminal_id)
+    .execute(pool)
+    .await
+    .map_err(|e| e.to_string())?
+    .rows_affected())
+}
+
 /// UI からの購読解除。MCP 経由（`delete_subscription`）と違い呼び出し元タブに
 /// 縛られない —— 人間は引き継ぎ待ちの（＝どのタブからも触れない）購読も消せる必要がある。
 pub async fn delete_subscription_by_id(pool: &SqlitePool, id: &str) -> Result<u64, String> {

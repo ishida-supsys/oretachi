@@ -21,6 +21,7 @@ import { useTaskSearch } from "../composables/useTaskSearch";
 import { useInfiniteScroll } from "../composables/useInfiniteScroll";
 import { useArchivePersistence, deleteArchive } from "../composables/useArchivePersistence";
 import {
+  ackAll,
   agentTerminals,
   isLoading as subscriptionsLoading,
   loadSubscriptions,
@@ -585,6 +586,7 @@ watch(
         :agent-terminals="agentTerminals"
         @unsubscribe="unsubscribe"
         @rebind="(p) => rebindGroup(p.worktreeId, p.deadTerminalId, p.sessionId)"
+        @ack-all="ackAll"
       />
     </template>
 

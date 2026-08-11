@@ -17,6 +17,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   unsubscribe: [subscriptionId: string];
   rebind: [payload: { worktreeId: string; deadTerminalId: string; sessionId: number }];
+  ackAll: [terminalId: string];
 }>();
 
 function formatDate(ts: number | null): string {
@@ -100,7 +101,16 @@ function onRebind(worktreeId: string, deadTerminalId: string, event: Event): voi
             <span v-else class="badge badge-active">{{ t('active') }}</span>
           </td>
           <td class="cell-unread">
-            <span v-if="item.unacked > 0" class="unread-badge">{{ item.unacked }}</span>
+            <template v-if="item.unacked > 0">
+              <span class="unread-badge">{{ item.unacked }}</span>
+              <button
+                class="btn-ack"
+                :title="t('ackAllTitle')"
+                @click="emit('ackAll', item.subscriberTerminalId)"
+              >
+                <span class="pi pi-check" />
+              </button>
+            </template>
             <span v-else class="muted">-</span>
           </td>
           <td class="cell-date">{{ formatDate(item.createdAt) }}</td>
@@ -304,6 +314,23 @@ function onRebind(worktreeId: string, deadTerminalId: string, event: Event): voi
   text-align: center;
 }
 
+.btn-ack {
+  background: none;
+  border: none;
+  padding: 2px 5px;
+  margin-left: 4px;
+  border-radius: 4px;
+  color: #6c7086;
+  cursor: pointer;
+  font-size: 11px;
+  transition: color 0.15s, background 0.15s;
+}
+
+.btn-ack:hover {
+  color: #a6e3a1;
+  background: #313244;
+}
+
 .btn-delete {
   background: none;
   border: none;
@@ -332,6 +359,7 @@ function onRebind(worktreeId: string, deadTerminalId: string, event: Event): voi
     "colCreatedAt": "Created",
     "colOrphanedAt": "Orphaned",
     "unsubscribeTitle": "Remove subscription",
+    "ackAllTitle": "Mark all unread messages for this tab as read",
     "active": "active",
     "orphaned": "awaiting handover",
     "orphanedHint": "The subscribing tab is gone. Messages keep piling up and are handed over to the next AI agent started in the same worktree (kept for 7 days).",
@@ -354,6 +382,7 @@ function onRebind(worktreeId: string, deadTerminalId: string, event: Event): voi
     "colCreatedAt": "登録日時",
     "colOrphanedAt": "待機開始",
     "unsubscribeTitle": "購読を解除",
+    "ackAllTitle": "このタブの未読をすべて既読にする",
     "active": "有効",
     "orphaned": "引き継ぎ待ち",
     "orphanedHint": "購読していたタブがありません。メッセージは溜まり続け、同じワークツリーで次に AI エージェントが立ち上がったときに引き継がれます（7日間保持）",

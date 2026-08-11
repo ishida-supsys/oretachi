@@ -95,9 +95,10 @@ export async function rebindGroup(
   await Promise.all([loadSubscriptions(), loadTerminalUnread()]);
 }
 
-export async function ackMessages(terminalId: string, ids: string[]): Promise<void> {
-  await invoke("event_ack", { terminalId, ids });
-  await Promise.all([loadSubscriptions(), loadTerminalUnread()]);
+/** そのタブの未 ack を全件既読にする。エージェントが ack しないまま忘れた分を人間が畳む。 */
+export async function ackAll(terminalId: string): Promise<void> {
+  await invoke("event_ack_all", { terminalId });
+  await loadSubscriptions();
 }
 
 /** 自動 spawn 要求への応答。**成否にかかわらず必ず呼ぶ**。呼ばないと Rust 側の

@@ -1551,7 +1551,7 @@ pub fn run() {
             event_delivery::event_list_orphaned_groups,
             event_delivery::event_rebind_group,
             event_delivery::event_unsubscribe,
-            event_delivery::event_ack,
+            event_delivery::event_ack_all,
             event_delivery::event_terminal_unread,
             event_delivery::event_spawn_result,
             set_debug_mode,
