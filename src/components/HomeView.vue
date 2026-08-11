@@ -24,6 +24,7 @@ import {
   ackAll,
   agentTerminals,
   isLoading as subscriptionsLoading,
+  lastActionError,
   loadSubscriptions,
   orphanedGroups,
   rebindGroup,
@@ -435,7 +436,8 @@ watch(
             <i class="pi pi-plus"></i>
           </button>
         </template>
-        <template v-else>
+        <!-- アーカイブ検索。`v-else` にすると購読パネルでも出てしまうので種別を明示する -->
+        <template v-else-if="panelMode === 'archive'">
           <div class="task-search">
             <i class="pi pi-search search-icon" />
             <input
@@ -579,6 +581,9 @@ watch(
       >
         {{ t('subscriptionEmpty') }}
       </div>
+
+      <!-- 引き継ぎは候補一覧が古いと正当に失敗する。黙って捨てず理由を出す -->
+      <div v-if="lastActionError" class="subscription-error">{{ lastActionError }}</div>
 
       <SubscriptionTable
         :items="subscriptions"
@@ -793,6 +798,15 @@ watch(
   height: calc(100% - 48px);
   color: #6c7086;
   font-size: 14px;
+}
+
+.subscription-error {
+  margin: 8px 12px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: #45324a;
+  color: #f38ba8;
+  font-size: 12px;
 }
 </style>
 

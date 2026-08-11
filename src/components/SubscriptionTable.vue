@@ -36,7 +36,11 @@ const inboxOnlyGroups = computed(() =>
 );
 
 function onRebind(worktreeId: string, deadTerminalId: string, event: Event): void {
-  const sessionId = Number((event.target as HTMLSelectElement).value);
+  const select = event.target as HTMLSelectElement;
+  const sessionId = Number(select.value);
+  // 選択値は毎回プレースホルダへ戻す。引き継ぎに失敗して行が残ったとき、同じ候補を
+  // 選び直しても change が発火せず、二度選び替えないと再試行できなくなるため。
+  select.value = "";
   if (!Number.isFinite(sessionId) || sessionId <= 0) return;
   emit("rebind", { worktreeId, deadTerminalId, sessionId });
 }

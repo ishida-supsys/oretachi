@@ -175,7 +175,19 @@ struct WorkerState {
     /// 1タブが同じワークツリーの死亡タブ全グループを吸い上げ、「新しいタブ1つにつき
     /// 1グループ」という設計不変条件が崩れる。タブが消えたら忘れる。
     claimed: std::collections::HashSet<String>,
+    /// 前回 `Reconcile` を処理したときの生存タブ一覧（ソート済み）。
+    ///
+    /// ポーリングは 10 秒ごとに送ってくるが、`events.db` は WAL ではない（sqlx は
+    /// 明示指定が無いと `journal_mode` を触らない）ので**書き込みが読み取りをブロックする**。
+    /// この DB は SessionStart フックのリクエストパス（`collect_inbox_digest`、busy_timeout
+    /// 800ms / 全体 1200ms）からも読まれるため、変化が無いときは書き込みを一切走らせない。
+    last_live: Option<Vec<String>>,
+    /// 保持期限切れの掃除を最後に回した時刻。期限は7日なので毎 tick 回す必要はない。
+    last_retention_purge: Option<Instant>,
 }
+
+/// 引き継ぎ待ちの保持期限切れを掃除する間隔。
+const RETENTION_PURGE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 pub fn start(app: AppHandle, pool: SqlitePool) -> DeliveryHandle {
     let (tx, mut rx) = mpsc::channel::<DeliveryMsg>(QUEUE_CAPACITY);
@@ -212,30 +224,46 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
     match msg {
         DeliveryMsg::Reconcile { live_terminal_ids } => {
             let now = event_db::now_ms();
-            // 消えたタブの「引き継ぎ済み」マークは忘れる（terminal_id は再利用されないので
-            // 放置しても誤動作はしないが、長時間稼働で単調増加する）。
-            state.claimed.retain(|t| live_terminal_ids.contains(t));
-            match event_db::mark_orphaned_subscribers(pool, &live_terminal_ids, now).await {
-                Ok((subs, inbox, deleted)) if subs > 0 || inbox > 0 || deleted > 0 => {
-                    log::info!(
-                        "[delivery] タブ死亡を検出: 購読 {} 件 / 未読 {} 件を引き継ぎ待ちにした（到達不能な {} 件は削除）",
-                        subs, inbox, deleted
-                    );
-                    let _ = app.emit("event-inbox-changed", ());
+            let mut live_sorted = live_terminal_ids.clone();
+            live_sorted.sort();
+            // 生存タブに変化が無ければ DB へは触らない。10 秒ごとに無条件で書き込むと、
+            // WAL でないこの DB では SessionStart フックの読み取りと競合しうる。
+            if state.last_live.as_ref() != Some(&live_sorted) {
+                state.last_live = Some(live_sorted);
+                // 消えたタブの「引き継ぎ済み」マークは忘れる（terminal_id は再利用されないので
+                // 放置しても誤動作はしないが、長時間稼働で単調増加する）。
+                state.claimed.retain(|t| live_terminal_ids.contains(t));
+                match event_db::mark_orphaned_subscribers(pool, &live_terminal_ids, now).await {
+                    Ok((subs, inbox, deleted)) if subs > 0 || inbox > 0 || deleted > 0 => {
+                        log::info!(
+                            "[delivery] タブ死亡を検出: 購読 {} 件 / 未読 {} 件を引き継ぎ待ちにした（到達不能な {} 件は削除）",
+                            subs, inbox, deleted
+                        );
+                        let _ = app.emit("event-inbox-changed", ());
+                    }
+                    Ok(_) => {}
+                    Err(e) => log::warn!("[delivery] mark_orphaned_subscribers failed: {}", e),
                 }
-                Ok(_) => {}
-                Err(e) => log::warn!("[delivery] mark_orphaned_subscribers failed: {}", e),
             }
-            match event_db::purge_orphaned_expired(pool, now, event_db::ORPHANED_RETENTION_MS).await
-            {
-                Ok((subs, inbox)) if subs > 0 || inbox > 0 => log::info!(
-                    "[delivery] 保持期限（{}日）を過ぎた引き継ぎ待ちを削除: 購読 {} 件 / 未読 {} 件",
-                    event_db::ORPHANED_RETENTION_DAYS,
-                    subs,
-                    inbox
-                ),
-                Ok(_) => {}
-                Err(e) => log::warn!("[delivery] purge_orphaned_expired failed: {}", e),
+            // 保持期限は7日なので、掃除は1時間おきで十分。
+            let purge_due = state
+                .last_retention_purge
+                .map(|at| at.elapsed() >= RETENTION_PURGE_INTERVAL)
+                .unwrap_or(true);
+            if purge_due {
+                state.last_retention_purge = Some(Instant::now());
+                match event_db::purge_orphaned_expired(pool, now, event_db::ORPHANED_RETENTION_MS)
+                    .await
+                {
+                    Ok((subs, inbox)) if subs > 0 || inbox > 0 => log::info!(
+                        "[delivery] 保持期限（{}日）を過ぎた引き継ぎ待ちを削除: 購読 {} 件 / 未読 {} 件",
+                        event_db::ORPHANED_RETENTION_DAYS,
+                        subs,
+                        inbox
+                    ),
+                    Ok(_) => {}
+                    Err(e) => log::warn!("[delivery] purge_orphaned_expired failed: {}", e),
+                }
             }
         }
         DeliveryMsg::Rebind { terminal_id, reply } => {
@@ -299,8 +327,11 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
                 state.inflight_spawn.remove(wt);
             }
             let Some(session_id) = session_id else {
-                log::warn!(
-                    "[delivery] spawn に失敗した応答を受け取った request={} worktree={:?}",
+                // サブウィンドウへ分離済みのワークツリーは session_id を回収できないため、
+                // 成功しても None で返ってくる（引き継ぎはエージェント検出のポーリングに任せる）。
+                // 失敗と区別できないので warn ではなく info に留める。
+                log::info!(
+                    "[delivery] spawn 応答に session_id が無い（失敗、またはサブウィンドウ経由の成功）request={} worktree={:?}",
                     request_id,
                     worktree_id
                 );
@@ -318,6 +349,12 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
             match terminal_id {
                 Some(tid) => {
                     let moved = rebind_for_terminal(app, pool, &tid).await;
+                    if moved != (0, 0) {
+                        // `Rebind` 経路と同じく引き継ぎ済みの印を付ける。付けないと、この直後に
+                        // エージェント検出や購読系ツール呼び出しで再び `Rebind` が来たときに
+                        // **2つ目のグループまで吸い上げ**、「1タブ1グループ」が崩れる。
+                        state.claimed.insert(tid.clone());
+                    }
                     log::info!(
                         "[delivery] spawn したタブへ引き継いだ session_id={} 購読={} 未読={}",
                         session_id,

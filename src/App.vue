@@ -1532,10 +1532,13 @@ onMounted(async () => {
   // PTY へ押し込んだ瞬間にトーストで知らせる。
   await listen<DeliveredPayload>("event-delivered", (event) => {
     const p = event.payload;
+    // 本文は最大 600 字。トーストは幅 260px なので、そのまま出すと画面を埋める。
+    // 全文はエージェント側の画面と購読パネルで読めるので、ここは要約で足りる。
+    const detail = p.text.length > 120 ? `${p.text.slice(0, 120)}…` : p.text;
     toast.add({
-      severity: "info",
+      severity: "success",
       summary: t("eventDeliveredSummary", { name: p.worktreeName ?? "", count: p.count }),
-      detail: p.text,
+      detail,
       life: 8000,
     });
   });
@@ -1601,7 +1604,8 @@ onMounted(async () => {
     }
     await reportSpawnResult(requestId, sessionId);
     toast.add({
-      severity: "info",
+      // `info` は共通テンプレートがスピナーを出す（進行中を意味する）ので使わない
+      severity: "success",
       summary: t("eventSpawnedSummary"),
       detail: t("eventSpawnedDetail", { name: targetWt.name, count: event.payload.pending }),
       life: 8000,

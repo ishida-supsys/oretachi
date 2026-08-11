@@ -52,8 +52,16 @@ async function safeInvoke<T>(cmd: string, fallback: T, args?: Record<string, unk
   }
 }
 
+/** 読み込み中に来た更新要求。取りこぼすと未読バッジが古いまま固定される
+ *  （`event-inbox-changed` は変化があったときしか飛ばないので自然回復しない）。
+ *  `useArchivePersistence.ts` / `useTaskPersistence.ts` と同じ流儀で1回だけ再実行する。 */
+let pendingReload = false;
+
 export async function loadSubscriptions(): Promise<void> {
-  if (isLoading.value) return;
+  if (isLoading.value) {
+    pendingReload = true;
+    return;
+  }
   isLoading.value = true;
   try {
     subscriptions.value = await safeInvoke<SubscriptionView[]>("event_list_subscriptions", []);
@@ -65,6 +73,11 @@ export async function loadSubscriptions(): Promise<void> {
     await loadTerminalUnread();
   } finally {
     isLoading.value = false;
+  }
+
+  if (pendingReload) {
+    pendingReload = false;
+    await loadSubscriptions();
   }
 }
 
@@ -78,9 +91,27 @@ export async function loadTerminalUnread(): Promise<void> {
   terminalUnread.value = next;
 }
 
-export async function unsubscribe(subscriptionId: string): Promise<void> {
-  await invoke("event_unsubscribe", { subscriptionId });
-  await loadSubscriptions();
+/** 直近の操作エラー。UI が拾ってトーストなどで見せる（握り潰すと黙って失敗する）。 */
+export const lastActionError = ref<string | null>(null);
+
+async function runAction(cmd: string, args: Record<string, unknown>): Promise<boolean> {
+  try {
+    await invoke(cmd, args);
+    lastActionError.value = null;
+    return true;
+  } catch (e) {
+    // `event_rebind_group` は候補一覧が古い（タブが消えた / 別ワークツリーへ移った）と
+    // 正当に失敗する。黙って捨てると「押したのに何も起きない」になる。
+    console.warn(`[event] ${cmd} failed:`, e);
+    lastActionError.value = String(e);
+    return false;
+  } finally {
+    await loadSubscriptions();
+  }
+}
+
+export async function unsubscribe(subscriptionId: string): Promise<boolean> {
+  return runAction("event_unsubscribe", { subscriptionId });
 }
 
 /** 引き継ぎ待ちグループを、人間が選んだ生存タブへ手動で引き継ぐ。
@@ -90,15 +121,13 @@ export async function rebindGroup(
   worktreeId: string,
   deadTerminalId: string,
   sessionId: number,
-): Promise<void> {
-  await invoke("event_rebind_group", { worktreeId, deadTerminalId, sessionId });
-  await Promise.all([loadSubscriptions(), loadTerminalUnread()]);
+): Promise<boolean> {
+  return runAction("event_rebind_group", { worktreeId, deadTerminalId, sessionId });
 }
 
 /** そのタブの未 ack を全件既読にする。エージェントが ack しないまま忘れた分を人間が畳む。 */
-export async function ackAll(terminalId: string): Promise<void> {
-  await invoke("event_ack_all", { terminalId });
-  await loadSubscriptions();
+export async function ackAll(terminalId: string): Promise<boolean> {
+  return runAction("event_ack_all", { terminalId });
 }
 
 /** 自動 spawn 要求への応答。**成否にかかわらず必ず呼ぶ**。呼ばないと Rust 側の

@@ -1236,7 +1236,12 @@ pub fn format_inbox_push_text(items: &[InboxItem]) -> Option<(String, usize)> {
     let tail = " 購読していた作業が完了したということなので、必要な動作確認や後続作業を進めてください。\
                 確認したら oretachi_ack_message に [] 内の ID を渡して ack してください。";
     // 固定文言のぶんを引いた残りに、入る行だけを詰める（最低1件は必ず載せる）。
-    let budget = PTY_TEXT_MAX_CHARS.saturating_sub(head.chars().count() + tail.chars().count());
+    // 残件の告知（`more`）も後ろに付くので、そのぶんの余白も先に引いておく。引かないと
+    // 全体が上限を超え、`sanitize_for_pty` が**末尾から**切るせいで
+    // 「oretachi_ack_message で ack してください」という一番効かせたい指示が欠ける。
+    const MORE_ALLOWANCE: usize = 48;
+    let budget = PTY_TEXT_MAX_CHARS
+        .saturating_sub(head.chars().count() + tail.chars().count() + MORE_ALLOWANCE);
     let mut body = String::new();
     let mut used = 0usize;
     for item in items {
@@ -2128,6 +2133,8 @@ mod tests {
         let (text, used) = format_inbox_push_text(&items).unwrap();
         assert!(used > 0 && used < items.len(), "一部だけ載る想定 (used={})", used);
         assert!(text.chars().count() <= PTY_TEXT_MAX_CHARS + 1);
+        // 残件告知を足しても上限を超えず、末尾の ack 指示が切られていないこと
+        assert!(text.ends_with("ack してください。"), "末尾が切れている: {}", text);
         // 載った分だけが本文にあり、載らなかった分は残件として告知される
         assert!(text.contains(&format!("inbox-{:02}", used - 1)));
         assert!(!text.contains(&format!("inbox-{:02}", used)));
