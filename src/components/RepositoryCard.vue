@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
 import { useI18n } from "vue-i18n";
+import { message } from "@tauri-apps/plugin-dialog";
+import { applyPluginConfig } from "../composables/useSettings";
 import type { Repository } from "../types/settings";
 import type { Worktree } from "../types/worktree";
 import TerminalThumbnail from "./TerminalThumbnail.vue";
@@ -98,6 +100,20 @@ function withMenuHidden<T>(fn: () => T): T {
   menuRef.value?.hide();
   return fn();
 }
+
+/**
+ * リポジトリ root の .claude/settings.local.json に oretachi プラグイン設定を書き直す。
+ * 手編集や削除で MCP / 通知が効かなくなったときの復旧口。
+ * 親へ emit せずここで完結させる（他の状態に影響しない自己完結の操作のため）。
+ */
+async function reapplyPluginConfig() {
+  try {
+    await applyPluginConfig(props.repo.path, props.repo.name, props.repo.notificationHooks ?? []);
+    await message(t("menu.reapplyPluginDone"), { kind: "info" });
+  } catch (e) {
+    await message(t("menu.reapplyPluginFailed", { error: e }), { kind: "error" });
+  }
+}
 </script>
 
 <template>
@@ -191,6 +207,10 @@ function withMenuHidden<T>(fn: () => T): T {
         <button class="popup-item" @click="withMenuHidden(() => emit('openArtifacts', repo.id))">
           <span class="pi pi-box" />
           {{ t('menu.openArtifacts') }}
+        </button>
+        <button class="popup-item" @click="withMenuHidden(reapplyPluginConfig)">
+          <span class="pi pi-refresh" />
+          {{ t('menu.reapplyPlugin') }}
         </button>
         <template v-if="worktreeId">
           <button
@@ -460,6 +480,9 @@ function withMenuHidden<T>(fn: () => T): T {
       "selectExecScript": "Select exec script",
       "clearExecScript": "Clear exec script",
       "openArtifacts": "Artifacts",
+      "reapplyPlugin": "Re-apply plugin settings",
+      "reapplyPluginDone": "Wrote the oretachi plugin settings into .claude/settings.local.json.",
+      "reapplyPluginFailed": "Failed to re-apply the plugin settings: {error}",
       "autoApproval": "Auto approval",
       "setHotkey": "Assign hotkey",
       "moveToSubWindow": "Move to sub window",
@@ -487,6 +510,9 @@ function withMenuHidden<T>(fn: () => T): T {
       "selectExecScript": "実行スクリプトを選択",
       "clearExecScript": "実行スクリプトを解除",
       "openArtifacts": "アーティファクト",
+      "reapplyPlugin": "プラグイン設定を再適用",
+      "reapplyPluginDone": ".claude/settings.local.json に oretachi プラグイン設定を書き込みました。",
+      "reapplyPluginFailed": "プラグイン設定の再適用に失敗しました: {error}",
       "autoApproval": "自動承認",
       "setHotkey": "ホットキーを割り当て",
       "moveToSubWindow": "サブウィンドウへ移動",

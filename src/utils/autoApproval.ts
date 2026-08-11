@@ -51,6 +51,7 @@ export function hasApprovalPrompt(content: string): boolean {
  * - oretachi_spawn_terminal / oretachi_write_terminal … 任意コマンドを PTY に流し込める
  *   (= 任意コード実行)。無条件承認すると安全ゲートが無効化される
  * - oretachi_add_task … 任意 prompt からワークツリー作成とエージェント実行を発火する
+ * - oretachi_import_worktree … settings を書き換えてワークツリーを登録する
  *
  * artifact_module は artifact より前に置く (正規表現の選択肢で長い方を優先させるため)。
  */
@@ -62,6 +63,7 @@ export const ORETACHI_AUTO_APPROVE_TOOLS = [
   "oretachi_set_description",
   "oretachi_get_worktree_status",
   "oretachi_get_app_options",
+  "oretachi_show_worktree",
   "oretachi_list_repository",
   "oretachi_list_terminals",
   "oretachi_read_terminal",

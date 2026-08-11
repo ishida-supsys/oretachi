@@ -36,6 +36,7 @@ async function selectWorktreeBaseDir() {
 }
 
 const reseedResult = ref("");
+const reapplyResult = ref("");
 
 // プロンプト未設定時に実際に注入される既定値（Rust 側の定義を唯一の出所にする）
 const defaultHomeAgentPrompt = ref("");
@@ -55,6 +56,30 @@ async function reseedHomeSkills() {
   } catch (e) {
     await message(t("homeAgent.reseedFailed", { error: e }), { kind: "error" });
   }
+}
+
+/** oretachi プラグイン設定 (settings.local.json) をホームへ再適用する */
+async function reapplyPluginConfig() {
+  const baseDir = settings.value.worktreeBaseDir;
+  if (!baseDir) return;
+  reapplyResult.value = "";
+  try {
+    // overwrite=false: プラグイン設定は毎回マージ書き込みされ、スキルの編集は温存される
+    await invoke("setup_home_claude_dir", { homePath: baseDir, overwrite: false });
+    reapplyResult.value = t("homeAgent.reapplyDone");
+  } catch (e) {
+    await message(t("homeAgent.reapplyFailed", { error: e }), { kind: "error" });
+  }
+}
+
+// 空欄にフォーカスしたら既定値を実値として投入する。
+// placeholder のままだと「既定値に一行足したい」ときに全文を打ち直す必要があるため。
+// 全消しして blur すれば undefined に戻り、「空 = 既定値」のセマンティクスは維持される。
+function onPromptFocus() {
+  if (settings.value.homeAgentPrompt) return;
+  if (!defaultHomeAgentPrompt.value) return;
+  settings.value.homeAgentPrompt = defaultHomeAgentPrompt.value;
+  scheduleSave();
 }
 
 function onPromptChange(e: Event) {
@@ -96,6 +121,7 @@ function onPromptChange(e: Event) {
             rows="6"
             :value="settings.homeAgentPrompt ?? ''"
             :placeholder="defaultHomeAgentPrompt"
+            @focus="onPromptFocus"
             @change="onPromptChange"
           />
         </div>
@@ -108,6 +134,16 @@ function onPromptChange(e: Event) {
             <span v-if="reseedResult" class="hint">{{ reseedResult }}</span>
           </div>
           <p class="hint">{{ t('homeAgent.reseedSkillsDesc') }}</p>
+        </div>
+
+        <div class="field">
+          <div class="row">
+            <button class="btn-secondary" @click="reapplyPluginConfig">
+              {{ t('homeAgent.reapplyPlugin') }}
+            </button>
+            <span v-if="reapplyResult" class="hint">{{ reapplyResult }}</span>
+          </div>
+          <p class="hint">{{ t('homeAgent.reapplyPluginDesc') }}</p>
         </div>
       </template>
 
@@ -255,7 +291,11 @@ function onPromptChange(e: Event) {
     },
     "homeAgent": {
       "label": "Home management agent",
-      "desc": "Injected into every Claude Code session started in the home worktree (via the SessionStart hook, so it survives /clear and restarts). Just run `claude` there and it becomes the worktree management agent. Leave empty to use the default shown below; the actual procedures live as skills under .claude/skills/ in the base directory.",
+      "desc": "Injected into every Claude Code session started in the home worktree (via the SessionStart hook, so it survives /clear and restarts). Just run `claude` there and it becomes the worktree management agent. Click the empty box to drop in the default text and edit from there; leave it empty and the default is used as-is. The actual procedures live as skills under .claude/skills/ in the base directory.",
+      "reapplyPlugin": "Re-apply plugin settings",
+      "reapplyPluginDesc": "Writes the oretachi plugin settings into .claude/settings.local.json in the base directory again. Use this if the file was edited or deleted by hand and MCP tools / notifications stopped working. Other keys in the file are preserved.",
+      "reapplyDone": "Re-applied the plugin settings.",
+      "reapplyFailed": "Failed to re-apply the plugin settings: {error}",
       "reseedSkills": "Restore bundled skills",
       "reseedSkillsDesc": "Bundled skills (worktree-cleanup / report / assign) are written once and never overwrite your edits. This button restores them to the defaults; skills you added yourself are left untouched.",
       "reseedConfirm": "Overwrite the bundled skill files with their default contents? Your edits to those files will be lost.",
@@ -276,7 +316,11 @@ function onPromptChange(e: Event) {
     },
     "homeAgent": {
       "label": "ホームの管理エージェント",
-      "desc": "home で起動した Claude Code セッションに常時注入されます（SessionStart フック経由。/clear や再起動後も維持）。home で claude を起動するだけでワークツリー管理エージェントになります。空なら薄く表示されている既定値が使われます。実際の手順は追加先ディレクトリの .claude/skills/ にスキルとして置かれます。",
+      "desc": "home で起動した Claude Code セッションに常時注入されます（SessionStart フック経由。/clear や再起動後も維持）。home で claude を起動するだけでワークツリー管理エージェントになります。空欄をクリックすると既定値が入るので、そこから追記・編集できます。空のままなら既定値がそのまま使われます。実際の手順は追加先ディレクトリの .claude/skills/ にスキルとして置かれます。",
+      "reapplyPlugin": "プラグイン設定を再適用",
+      "reapplyPluginDesc": "追加先ディレクトリの .claude/settings.local.json に oretachi プラグイン設定を書き直します。手で編集・削除して MCP ツールや通知が効かなくなったときに使います。ファイル内の他のキーは保持されます。",
+      "reapplyDone": "プラグイン設定を再適用しました。",
+      "reapplyFailed": "プラグイン設定の再適用に失敗しました: {error}",
       "reseedSkills": "同梱スキルを再展開",
       "reseedSkillsDesc": "同梱スキル (worktree-cleanup / report / assign) は初回のみ書き出され、以降ユーザーの編集を上書きしません。このボタンは既定内容に戻します。自分で追加したスキルには触れません。",
       "reseedConfirm": "同梱スキルのファイルを既定内容で上書きしますか？ これらのファイルへの編集は失われます。",

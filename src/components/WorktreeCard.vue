@@ -3,7 +3,10 @@ import { ref, computed } from "vue";
 import type { Worktree } from "../types/worktree";
 import type { Workgroup } from "../types/settings";
 import { useI18n } from "vue-i18n";
+import { invoke } from "@tauri-apps/api/core";
+import { message } from "@tauri-apps/plugin-dialog";
 import { useWorkgroups } from "../composables/useWorkgroups";
+import { useSettings, applyPluginConfig } from "../composables/useSettings";
 
 const { t } = useI18n();
 const { displayName: workgroupDisplayName } = useWorkgroups();
@@ -113,6 +116,36 @@ function onMoveWindow() {
 function onOpenArtifacts() {
   menuRef.value?.hide();
   emit("openArtifacts", props.worktree.id);
+}
+
+/**
+ * このワークツリーの .claude/settings.local.json に oretachi プラグイン設定を書き直す。
+ * 手編集や削除で MCP / 通知が効かなくなったときの復旧口。
+ * ホームは同梱スキルのシードも伴うため専用コマンド経由にする。
+ * 親へ emit せずここで完結させる（他の状態に影響しない自己完結の操作のため）。
+ */
+async function onReapplyPluginConfig() {
+  menuRef.value?.hide();
+  const { settings } = useSettings();
+  try {
+    if (isHome.value) {
+      // overwrite=false: プラグイン設定は毎回マージ書き込みされ、スキルの編集は温存される
+      await invoke("setup_home_claude_dir", {
+        homePath: props.worktree.path,
+        overwrite: false,
+      });
+    } else {
+      const repo = settings.value.repositories.find((r) => r.id === props.worktree.repositoryId);
+      await applyPluginConfig(
+        props.worktree.path,
+        props.worktree.name,
+        repo?.notificationHooks ?? [],
+      );
+    }
+    await message(t("menu.reapplyPluginDone"), { kind: "info" });
+  } catch (e) {
+    await message(t("menu.reapplyPluginFailed", { error: e }), { kind: "error" });
+  }
 }
 
 function onDuplicate() {
@@ -250,6 +283,10 @@ const terminalList = computed(() =>
         <button class="popup-item" :disabled="loading" @click="onMoveWindow">
           <span :class="detached ? 'pi pi-window-maximize' : 'pi pi-external-link'" />
           {{ detached ? t('menu.moveToMainWindow') : t('menu.moveToSubWindow') }}
+        </button>
+        <button class="popup-item" :disabled="loading" @click="onReapplyPluginConfig">
+          <span class="pi pi-refresh" />
+          {{ t('menu.reapplyPlugin') }}
         </button>
         <button v-if="!isHome" class="popup-item" :disabled="loading" @click="onDuplicate">
           <span class="pi pi-copy" />
@@ -613,6 +650,9 @@ const terminalList = computed(() =>
       "openArtifacts": "Artifacts",
       "moveToSubWindow": "Move to sub window",
       "moveToMainWindow": "Move to main window",
+      "reapplyPlugin": "Re-apply plugin settings",
+      "reapplyPluginDone": "Wrote the oretachi plugin settings into .claude/settings.local.json.",
+      "reapplyPluginFailed": "Failed to re-apply the plugin settings: {error}",
       "duplicate": "Duplicate",
       "moveToWorkgroup": "Move to group",
       "delete": "Delete"
@@ -634,6 +674,9 @@ const terminalList = computed(() =>
       "openArtifacts": "アーティファクト",
       "moveToSubWindow": "サブウィンドウに移動",
       "moveToMainWindow": "メインウィンドウに戻す",
+      "reapplyPlugin": "プラグイン設定を再適用",
+      "reapplyPluginDone": ".claude/settings.local.json に oretachi プラグイン設定を書き込みました。",
+      "reapplyPluginFailed": "プラグイン設定の再適用に失敗しました: {error}",
       "duplicate": "複製",
       "moveToWorkgroup": "グループ移動",
       "delete": "削除"

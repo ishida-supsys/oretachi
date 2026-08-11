@@ -158,8 +158,64 @@ pub fn mcp_close_worktree_result(
     }
 }
 
+/// ワークツリー取り込みの最終結果。
+pub enum ImportWorktreeOutcome {
+    /// 登録できた（ワークツリーID）
+    Imported(String),
+    /// 既に登録済みだった（エラーではない）
+    AlreadyRegistered,
+    Failed(String),
+}
+
+/// oretachi_import_worktree の処理結果をフロントエンドから受け取る。
+/// settings の所有権はフロント側にあるため、登録そのものはフロントに行わせて結果だけ受け取る。
+#[derive(Default)]
+pub struct ImportWorktreeAckRegistry(pub Mutex<HashMap<String, oneshot::Sender<ImportWorktreeOutcome>>>);
+
+impl ImportWorktreeAckRegistry {
+    fn register(&self, request_id: String) -> oneshot::Receiver<ImportWorktreeOutcome> {
+        let (tx, rx) = oneshot::channel();
+        match self.0.lock() {
+            Ok(mut g) => { g.insert(request_id, tx); }
+            Err(e) => { e.into_inner().insert(request_id, tx); }
+        }
+        rx
+    }
+
+    fn take(&self, request_id: &str) -> Option<oneshot::Sender<ImportWorktreeOutcome>> {
+        match self.0.lock() {
+            Ok(mut g) => g.remove(request_id),
+            Err(e) => e.into_inner().remove(request_id),
+        }
+    }
+}
+
+/// フロントエンドがワークツリー取り込みの成否を MCP ツールへ返す。
+/// status: "ok" | "already" | それ以外は失敗扱い。
+#[tauri::command]
+pub fn mcp_import_worktree_result(
+    request_id: String,
+    status: String,
+    worktree_id: Option<String>,
+    error: Option<String>,
+    registry: tauri::State<'_, ImportWorktreeAckRegistry>,
+) {
+    if let Some(tx) = registry.take(&request_id) {
+        let outcome = match status.as_str() {
+            "ok" => ImportWorktreeOutcome::Imported(worktree_id.unwrap_or_default()),
+            "already" => ImportWorktreeOutcome::AlreadyRegistered,
+            _ => ImportWorktreeOutcome::Failed(error.unwrap_or_else(|| "unknown error".to_string())),
+        };
+        let _ = tx.send(outcome);
+    }
+}
+
 static PEER_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
 static CLOSE_WORKTREE_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+static IMPORT_WORKTREE_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+/// 取り込み結果を待つ上限。登録はファイル I/O を伴わない settings 操作なので短くてよいが、
+/// フロントが重い処理中でも取りこぼさないよう余裕を持たせる。
+const IMPORT_WORKTREE_ACK_TIMEOUT_SECS: u64 = 30;
 /// クローズ結果を待つ上限。worktree remove はロックエラー時にキャンセルまで無限リトライする
 /// (git_worktree::worktree_remove_persistent) ため、タイムアウトしても失敗とは断定せず
 /// 「継続中」として返す。MCP クライアント側のツールタイムアウト(既定 60 秒前後)に
@@ -551,6 +607,39 @@ struct SpawnTerminalEvent {
     worktree_id: String,
     command: String,
     title: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ImportWorktreeParams {
+    #[schemars(description = "取り込むワークツリーの絶対パス。省略すると候補の列挙のみ行う")]
+    pub path: Option<String>,
+    #[schemars(description = "対象リポジトリ名で絞り込む（省略時は登録済み全リポジトリを走査）")]
+    pub repository_name: Option<String>,
+    #[schemars(description = "true なら path を指定していても登録せず候補列挙だけ行う（デフォルト false）")]
+    pub dry_run: Option<bool>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct ImportWorktreeEvent {
+    request_id: String,
+    repository_id: String,
+    repository_name: String,
+    path: String,
+    name: String,
+    branch_name: String,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ShowWorktreeParams {
+    #[schemars(description = "フォーカスするワークツリーの名前")]
+    pub worktree_name: Option<String>,
+    #[schemars(description = "ワークツリーID（同名ワークツリーが複数ある場合に指定）")]
+    pub worktree_id: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone)]
+struct ShowWorktreeEvent {
+    worktree_id: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1062,43 +1151,13 @@ impl NotifyService {
         let settings = settings_manager.get();
 
         // 解決優先順位: worktree_id > worktree_name > project_dir 逆引き
-        let wt = if let Some(id) = worktree_id.as_deref() {
-            settings.worktrees.iter().find(|w| w.id == id).ok_or_else(|| {
-                McpError::invalid_params(format!("worktree id '{}' not found", id), None)
-            })?
-        } else if let Some(name) = worktree_name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            let matches: Vec<_> = settings.worktrees.iter().filter(|w| w.name == name).collect();
-            match matches.len() {
-                0 => {
-                    let names: Vec<&str> = settings.worktrees.iter().map(|w| w.name.as_str()).collect();
-                    return Err(McpError::invalid_params(
-                        format!("worktree '{}' not found. available: [{}]", name, names.join(", ")),
-                        None,
-                    ));
-                }
-                1 => matches[0],
-                _ => {
-                    let ids: Vec<&str> = matches.iter().map(|w| w.id.as_str()).collect();
-                    return Err(McpError::invalid_params(
-                        format!("multiple worktrees named '{}'. specify worktree_id to disambiguate: [{}]", name, ids.join(", ")),
-                        None,
-                    ));
-                }
-            }
-        } else if let Some(dir) = project_dir.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            resolve_worktree_by_dir(&settings, dir).ok_or_else(|| {
-                let names: Vec<&str> = settings.worktrees.iter().map(|w| w.name.as_str()).collect();
-                McpError::invalid_params(
-                    format!("no worktree matches project_dir '{}'. available: [{}]", dir, names.join(", ")),
-                    None,
-                )
-            })?
-        } else {
-            return Err(McpError::invalid_params(
-                "specify one of project_dir / worktree_name / worktree_id",
-                None,
-            ));
-        };
+        let wt = resolve_worktree(
+            &settings,
+            worktree_id.as_deref(),
+            worktree_name.as_deref(),
+            project_dir.as_deref(),
+            "specify one of project_dir / worktree_name / worktree_id",
+        )?;
 
         let previous = wt.description.clone();
         let event = SetWorktreeDescriptionEvent {
@@ -1122,7 +1181,7 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "登録済みワークツリーのステータス一覧を取得する。各エントリはルートパス(path)・1行説明(description)・ブランチ名・isHome・isRepository を含む。isHome / isRepository が true のものは git ワークツリーではない擬似エントリなので、作業割り当てや削除の候補からは外すこと。query で name / branchName / description の部分一致検索ができる", annotations(read_only_hint = true))]
+    #[tool(description = "登録済みワークツリーのステータス一覧を取得する。各エントリはルートパス(path)・1行説明(description)・ブランチ名・所属ワークグループ(workgroupId / workgroupName)・isHome・isRepository を含む。isHome / isRepository が true のものは git ワークツリーではない擬似エントリなので、作業割り当てや削除の候補からは外すこと。query で name / branchName / description の部分一致検索ができる", annotations(read_only_hint = true))]
     fn oretachi_get_worktree_status(
         &self,
         Parameters(GetWorktreeStatusParams { query }): Parameters<GetWorktreeStatusParams>,
@@ -1154,6 +1213,9 @@ impl NotifyService {
                 }
             })
             .map(|wt| {
+                // 所属ワークグループ。未設定なら先頭グループへフォールバックする（UI の表示と同じ解決）。
+                // グループ自体が未定義なら workgroupId / workgroupName ともに null。
+                let group = resolve_workgroup(&settings, wt);
                 serde_json::json!({
                     "id": wt.id,
                     "name": wt.name,
@@ -1161,6 +1223,8 @@ impl NotifyService {
                     "description": wt.description,
                     "repositoryName": wt.repository_name,
                     "branchName": wt.branch_name,
+                    "workgroupId": group.map(|g| g.id.as_str()),
+                    "workgroupName": group.map(|g| workgroup_display_name(&settings, g)),
                     "isHome": wt.is_home,
                     "isRepository": wt.is_repository,
                     "isDetached": detached.contains(wt.id.as_str()),
@@ -1183,35 +1247,13 @@ impl NotifyService {
         let settings_manager = self.app_handle.state::<SettingsManager>();
         let settings = settings_manager.get();
 
-        let wt = if let Some(id) = worktree_id.as_deref() {
-            settings.worktrees.iter().find(|w| w.id == id).ok_or_else(|| {
-                McpError::invalid_params(format!("worktree id '{}' not found", id), None)
-            })?
-        } else if let Some(name) = worktree_name.as_deref().map(str::trim).filter(|n| !n.is_empty()) {
-            let matches: Vec<_> = settings.worktrees.iter().filter(|w| w.name == name).collect();
-            match matches.len() {
-                0 => {
-                    let names: Vec<&str> = settings.worktrees.iter().map(|w| w.name.as_str()).collect();
-                    return Err(McpError::invalid_params(
-                        format!("worktree '{}' not found. available: [{}]", name, names.join(", ")),
-                        None,
-                    ));
-                }
-                1 => matches[0],
-                _ => {
-                    let ids: Vec<&str> = matches.iter().map(|w| w.id.as_str()).collect();
-                    return Err(McpError::invalid_params(
-                        format!("multiple worktrees named '{}'. specify worktree_id to disambiguate: [{}]", name, ids.join(", ")),
-                        None,
-                    ));
-                }
-            }
-        } else {
-            return Err(McpError::invalid_params(
-                "specify one of worktree_name / worktree_id",
-                None,
-            ));
-        };
+        let wt = resolve_worktree(
+            &settings,
+            worktree_id.as_deref(),
+            worktree_name.as_deref(),
+            None,
+            "specify one of worktree_name / worktree_id",
+        )?;
 
         // ホーム / リポジトリは git ワークツリーではないので、ワークツリーとしての git 状態を持たない
         // （リポジトリ root で git は動くが branchName が空の擬似エントリなので結果が噛み合わない）
@@ -1431,32 +1473,14 @@ impl NotifyService {
             let settings_manager = self.app_handle.state::<SettingsManager>();
             let settings = settings_manager.get();
 
-            let wt = if let Some(id) = worktree_id.as_deref() {
-                // IDが指定されている場合はIDで特定
-                settings.worktrees.iter().find(|w| w.id == id).ok_or_else(|| {
-                    McpError::invalid_params(format!("worktree id '{}' not found", id), None)
-                })?
-            } else {
-                // 名前で特定（同名が複数ある場合はエラー）
-                let matches: Vec<_> = settings.worktrees.iter().filter(|w| w.name == worktree_name).collect();
-                match matches.len() {
-                    0 => {
-                        let names: Vec<&str> = settings.worktrees.iter().map(|w| w.name.as_str()).collect();
-                        return Err(McpError::invalid_params(
-                            format!("worktree '{}' not found. available: [{}]", worktree_name, names.join(", ")),
-                            None,
-                        ));
-                    }
-                    1 => matches[0],
-                    _ => {
-                        let ids: Vec<&str> = matches.iter().map(|w| w.id.as_str()).collect();
-                        return Err(McpError::invalid_params(
-                            format!("multiple worktrees named '{}'. specify worktree_id to disambiguate: [{}]", worktree_name, ids.join(", ")),
-                            None,
-                        ));
-                    }
-                }
-            };
+            // worktree_name は上で空チェック済みなので missing_hint には到達しない
+            let wt = resolve_worktree(
+                &settings,
+                worktree_id.as_deref(),
+                Some(worktree_name.as_str()),
+                None,
+                "specify one of worktree_name / worktree_id",
+            )?;
 
             // ホーム / リポジトリは git ワークツリーではなく、path がワークツリー追加先ディレクトリ
             // またはリポジトリのルートそのもの。削除すると親ごと壊すため、要求は必ず拒否する。
@@ -1557,30 +1581,14 @@ impl NotifyService {
         let settings_manager = self.app_handle.state::<SettingsManager>();
         let settings = settings_manager.get();
 
-        let wt = if let Some(id) = worktree_id.as_deref() {
-            settings.worktrees.iter().find(|w| w.id == id).ok_or_else(|| {
-                McpError::invalid_params(format!("worktree id '{}' not found", id), None)
-            })?
-        } else {
-            let matches: Vec<_> = settings.worktrees.iter().filter(|w| w.name == worktree_name).collect();
-            match matches.len() {
-                0 => {
-                    let names: Vec<&str> = settings.worktrees.iter().map(|w| w.name.as_str()).collect();
-                    return Err(McpError::invalid_params(
-                        format!("worktree '{}' not found. available: [{}]", worktree_name, names.join(", ")),
-                        None,
-                    ));
-                }
-                1 => matches[0],
-                _ => {
-                    let ids: Vec<&str> = matches.iter().map(|w| w.id.as_str()).collect();
-                    return Err(McpError::invalid_params(
-                        format!("multiple worktrees named '{}'. specify worktree_id to disambiguate: [{}]", worktree_name, ids.join(", ")),
-                        None,
-                    ));
-                }
-            }
-        };
+        // worktree_name は上で空チェック済みなので missing_hint には到達しない
+        let wt = resolve_worktree(
+            &settings,
+            worktree_id.as_deref(),
+            Some(worktree_name.as_str()),
+            None,
+            "specify one of worktree_name / worktree_id",
+        )?;
 
         // detached（サブウィンドウ化済み）ワークツリーへの spawn はフロント側で
         // handleDetachedMcpSpawn 経由でサブウィンドウへ pendingCommand 付きでルーティングされる。
@@ -1601,6 +1609,202 @@ impl NotifyService {
         )]))
     }
 
+    #[tool(description = "指定ワークツリーを oretachi UI 上でフォーカスする。メインウィンドウにあればタブを切り替え（所属ワークグループが非アクティブなら併せて切り替え）、サブウィンドウへ分離済みならそのウィンドウを前面に出す。ユーザーに特定ワークツリーの様子を見せたいときに使う", annotations(read_only_hint = true))]
+    fn oretachi_show_worktree(
+        &self,
+        Parameters(ShowWorktreeParams { worktree_name, worktree_id }): Parameters<ShowWorktreeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+
+        let wt = resolve_worktree(
+            &settings,
+            worktree_id.as_deref(),
+            worktree_name.as_deref(),
+            None,
+            "specify one of worktree_name / worktree_id",
+        )?;
+
+        // detached かどうかの判定はフロント側に任せる。ここで分岐すると
+        // サブウィンドウの生成/破棄との競合で古い情報を見ることになる。
+        let event = ShowWorktreeEvent { worktree_id: wt.id.clone() };
+        self.app_handle
+            .emit("mcp-show-worktree", &event)
+            .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
+        log::info!("[mcp] oretachi_show_worktree: name={} id={}", wt.name, wt.id);
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "ワークツリー '{}' を表示しました。",
+            wt.name
+        ))]))
+    }
+
+    #[tool(description = "git リポジトリには存在するが oretachi に未登録のワークツリーを取り込む。path 省略または dry_run=true で候補を列挙し、path を指定するとその1件を登録する。ワークツリーの追加先ディレクトリの外にあるものも検出できる")]
+    async fn oretachi_import_worktree(
+        &self,
+        Parameters(ImportWorktreeParams { path, repository_name, dry_run }): Parameters<ImportWorktreeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // await をまたいで State / settings の参照を保持しないよう、必要な値をここで所有権付きに確定させる
+        let (repos, registered): (Vec<(String, String, String)>, std::collections::HashSet<String>) = {
+            let settings_manager = self.app_handle.state::<SettingsManager>();
+            let settings = settings_manager.get();
+
+            let wanted = repository_name.as_deref().map(str::trim).filter(|s| !s.is_empty());
+            let repos: Vec<(String, String, String)> = settings
+                .repositories
+                .iter()
+                .filter(|r| wanted.map_or(true, |n| r.name == n))
+                .map(|r| (r.id.clone(), r.name.clone(), r.path.clone()))
+                .collect();
+            if repos.is_empty() {
+                let names: Vec<&str> = settings.repositories.iter().map(|r| r.name.as_str()).collect();
+                return Err(McpError::invalid_params(
+                    match wanted {
+                        Some(n) => format!("repository '{}' not found. available: [{}]", n, names.join(", ")),
+                        None => "no repository is registered in oretachi".to_string(),
+                    },
+                    None,
+                ));
+            }
+
+            // 登録済み判定にはリポジトリ擬似エントリ・ホームも含める（同一パスの二重登録を防ぐ）
+            let mut registered: std::collections::HashSet<String> = settings
+                .worktrees
+                .iter()
+                .map(|w| normalize_path_for_match(&w.path))
+                .collect();
+            // リポジトリ root 自体は「ワークツリー」として取り込む対象ではない
+            registered.extend(repos.iter().map(|(_, _, p)| normalize_path_for_match(p)));
+            (repos, registered)
+        };
+
+        // git worktree list はブロッキング I/O なのでワーカースレッドへ逃がす
+        let scan_repos = repos.clone();
+        let candidates: Vec<(String, String, crate::git_worktree::GitWorktreeInfo)> =
+            tokio::task::spawn_blocking(move || {
+                let mut out = Vec::new();
+                for (repo_id, repo_name, repo_path) in &scan_repos {
+                    match crate::git_worktree::list_worktrees(repo_path) {
+                        Ok(list) => {
+                            for info in list {
+                                // bare リポジトリ本体は作業ディレクトリを持たない。
+                                // メインワークツリーは git worktree remove できず、誤登録して削除すると
+                                // リポジトリ本体を巻き込む（リポジトリをサブディレクトリで登録していると
+                                // registered による除外をすり抜けるため、フラグで確実に外す）。
+                                // prunable は実体ディレクトリが既に無く、登録しても壊れたカードになるだけ。
+                                if info.bare || info.is_main || info.prunable {
+                                    continue;
+                                }
+                                if registered.contains(&normalize_path_for_match(&info.path)) {
+                                    continue;
+                                }
+                                out.push((repo_id.clone(), repo_name.clone(), info));
+                            }
+                        }
+                        // 1 リポジトリの失敗で全体を落とさない（移動済み・削除済みのリポジトリがありうる）
+                        Err(e) => log::warn!(
+                            "[mcp] oretachi_import_worktree: git worktree list failed for {}: {}",
+                            repo_path, e
+                        ),
+                    }
+                }
+                out
+            })
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+
+        let target_path = path.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+        // path 未指定 or dry_run なら候補の列挙だけ
+        if target_path.is_none() || dry_run.unwrap_or(false) {
+            let json: Vec<serde_json::Value> = candidates
+                .iter()
+                .map(|(_, repo_name, info)| {
+                    serde_json::json!({
+                        "path": info.path,
+                        "name": worktree_name_from_path(&info.path),
+                        "branch": info.branch,
+                        "detached": info.detached,
+                        "repositoryName": repo_name,
+                    })
+                })
+                .collect();
+            log::info!("[mcp] oretachi_import_worktree: {} candidate(s)", json.len());
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&json)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+            )]));
+        }
+
+        let wanted_path = normalize_path_for_match(target_path.expect("checked above"));
+        let Some((repo_id, repo_name, info)) = candidates
+            .into_iter()
+            .find(|(_, _, i)| normalize_path_for_match(&i.path) == wanted_path)
+        else {
+            return Err(McpError::invalid_params(
+                format!(
+                    "'{}' is not an unregistered worktree of any registered repository. call this tool without path to list candidates",
+                    target_path.unwrap_or_default()
+                ),
+                None,
+            ));
+        };
+
+        // フロント側の登録結果を受け取るための oneshot を先に登録してから emit する
+        let request_id = format!(
+            "import-{}",
+            IMPORT_WORKTREE_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+        );
+        let rx = {
+            let registry = self.app_handle.state::<ImportWorktreeAckRegistry>();
+            registry.register(request_id.clone())
+        };
+
+        let name = worktree_name_from_path(&info.path);
+        let event = ImportWorktreeEvent {
+            request_id: request_id.clone(),
+            repository_id: repo_id,
+            repository_name: repo_name,
+            path: info.path.clone(),
+            name: name.clone(),
+            // detached HEAD のワークツリーはブランチ名を持たない。空文字で登録する
+            branch_name: info.branch.clone().unwrap_or_default(),
+        };
+        if let Err(e) = self.app_handle.emit("mcp-import-worktree", &event) {
+            self.app_handle.state::<ImportWorktreeAckRegistry>().take(&request_id);
+            return Err(McpError::internal_error(e.to_string(), None));
+        }
+        log::info!("[mcp] oretachi_import_worktree: path={} request_id={}", info.path, request_id);
+
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(IMPORT_WORKTREE_ACK_TIMEOUT_SECS),
+            rx,
+        )
+        .await
+        {
+            Ok(Ok(ImportWorktreeOutcome::Imported(id))) => Ok(CallToolResult::success(vec![Content::text(
+                format!("ワークツリー '{}' ({}) を登録しました。id={}", name, info.path, id),
+            )])),
+            Ok(Ok(ImportWorktreeOutcome::AlreadyRegistered)) => Ok(CallToolResult::success(vec![Content::text(
+                format!("'{}' は既に登録済みでした。", info.path),
+            )])),
+            Ok(Ok(ImportWorktreeOutcome::Failed(e))) => {
+                Err(McpError::internal_error(format!("取り込みに失敗しました: {}", e), None))
+            }
+            // 送信側が drop された（ウィンドウが閉じた等）/ タイムアウト
+            Ok(Err(_)) | Err(_) => {
+                self.app_handle.state::<ImportWorktreeAckRegistry>().take(&request_id);
+                Err(McpError::internal_error(
+                    format!(
+                        "'{}' の取り込み結果を {} 秒以内に受け取れませんでした。oretachi_get_worktree_status で登録状況を確認してください。",
+                        info.path, IMPORT_WORKTREE_ACK_TIMEOUT_SECS
+                    ),
+                    None,
+                ))
+            }
+        }
+    }
+
     #[tool(description = "現在の PTY セッション一覧を返す。session_id, cwd, isAiAgent, ワークツリー名/ID を含む。oretachi_kill_terminal を呼ぶ前の確認に使う", annotations(read_only_hint = true))]
     fn oretachi_list_terminals(
         &self,
@@ -1612,30 +1816,21 @@ impl NotifyService {
         let settings_manager = self.app_handle.state::<SettingsManager>();
         let settings = settings_manager.get();
 
-        let filter_id: Option<String> = if let Some(id) = worktree_id.as_deref() {
-            if !settings.worktrees.iter().any(|w| w.id == id) {
-                return Err(McpError::invalid_params(format!("worktree id '{}' not found", id), None));
-            }
-            Some(id.to_string())
-        } else if let Some(name) = worktree_name.as_deref() {
-            let matches: Vec<_> = settings.worktrees.iter().filter(|w| w.name == name).collect();
-            match matches.len() {
-                0 => {
-                    let names: Vec<&str> = settings.worktrees.iter().map(|w| w.name.as_str()).collect();
-                    return Err(McpError::invalid_params(
-                        format!("worktree '{}' not found. available: [{}]", name, names.join(", ")),
-                        None,
-                    ));
-                }
-                1 => Some(matches[0].id.clone()),
-                _ => {
-                    let ids: Vec<&str> = matches.iter().map(|w| w.id.as_str()).collect();
-                    return Err(McpError::invalid_params(
-                        format!("multiple worktrees named '{}'. specify worktree_id to disambiguate: [{}]", name, ids.join(", ")),
-                        None,
-                    ));
-                }
-            }
+        // どちらも未指定なら絞り込みなし（全 PTY を返す）
+        let has_filter = worktree_id.as_deref().map_or(false, |s| !s.trim().is_empty())
+            || worktree_name.as_deref().map_or(false, |s| !s.trim().is_empty());
+        let filter_id: Option<String> = if has_filter {
+            Some(
+                resolve_worktree(
+                    &settings,
+                    worktree_id.as_deref(),
+                    worktree_name.as_deref(),
+                    None,
+                    "specify one of worktree_name / worktree_id",
+                )?
+                .id
+                .clone(),
+            )
         } else {
             None
         };
@@ -1817,6 +2012,86 @@ fn resolve_worktree_by_dir<'a>(settings: &'a AppSettings, dir: &str) -> Option<&
         .find(|w| normalize_path_for_match(&w.path) == target)
 }
 
+/// ワークツリーのパスから表示名（末尾ディレクトリ名）を取り出す。
+/// フロントのリポジトリ名導出（`path.split(/[/\\]/).pop()`）と同じ規則。
+fn worktree_name_from_path(path: &str) -> String {
+    path.trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or(path)
+        .to_string()
+}
+
+/// 登録済みワークツリー名を列挙する（エラーメッセージ用）。
+fn available_worktree_names(settings: &AppSettings) -> String {
+    settings
+        .worktrees
+        .iter()
+        .map(|w| w.name.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// worktree_id / worktree_name / project_dir のいずれかからワークツリーを1件に確定する。
+/// 優先順位は id > name > project_dir。同名が複数ある場合は ID を列挙したエラーを返し、
+/// 呼び出し元（AI agent）に worktree_id での指定をやり直させる。
+/// `missing_hint` はどれも指定されなかったときのエラー文（ツールごとに受け付ける引数が違うため呼び出し側が渡す）。
+fn resolve_worktree<'a>(
+    settings: &'a AppSettings,
+    worktree_id: Option<&str>,
+    worktree_name: Option<&str>,
+    project_dir: Option<&str>,
+    missing_hint: &str,
+) -> Result<&'a WorktreeEntry, McpError> {
+    if let Some(id) = worktree_id.map(str::trim).filter(|s| !s.is_empty()) {
+        return settings.worktrees.iter().find(|w| w.id == id).ok_or_else(|| {
+            McpError::invalid_params(format!("worktree id '{}' not found", id), None)
+        });
+    }
+
+    if let Some(name) = worktree_name.map(str::trim).filter(|s| !s.is_empty()) {
+        let matches: Vec<_> = settings.worktrees.iter().filter(|w| w.name == name).collect();
+        return match matches.len() {
+            0 => Err(McpError::invalid_params(
+                format!(
+                    "worktree '{}' not found. available: [{}]",
+                    name,
+                    available_worktree_names(settings)
+                ),
+                None,
+            )),
+            1 => Ok(matches[0]),
+            _ => {
+                let ids: Vec<&str> = matches.iter().map(|w| w.id.as_str()).collect();
+                Err(McpError::invalid_params(
+                    format!(
+                        "multiple worktrees named '{}'. specify worktree_id to disambiguate: [{}]",
+                        name,
+                        ids.join(", ")
+                    ),
+                    None,
+                ))
+            }
+        };
+    }
+
+    if let Some(dir) = project_dir.map(str::trim).filter(|s| !s.is_empty()) {
+        return resolve_worktree_by_dir(settings, dir).ok_or_else(|| {
+            McpError::invalid_params(
+                format!(
+                    "no worktree matches project_dir '{}'. available: [{}]",
+                    dir,
+                    available_worktree_names(settings)
+                ),
+                None,
+            )
+        });
+    }
+
+    Err(McpError::invalid_params(missing_hint.to_string(), None))
+}
+
 /// artifact 系ツール（artifact / artifact_module / search_artifact）の保存先ワークツリーを解決する。
 /// 優先順位: worktree_id > project_dir 逆引き > repository + branch。
 /// HOME / リポジトリ擬似ワークツリーは repository_name / branch_name が空なので
@@ -1828,15 +2103,6 @@ fn resolve_artifact_worktree<'a>(
     repository: Option<&str>,
     branch: Option<&str>,
 ) -> Result<&'a WorktreeEntry, McpError> {
-    let available = || -> String {
-        settings
-            .worktrees
-            .iter()
-            .map(|w| w.name.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
-    };
-
     if let Some(id) = worktree_id.map(str::trim).filter(|s| !s.is_empty()) {
         return settings.worktrees.iter().find(|w| w.id == id).ok_or_else(|| {
             McpError::invalid_params(format!("worktree id '{}' が存在しません", id), None)
@@ -1849,7 +2115,7 @@ fn resolve_artifact_worktree<'a>(
                 format!(
                     "project_dir '{}' に一致するワークツリーが存在しません。available: [{}]",
                     dir,
-                    available()
+                    available_worktree_names(settings)
                 ),
                 None,
             )
@@ -1875,7 +2141,7 @@ fn resolve_artifact_worktree<'a>(
         (None, None) => Err(McpError::invalid_params(
             format!(
                 "project_dir / worktree_id / repository+branch のいずれかを指定してください。available: [{}]",
-                available()
+                available_worktree_names(settings)
             ),
             None,
         )),
@@ -1894,6 +2160,25 @@ fn resolve_workgroup<'a>(settings: &'a AppSettings, worktree: &WorktreeEntry) ->
         .as_ref()
         .and_then(|id| settings.workgroups.iter().find(|g| &g.id == id))
         .or_else(|| settings.workgroups.first())
+}
+
+/// ワークグループの表示名。UI と同じ規則で、name 未設定なら並び順から自動生成する
+/// （フロントの useWorkgroups.displayName / i18n `workgroup.autoName` と一致させる）。
+/// 生の name をそのまま返すと、リネームしていない既定グループが全部 null になり
+/// レポート側で「グループが出てこない」状態になるため、ここで解決しておく。
+fn workgroup_display_name(settings: &AppSettings, group: &Workgroup) -> String {
+    if let Some(name) = group.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        return name.to_string();
+    }
+    let n = settings
+        .workgroups
+        .iter()
+        .position(|g| g.id == group.id)
+        .map_or(1, |i| i + 1);
+    match settings.locale.as_deref() {
+        Some("en") => format!("Group ({})", n),
+        _ => format!("グループ({})", n),
+    }
 }
 
 /// リポジトリに通知フックが1件以上設定されているか。
@@ -2748,6 +3033,29 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
 mod tests {
     use super::*;
 
+    /// name 未設定のグループは UI 側 (useWorkgroups.displayName / i18n workgroup.autoName) が
+    /// 並び順から「グループ(N)」を自動生成して表示する。MCP が生の name をそのまま返すと
+    /// リネームしていない既定グループが null になり、レポートにグループが出せなくなる。
+    #[test]
+    fn workgroup_display_name_matches_ui_fallback() {
+        let mut settings = AppSettings::default();
+        settings.workgroups = vec![
+            Workgroup { id: "wg-1".into(), name: None, ..Default::default() },
+            Workgroup { id: "wg-2".into(), name: Some("  ".into()), ..Default::default() },
+            Workgroup { id: "wg-3".into(), name: Some("リリース準備".into()), ..Default::default() },
+        ];
+
+        // 既定ロケール (ja) は 1 始まりの並び順で自動生成
+        assert_eq!(workgroup_display_name(&settings, &settings.workgroups[0]), "グループ(1)");
+        // 空白のみの name も未設定扱い（UI の trim と揃える）
+        assert_eq!(workgroup_display_name(&settings, &settings.workgroups[1]), "グループ(2)");
+        // 明示的な name はそのまま
+        assert_eq!(workgroup_display_name(&settings, &settings.workgroups[2]), "リリース準備");
+
+        settings.locale = Some("en".into());
+        assert_eq!(workgroup_display_name(&settings, &settings.workgroups[0]), "Group (1)");
+    }
+
     /// Claude Code は plan モードで `readOnlyHint` が立っていない MCP ツールを
     /// permissions.allow に関わらず一律 ask にする。ここで advertise 内容を固定しておく。
     #[test]
@@ -2762,6 +3070,7 @@ mod tests {
             "oretachi_list_repository",
             "oretachi_list_terminals",
             "oretachi_read_terminal",
+            "oretachi_show_worktree",
         ];
         const NOT_READ_ONLY: &[&str] = &[
             "notify_worktree",
@@ -2771,6 +3080,7 @@ mod tests {
             "oretachi_spawn_terminal",
             "oretachi_kill_terminal",
             "oretachi_write_terminal",
+            "oretachi_import_worktree",
         ];
 
         let tools = NotifyService::tool_router().list_all();

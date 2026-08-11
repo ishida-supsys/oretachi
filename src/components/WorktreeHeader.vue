@@ -56,7 +56,7 @@ async function closeWindow() {
 
 <template>
   <div
-    class="flex items-center justify-between border-b shrink-0 pr-[2px] py-1 transition-colors duration-200"
+    class="flex items-center justify-between border-b shrink-0 pr-2 py-1 transition-colors duration-200"
     :class="[
       props.isWindowFocused ? 'border-[#cba6f7]/50' : 'opacity-80 border-[#313244]',
       isMac && props.showWindowControls ? '' : 'pl-4'
@@ -140,55 +140,81 @@ async function closeWindow() {
         </button>
       </ArtifactUrlHoverMenu>
     </div>
-    <div class="flex items-center">
+    <!-- 右端のボタン列。5つとも hdr-btn で同一寸法・同一アイコンサイズに揃える
+         （個別に w-*/h-*/font-size を書くと必ずどれかがずれるため、寸法はここに集約する） -->
+    <div class="flex items-center gap-1">
       <button
-        class="flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors mr-1"
+        class="hdr-btn bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4]"
         :title="t('openInIde')"
         @click="$emit('open-in-ide')"
       >
-        <span class="pi pi-code text-sm" />
+        <span class="pi pi-code" />
       </button>
-      <ArtifactUrlHoverMenu
-        :urls="props.artifactUrls ?? []"
-        :class="props.showWindowControls && !isMac ? 'mr-4' : ''"
-      >
+      <!-- ウィンドウ操作との間隔は下の spacer が持つので、ここでは mr-* を付けない -->
+      <ArtifactUrlHoverMenu :urls="props.artifactUrls ?? []">
         <button
-          class="flex items-center justify-center w-7 h-7 rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
+          class="hdr-btn bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4]"
           :title="t('openArtifacts')"
           @click="$emit('open-artifacts')"
         >
-          <ArtifactIcon :has-url="(props.artifactUrls?.length ?? 0) > 0" class="text-sm" />
+          <ArtifactIcon :has-url="(props.artifactUrls?.length ?? 0) > 0" />
         </button>
       </ArtifactUrlHoverMenu>
       <template v-if="props.showWindowControls && !isMac">
+        <!-- アプリ機能ボタンとウィンドウ操作の区切り（誤クリック防止の間隔） -->
+        <span class="w-2 shrink-0" aria-hidden="true" />
         <button
-          class="flex items-center justify-center h-8 hover:bg-[#313244] text-[#6c7086] hover:text-[#cdd6f4] transition-colors"
-          style="width: 42px; margin: 0 1px;"
+          class="hdr-btn hover:bg-[#313244] text-[#6c7086] hover:text-[#cdd6f4]"
           :title="t('minimize')"
           @click="minimize"
         >
-          <span class="pi pi-minus text-xs" />
+          <span class="pi pi-minus" />
         </button>
         <button
-          class="flex items-center justify-center h-8 hover:bg-[#313244] text-[#6c7086] hover:text-[#cdd6f4] transition-colors"
-          style="width: 42px; margin: 0 1px;"
+          class="hdr-btn hover:bg-[#313244] text-[#6c7086] hover:text-[#cdd6f4]"
           :title="t('maximize')"
           @click="toggleMaximize"
         >
-          <span class="pi pi-stop text-xs" />
+          <span class="pi pi-stop" />
         </button>
         <button
-          class="flex items-center justify-center h-8 hover:bg-[#c0392b] hover:text-white text-[#6c7086] transition-colors"
-          style="width: 42px; margin: 0 1px;"
+          class="hdr-btn hover:bg-[#c0392b] hover:text-white text-[#6c7086]"
           :title="t('close')"
           @click="closeWindow"
         >
-          <span class="pi pi-times text-xs" />
+          <span class="pi pi-times" />
         </button>
       </template>
     </div>
   </div>
 </template>
+
+<style scoped>
+/**
+ * ヘッダ右端のボタン共通スタイル。
+ * 寸法は rem 基準に統一する。webview の setZoom は px/rem を同率で拡大するのでズームでは崩れないが、
+ * 単位を混ぜると（w-7 = rem と inline の px）差分を見落としやすいため rem に寄せている。
+ */
+.hdr-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 0.25rem;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+/* アイコンの実寸も揃える。pi の既定 font-size (1rem) と line-height を上書きして中央に置く。
+   ArtifactIcon はルートが .pi ではなく .artifact-icon で、中の実アイコンが font-size: 1em で
+   呼び出し元に追従する作りなので、こちらにも同じサイズを渡す。 */
+.hdr-btn .pi,
+.hdr-btn .artifact-icon {
+  font-size: 0.875rem;
+  line-height: 1;
+}
+</style>
 
 <i18n lang="json">
 {

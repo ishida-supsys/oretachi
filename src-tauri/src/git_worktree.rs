@@ -86,6 +86,20 @@ pub fn validate_repo(path: &str) -> Result<bool, String> {
     Ok(output.status.success())
 }
 
+/// 与えられたパスを含む git リポジトリのルート（メインワークツリー）を返す。
+/// validate_repo は `--is-inside-work-tree` なのでサブディレクトリでも成功する。
+/// リポジトリ登録時にここを通してルートへ正規化しないと、`git worktree list` が返す
+/// メインワークツリーと登録パスが食い違い、メインワークツリーが「未登録のワークツリー」
+/// として取り込み候補に現れてしまう。
+pub fn repo_root(path: &str) -> Result<String, String> {
+    let stdout = run_git_in(path, &["rev-parse", "--show-toplevel"])?;
+    let root = stdout.trim();
+    if root.is_empty() {
+        return Err("git rev-parse --show-toplevel returned empty".to_string());
+    }
+    Ok(root.to_string())
+}
+
 /// リモート名を抽出する: "<remote>/<branch>" 形式の場合にリモート名を返す
 fn extract_remote_name(repo_path: &str, branch: &str) -> Option<String> {
     if !branch.contains('/') {
@@ -200,6 +214,76 @@ pub fn list_branches(repo_path: &str) -> Result<Vec<String>, String> {
         .filter(|l| !l.is_empty())
         .collect();
     Ok(branches)
+}
+
+/// `git worktree list --porcelain` の 1 エントリ。
+#[derive(Debug, Clone, Serialize)]
+pub struct GitWorktreeInfo {
+    pub path: String,
+    /// `refs/heads/` を剥がしたブランチ名。detached HEAD や bare では None
+    pub branch: Option<String>,
+    pub head: Option<String>,
+    /// メインの bare リポジトリ本体（ワークツリーとして取り込む対象ではない）
+    pub bare: bool,
+    pub detached: bool,
+    /// メインワークツリー（git は必ず先頭に出力する）。
+    /// `git worktree remove` できない特別な存在なので、取り込み対象から必ず外すこと。
+    pub is_main: bool,
+    /// 実体ディレクトリが消えている等で `git worktree prune` の対象になっている。
+    /// 取り込んでも存在しないパスが登録されるだけなので候補から外すこと。
+    pub prunable: bool,
+    pub locked: bool,
+}
+
+/// リポジトリに紐づく git ワークツリーを全件返す（メインワークツリー自身を含む）。
+/// パスは git が返す絶対パスそのままなので、oretachi の追加先ディレクトリ外にあるものも拾える。
+pub fn list_worktrees(repo_path: &str) -> Result<Vec<GitWorktreeInfo>, String> {
+    let stdout = run_git_in(repo_path, &["worktree", "list", "--porcelain"])?;
+    Ok(parse_worktree_list(&stdout))
+}
+
+/// `git worktree list --porcelain` の出力をパースする。
+fn parse_worktree_list(stdout: &str) -> Vec<GitWorktreeInfo> {
+    let mut result: Vec<GitWorktreeInfo> = Vec::new();
+
+    // porcelain は 1 エントリが空行区切り。`worktree <path>` が必ずエントリの先頭に来る。
+    for line in stdout.lines() {
+        let line = line.trim_end();
+        if let Some(path) = line.strip_prefix("worktree ") {
+            result.push(GitWorktreeInfo {
+                path: path.to_string(),
+                branch: None,
+                head: None,
+                bare: false,
+                detached: false,
+                // git は必ずメインワークツリーを先頭に出力する
+                is_main: result.is_empty(),
+                prunable: false,
+                locked: false,
+            });
+            continue;
+        }
+        let Some(current) = result.last_mut() else {
+            continue;
+        };
+        if let Some(head) = line.strip_prefix("HEAD ") {
+            current.head = Some(head.to_string());
+        } else if let Some(branch) = line.strip_prefix("branch ") {
+            current.branch = Some(branch.strip_prefix("refs/heads/").unwrap_or(branch).to_string());
+        } else if line == "bare" {
+            current.bare = true;
+        } else if line == "detached" {
+            current.detached = true;
+        } else if line == "prunable" || line.starts_with("prunable ") {
+            // 理由付き (`prunable gitdir file points to non-existent location`) と
+            // 理由なしの両方がありうる
+            current.prunable = true;
+        } else if line == "locked" || line.starts_with("locked ") {
+            current.locked = true;
+        }
+    }
+
+    result
 }
 
 fn find_branch_worktree(repo_path: &str, branch_name: &str) -> Result<Option<String>, String> {
@@ -1333,6 +1417,15 @@ pub fn worktree_restore(repo_path: &str, worktree_path: &str, branch_name: &str)
     Ok(())
 }
 
+/// `git worktree remove` がメインワークツリーを理由に失敗したか。
+/// この場合にディレクトリ直接削除へフォールバックすると .git ごとリポジトリ本体を消してしまう。
+///
+/// 「実体ディレクトリが既に無い」系のエラー (`is not a working tree`) はここに含めない。
+/// あちらはフォールバック側の prune 処理で掃除するのが正しい挙動のため。
+fn is_main_worktree_error(stderr: &str) -> bool {
+    stderr.to_lowercase().contains("is a main working tree")
+}
+
 fn is_lock_error(stderr: &str) -> bool {
     // Windows でプロセス終了直後にファイルハンドルが残留している場合に git や OS が返すエラー文言
     let lower = stderr.to_lowercase();
@@ -1367,6 +1460,15 @@ pub fn worktree_remove(repo_path: &str, worktree_path: &str) -> Result<(), Strin
         }
 
         let stderr = String::from_utf8_lossy(&output.stderr);
+
+        // メインワークツリーはディレクトリ直接削除へフォールバックしてはいけない。
+        // ここで remove_dir_all に落ちると .git ごとリポジトリ本体が消える。
+        if is_main_worktree_error(&stderr) {
+            return Err(format!(
+                "git worktree remove failed (メインワークツリーのため中止しました): {}",
+                stderr.trim()
+            ));
+        }
 
         // ロック起因のエラーで試行回数が残っている場合はリトライ
         if attempt < MAX_ATTEMPTS - 1 && is_lock_error(&stderr) {
@@ -1575,4 +1677,103 @@ pub fn copy_claude_session_data(
         .map_err(|e| format!("failed to rename tmp dir to target: {}", e))?;
 
     Ok(count)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_worktree_list_handles_main_branch_detached_and_bare() {
+        // git worktree list --porcelain の実出力形式（エントリは空行区切り）
+        let stdout = "\
+worktree C:/repo
+HEAD abc123
+branch refs/heads/main
+
+worktree X:/devel/worktree/feature-a
+HEAD def456
+branch refs/heads/feature/a
+
+worktree D:/elsewhere/detached-wt
+HEAD 789abc
+detached
+
+worktree C:/bare-repo
+bare
+";
+        let list = parse_worktree_list(stdout);
+        assert_eq!(list.len(), 4);
+
+        assert_eq!(list[0].path, "C:/repo");
+        assert_eq!(list[0].branch.as_deref(), Some("main"));
+        assert_eq!(list[0].head.as_deref(), Some("abc123"));
+        assert!(!list[0].bare && !list[0].detached);
+        // 先頭がメインワークツリー。取り込み候補から外す判定に使う
+        assert!(list[0].is_main);
+        assert!(!list[1].is_main && !list[2].is_main && !list[3].is_main);
+
+        // refs/heads/ を剥がしつつ、スラッシュを含むブランチ名を壊さない
+        assert_eq!(list[1].branch.as_deref(), Some("feature/a"));
+        // 追加先ディレクトリ外（別ドライブ）のパスもそのまま拾える
+        assert_eq!(list[2].path, "D:/elsewhere/detached-wt");
+        assert!(list[2].detached);
+        assert_eq!(list[2].branch, None);
+
+        assert!(list[3].bare);
+    }
+
+    #[test]
+    fn parse_worktree_list_flags_prunable_and_locked() {
+        // 実体ディレクトリを消したワークツリーには理由付きの prunable 行が出る。
+        // locked も porcelain に出力される（理由の有無は状況次第）。
+        let stdout = "\
+worktree C:/repo
+HEAD abc123
+branch refs/heads/main
+
+worktree C:/gone-wt
+HEAD def456
+branch refs/heads/gone
+prunable gitdir file points to non-existent location
+
+worktree C:/locked-wt
+HEAD 789abc
+branch refs/heads/locked
+locked because it is on a removable device
+
+worktree C:/plain-locked
+HEAD 111222
+detached
+locked
+";
+        let list = parse_worktree_list(stdout);
+        assert_eq!(list.len(), 4);
+        assert!(!list[0].prunable && !list[0].locked);
+        assert!(list[1].prunable, "理由付き prunable を拾えていない");
+        assert!(list[2].locked, "理由付き locked を拾えていない");
+        assert!(list[3].locked, "理由なし locked を拾えていない");
+        // locked は実体が存在するので取り込み対象から外さない
+        assert!(!list[2].prunable && !list[3].prunable);
+    }
+
+    #[test]
+    fn is_main_worktree_error_only_matches_main_worktree() {
+        // メインワークツリーはディレクトリ直接削除へフォールバックさせてはいけない
+        assert!(is_main_worktree_error(
+            "fatal: 'C:/repo' is a main working tree\n"
+        ));
+        // 実体が既に無いケースはフォールバック側の prune 処理に任せる（誤って止めない）
+        assert!(!is_main_worktree_error(
+            "fatal: 'C:/gone' is not a working tree\n"
+        ));
+        assert!(!is_main_worktree_error("error: Permission denied\n"));
+    }
+
+    #[test]
+    fn parse_worktree_list_returns_empty_for_blank_output() {
+        assert!(parse_worktree_list("").is_empty());
+        // worktree 行より前の孤立した属性行はどのエントリにも属さず無視される
+        assert!(parse_worktree_list("HEAD abc\nbare\n").is_empty());
+    }
 }
