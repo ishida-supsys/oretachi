@@ -491,11 +491,12 @@ impl PtyManagerCore {
                 // exited セッション（EXITED_SESSION_TTL の間 map に残る死体）は子プロセスが
                 // 既に居ないため検出結果が必ず「エージェント無し」になる。TTL 中は exit code /
                 // 最終ログを参照できるという既存方針に合わせ、エージェント情報も最終値を凍結する。
+                let mut exited_ids: std::collections::HashSet<u32> = std::collections::HashSet::new();
                 if let Ok(mut sessions) = sessions_arc.lock() {
                     for (id, is_agent, info) in &new_infos {
                         if let Some(session) = sessions.get_mut(id) {
-                            let exited = session.exited_at.lock().ok().and_then(|g| *g).is_some();
-                            if exited {
+                            if session.exited_at.lock().ok().and_then(|g| *g).is_some() {
+                                exited_ids.insert(*id);
                                 continue;
                             }
                             session.is_ai_agent = *is_agent;
@@ -505,10 +506,16 @@ impl PtyManagerCore {
                     }
                 }
 
-                // 前回との差分を検出（is_agent または session_id が変わった場合）
+                // 前回との差分を検出（is_agent または session_id が変わった場合）。
+                // 凍結した exited セッションは emit からも外し、フロントの表示と
+                // バックエンドが保持する最終値が食い違わないようにする
+                // （タブ自体は pty-exit で既に消えているので通知する相手も居ない）。
                 let changed: HashMap<u32, AiAgentInfo> = new_infos
                     .into_iter()
                     .filter(|(id, _, info)| {
+                        if exited_ids.contains(id) {
+                            return false;
+                        }
                         let prev = last_status.get(id);
                         match prev {
                             None => true,
