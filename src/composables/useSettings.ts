@@ -4,7 +4,13 @@ import { emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { error } from "@tauri-apps/plugin-log";
 import { platform } from "@tauri-apps/plugin-os";
-import type { AppSettings, HotkeyBinding, HotkeySettings, Workgroup } from "../types/settings";
+import type {
+  AppSettings,
+  HotkeyBinding,
+  HotkeySettings,
+  NotificationHookEntry,
+  Workgroup,
+} from "../types/settings";
 import { setLocale } from "../i18n";
 import { setVerboseLogging } from "../utils/log";
 import { isHomeWorktree, makeHomeWorktreeEntry } from "../utils/homeWorktree";
@@ -232,6 +238,24 @@ export async function setupHomeClaudeDir(homePath: string, overwrite = false): P
   } catch (e) {
     console.error("ホームの .claude/ 準備に失敗:", e);
   }
+}
+
+/**
+ * 任意のディレクトリの .claude/settings.local.json に oretachi プラグイン設定を書く。
+ * write_plugin_config は既存 JSON をマージする冪等実装なので、何度呼んでも安全。
+ * ワークツリー追加時だけでなく、リポジトリ登録時や「再適用」操作からも使う。
+ * 失敗は呼び出し側に投げる（明示操作ではエラーを見せたいため）。
+ */
+export async function applyPluginConfig(
+  path: string,
+  name: string,
+  hooks: NotificationHookEntry[] = [],
+): Promise<void> {
+  await invoke("write_claude_plugin_config", {
+    worktreePath: path,
+    worktreeName: name,
+    hooks,
+  });
 }
 
 const settings = ref<AppSettings>({

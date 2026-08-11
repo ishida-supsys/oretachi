@@ -201,6 +201,12 @@ async fn git_validate_repo(path: String) -> Result<bool, String> {
     run_git(move || git_worktree::validate_repo(&path)).await
 }
 
+/// リポジトリ登録用に、選択されたパスをリポジトリのルートへ正規化する。
+#[tauri::command]
+async fn git_repo_root(path: String) -> Result<String, String> {
+    run_git(move || git_worktree::repo_root(&path)).await
+}
+
 #[tauri::command]
 async fn git_pull(repo_path: String) -> Result<(), String> {
     run_git(move || git_worktree::git_pull(&repo_path)).await
@@ -1317,6 +1323,7 @@ pub fn run() {
         .manage(mcp_server::McpPeerRegistry(std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()))))
         .manage(mcp_server::DetachedWorktreeRegistry::default())
         .manage(mcp_server::CloseWorktreeAckRegistry::default())
+        .manage(mcp_server::ImportWorktreeAckRegistry::default())
         .manage(ai_judge::ApprovalManager::new())
         .manage(ai_commit_message::CommitMessageManager::new())
         .manage(ai_description::DescriptionManager::new())
@@ -1334,6 +1341,7 @@ pub fn run() {
             get_settings,
             save_settings,
             git_validate_repo,
+            git_repo_root,
             git_pull,
             git_worktree_add,
             git_worktree_remove,
@@ -1373,6 +1381,7 @@ pub fn run() {
             mcp_server::register_detached_worktree,
             mcp_server::unregister_detached_worktree,
             mcp_server::mcp_close_worktree_result,
+            mcp_server::mcp_import_worktree_result,
             download_and_install_update,
             ai_judge::judge_approval,
             ai_judge::cancel_approval,

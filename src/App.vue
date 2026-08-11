@@ -21,7 +21,7 @@ import FirstRunWizard from "./components/wizard/FirstRunWizard.vue";
 import { message } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
 import { useIdeSelect } from "./composables/useIdeSelect";
-import { useSettings, syncRepositoryWorktrees } from "./composables/useSettings";
+import { useSettings, syncRepositoryWorktrees, applyPluginConfig } from "./composables/useSettings";
 import { useWorktrees } from "./composables/useWorktrees";
 import { useI18n } from "vue-i18n";
 import { useSubWindows, requestSubWindowLayout } from "./composables/useSubWindows";
@@ -64,7 +64,7 @@ import { useUpdater } from "./composables/useUpdater";
 import Toast from "primevue/toast";
 import Popover from "primevue/popover";
 import MacTrafficLights from "./components/MacTrafficLights.vue";
-import { isMac } from "./composables/usePlatform";
+import { isMac, isWindows } from "./composables/usePlatform";
 
 const { t } = useI18n();
 
@@ -422,7 +422,7 @@ const activeTaskExecAgent = computed(() => {
 
 // タスク追加ダイアログ「追加先」のデフォルト:
 // ホームのパネルが worktree 一覧なら現在選択中グループ、それ以外（task/archive）なら先頭グループ
-const { panelMode } = useHomePanel();
+const { panelMode, listMode } = useHomePanel();
 const taskDialogDefaultWorkgroupId = computed(() =>
   panelMode.value === "worktree"
     ? activeWorkgroupId.value
@@ -1481,6 +1481,115 @@ onMounted(async () => {
       }
     },
   );
+
+  // MCP: 指定ワークツリーをフォーカスする
+  await listen<{ worktree_id: string }>("mcp-show-worktree", async (event) => {
+    const { worktree_id } = event.payload;
+    const targetWt = worktrees.value.find((w) => w.id === worktree_id);
+    if (!targetWt) {
+      logDebug(`[Terminal] mcp-show-worktree: worktree ${worktree_id} not found, skipping`);
+      return;
+    }
+    // サブウィンドウへ分離済みならそのウィンドウを前面に出す（メイン側のタブは動かさない）
+    if (isDetached(worktree_id)) {
+      try {
+        await focusSubWindow(worktree_id);
+      } catch (e) {
+        logDebug(`[Terminal] mcp-show-worktree: focusSubWindow failed: ${e}`);
+      }
+      return;
+    }
+    // ホームへ戻ったときにカードが見えるよう、所属グループが非アクティブなら併せて切り替える。
+    // ホーム/リポジトリ擬似ワークツリーは専用パネル側の表示なのでグループ切替の対象外。
+    if (!isPseudoWorktree(targetWt)) {
+      const groupId = resolvedGroupId(targetWt.workgroupId);
+      if (groupId && groupId !== activeWorkgroupId.value) {
+        activeWorkgroupId.value = groupId;
+      }
+      // グループを選んだらリポジトリ一覧ではなくワークツリー一覧を出す
+      // （WorkgroupBar / cycleWorkgroup のグループ切替と同じ扱い）
+      listMode.value = "worktree";
+    }
+    try {
+      await switchToWorktree(worktree_id);
+    } catch (e) {
+      logDebug(`[Terminal] mcp-show-worktree: switchToWorktree failed: ${e}`);
+      return;
+    }
+    // トレイ常駐のためメインウィンドウは hide / minimize されているのが常態。
+    // setFocus だけでは画面に出てこないので show → unminimize から行う。
+    const win = getCurrentWindow();
+    await win.show();
+    await win.unminimize();
+    await win.setFocus();
+  });
+
+  // MCP: git 上に存在するが oretachi 未登録のワークツリーを settings へ取り込む。
+  // git worktree 自体は既にあるので git_worktree_add は呼ばず、エントリ登録だけを行う。
+  await listen<{
+    request_id: string;
+    repository_id: string;
+    repository_name: string;
+    path: string;
+    name: string;
+    branch_name: string;
+  }>("mcp-import-worktree", async (event) => {
+    const { request_id, repository_id, repository_name, path, name, branch_name } = event.payload;
+    const ack = (status: string, worktreeId?: string, error?: string) =>
+      invoke("mcp_import_worktree_result", { requestId: request_id, status, worktreeId, error }).catch(
+        (e) => logDebug(`[Terminal] mcp-import-worktree: ack failed: ${e}`),
+      );
+
+    // Rust 側でも重複チェックしているが、emit と登録のあいだに他経路で追加される余地がある。
+    // 比較規則は Rust の normalize_path_for_match と揃える（Windows のみ小文字化）。
+    const normalize = (p: string) => {
+      const s = p.replace(/\\/g, "/").replace(/\/+$/, "");
+      return isWindows ? s.toLowerCase() : s;
+    };
+    const existing = settings.value.worktrees.find((w) => normalize(w.path) === normalize(path));
+    if (existing) {
+      await ack("already", existing.id);
+      return;
+    }
+
+    let entry: WorktreeEntry;
+    try {
+      entry = {
+        id: `${Date.now()}-${crypto.randomUUID().replace(/-/g, "").slice(0, 6)}`,
+        name,
+        repositoryId: repository_id,
+        repositoryName: repository_name,
+        path,
+        branchName: branch_name,
+        // 取り込み先は現在表示中のワークグループ（手動追加と同じ扱い）
+        ...(activeWorkgroupId.value ? { workgroupId: activeWorkgroupId.value } : {}),
+        // 手動追加 (onAddWorktreeConfirm) と初期状態を揃える
+        ...(settings.value.worktreeDefaults?.autoApproval ? { autoApproval: true } : {}),
+      };
+      commitWorktree(entry);
+    } catch (e) {
+      await ack("failed", undefined, String(e));
+      return;
+    }
+
+    // ここから先の失敗は「登録済みだが後続処理が一部失敗した」状態。
+    // ack を failed にするとエージェントが再取り込みを試みて実態と食い違うため、必ず ok を返す。
+    try {
+      // settings 配列とランタイム配列は二重管理。片方だけ変異させるとカウントと表示が
+      // 再起動まで分裂するため、必ずここで同期する。
+      syncWorktreesFromSettings();
+      if (settings.value.worktreeDefaults?.autoApproval) autoApprovalMap.set(entry.id, true);
+      tryAutoAssignHotkey(entry.id);
+
+      // 通常のワークツリー追加と同じく、プラグイン設定を書いて MCP / 通知を有効化する
+      const repo = settings.value.repositories.find((r) => r.id === repository_id);
+      await applyPluginConfig(entry.path, entry.name, repo?.notificationHooks ?? []);
+    } catch (e) {
+      logDebug(`[Terminal] mcp-import-worktree: post-commit step failed: ${e}`);
+    }
+
+    await ack("ok", entry.id);
+  });
 
   // サブウィンドウ準備完了 → init データをイベントで送信（サブウィンドウ復元より前に登録必須）
   await listen<{ worktreeId: string }>("sub-ready", async (event) => {

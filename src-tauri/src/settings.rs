@@ -64,7 +64,7 @@ pub struct WorktreeEntry {
     pub is_repository: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Workgroup {
     pub id: String,
