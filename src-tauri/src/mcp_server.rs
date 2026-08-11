@@ -2069,6 +2069,11 @@ impl NotifyService {
             ids.len(),
             acked
         );
+        // 未読件数が減ったことを UI に伝える。これが無いと正常系（押し込み → エージェントが
+        // ack）でタブの未読バッジが消えず、人間がホームの購読パネルを開き直すまで残る。
+        if acked > 0 {
+            let _ = self.app_handle.emit("event-inbox-changed", ());
+        }
         Ok(CallToolResult::success(vec![Content::text(format!(
             "{} 件を確認済みにしました（要求 {} 件。差分は既に ack 済みか、別のターミナル宛のメッセージです）。",
             acked,

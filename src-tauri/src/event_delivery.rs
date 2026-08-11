@@ -52,6 +52,11 @@ const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 /// spawn 要求を出してからフロントの応答を待つ上限。過ぎたら単一フライトを解放する。
 const SPAWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// 同じワークツリーへ続けて自動 spawn するまでの最小間隔。
+/// spawn したタブでエージェントが起動しない（`claude` が PATH に無い等）と検出フラグが
+/// 立たないため、これが無いと tick ごとに壊れたタブを上限まで積み増す。
+const SPAWN_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(600);
+
 /// これ以上ターミナルがあるときは自動 spawn しない。
 /// 端末数 15+ で webview ハングと強い相関があるため、自動増殖には手前で天井を設ける。
 const SPAWN_MAX_LIVE_SESSIONS: usize = 12;
@@ -161,6 +166,15 @@ struct WorkerState {
     last_push: HashMap<String, Instant>,
     /// spawn 要求中のワークツリー（単一フライト）。request_id と発行時刻
     inflight_spawn: HashMap<String, (String, Instant)>,
+    /// ワークツリーごとの最終 spawn 時刻。単一フライトは応答で即解除されるので、
+    /// 「spawn したがエージェントが検出されない」（`claude` が PATH に無い等）ときに
+    /// tick ごとに新しいタブを積み増すのを止めるためのクールダウン。
+    last_spawn: HashMap<String, Instant>,
+    /// 自動引き継ぎを済ませたタブ。`resolve_subscriber` は購読系ツールの呼び出しごとに
+    /// 引き継ぎを要求するため、抑止が無いと `oretachi_poll_inbox` を数回叩くだけで
+    /// 1タブが同じワークツリーの死亡タブ全グループを吸い上げ、「新しいタブ1つにつき
+    /// 1グループ」という設計不変条件が崩れる。タブが消えたら忘れる。
+    claimed: std::collections::HashSet<String>,
 }
 
 pub fn start(app: AppHandle, pool: SqlitePool) -> DeliveryHandle {
@@ -198,6 +212,9 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
     match msg {
         DeliveryMsg::Reconcile { live_terminal_ids } => {
             let now = event_db::now_ms();
+            // 消えたタブの「引き継ぎ済み」マークは忘れる（terminal_id は再利用されないので
+            // 放置しても誤動作はしないが、長時間稼働で単調増加する）。
+            state.claimed.retain(|t| live_terminal_ids.contains(t));
             match event_db::mark_orphaned_subscribers(pool, &live_terminal_ids, now).await {
                 Ok((subs, inbox, deleted)) if subs > 0 || inbox > 0 || deleted > 0 => {
                     log::info!(
@@ -222,7 +239,18 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
             }
         }
         DeliveryMsg::Rebind { terminal_id, reply } => {
-            let result = rebind_for_terminal(app, pool, &terminal_id).await;
+            // 自動引き継ぎは1タブにつき1グループまで。`resolve_subscriber` は購読系ツールの
+            // 呼び出しごとに要求してくるので、抑止しないと1タブが全グループを吸い上げる。
+            // 人間が明示的に選ぶ `RebindManual` はこの制限を受けない。
+            let result = if state.claimed.contains(&terminal_id) {
+                (0, 0)
+            } else {
+                let moved = rebind_for_terminal(app, pool, &terminal_id).await;
+                if moved != (0, 0) {
+                    state.claimed.insert(terminal_id.clone());
+                }
+                moved
+            };
             if let Some(reply) = reply {
                 let _ = reply.send(result);
             }
@@ -526,7 +554,8 @@ async fn push_pending(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerStat
                 terminal_id
             );
         }
-        let Some(text) = event_db::format_inbox_push_text(&allowed) else {
+        // 長さ上限で載らなかった分は打刻しない（未配送のまま次回に回す）。
+        let Some((text, used)) = event_db::format_inbox_push_text(&allowed) else {
             continue;
         };
 
@@ -570,7 +599,7 @@ async fn push_pending(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerStat
             );
             continue;
         }
-        let ids: Vec<String> = allowed.iter().map(|i| i.id.clone()).collect();
+        let ids: Vec<String> = allowed.iter().take(used).map(|i| i.id.clone()).collect();
         if let Err(e) = event_db::mark_delivered(pool, &ids, now).await {
             log::warn!("[delivery] mark_delivered failed: {}", e);
         }
@@ -645,6 +674,11 @@ async fn spawn_for_closed_tabs(
         if state.inflight_spawn.contains_key(&worktree_id) {
             continue;
         }
+        if let Some(prev) = state.last_spawn.get(&worktree_id) {
+            if prev.elapsed() < SPAWN_COOLDOWN {
+                continue;
+            }
+        }
         let Some(worktree) = find_worktree(&settings, &worktree_id) else {
             // 購読者ワークツリー自体が消えている。`purge_subscriber_worktree` の対象。
             continue;
@@ -714,6 +748,7 @@ async fn spawn_for_closed_tabs(
             request_id
         );
         projected_live += 1;
+        state.last_spawn.insert(worktree_id.clone(), Instant::now());
         state
             .inflight_spawn
             .insert(worktree_id, (request_id, Instant::now()));
@@ -860,13 +895,31 @@ pub async fn event_rebind_group(
     dead_terminal_id: String,
     session_id: u32,
 ) -> Result<(u64, u64), String> {
-    let terminal_id = app_handle
+    let session = app_handle
         .state::<crate::pty_manager::PtyManager>()
         .list_sessions()
         .into_iter()
         .find(|s| s.session_id == session_id && s.exit_code.is_none())
-        .map(|s| s.terminal_id)
         .ok_or_else(|| format!("session_id {} に対応する生存ターミナルがありません", session_id))?;
+    // 引き継ぎ先が本当にそのワークツリーのタブか、バックエンド側でも確かめる。
+    // `subscriber_worktree_id` は引き継ぎでも変わらないので、別ワークツリーのタブへ渡すと
+    // 以後その行の押し込みが**実際の宛先ではない**ワークツリーの autoApproval 設定で
+    // 判定されることになる（フロントの候補リストが古いだけで起きうる）。
+    {
+        let settings = app_handle.state::<SettingsManager>().get();
+        let actual = session
+            .cwd
+            .as_deref()
+            .and_then(|c| crate::mcp_server::resolve_worktree_by_cwd(&settings, c))
+            .map(|w| w.id.clone());
+        if actual.as_deref() != Some(worktree_id.as_str()) {
+            return Err(format!(
+                "session_id {} はワークツリー {} のターミナルではありません（実際: {:?}）",
+                session_id, worktree_id, actual
+            ));
+        }
+    }
+    let terminal_id = session.terminal_id;
     let (tx, rx) = oneshot::channel();
     {
         let h = handle(&app_handle).ok_or_else(|| "配送ワーカーが起動していません".to_string())?;

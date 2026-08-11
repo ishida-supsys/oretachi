@@ -510,8 +510,13 @@ pub async fn fanout(pool: &SqlitePool, event: &EventRow, now: i64) -> Result<usi
         }
         // orphaned な購読へ積む行は最初から orphaned として印を付ける。そうしないと
         // 「タブが死んでいる間に届いた分」が再バインドの対象から漏れる。
+        //
+        // **時刻は購読の `orphaned_at` ではなく `now`。** 購読側の時刻を継承すると、
+        // 6日前に orphaned になった購読へ今届いたメッセージが「6日前から待っている」扱いに
+        // なり、保持期限（7日）まで数時間しか残らないまま消える。引き継ぎ順序
+        // （`orphaned_at DESC`）でも最後尾に回り、本命のメッセージほど後回しになる。
         let orphaned_at = if sub.state == STATE_ORPHANED {
-            Some(sub.orphaned_at.unwrap_or(now))
+            Some(now)
         } else {
             None
         };
@@ -714,6 +719,46 @@ pub async fn mark_orphaned_subscribers(
         q = q.bind(id);
     }
     let inbox = q.execute(pool).await.map_err(|e| e.to_string())?.rows_affected();
+
+    // 逆遷移: 生存しているタブの行が orphaned のまま残っていたら active に戻す。
+    //
+    // ポーリングは生存タブ一覧をスナップショットしてから非同期に投げるため、その隙に
+    // spawn されたタブが subscribe すると**古い一覧**で orphaned に落とされうる。戻す道が
+    // 無いと、そのタブは生存しているのに `rebind_next_orphaned_group` が自分自身のグループを
+    // 除外する（`terminal_id != new_terminal_id`）ので永久に引き継げず、押し込みも
+    // `list_pushable` の `orphaned_at IS NULL` から外れて一切来なくなる。
+    if !live_terminal_ids.is_empty() {
+        let in_live = format!(
+            " AND subscriber_terminal_id IN ({})",
+            placeholders(live_terminal_ids.len())
+        );
+        let sql = format!(
+            "UPDATE subscriptions SET state = ?, orphaned_at = NULL WHERE state = ?{}",
+            in_live
+        );
+        let mut q = sqlx::query(&sql).bind(STATE_ACTIVE).bind(STATE_ORPHANED);
+        for id in live_terminal_ids {
+            q = q.bind(id);
+        }
+        let restored = q.execute(pool).await.map_err(|e| e.to_string())?.rows_affected();
+
+        let sql = format!(
+            "UPDATE inbox SET orphaned_at = NULL WHERE orphaned_at IS NOT NULL AND acked_at IS NULL{}",
+            in_live
+        );
+        let mut q = sqlx::query(&sql);
+        for id in live_terminal_ids {
+            q = q.bind(id);
+        }
+        let restored_inbox = q.execute(pool).await.map_err(|e| e.to_string())?.rows_affected();
+        if restored > 0 || restored_inbox > 0 {
+            log::info!(
+                "[event-db] 生存タブの引き継ぎ待ちを解除: 購読 {} 件 / 未読 {} 件",
+                restored,
+                restored_inbox
+            );
+        }
+    }
 
     Ok((subs, inbox, deleted))
 }
@@ -1178,22 +1223,41 @@ pub fn sanitize_for_pty(s: &str) -> String {
 ///
 /// SessionStart 用の `format_inbox_digest` と分けているのは、押し込みは**1行**でなければ
 /// ならないため（改行はそのままターン送信になる）。本文は `sanitize_for_pty` を通す。
-pub fn format_inbox_push_text(items: &[InboxItem]) -> Option<String> {
+///
+/// 戻り値は `(本文, 本文に載せた件数)`。**載らなかった分は呼び出し元が打刻してはいけない。**
+/// 全件の ID を `mark_delivered` に渡すと、長さ上限で切り落とされた分が「配送済みだが
+/// 本文は誰も見ていない」状態になり、再送しない方針（#120 §5.2）のせいで二度と出てこない。
+/// 載らなかった分は未配送のまま残り、次の押し込み / SessionStart 回収で拾われる。
+pub fn format_inbox_push_text(items: &[InboxItem]) -> Option<(String, usize)> {
     if items.is_empty() {
         return None;
     }
-    let body = items
-        .iter()
-        .map(format_inbox_line)
-        .collect::<Vec<_>>()
-        .join(" / ");
-    Some(sanitize_for_pty(&format!(
-        "[oretachi] 購読していたワークツリーイベントが {} 件届きました。{} \
-         購読していた作業が完了したということなので、必要な動作確認や後続作業を進めてください。\
-         確認したら oretachi_ack_message に [] 内の ID を渡して ack してください。",
-        items.len(),
-        body
-    )))
+    let head = "[oretachi] 購読していたワークツリーイベントが届きました。";
+    let tail = " 購読していた作業が完了したということなので、必要な動作確認や後続作業を進めてください。\
+                確認したら oretachi_ack_message に [] 内の ID を渡して ack してください。";
+    // 固定文言のぶんを引いた残りに、入る行だけを詰める（最低1件は必ず載せる）。
+    let budget = PTY_TEXT_MAX_CHARS.saturating_sub(head.chars().count() + tail.chars().count());
+    let mut body = String::new();
+    let mut used = 0usize;
+    for item in items {
+        let line = sanitize_for_pty(&format_inbox_line(item));
+        let sep = if used == 0 { "" } else { " / " };
+        if used > 0 && body.chars().count() + sep.len() + line.chars().count() > budget {
+            break;
+        }
+        body.push_str(sep);
+        body.push_str(&line);
+        used += 1;
+    }
+    let more = if used < items.len() {
+        format!("（ほかに {} 件あります。oretachi_poll_inbox で取得できます）", items.len() - used)
+    } else {
+        String::new()
+    };
+    Some((
+        sanitize_for_pty(&format!("{}{}{}{}", head, body, more, tail)),
+        used,
+    ))
 }
 
 /// SessionStart 注入用のテキストを組み立てる。
@@ -2040,10 +2104,87 @@ mod tests {
             KIND_WORKTREE_CLOSED,
             r#"{"worktreeId":"a","worktreeName":"wt-a","branchName":"feature/x"}"#,
         )];
-        let text = format_inbox_push_text(&items).unwrap();
+        let (text, used) = format_inbox_push_text(&items).unwrap();
         assert!(!text.contains('\n') && !text.contains('\r'));
         assert!(text.contains("wt-a"));
-        assert_eq!(format_inbox_push_text(&[]), None);
+        assert_eq!(used, 1);
+        assert!(format_inbox_push_text(&[]).is_none());
+    }
+
+    /// 長さ上限で本文に載らなかった分の件数は返さない。
+    /// 全件を配送済みにすると、切り落とされた分は「再送しない」方針のせいで二度と出ない。
+    #[test]
+    fn test_format_inbox_push_text_reports_only_what_fits() {
+        let items: Vec<InboxItem> = (0..40)
+            .map(|i| {
+                let mut item = inbox_item(
+                    KIND_WORKTREE_CLOSED,
+                    r#"{"worktreeId":"a","worktreeName":"very-long-worktree-name-for-truncation","branchName":"feature/quite-long-branch-name"}"#,
+                );
+                item.id = format!("inbox-{:02}", i);
+                item
+            })
+            .collect();
+        let (text, used) = format_inbox_push_text(&items).unwrap();
+        assert!(used > 0 && used < items.len(), "一部だけ載る想定 (used={})", used);
+        assert!(text.chars().count() <= PTY_TEXT_MAX_CHARS + 1);
+        // 載った分だけが本文にあり、載らなかった分は残件として告知される
+        assert!(text.contains(&format!("inbox-{:02}", used - 1)));
+        assert!(!text.contains(&format!("inbox-{:02}", used)));
+        assert!(text.contains(&format!("ほかに {} 件", items.len() - used)));
+    }
+
+    /// 引き継ぎ待ちの購読へ後から届いたメッセージは、購読が orphaned になった時刻ではなく
+    /// **届いた時刻**で保持期限を数える（数時間で消えないように）。
+    #[test]
+    fn test_fanout_stamps_inbox_with_arrival_time_not_subscription_time() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let long_ago = 1_000_000i64;
+            let s = sub("term-a", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+            mark_orphaned_subscribers(&pool, &[], long_ago).await.unwrap();
+
+            // 6日後にイベントが届く
+            let arrival = long_ago + 6 * 24 * 60 * 60 * 1000;
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            fanout(&pool, &e, arrival).await.unwrap();
+
+            let items = list_inbox(&pool, "term-a", InboxFilter::All).await.unwrap();
+            assert_eq!(items[0].orphaned_at, Some(arrival));
+            // 到着から7日以内なので保持期限では消えない
+            let (_, purged) =
+                purge_orphaned_expired(&pool, arrival + 1000, ORPHANED_RETENTION_MS).await.unwrap();
+            assert_eq!(purged, 0);
+        });
+    }
+
+    /// 生存しているタブが（古い生存一覧のせいで）orphaned に落ちたら active へ戻す。
+    /// 戻す道が無いと、そのタブは生存しているのに引き継ぎ対象からも押し込み対象からも外れる。
+    #[test]
+    fn test_mark_orphaned_restores_live_terminals() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-a", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            fanout(&pool, &e, now).await.unwrap();
+
+            // 古い生存一覧で誤って orphaned に落ちる
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+            assert_eq!(list_subscriptions(&pool, "term-a", now).await.unwrap()[0].state, STATE_ORPHANED);
+            assert!(list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap().is_empty());
+
+            // 次の tick で生存が確認されれば戻る
+            mark_orphaned_subscribers(&pool, &["term-a".to_string()], now).await.unwrap();
+            let rows = list_subscriptions(&pool, "term-a", now).await.unwrap();
+            assert_eq!(rows[0].state, STATE_ACTIVE);
+            assert_eq!(rows[0].orphaned_at, None);
+            assert_eq!(list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap().len(), 1);
+        });
     }
 
     /// クローズされた target を指す購読は配送後に削除される。
