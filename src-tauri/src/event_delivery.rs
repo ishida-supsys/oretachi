@@ -72,14 +72,64 @@ const AUTO_APPROVAL_PUSHABLE_KINDS: &[&str] = &[event_db::KIND_WORKTREE_CLOSED];
 
 // ─── ハンドル ─────────────────────────────────────────────────────────────────
 
+/// `additionalContext` 経由で未読をまとめて渡すときの、呼び出し元の hook 種別（#124）。
+///
+/// PTY 押し込みと違い、どれも「文字列を返すだけ」で PTY には触らない。ただし
+/// **`TurnEnd` だけはターンを開始させる**（`Stop` の `additionalContext` は会話を継続する）
+/// ため、押し込みと同じ制限（`passive` を巻き込まない・自動承認が有効な宛先へは定型
+/// イベントのみ）を課す。`SessionStart` / `PromptSubmit` は人間の操作が起点なので、
+/// Phase 1 から変わらず全件を渡す。
+#[derive(Debug, Clone, PartialEq)]
+pub enum DigestReason {
+    /// SessionStart フック。アプリ停止中に溜まった分の回収（#123）
+    SessionStart,
+    /// Stop フック。ターン境界配送の本命（#124）。`prompt_id` は「1ターン1回」の鍵
+    TurnEnd { prompt_id: Option<String> },
+    /// UserPromptSubmit フック。Stop の取りこぼし回収（#124）
+    PromptSubmit,
+}
+
+impl DigestReason {
+    /// ログと `event-delivered` の `method` に出す識別子。
+    fn label(&self) -> &'static str {
+        match self {
+            DigestReason::SessionStart => "session",
+            DigestReason::TurnEnd { .. } => "stop",
+            DigestReason::PromptSubmit => "prompt",
+        }
+    }
+
+    fn is_turn_end(&self) -> bool {
+        matches!(self, DigestReason::TurnEnd { .. })
+    }
+
+    /// 本文が0件でも「未 ack が N 件残っています」だけを伝えてよい経路か。
+    ///
+    /// `SessionStart` だけ `true`。発火は startup / resume / clear / compact に限られ
+    /// （`claude_plugin.rs` の SessionStart フックは matcher なしで登録している）、
+    /// 毎ターン・毎プロンプトの `Stop` / `UserPromptSubmit` とは頻度が桁違いに低い。
+    /// この頻度なら Phase 1 の「注入が失われても件数で気づける」（#120 §5.2）が
+    /// 実用になる。`Stop` / `UserPromptSubmit` で同じことをやると、`Stop` は残件を
+    /// 報告するためだけに会話が継続し、`UserPromptSubmit` は ack するまで
+    /// **ユーザーの全プロンプトの先頭に催促が付きまとう**。
+    fn reports_carryover_only(&self) -> bool {
+        matches!(self, DigestReason::SessionStart)
+    }
+}
+
 pub enum DeliveryMsg {
     /// 生存タブの一覧。ここに無い terminal_id の購読 / inbox は orphaned にする
     Reconcile { live_terminal_ids: Vec<String> },
-    /// このタブへ、同じワークツリーの引き継ぎ待ちグループを1つ引き継ぐ
-    Rebind {
+    /// hook 経路（SessionStart / Stop / UserPromptSubmit）へ渡す未読テキストを組む。
+    /// **押し込みと同じワーカーで直列に処理するのが要点**（下の `collect_digest_and_wait` 参照）
+    CollectDigest {
         terminal_id: String,
-        reply: Option<oneshot::Sender<(u64, u64)>>,
+        reason: DigestReason,
+        reply: oneshot::Sender<Option<String>>,
     },
+    /// このタブへ、同じワークツリーの引き継ぎ待ちグループを1つ引き継ぐ（応答は待たない）。
+    /// 完了を待ちたい経路（hook からの回収）は `CollectDigest` が内包している。
+    Rebind { terminal_id: String },
     /// UI からの手動引き継ぎ（引き継ぎ先グループを人間が選ぶ）
     RebindManual {
         worktree_id: String,
@@ -123,10 +173,7 @@ pub fn reconcile_live_terminals(app: &AppHandle, live_terminal_ids: Vec<String>)
 /// AI エージェントが立ち上がったタブから引き継ぎを要求する（応答は待たない）。
 pub fn request_rebind(app: &AppHandle, terminal_id: String) {
     if let Some(h) = handle(app) {
-        h.try_send(DeliveryMsg::Rebind {
-            terminal_id,
-            reply: None,
-        });
+        h.try_send(DeliveryMsg::Rebind { terminal_id });
     }
 }
 
@@ -137,25 +184,35 @@ pub fn notify_event_queued(app: &AppHandle) {
     }
 }
 
-/// 引き継ぎを要求し、完了まで待つ（`SessionStart` から使う）。
+/// hook 経路へ渡す未読テキストを組み、出した分に `delivered_at` を打つ（#124）。
 ///
-/// ワーカーが詰まっていたら `None` を返す。呼び出し元は上位のタイムアウトの内側で
-/// 使うので、「今回は引き継がない」に劣化するだけで済む。
-pub async fn rebind_and_wait(app: &AppHandle, terminal_id: &str) -> Option<(u64, u64)> {
+/// **押し込み (`push_pending`) と同じワーカーで処理させるのが要点。** 別経路で
+/// 「未配送を SELECT → 注入 → 打刻」をやると、その隙間に走った押し込みが同じ行を
+/// PTY へ流し、同じ本文が二重に届く（`mark_delivered` の `WHERE delivered_at IS NULL`
+/// は打刻を冪等にするだけで、読み取りと注入のインターリーブは防げない）。
+///
+/// ワーカーが詰まっていたら `None`（＝今回は注入しない）。呼び出し元は上位のタイム
+/// アウトの内側で使うので、取りこぼしではなく次の機会に回るだけで済む。
+pub async fn collect_digest_and_wait(
+    app: &AppHandle,
+    terminal_id: &str,
+    reason: DigestReason,
+) -> Option<String> {
     let (tx, rx) = oneshot::channel();
     {
         let h = handle(app)?;
         if h.tx
-            .try_send(DeliveryMsg::Rebind {
+            .try_send(DeliveryMsg::CollectDigest {
                 terminal_id: terminal_id.to_string(),
-                reply: Some(tx),
+                reason,
+                reply: tx,
             })
             .is_err()
         {
             return None;
         }
     }
-    rx.await.ok()
+    rx.await.ok().flatten()
 }
 
 // ─── ワーカー ─────────────────────────────────────────────────────────────────
@@ -175,6 +232,25 @@ struct WorkerState {
     /// 1タブが同じワークツリーの死亡タブ全グループを吸い上げ、「新しいタブ1つにつき
     /// 1グループ」という設計不変条件が崩れる。タブが消えたら忘れる。
     claimed: std::collections::HashSet<String>,
+    /// 引き継ぎを試したが**対象が1グループも無かった**タブ（#124 のレビュー指摘）。
+    ///
+    /// `claimed` は「1グループ引き継いだ」タブしか入らないので、引き継ぐものが無いタブは
+    /// 永久に `claimed` に入らない。`Stop` / `UserPromptSubmit` は毎ターン・毎プロンプト
+    /// 発火するため、抑止しないと**全 CC タブが毎ターン `list_orphaned_groups` を叩き続ける**
+    /// （events.db は非 WAL なので書き込みと競合しうる）。
+    ///
+    /// 引き継ぎ待ちグループが新しく生まれるのは `mark_orphaned_subscribers`（＝生存タブ一覧が
+    /// 変化した `Reconcile`）だけなので、そこで捨てれば取りこぼさない。
+    rebind_probed: std::collections::HashSet<String>,
+    /// タブごとの「最後に Stop 経路で注入したターン」の `prompt_id`（#124）。
+    ///
+    /// `Stop` の `additionalContext` は会話を継続させるので、継続したターンが終われば
+    /// また `Stop` が発火する。`stop_hook_active` で弾くのが第一の防波堤だが、CC 側の
+    /// 仕様変更で無防備にならないよう `prompt_id` 単位の上限も持つ。実測（#121）で
+    /// **1ユーザー発話に対する 9 回の発火すべてで `prompt_id` は同一**だったので、
+    /// これがターン境界の正確な鍵になる（`session_id` は複数ターンで共通なので粗い）。
+    /// タブが消えたら忘れる。
+    last_turn: HashMap<String, String>,
     /// 前回 `Reconcile` を処理したときの生存タブ一覧（ソート済み）。
     ///
     /// ポーリングは 10 秒ごとに送ってくるが、`events.db` は WAL ではない（sqlx は
@@ -233,6 +309,10 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
                 // 消えたタブの「引き継ぎ済み」マークは忘れる（terminal_id は再利用されないので
                 // 放置しても誤動作はしないが、長時間稼働で単調増加する）。
                 state.claimed.retain(|t| live_terminal_ids.contains(t));
+                state.last_turn.retain(|t, _| live_terminal_ids.contains(t));
+                // 引き継ぎ待ちグループが増えるのはこの直後の `mark_orphaned_subscribers`
+                // だけなので、「対象が無かった」という記憶はここで捨てれば十分。
+                state.rebind_probed.clear();
                 match event_db::mark_orphaned_subscribers(pool, &live_terminal_ids, now).await {
                     Ok((subs, inbox, deleted)) if subs > 0 || inbox > 0 || deleted > 0 => {
                         log::info!(
@@ -266,22 +346,10 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
                 }
             }
         }
-        DeliveryMsg::Rebind { terminal_id, reply } => {
-            // 自動引き継ぎは1タブにつき1グループまで。`resolve_subscriber` は購読系ツールの
-            // 呼び出しごとに要求してくるので、抑止しないと1タブが全グループを吸い上げる。
-            // 人間が明示的に選ぶ `RebindManual` はこの制限を受けない。
-            let result = if state.claimed.contains(&terminal_id) {
-                (0, 0)
-            } else {
-                let moved = rebind_for_terminal(app, pool, &terminal_id).await;
-                if moved != (0, 0) {
-                    state.claimed.insert(terminal_id.clone());
-                }
-                moved
-            };
-            if let Some(reply) = reply {
-                let _ = reply.send(result);
-            }
+        DeliveryMsg::Rebind { terminal_id } => {
+            // 自動引き継ぎは1タブにつき1グループまで。人間が明示的に選ぶ `RebindManual` は
+            // この制限を受けない。
+            let result = try_rebind_once(app, pool, state, &terminal_id).await;
             if result != (0, 0) {
                 let _ = app.emit("event-inbox-changed", ());
             }
@@ -309,6 +377,13 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
             }
             let _ = app.emit("event-inbox-changed", ());
             drive(app, pool, state).await;
+        }
+        DeliveryMsg::CollectDigest {
+            terminal_id,
+            reason,
+            reply,
+        } => {
+            collect_digest(app, pool, state, &terminal_id, &reason, reply).await;
         }
         DeliveryMsg::EventQueued => {
             let _ = app.emit("event-inbox-changed", ());
@@ -372,6 +447,31 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
     }
 }
 
+/// 1タブにつき1グループまでの引き継ぎを、無駄打ちを抑えつつ試す。
+///
+/// - 既に1グループ引き継いだタブ（`claimed`）は対象外。`resolve_subscriber` や hook 経路は
+///   呼び出しのたびに要求してくるので、抑止しないと1タブが全グループを吸い上げる
+/// - 前回試して**対象が無かった**タブ（`rebind_probed`）も対象外。`Stop` は毎ターン発火
+///   するため、これが無いと全 CC タブが毎ターン `list_orphaned_groups` を叩き続ける。
+///   新しい引き継ぎ待ちが生まれる `Reconcile`（生存タブ変化時）で忘れる
+async fn try_rebind_once(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    state: &mut WorkerState,
+    terminal_id: &str,
+) -> (u64, u64) {
+    if state.claimed.contains(terminal_id) || state.rebind_probed.contains(terminal_id) {
+        return (0, 0);
+    }
+    let moved = rebind_for_terminal(app, pool, terminal_id).await;
+    if moved != (0, 0) {
+        state.claimed.insert(terminal_id.to_string());
+    } else {
+        state.rebind_probed.insert(terminal_id.to_string());
+    }
+    moved
+}
+
 /// タブの cwd からワークツリーを引いて、そのワークツリーの引き継ぎ待ちを1グループ引き継ぐ。
 async fn rebind_for_terminal(app: &AppHandle, pool: &SqlitePool, terminal_id: &str) -> (u64, u64) {
     let Some(worktree_id) = worktree_of_terminal(app, terminal_id) else {
@@ -404,6 +504,206 @@ fn worktree_of_terminal(app: &AppHandle, terminal_id: &str) -> Option<String> {
     let session = sessions.iter().find(|s| s.terminal_id == terminal_id)?;
     let cwd = session.cwd.as_deref()?;
     crate::mcp_server::resolve_worktree_by_cwd(&settings, cwd).map(|w| w.id.clone())
+}
+
+// ─── hook 経路への注入（#124） ────────────────────────────────────────────────
+
+/// 同じターンへ二度注入しないか判定する（#124 §5.1）。
+///
+/// `prompt_id` が取れない場合は通す。`Stop` 由来の継続ターンは `stop_hook_active` で
+/// 先に落ちているので、ここは CC の仕様変更に備えた二枚目の防波堤という位置づけ。
+fn should_deliver_turn(last: Option<&str>, prompt_id: Option<&str>) -> bool {
+    match prompt_id {
+        Some(p) => last != Some(p),
+        None => true,
+    }
+}
+
+/// `Stop` 経路で注入してよい未読だけに絞る。
+///
+/// `Stop` の `additionalContext` は**会話を継続させる＝ターンを開始させる**ので、
+/// PTY 押し込みと同じ危険度を持つ。よって押し込みと同じ2つの制限を課す:
+///
+/// - `delivery=passive` は「押し込まないでほしい」という購読側の明示指定。同じタブに
+///   他の戦略が混ざっていても巻き込まない（Phase 3 で踏んだバグと同じ轍を踏まない）
+/// - 自動承認が有効な宛先へは定型イベントのみ（#120 §5.5）。自由文は inbox に残して
+///   人間の確認を要求する
+///
+/// 自動承認の判定は**行ごとにその行自身の `subscriber_worktree_id` で行う**。1タブが
+/// `cd` して別ワークツリーで再購読すると同じ `terminal_id` に異なるワークツリー宛の行が
+/// 混ざるため、代表1件から解決すると**実際の宛先ではないワークツリーの設定で全件を
+/// 判定してしまう**（#131 が手動引き継ぎで塞いだのと同じ穴）。
+fn filter_for_turn_end(
+    items: Vec<event_db::InboxItem>,
+    settings: &AppSettings,
+) -> Vec<event_db::InboxItem> {
+    items
+        .into_iter()
+        .filter(|i| i.delivery != event_db::DELIVERY_PASSIVE)
+        .filter(|i| {
+            let worktree = i
+                .subscriber_worktree_id
+                .as_deref()
+                .and_then(|id| find_worktree(settings, id));
+            auto_approval_allows(worktree, &i.kind)
+        })
+        .collect()
+}
+
+/// 指定タブ宛の未読を hook の `additionalContext` 用テキストにまとめ、本文を出した分に
+/// `delivered_at` を打つ。
+///
+/// 本文を列挙するのは **未配送のみ**。未 ack 全件を毎回再掲すると「再送はしない」方針
+/// （#120 §5.2）に反する。ただしそれだけだと、注入が失われたとき（サイドカーの読み取り
+/// タイムアウト等）にエージェントも人間も気づけない。そこで**未 ack の残存件数だけは
+/// 毎回伝える**。件数を見れば `oretachi_poll_inbox` で取り直せる。
+///
+/// **本文を呼び出し元へ渡せたときだけ `delivered_at` を打つ。** 呼び出し元（axum ハンドラ）は
+/// `INBOX_DIGEST_BUDGET_MS` のタイムアウトを持っており、ワーカーが詰まっている間に
+/// 諦めると受信側が消える。先に打刻すると「配送済みだが誰も見ていない」本文が生まれ、
+/// 再送しない方針（#120 §5.2）のせいで二度と出てこない。`push_pending` の
+/// 「`pty.write` が成功してから打刻する」と同じ不変条件。
+async fn collect_digest(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    state: &mut WorkerState,
+    terminal_id: &str,
+    reason: &DigestReason,
+    reply: oneshot::Sender<Option<String>>,
+) {
+    if let DigestReason::TurnEnd { prompt_id } = reason {
+        if !should_deliver_turn(
+            state.last_turn.get(terminal_id).map(String::as_str),
+            prompt_id.as_deref(),
+        ) {
+            log::debug!(
+                "[delivery] このターンへは注入済みなので見送る terminal={} prompt_id={:?}",
+                terminal_id,
+                prompt_id
+            );
+            let _ = reply.send(None);
+            return;
+        }
+    }
+    // このタブが名乗り出たので、同じワークツリーの引き継ぎ待ち（アプリ再起動やタブ死亡で
+    // 宙に浮いた購読と未読）を引き継ぐ。**回収より先に行う**必要がある。引き継ぎ前に
+    // list_inbox すると、前回の terminal_id 宛のままの行が見えない。
+    let moved = try_rebind_once(app, pool, state, terminal_id).await;
+    if moved != (0, 0) {
+        log::info!(
+            "[delivery] 引き継ぎ待ちを回収した terminal={} 購読={} 未読={} 経路={}",
+            terminal_id,
+            moved.0,
+            moved.1,
+            reason.label()
+        );
+        let _ = app.emit("event-inbox-changed", ());
+    }
+
+    let items = match event_db::list_inbox(pool, terminal_id, event_db::InboxFilter::Undelivered)
+        .await
+    {
+        Ok(items) => items,
+        Err(e) => {
+            log::warn!("[delivery] inbox 取得に失敗: {}", e);
+            let _ = reply.send(None);
+            return;
+        }
+    };
+    let items = if reason.is_turn_end() {
+        let settings = app.state::<SettingsManager>().get();
+        let before = items.len();
+        let items = filter_for_turn_end(items, &settings);
+        if items.len() < before {
+            log::debug!(
+                "[delivery] Stop 経路では {} 件を注入対象から外した（passive / 自動承認）terminal={}",
+                before - items.len(),
+                terminal_id
+            );
+        }
+        items
+    } else {
+        items
+    };
+
+    // **件数だけの通知を毎回出さない。** `format_inbox_digest` は本文が0件でも未 ack の
+    // 残件があれば「N 件残っています」を返す。これは「注入が失われても人間とエージェントが
+    // 気づけるように」という Phase 1 の設計（#120 §5.2）だが、**発火頻度が高い経路では害になる**:
+    //
+    // - `Stop`: 残件を報告するためだけに会話が継続してしまう（ターンを開始させる経路なので致命的）
+    // - `UserPromptSubmit`: ack されない限り**ユーザーの全プロンプトの先頭に ack 催促が付く**
+    //
+    // `SessionStart` は1セッション1回なので Phase 1 のまま件数を伝える（本来の目的どおり）。
+    if items.is_empty() && !reason.reports_carryover_only() {
+        let _ = reply.send(None);
+        return;
+    }
+
+    // 配送済みだが未 ack のまま残っている件数（今回本文を出す分は差し引く）
+    let carryover = match event_db::count_unacked(pool, terminal_id).await {
+        Ok((unacked, _)) => (unacked - items.len() as i64).max(0),
+        Err(e) => {
+            log::warn!("[delivery] 未 ack 件数の取得に失敗: {}", e);
+            0
+        }
+    };
+    let Some(digest) = event_db::format_inbox_digest(&items, carryover) else {
+        let _ = reply.send(None);
+        return;
+    };
+
+    // **先に渡してから打刻する。** 呼び出し元がタイムアウトで諦めていれば送信は失敗し、
+    // その場合は打刻しない（未配送のまま残るので次の機会に再度出る）。逆順にすると
+    // 「配送済みだが誰も見ていない」本文が生まれ、再送しない方針のせいで永久に失われる。
+    if reply.send(Some(digest.clone())).is_err() {
+        log::warn!(
+            "[delivery] 注入本文の受け取り手が既に居ない（タイムアウト）ため打刻しない terminal={} 経路={}",
+            terminal_id,
+            reason.label()
+        );
+        return;
+    }
+
+    let ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
+    if let Err(e) = event_db::mark_delivered(pool, &ids, event_db::now_ms()).await {
+        // 打刻に失敗しても本文は既に渡している。未配送のまま残るので次の機会に再度出る
+        // （取りこぼすより一度重複するほうが安全）。
+        log::warn!("[delivery] mark_delivered に失敗: {}", e);
+    }
+    if let DigestReason::TurnEnd { prompt_id } = reason {
+        if let Some(p) = prompt_id {
+            state.last_turn.insert(terminal_id.to_string(), p.clone());
+        }
+    }
+    if !ids.is_empty() {
+        log::info!(
+            "[delivery] {} 件を {} 経由で注入した terminal={}",
+            ids.len(),
+            reason.label(),
+            terminal_id
+        );
+        let _ = app.emit("event-inbox-changed", ());
+    }
+    if reason.is_turn_end() {
+        // 待機中への押し込み (`event-delivered`) と同じ形でフロントへ知らせる。
+        // SessionStart / UserPromptSubmit は人間が画面を見ている場面なのでトーストは出さない。
+        let settings = app.state::<SettingsManager>().get();
+        let worktree = items
+            .first()
+            .and_then(|i| i.subscriber_worktree_id.as_deref())
+            .and_then(|id| find_worktree(&settings, id));
+        let _ = app.emit(
+            "event-delivered",
+            serde_json::json!({
+                "terminalId": terminal_id,
+                "worktreeId": worktree.map(|w| w.id.clone()),
+                "worktreeName": worktree.map(|w| w.name.clone()),
+                "count": ids.len(),
+                "text": digest,
+                "method": "stop",
+            }),
+        );
+    }
 }
 
 // ─── 配送の駆動 ───────────────────────────────────────────────────────────────
@@ -1181,5 +1481,145 @@ mod tests {
         let unset = worktree(None);
         assert!(auto_approval_allows(Some(&unset), "worktree.message"));
         assert!(auto_approval_allows(None, "worktree.message"));
+    }
+
+    // ─── ターン境界配送（#124） ──────────────────────────────────────────────
+
+    fn item(id: &str, delivery: &str, kind: &str) -> event_db::InboxItem {
+        event_db::InboxItem {
+            id: id.to_string(),
+            subscriber_terminal_id: "t-1".to_string(),
+            subscriber_worktree_id: Some("wt-1".to_string()),
+            event_id: format!("ev-{}", id),
+            state: event_db::STATE_PENDING.to_string(),
+            created_at: 1_000_000,
+            delivered_at: None,
+            acked_at: None,
+            orphaned_at: None,
+            delivery: delivery.to_string(),
+            spawn_if_closed: 0,
+            kind: kind.to_string(),
+            body: "{}".to_string(),
+            source_worktree_id: "wt-src".to_string(),
+            actor: None,
+        }
+    }
+
+    fn ids(items: &[event_db::InboxItem]) -> Vec<&str> {
+        items.iter().map(|i| i.id.as_str()).collect()
+    }
+
+    /// `Stop` の additionalContext は会話を継続させるので、同じ prompt_id へ二度返すと
+    /// 永久に回る。実測（#121）では 1 発話に対する 9 回の発火すべてで prompt_id が同一。
+    #[test]
+    fn test_should_deliver_turn_once_per_prompt_id() {
+        assert!(should_deliver_turn(None, Some("p-1")));
+        assert!(!should_deliver_turn(Some("p-1"), Some("p-1")));
+        // 次のユーザー発話は別の prompt_id なので通す
+        assert!(should_deliver_turn(Some("p-1"), Some("p-2")));
+    }
+
+    /// prompt_id が取れないときは通す。継続ターンは stop_hook_active が先に落としており、
+    /// ここで止めると「一度も配送できない」に倒れてしまう。
+    #[test]
+    fn test_should_deliver_turn_without_prompt_id() {
+        assert!(should_deliver_turn(None, None));
+        assert!(should_deliver_turn(Some("p-1"), None));
+    }
+
+    /// `passive` は「押し込まないでほしい」の明示指定。Stop の注入はターンを開始させる
+    /// ので押し込みと同じ扱いにする（同じタブの他戦略に巻き込まない）。
+    /// `worktree()` が返す wt-1 を1件だけ持つ settings。
+    fn settings_with(auto: Option<bool>) -> AppSettings {
+        let mut s = AppSettings::default();
+        s.worktrees = vec![worktree(auto)];
+        s
+    }
+
+    #[test]
+    fn test_filter_for_turn_end_excludes_passive() {
+        let items = vec![
+            item("a", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_CLOSED),
+            item("b", event_db::DELIVERY_PASSIVE, event_db::KIND_WORKTREE_CLOSED),
+            item("c", event_db::DELIVERY_INTERRUPT, event_db::KIND_WORKTREE_CLOSED),
+        ];
+        // interrupt は「走行中でも割り込んでよい」の明示指定なので、ターン境界でも当然通す
+        assert_eq!(
+            ids(&filter_for_turn_end(items, &settings_with(None))),
+            vec!["a", "c"]
+        );
+    }
+
+    /// 自動承認が有効な宛先は、注入された内容を人間の確認なしに実行する（#120 §5.5）。
+    /// #126 で自由文 (`worktree.message`) が入った瞬間に default-deny になるのが目的。
+    #[test]
+    fn test_filter_for_turn_end_respects_auto_approval() {
+        let items = vec![
+            item("a", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_CLOSED),
+            item("b", event_db::DELIVERY_TURN_END, "worktree.message"),
+        ];
+        assert_eq!(
+            ids(&filter_for_turn_end(items.clone(), &settings_with(Some(true)))),
+            vec!["a"]
+        );
+        assert_eq!(
+            ids(&filter_for_turn_end(items, &settings_with(Some(false)))),
+            vec!["a", "b"]
+        );
+    }
+
+    /// 1タブが `cd` して別ワークツリーで再購読すると、同じ terminal_id の inbox に
+    /// 異なる `subscriber_worktree_id` の行が混ざる。代表1件から自動承認を判定すると
+    /// **実際の宛先ではないワークツリーの設定で全件を通してしまう**ので、行ごとに引く。
+    #[test]
+    fn test_filter_for_turn_end_judges_each_row_by_its_own_worktree() {
+        let mut auto_on = worktree(Some(true));
+        auto_on.id = "wt-auto".to_string();
+        let mut auto_off = worktree(Some(false));
+        auto_off.id = "wt-manual".to_string();
+        let mut settings = AppSettings::default();
+        settings.worktrees = vec![auto_on, auto_off];
+
+        // 1件目は自動承認 OFF のワークツリー宛（＝代表にすると全件が通ってしまう）
+        let mut a = item("a", event_db::DELIVERY_TURN_END, "worktree.message");
+        a.subscriber_worktree_id = Some("wt-manual".to_string());
+        let mut b = item("b", event_db::DELIVERY_TURN_END, "worktree.message");
+        b.subscriber_worktree_id = Some("wt-auto".to_string());
+
+        assert_eq!(ids(&filter_for_turn_end(vec![a, b], &settings)), vec!["a"]);
+    }
+
+    /// 宛先ワークツリーが解決できない行（設定から消えた等）は、自動承認の判定材料が
+    /// 無いので `auto_approval_allows(None, _)` の既定（許可）に落ちる。1件目が
+    /// これだったせいで他の行まで巻き込まれないことを固定する。
+    #[test]
+    fn test_filter_for_turn_end_unresolvable_row_does_not_leak_to_others() {
+        let mut a = item("a", event_db::DELIVERY_TURN_END, "worktree.message");
+        a.subscriber_worktree_id = Some("wt-gone".to_string());
+        let b = item("b", event_db::DELIVERY_TURN_END, "worktree.message"); // wt-1 = 自動承認 ON
+        assert_eq!(
+            ids(&filter_for_turn_end(vec![a, b], &settings_with(Some(true)))),
+            vec!["a"]
+        );
+    }
+
+    #[test]
+    fn test_digest_reason_labels() {
+        assert_eq!(DigestReason::SessionStart.label(), "session");
+        assert_eq!(DigestReason::PromptSubmit.label(), "prompt");
+        assert_eq!(DigestReason::TurnEnd { prompt_id: None }.label(), "stop");
+        assert!(DigestReason::TurnEnd { prompt_id: None }.is_turn_end());
+        assert!(!DigestReason::SessionStart.is_turn_end());
+        assert!(!DigestReason::PromptSubmit.is_turn_end());
+    }
+
+    /// 本文0件のときに「未 ack が N 件残っています」だけを注入してよいのは
+    /// `SessionStart` だけ。`Stop` は残件報告のためだけに会話を継続させてしまい、
+    /// `UserPromptSubmit` は ack するまでユーザーの全プロンプトに催促が付きまとう。
+    #[test]
+    fn test_only_session_start_reports_carryover_only() {
+        assert!(DigestReason::SessionStart.reports_carryover_only());
+        assert!(!DigestReason::PromptSubmit.reports_carryover_only());
+        assert!(!DigestReason::TurnEnd { prompt_id: Some("p".into()) }.reports_carryover_only());
     }
 }

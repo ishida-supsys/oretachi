@@ -409,6 +409,20 @@ pub struct SetWorktreeDescriptionEvent {
     pub description: Option<String>,
 }
 
+/// Stop フック (--turn-context) が送るペイロード（#124）
+#[derive(Debug, Deserialize)]
+pub struct TurnContextPayload {
+    #[serde(default, rename = "projectDir")]
+    pub project_dir: Option<String>,
+    /// 発火元 PTY タブの `terminal_id`（env `ORETACHI_TERMINAL_ID` 由来）。
+    /// 配送はこのタブ宛の inbox だけを対象にする（同一ワークツリーの別タブ宛を抜き取らない）。
+    #[serde(default, rename = "terminalId")]
+    pub terminal_id: Option<String>,
+    /// Stop フックの stdin JSON（生文字列）。`prompt_id` / `stop_hook_active` をここから読む。
+    #[serde(default, rename = "hookJson")]
+    pub hook_json: Option<String>,
+}
+
 /// UserPromptSubmit フック (--prompt-context) が送るペイロード
 #[derive(Debug, Deserialize)]
 pub struct PromptContextPayload {
@@ -3196,7 +3210,11 @@ async fn session_context_handler(
     // ので次のセッション開始で再度提示される。
     let inbox = match tokio::time::timeout(
         std::time::Duration::from_millis(INBOX_DIGEST_BUDGET_MS),
-        collect_inbox_digest(&app_handle, payload.terminal_id.as_deref()),
+        collect_inbox_digest(
+            &app_handle,
+            payload.terminal_id.as_deref(),
+            crate::event_delivery::DigestReason::SessionStart,
+        ),
     )
     .await
     {
@@ -3220,93 +3238,167 @@ async fn session_context_handler(
     Json(serde_json::json!({ "prompt": prompt, "inbox": inbox }))
 }
 
-/// 指定タブ宛の inbox を SessionStart 注入用テキストにまとめ、本文を出した分に
-/// `delivered_at` を打つ。
+/// 指定タブ宛の inbox を hook 注入用テキストにまとめ、本文を出した分に `delivered_at` を打つ。
 ///
 /// terminal_id が無い（oretachi 管理外のターミナルから起動されたエージェント）場合や
 /// イベント DB が未初期化の場合は None を返し、既存の挙動を一切変えない。
 ///
-/// 本文を列挙するのは **未配送のみ**。未 ack 全件を毎回再掲すると「再送はしない」方針
-/// （#120 §5.2）に反する。ただしそれだけだと、注入が失われたとき（サイドカーの読み取り
-/// タイムアウト等）にエージェントも人間も気づけなくなる（Phase 1 には UI が無い）。
-/// そこで**未 ack の残存件数だけは毎回伝える**。件数を見れば `oretachi_poll_inbox` で
-/// 取り直せるので、注入喪失が恒久的な取りこぼしにならない。
-async fn collect_inbox_digest(app_handle: &AppHandle, terminal_id: Option<&str>) -> Option<String> {
+/// 実体は `event_delivery` の**単一ワーカー**が持つ（#124）。押し込みと同じキューを通すことで
+/// 「未配送を SELECT → 注入 → 打刻」の隙間に押し込みが割り込んで二重配送になる経路を潰す。
+/// ワーカーが詰まっていれば None が返り「今回は注入しない」に劣化するだけで、上位の
+/// `INBOX_DIGEST_BUDGET_MS` タイムアウトを食い潰さない。
+async fn collect_inbox_digest(
+    app_handle: &AppHandle,
+    terminal_id: Option<&str>,
+    reason: crate::event_delivery::DigestReason,
+) -> Option<String> {
     let terminal_id = terminal_id.map(str::trim).filter(|s| !s.is_empty())?;
-    let pool = app_handle
-        .try_state::<crate::event_db::EventPool>()
-        .map(|p| p.0.clone())?;
-    // このタブが立ち上がったので、同じワークツリーの引き継ぎ待ち（アプリ再起動や
-    // タブ死亡で宙に浮いた購読と未読）を引き継ぐ。**回収より先に行う**必要がある。
-    // 引き継ぎ前に list_inbox すると、前回の terminal_id 宛のままの行が見えない。
-    // ワーカーが詰まっていれば None が返り「今回は引き継がない」に劣化するだけで、
-    // 上位の INBOX_DIGEST_BUDGET_MS タイムアウトを食い潰さない（#125）。
-    if let Some((subs, inbox)) =
-        crate::event_delivery::rebind_and_wait(app_handle, terminal_id).await
-    {
-        if subs > 0 || inbox > 0 {
-            log::info!(
-                "[session-context] 引き継ぎ待ちを回収した terminal={} 購読={} 未読={}",
-                terminal_id,
-                subs,
-                inbox
-            );
-        }
+    // DB 未初期化なら `DeliveryHandle` も manage されていないので、ここで弾かなくても
+    // no-op になる。早期 return は無駄なチャネル往復を避けるためだけのもの。
+    app_handle.try_state::<crate::event_db::EventPool>()?;
+    crate::event_delivery::collect_digest_and_wait(app_handle, terminal_id, reason).await
+}
+
+// ─── Simple REST endpoint (/turn-context) ────────────────────────────────────
+
+/// Stop フックの stdin JSON から `(prompt_id, stop_hook_active)` を読む（#124）。
+///
+/// Phase 0 (#121) の実測で CC 2.1.227 の Stop payload には両方が実在することが確認済み。
+/// `stop_hook_active` は初回発火が `false`、`additionalContext` による継続後の発火はすべて
+/// `true` になる。パースできない場合は「継続ターンではない」に倒す（配送側は
+/// `prompt_id` 単位の上限と `delivered_at` でも守られているため、ここで止める必要はない）。
+fn parse_stop_hook_fields(hook_json: Option<&str>) -> (Option<String>, bool) {
+    let Some(v) = hook_json.and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok()) else {
+        return (None, false);
+    };
+    let prompt_id = v
+        .get("prompt_id")
+        .and_then(|p| p.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let stop_hook_active = v
+        .get("stop_hook_active")
+        .and_then(|b| b.as_bool())
+        .unwrap_or(false);
+    (prompt_id, stop_hook_active)
+}
+
+/// Stop フック (--turn-context) 用。そのタブ宛の未読を `additionalContext` 本文として返す。
+///
+/// **`Stop` の `additionalContext` は会話を継続させる**ので、無条件に返すと未読が残る限り
+/// 永久に回る。防波堤は3枚（#120 §5.1・Phase 0 の訂正コメント）:
+///
+/// 1. `stop_hook_active == true`（= この Stop 自体が hook 由来の継続ターンの終わり）なら返さない
+/// 2. `prompt_id` 単位で1ターン1回（`event_delivery` のワーカーが持つ）
+/// 3. `delivered_at` による二重注入防止（`inbox` の UNIQUE 制約と `mark_delivered`）
+///
+/// CC 側にも継続9回で自然停止する上限があるが、**打ち切りが呼び出し側から判別できない**
+/// （警告が出ず headless の結果 JSON も `is_error: false`）ため依存しない。
+async fn turn_context_handler(
+    State(app_handle): State<AppHandle>,
+    Json(payload): Json<TurnContextPayload>,
+) -> Json<serde_json::Value> {
+    let (prompt_id, stop_hook_active) = parse_stop_hook_fields(payload.hook_json.as_deref());
+    if stop_hook_active {
+        log::debug!(
+            "[turn-context] stop_hook_active=true のため配送しない terminal={:?} prompt_id={:?}",
+            payload.terminal_id,
+            prompt_id
+        );
+        return Json(serde_json::json!({ "inbox": serde_json::Value::Null }));
     }
-    let items = match crate::event_db::list_inbox(
-        &pool,
-        terminal_id,
-        crate::event_db::InboxFilter::Undelivered,
+    // サイドカーの読み取りタイムアウトは 2 秒。それを超えるとレスポンス自体が捨てられる。
+    // DB が詰まっている場合は諦める。諦めた分は打刻していないので次の機会に再度出る。
+    let inbox = match tokio::time::timeout(
+        std::time::Duration::from_millis(INBOX_DIGEST_BUDGET_MS),
+        collect_inbox_digest(
+            &app_handle,
+            payload.terminal_id.as_deref(),
+            crate::event_delivery::DigestReason::TurnEnd {
+                prompt_id: prompt_id.clone(),
+            },
+        ),
     )
     .await
     {
-        Ok(items) => items,
-        Err(e) => {
-            log::warn!("[session-context] inbox 取得に失敗: {}", e);
-            return None;
+        Ok(inbox) => inbox,
+        Err(_) => {
+            log::warn!(
+                "[turn-context] inbox の取得が {}ms を超えたため今回は注入を見送る (terminal={:?})",
+                INBOX_DIGEST_BUDGET_MS,
+                payload.terminal_id
+            );
+            None
         }
     };
-    // 配送済みだが未 ack のまま残っている件数（今回本文を出す分は差し引く）
-    let carryover = match crate::event_db::count_unacked(&pool, terminal_id).await {
-        Ok((unacked, _)) => (unacked - items.len() as i64).max(0),
-        Err(e) => {
-            log::warn!("[session-context] 未 ack 件数の取得に失敗: {}", e);
-            0
-        }
-    };
-    let digest = crate::event_db::format_inbox_digest(&items, carryover)?;
-    let ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
-    if let Err(e) = crate::event_db::mark_delivered(&pool, &ids, crate::event_db::now_ms()).await {
-        // 打刻に失敗しても本文は返す。未配送のまま残るので次回のセッション開始で再度出る
-        // （取りこぼすより一度重複するほうが安全）。
-        log::warn!("[session-context] mark_delivered に失敗: {}", e);
+    match &inbox {
+        Some(_) => log::info!(
+            "[turn-context] ターン境界で未読を注入する terminal={:?} prompt_id={:?}",
+            payload.terminal_id,
+            prompt_id
+        ),
+        // 注入しなかったことも残す。Stop はターンごとに必ず来るので、ここが無いと
+        // 「hook が届いていない」のか「未読が無かった」のかログから切り分けられない。
+        None => log::debug!(
+            "[turn-context] 注入なし terminal={:?} prompt_id={:?}",
+            payload.terminal_id,
+            prompt_id
+        ),
     }
-    Some(digest)
+    Json(serde_json::json!({ "inbox": inbox }))
 }
 
 // ─── Simple REST endpoint (/prompt-context) ──────────────────────────────────
 
-/// UserPromptSubmit フック (--prompt-context) 用。現在の description を返す。
-/// ワークツリー単位でスロットルし、期間内の再送・未解決時は {"skip":true} を返す
-/// （サイドカーは skip 時に何も出力せず exit 0 する）。
+/// UserPromptSubmit フック (--prompt-context) 用。現在の description と未読を返す。
+///
+/// description はワークツリー単位でスロットルし、期間内の再送・未解決時は `skip: true` を
+/// 返す（サイドカーは description を出力しない）。
+///
+/// **イベント配送はこのスロットルの対象外**（#120 §5.3）。スロットルは description の再注入
+/// 頻度を抑えるためのもので、600 秒に1回しか未読を渡せないのでは Stop の取りこぼし回収に
+/// ならない。よって `skip` は description 側だけを支配し、`inbox` は毎回計算する。
 const PROMPT_CONTEXT_THROTTLE_SECS: u64 = 600;
 
 async fn prompt_context_handler(
     State(app_handle): State<AppHandle>,
     Json(payload): Json<PromptContextPayload>,
 ) -> Json<serde_json::Value> {
-    let settings = app_handle.state::<SettingsManager>().get();
+    // 未読の回収はワークツリー解決にもスロットルにも依存させない。鍵は terminal_id だけ。
+    // ここで諦めても打刻していないので次のプロンプト送信で再度出る。
+    let inbox = match tokio::time::timeout(
+        std::time::Duration::from_millis(INBOX_DIGEST_BUDGET_MS),
+        collect_inbox_digest(
+            &app_handle,
+            payload.terminal_id.as_deref(),
+            crate::event_delivery::DigestReason::PromptSubmit,
+        ),
+    )
+    .await
+    {
+        Ok(inbox) => inbox,
+        Err(_) => {
+            log::warn!(
+                "[prompt-context] inbox の取得が {}ms を超えたため今回は注入を見送る (terminal={:?})",
+                INBOX_DIGEST_BUDGET_MS,
+                payload.terminal_id
+            );
+            None
+        }
+    };
 
+    let settings = app_handle.state::<SettingsManager>().get();
     let Some(wt) = payload
         .project_dir
         .as_deref()
         .and_then(|d| resolve_worktree_by_dir(&settings, d))
     else {
         log::debug!(
-            "[prompt-context] could not resolve worktree (projectDir={:?}); skipping",
+            "[prompt-context] could not resolve worktree (projectDir={:?}); skipping description",
             payload.project_dir
         );
-        return Json(serde_json::json!({ "skip": true }));
+        return Json(serde_json::json!({ "skip": true, "inbox": inbox }));
     };
 
     let manager = app_handle.state::<McpServerManager>();
@@ -3318,21 +3410,23 @@ async fn prompt_context_handler(
             .unwrap_or_else(|e| e.into_inner());
         if let Some(prev) = map.get(&wt.id) {
             if now.duration_since(*prev).as_secs() < PROMPT_CONTEXT_THROTTLE_SECS {
-                return Json(serde_json::json!({ "skip": true }));
+                return Json(serde_json::json!({ "skip": true, "inbox": inbox }));
             }
         }
         map.insert(wt.id.clone(), now);
     }
 
     log::info!(
-        "[prompt-context] worktree={} terminal={:?} description={:?}",
+        "[prompt-context] worktree={} terminal={:?} description={:?} inbox_len={:?}",
         wt.name,
         payload.terminal_id,
-        wt.description
+        wt.description,
+        inbox.as_ref().map(|s| s.len())
     );
     Json(serde_json::json!({
         "worktreeName": wt.name,
         "description": wt.description,
+        "inbox": inbox,
     }))
 }
 
@@ -3593,7 +3687,28 @@ pub fn cleanup_port_file(app_handle: &AppHandle) {
 
 // ─── Server startup ───────────────────────────────────────────────────────────
 
+/// `.env` 由来のポート上書きを解決する。
+///
+/// **空文字は「未設定」と同じ扱いにする。** `.env` には3つのポート上書きを空値で
+/// 並べてあり（既定値のドキュメントを兼ねる）、`dotenvy` はそれを空文字として
+/// プロセス環境へ載せるため、ここで弾かないと既定値へ落ちない。
+pub fn parse_port_override(raw: Option<&str>, default: u16) -> u16 {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(default)
+}
+
+/// env からポート上書きを読む（未設定・空・数値でない場合は `default`）。
+pub fn env_port_override(name: &str, default: u16) -> u16 {
+    parse_port_override(std::env::var(name).ok().as_deref(), default)
+}
+
 pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
+    // `settings.json` は本番と全 dev インスタンスで共有されるため、別ワークツリーで
+    // dev ビルドを立ち上げると `mcpPort` を奪い合って bind に失敗する。env で退避できる
+    // ようにしておく（`MCP_PORT_OVERWRITE=false` と併用すれば mcp-server.json も奪わない）。
+    let port = env_port_override("ORETACHI_MCP_PORT", port);
     let manager = app_handle.state::<McpServerManager>();
 
     // 既存サーバーを停止
@@ -3758,6 +3873,7 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
             .route("/set-description", post(set_description_handler))
             .route("/session-context", post(session_context_handler))
             .route("/prompt-context", post(prompt_context_handler))
+            .route("/turn-context", post(turn_context_handler))
             .with_state(app_handle.clone())
             .layer(middleware::from_fn(move |mut req: Request, next: Next| {
                 let key = api_key_state.clone();
@@ -3857,6 +3973,67 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Phase 0 (#121) で実測した Stop payload そのもの（CC 2.1.227 / Windows 10）。
+    /// #120 本文は「`stop_hook_active` 相当のフラグは現行ドキュメントに見当たらない」と
+    /// していたが、実在することが確認され訂正されている。ここに生データを残しておく。
+    const STOP_PAYLOAD: &str = r#"{
+        "session_id": "bcbd95af-3066-4bc9-9b6b-98fabdd3ef8b",
+        "transcript_path": "X:/t.jsonl",
+        "cwd": "X:/wt/foo",
+        "prompt_id": "46513e5d-9375-47f3-a6c0-c3a4452eb2fa",
+        "permission_mode": "default",
+        "effort": { "level": "medium" },
+        "hook_event_name": "Stop",
+        "stop_hook_active": false,
+        "last_assistant_message": "2",
+        "background_tasks": [],
+        "session_crons": []
+    }"#;
+
+    /// `.env` にはポート上書き3本を**空値**で並べてある（既定値のドキュメントを兼ねる）。
+    /// `dotenvy` は空値もプロセス環境へ載せるので、「空 = 未設定」がここで崩れると
+    /// 本番の MCP ポートが 0 になったり tauri-mcp が起動に失敗したりする。
+    #[test]
+    fn test_parse_port_override_treats_blank_as_unset() {
+        assert_eq!(parse_port_override(None, 4000), 4000);
+        assert_eq!(parse_port_override(Some(""), 4000), 4000);
+        assert_eq!(parse_port_override(Some("   "), 4000), 4000);
+        // 数値でない値も既定へ落とす（起動を止めない）
+        assert_eq!(parse_port_override(Some("abc"), 4000), 4000);
+        assert_eq!(parse_port_override(Some("70000"), 4000), 4000);
+        // 明示された値は使う
+        assert_eq!(parse_port_override(Some("9163"), 4000), 9163);
+        assert_eq!(parse_port_override(Some(" 9163 "), 4000), 9163);
+    }
+
+    #[test]
+    fn test_parse_stop_hook_fields_initial_firing() {
+        let (prompt_id, active) = parse_stop_hook_fields(Some(STOP_PAYLOAD));
+        assert_eq!(prompt_id.as_deref(), Some("46513e5d-9375-47f3-a6c0-c3a4452eb2fa"));
+        assert!(!active, "初回発火は stop_hook_active=false");
+    }
+
+    #[test]
+    fn test_parse_stop_hook_fields_continuation() {
+        let json = STOP_PAYLOAD.replace("\"stop_hook_active\": false", "\"stop_hook_active\": true");
+        let (prompt_id, active) = parse_stop_hook_fields(Some(&json));
+        // 継続ターンでも prompt_id は不変（1発話に対する9回の発火すべてで同一値だった）
+        assert_eq!(prompt_id.as_deref(), Some("46513e5d-9375-47f3-a6c0-c3a4452eb2fa"));
+        assert!(active);
+    }
+
+    #[test]
+    fn test_parse_stop_hook_fields_missing_or_broken() {
+        assert_eq!(parse_stop_hook_fields(None), (None, false));
+        assert_eq!(parse_stop_hook_fields(Some("not json")), (None, false));
+        assert_eq!(parse_stop_hook_fields(Some("{}")), (None, false));
+        // 空文字の prompt_id は「取れなかった」と同じ扱い（1ターン1回の鍵にできない）
+        assert_eq!(
+            parse_stop_hook_fields(Some(r#"{"prompt_id":"  ","stop_hook_active":true}"#)),
+            (None, true)
+        );
+    }
 
     /// name 未設定のグループは UI 側 (useWorkgroups.displayName / i18n workgroup.autoName) が
     /// 並び順から「グループ(N)」を自動生成して表示する。MCP が生の name をそのまま返すと

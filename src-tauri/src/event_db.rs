@@ -1593,6 +1593,50 @@ mod tests {
         });
     }
 
+    /// #124 の完了条件「同一ワークツリーに複数タブがある状態で誤配送しない」。
+    ///
+    /// `Stop` フックは発火したタブの `terminal_id` を運んでくるので、配送はその ID で
+    /// 未配送を引いて打刻する。B タブの `Stop` が A タブ宛の未読を抜き取らないこと、
+    /// および同じタブの2回目が空になること（`delivered_at` による二重注入防止）を固定する。
+    #[test]
+    fn test_roundtrip_turn_end_drain_is_scoped_to_one_tab() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+
+            for (id, term) in [("sub-a", "term-a"), ("sub-b", "term-b")] {
+                let mut s = sub(term, Some("wt-subscriber"), r#"["worktree.closed"]"#);
+                s.id = id.to_string();
+                upsert_subscription(&pool, &s).await.unwrap();
+            }
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            assert_eq!(fanout(&pool, &e, now).await.unwrap(), 2, "両タブに積まれる");
+
+            // B タブで Stop が発火した相当の drain
+            let b = list_inbox(&pool, "term-b", InboxFilter::Undelivered).await.unwrap();
+            assert_eq!(b.len(), 1);
+            let ids: Vec<String> = b.iter().map(|i| i.id.clone()).collect();
+            assert_eq!(mark_delivered(&pool, &ids, now).await.unwrap(), 1);
+
+            // A タブ宛は未配送のまま残っている（抜き取られていない）
+            let a = list_inbox(&pool, "term-a", InboxFilter::Undelivered).await.unwrap();
+            assert_eq!(a.len(), 1, "A タブ宛は B タブの Stop で消えない");
+            assert!(a[0].delivered_at.is_none());
+
+            // B タブの次の Stop では本文が出ない（二重注入防止）
+            assert!(list_inbox(&pool, "term-b", InboxFilter::Undelivered)
+                .await
+                .unwrap()
+                .is_empty());
+            // ただし未 ack としては残るので poll_inbox で取り直せる
+            assert_eq!(
+                list_inbox(&pool, "term-b", InboxFilter::Unacked).await.unwrap().len(),
+                1
+            );
+        });
+    }
+
     #[test]
     fn test_roundtrip_expired_subscription_is_not_delivered_and_purged() {
         with_pool(async {

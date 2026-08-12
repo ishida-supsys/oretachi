@@ -15,8 +15,11 @@
 //     (SessionStart フック用。/session-context からワークツリー所属グループの systemPrompt を
 //      取得し、SessionStart 用 JSON として stdout に出力する。失敗時は何も出力せず exit 0)
 //   oretachi-notify --prompt-context --project-dir "<dir>"
-//     (UserPromptSubmit フック用。/prompt-context から現在の description を取得し、
+//     (UserPromptSubmit フック用。/prompt-context から現在の description と未読を取得し、
 //      additionalContext JSON を stdout に出力して Claude のコンテキストに注入する)
+//   oretachi-notify --turn-context --project-dir "<dir>"
+//     (Stop フック用。stdin の Stop hook JSON を /turn-context へ転送し、このタブ宛の未読を
+//      additionalContext として stdout に出力する。会話が継続してエージェントが着手する)
 //
 // hook からは userConfig ではなく CC 組み込み変数 ${CLAUDE_PROJECT_DIR} が --project-dir に渡る。
 // 未置換/空の場合はプロセスの current_dir (hook は worktree ディレクトリで実行される) にフォールバック。
@@ -95,6 +98,29 @@ fn main() {
         std::process::exit(0);
     }
 
+    // Stop フック (--turn-context): /turn-context からこのタブ宛の未読を取得し、
+    // additionalContext JSON を stdout に出力する（#124）。Stop の additionalContext は
+    // 会話を継続させるので、未読が無ければ何も出さない（＝そのままターンが終わる）。
+    // --prompt-context と同じく、失敗しても何も出力せず必ず exit 0 する。
+    if has_flag(&args, "--turn-context", "-t") {
+        let dir = resolve_project_dir(&args);
+        let hook_json = read_stdin_if_piped();
+        // 継続ターンの終わりならサーバを起こさずに終わる。サーバ側でも同じ判定をするが、
+        // 無駄な TCP 往復（と 2 秒の読み取り待ち）を hook のクリティカルパスから消す。
+        if !should_request_turn_context(hook_json.as_deref()) {
+            std::process::exit(0);
+        }
+        match send_turn_context(&dir, hook_json.as_deref()) {
+            Ok(Some(output)) => println!("{}", output),
+            Ok(None) => {}
+            Err(_e) => {
+                #[cfg(debug_assertions)]
+                eprintln!("Turn context failed: {}", _e);
+            }
+        }
+        std::process::exit(0);
+    }
+
     // 通知 (--notify): stdin(hook JSON) を body として /notify へ送る。
     // ワークツリー名と kind はサーバー側で project-dir / event から解決する。
     if has_flag(&args, "--notify", "-n") {
@@ -112,7 +138,7 @@ fn main() {
     }
 
     #[cfg(debug_assertions)]
-    eprintln!("Usage: oretachi-notify --notify --project-dir <dir> --event <Event> [--agent <agent>]\n       oretachi-notify --set-description --project-dir <dir>\n       oretachi-notify --session-context --project-dir <dir>\n       oretachi-notify --prompt-context --project-dir <dir>");
+    eprintln!("Usage: oretachi-notify --notify --project-dir <dir> --event <Event> [--agent <agent>]\n       oretachi-notify --set-description --project-dir <dir>\n       oretachi-notify --session-context --project-dir <dir>\n       oretachi-notify --prompt-context --project-dir <dir>\n       oretachi-notify --turn-context --project-dir <dir>");
     std::process::exit(2);
 }
 
@@ -276,6 +302,55 @@ fn send_prompt_context(project_dir: &str) -> Result<Option<String>, String> {
     Ok(build_prompt_context_output(&body))
 }
 
+/// Stop フック用。/turn-context からこのタブ宛の未読を取得し、stdout に出力すべき
+/// additionalContext JSON を返す。未読なしは Ok(None)。
+fn send_turn_context(project_dir: &str, hook_json: Option<&str>) -> Result<Option<String>, String> {
+    let mut payload = serde_json::json!({
+        "projectDir": project_dir,
+    });
+    attach_terminal_id(&mut payload, read_terminal_id().as_deref());
+    if let Some(j) = hook_json {
+        payload["hookJson"] = serde_json::Value::String(j.to_string());
+    }
+    let body = post_json_read_body("/turn-context", &payload)?;
+    Ok(build_turn_context_output(&body))
+}
+
+/// Stop フックの stdin JSON を見て、サーバへ問い合わせるべきか判定する（#124）。
+///
+/// `stop_hook_active` は「この Stop が hook 由来の継続ターンの終わりか」を CC が明示的に
+/// 教えてくれるフィールド（Phase 0 / #121 で CC 2.1.227 の payload に実在することを実測）。
+/// 初回発火は `false`、`additionalContext` による継続後の発火はすべて `true`。
+/// **`true` のときに注入すると会話が永久に回る**ので問い合わせ自体をやめる。
+///
+/// stdin が無い / パースできない / フィールドが無い場合は `true`（問い合わせる）に倒す。
+/// サーバ側でも同じ判定をしており、さらに `prompt_id` 単位の上限と `delivered_at` が
+/// あるので、ここで安全側に倒しても暴走はしない。
+fn should_request_turn_context(hook_json: Option<&str>) -> bool {
+    let Some(v) = hook_json.and_then(|j| serde_json::from_str::<serde_json::Value>(j).ok()) else {
+        return true;
+    };
+    v.get("stop_hook_active").and_then(|b| b.as_bool()) != Some(true)
+}
+
+/// /turn-context のレスポンスボディから Stop 用の additionalContext JSON を組み立てる。
+/// 未読なし・parse 失敗時は None（何も出力しない ＝ そのままターンが終わる）。
+fn build_turn_context_output(body: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let inbox = v
+        .get("inbox")
+        .and_then(|i| i.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())?;
+    let output = serde_json::json!({
+        "hookSpecificOutput": {
+            "hookEventName": "Stop",
+            "additionalContext": inbox,
+        }
+    });
+    Some(output.to_string())
+}
+
 /// SessionStart 用の additionalContext JSON を組み立てる。
 /// グループの systemPrompt と、自分が属するタブの terminal_id を続けて注入する。
 /// terminal_id を伝えるのは、エージェントが oretachi_list_terminals 等で
@@ -315,26 +390,47 @@ fn build_session_context_output(
 }
 
 /// /prompt-context のレスポンスボディから UserPromptSubmit 用の
-/// additionalContext JSON を組み立てる。skip / parse 失敗時は None。
+/// additionalContext JSON を組み立てる。parse 失敗時と、出すものが何も無ければ None。
+///
+/// `skip` は **description 側だけ**を支配する（#124）。未読の回収は 600 秒スロットルの
+/// 対象外なので、`skip: true` でも `inbox` があれば出力する。`inbox` フィールドを返さない
+/// 旧サーバとの後方互換は「欠落 = None」で担保する。
 fn build_prompt_context_output(body: &str) -> Option<String> {
     let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let inbox = v
+        .get("inbox")
+        .and_then(|i| i.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
     if v["skip"].as_bool() == Some(true) {
-        return None;
+        // description はスロットル中。未読だけを注入する。
+        let inbox = inbox?;
+        return Some(prompt_context_json(inbox));
     }
-    let context = match v["description"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+    let description = match v["description"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
         Some(desc) => format!(
             "[oretachi] このワークツリーの現在の description: 「{}」。これは作業全体の目的を表す1行です。今の作業がこの説明の範囲内（同一プランのサブタスク進行・レビュー対応など）なら更新は不要です。全く別の作業に切り替わった場合、または説明が実態と大きくずれている場合のみ oretachi_set_description ツールで更新してください。",
             desc
         ),
         None => "[oretachi] このワークツリーの description は未設定です。作業内容が決まっていれば oretachi_set_description ツールで作業全体の目的を1行でセットしてください。".to_string(),
     };
-    let output = serde_json::json!({
+    // 未読を後ろに置くのは、それが「今このターンで着手すべきこと」であり
+    // 前段の description より新しい指示だから（build_session_context_output と同じ順序）。
+    let context = match inbox {
+        Some(i) => format!("{}\n\n{}", description, i),
+        None => description,
+    };
+    Some(prompt_context_json(&context))
+}
+
+fn prompt_context_json(context: &str) -> String {
+    serde_json::json!({
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
             "additionalContext": context,
         }
-    });
-    Some(output.to_string())
+    })
+    .to_string()
 }
 
 /// post_json と同様に POST し、レスポンスボディまで読んで返す。
@@ -643,6 +739,119 @@ mod tests {
     #[test]
     fn test_build_prompt_context_output_skip() {
         assert_eq!(build_prompt_context_output(r#"{"skip":true}"#), None);
+    }
+
+    /// Phase 0 (#121) で実測した Stop payload そのもの。初回発火は stop_hook_active=false。
+    const STOP_PAYLOAD: &str = r#"{
+        "session_id": "bcbd95af-3066-4bc9-9b6b-98fabdd3ef8b",
+        "transcript_path": "X:/t.jsonl",
+        "cwd": "X:/wt/foo",
+        "prompt_id": "46513e5d-9375-47f3-a6c0-c3a4452eb2fa",
+        "permission_mode": "default",
+        "effort": { "level": "medium" },
+        "hook_event_name": "Stop",
+        "stop_hook_active": false,
+        "last_assistant_message": "2",
+        "background_tasks": [],
+        "session_crons": []
+    }"#;
+
+    #[test]
+    fn test_has_flag_turn_context() {
+        let args = vec![
+            "bin".to_string(),
+            "--turn-context".to_string(),
+            "--project-dir".to_string(),
+            "X:/wt/foo".to_string(),
+        ];
+        assert!(has_flag(&args, "--turn-context", "-t"));
+        // 他モードと取り違えない（main の分岐順に依存しないことを固定する）
+        assert!(!has_flag(&args, "--notify", "-n"));
+        assert!(!has_flag(&args, "--prompt-context", "-c"));
+        assert!(!has_flag(&args, "--session-context", "-s"));
+        assert!(!has_flag(&args, "--set-description", "-d"));
+    }
+
+    #[test]
+    fn test_should_request_turn_context_initial_firing() {
+        // 初回の Stop は問い合わせる
+        assert!(should_request_turn_context(Some(STOP_PAYLOAD)));
+    }
+
+    #[test]
+    fn test_should_request_turn_context_blocks_continuation() {
+        // additionalContext による継続後の発火。ここで注入すると無限に回る
+        let json = STOP_PAYLOAD.replace("\"stop_hook_active\": false", "\"stop_hook_active\": true");
+        assert!(!should_request_turn_context(Some(&json)));
+    }
+
+    #[test]
+    fn test_should_request_turn_context_falls_back_to_asking() {
+        // 判定材料が無いときは安全側ではなく「問い合わせる」に倒す。
+        // 止めるのはサーバ側の stop_hook_active / prompt_id / delivered_at の3枚が担う。
+        assert!(should_request_turn_context(None));
+        assert!(should_request_turn_context(Some("not json")));
+        assert!(should_request_turn_context(Some(r#"{"hook_event_name":"Stop"}"#)));
+        // 文字列 "true" は bool ではないので判定材料にしない
+        assert!(should_request_turn_context(Some(r#"{"stop_hook_active":"true"}"#)));
+    }
+
+    #[test]
+    fn test_build_turn_context_output() {
+        let out = build_turn_context_output(r#"{"inbox":"[oretachi] 1 件届いています"}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "Stop");
+        assert_eq!(
+            v["hookSpecificOutput"]["additionalContext"],
+            "[oretachi] 1 件届いています"
+        );
+    }
+
+    #[test]
+    fn test_build_turn_context_output_nothing_to_inject() {
+        // 未読が無ければ何も出さない ＝ そのままターンが終わる（会話を継続させない）
+        assert_eq!(build_turn_context_output(r#"{"inbox":null}"#), None);
+        assert_eq!(build_turn_context_output(r#"{"inbox":"   "}"#), None);
+        assert_eq!(build_turn_context_output(r#"{}"#), None);
+        assert_eq!(build_turn_context_output("not json"), None);
+    }
+
+    #[test]
+    fn test_build_prompt_context_output_inbox_survives_throttle() {
+        // description は 600 秒スロットル中でも、未読だけは注入される（#120 §5.3）
+        let out =
+            build_prompt_context_output(r#"{"skip":true,"inbox":"[oretachi] 未読 2 件"}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["hookSpecificOutput"]["hookEventName"], "UserPromptSubmit");
+        let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert_eq!(ctx, "[oretachi] 未読 2 件");
+        assert!(!ctx.contains("oretachi_set_description"));
+    }
+
+    #[test]
+    fn test_build_prompt_context_output_skip_without_inbox_is_none() {
+        assert_eq!(build_prompt_context_output(r#"{"skip":true,"inbox":null}"#), None);
+    }
+
+    #[test]
+    fn test_build_prompt_context_output_description_then_inbox() {
+        let body = r#"{"description":"認証機能のリファクタリング","inbox":"[oretachi] 未読 1 件"}"#;
+        let out = build_prompt_context_output(body).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(ctx.starts_with("[oretachi] このワークツリーの現在の description"));
+        assert!(ctx.ends_with("[oretachi] 未読 1 件"));
+        assert!(ctx.find("認証機能").unwrap() < ctx.find("未読 1 件").unwrap());
+    }
+
+    #[test]
+    fn test_build_prompt_context_output_without_inbox_field_is_unchanged() {
+        // inbox を返さない旧サーバとの後方互換
+        let out = build_prompt_context_output(r#"{"description":"x"}"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let ctx = v["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
+        assert!(ctx.contains("oretachi_set_description"));
+        assert!(!ctx.contains('\n'));
     }
 
     #[test]
