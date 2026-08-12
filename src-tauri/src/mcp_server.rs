@@ -1892,6 +1892,10 @@ impl NotifyService {
         let subscription_id = crate::event_db::upsert_subscription(&pool, &sub)
             .await
             .map_err(|e| McpError::internal_error(e, None))?;
+        // カードの購読バッジ（#137）は常時見えているので、エージェントが購読した瞬間に
+        // 反映されないと嘘の状態を見せ続ける。イベント名は「未読が変わった」だが、
+        // フロントの `loadSubscriptions` は購読一覧も一緒に読み直すのでこれで足りる。
+        let _ = self.app_handle.emit("event-inbox-changed", ());
 
         log::info!(
             "[mcp] oretachi_subscribe_worktree: target={} ({}) terminal={} kinds={:?} delivery={} expires_at={:?} subscription_id={}",
@@ -1968,6 +1972,10 @@ impl NotifyService {
             .await
         }
         .map_err(|e| McpError::internal_error(e, None))?;
+        // 購読が減ったこともカードのバッジへ即座に伝える（#137）
+        if deleted > 0 {
+            let _ = self.app_handle.emit("event-inbox-changed", ());
+        }
 
         log::info!(
             "[mcp] oretachi_unsubscribe_worktree: terminal={} subscription_id={:?} target={:?} deleted={}",

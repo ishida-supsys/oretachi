@@ -61,21 +61,6 @@ export interface TerminalUnread {
   unacked: number;
 }
 
-/** 配送トーストのペイロード（Rust の `event-delivered`）。 */
-export interface DeliveredPayload {
-  terminalId: string;
-  /** PTY 押し込み (`method: "pty"`) のみ。Stop フック経由の注入では PTY を触らないので入らない。 */
-  sessionId?: number;
-  worktreeId: string | null;
-  worktreeName: string | null;
-  /** 同上。押し込み時のみ。 */
-  agentName?: string | null;
-  count: number;
-  text: string;
-  /** `"pty"`（押し込み）または `"stop"`（Stop フックのターン境界配送、#124）。 */
-  method: string;
-}
-
 /** 端末数上限で自動 spawn を拒否したときの通知（Rust の `event-spawn-rejected`）。 */
 export interface SpawnRejectedPayload {
   worktreeId: string;

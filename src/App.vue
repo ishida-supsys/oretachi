@@ -15,6 +15,7 @@ import RemoveWorktreeDialog from "./components/RemoveWorktreeDialog.vue";
 import RemoveWorkgroupDialog from "./components/RemoveWorkgroupDialog.vue";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import HotkeyCharDialog from "./components/HotkeyCharDialog.vue";
+import SubscriptionFocusDialog from "./components/SubscriptionFocusDialog.vue";
 import AutoApprovalPromptDialog from "./components/AutoApprovalPromptDialog.vue";
 import TrayButton from "./components/TrayButton.vue";
 import FirstRunWizard from "./components/wizard/FirstRunWizard.vue";
@@ -65,7 +66,7 @@ import {
   reportSpawnResult,
   terminalUnread,
 } from "./composables/useEventSubscriptions";
-import { useEventDeliveryToast } from "./composables/useEventDeliveryToast";
+import { useEventToast } from "./composables/useEventToast";
 import { collectUnreadByTab } from "./utils/terminalUnread";
 import { mainWindowShowsDelivery } from "./utils/eventToastScope";
 import type { SpawnTerminalRequest } from "./types/event";
@@ -96,9 +97,10 @@ const { worktrees, loadWorktreesFromSettings, syncWorktreesFromSettings, addWork
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, registerTerminalSession, closeAllSubWindows } = useSubWindows();
 const { autoApprovalPromptMap, lastJudgedCommandMap, showAutoApprovalPromptDialog, autoApprovalPromptTargetId, restoreFromSettings: restoreAutoApprovalPrompts, onClickAutoApproval, onSaveAutoApprovalPrompt } = useAutoApprovalPrompt(settings, scheduleSave, isDetached);
 const { notifications, initNotificationListener, addNotification, clearNotification, purgeStaleNotifications, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
-// 購読イベントの配送トースト（#120 §7 / #130）。Rust 側は全 webview へブロードキャストするので、
-// **そのワークツリーを表示しているウィンドウだけ**が出す。分離済みならサブウィンドウの担当。
-useEventDeliveryToast({ shouldShow: (wid) => mainWindowShowsDelivery(wid, isDetached) });
+// 自動 spawn 拒否のトースト（#120 §7 / #130 / #137）。Rust 側は全 webview へブロードキャスト
+// するので、**そのワークツリーを表示しているウィンドウだけ**が出す。分離済みならサブウィンドウの担当。
+// 配送トーストは #137 で廃止（購読状態はカードの購読バッジが常時見せる）。
+useEventToast({ shouldShow: (wid) => mainWindowShowsDelivery(wid, isDetached) });
 const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees, setCurrentTrayWorktreeId, isTrayShowingWorktree, focusTrayWindow } = useTrayPopup();
 const { closeAllCodeReviewWindows } = useCodeReviewWindow();
 const { openArtifactViewer, closeArtifactWindow } = useArtifactWindow();
@@ -1346,6 +1348,16 @@ const hotkeys = useAppHotkeys({
   suppressed: showFirstRunWizard,
 });
 
+/** カードの購読バッジから開く購読関係ダイアログ（#137）。null なら閉じている。 */
+const subscriptionDialogWorktreeId = ref<string | null>(null);
+
+/** ダイアログで選ばれたワークツリーへフォーカスする。分岐は Alt+[char] と共有する
+ *  （分離中はサブウィンドウ / タブが無ければ新規ターミナル）。 */
+function onFocusFromSubscriptions(worktreeId: string) {
+  subscriptionDialogWorktreeId.value = null;
+  hotkeys.focusWorktree(worktreeId);
+}
+
 
 onMounted(async () => {
   await loadSettings();
@@ -2221,6 +2233,7 @@ onMounted(async () => {
         @add-terminal="onAddTerminal"
         @open-in-ide="onOpenInIde"
         @open-artifacts="onOpenArtifacts"
+        @open-subscriptions="subscriptionDialogWorktreeId = $event"
         @move-to-sub-window="onMoveToSubWindow"
         @move-to-main-window="onMoveToMainWindow"
         @focus-sub-window="onFocusSubWindow"
@@ -2386,6 +2399,15 @@ onMounted(async () => {
       @confirm="onHotkeyCharConfirm"
       @clear="onHotkeyCharClear"
       @cancel="showHotkeyCharDialog = false"
+    />
+
+    <!-- 購読関係ダイアログ（カードの購読バッジから開く） -->
+    <SubscriptionFocusDialog
+      v-if="subscriptionDialogWorktreeId"
+      :worktree-id="subscriptionDialogWorktreeId"
+      :worktree-name="worktrees.find((w) => w.id === subscriptionDialogWorktreeId)?.name"
+      @focus="onFocusFromSubscriptions"
+      @cancel="subscriptionDialogWorktreeId = null"
     />
 
     <!-- 自動承認 追加プロンプト編集ダイアログ -->

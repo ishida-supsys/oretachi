@@ -61,6 +61,7 @@ const emit = defineEmits<{
   addTerminal: [worktreeId: string];
   openInIde: [worktreeId: string];
   openArtifacts: [worktreeId: string];
+  openSubscriptions: [worktreeId: string];
   moveToSubWindow: [worktreeId: string];
   moveToMainWindow: [worktreeId: string];
   focusSubWindow: [worktreeId: string];
@@ -230,6 +231,7 @@ defineExpose({ addRepository });
             @add-terminal="emit('addTerminal', $event)"
             @open-in-ide="emit('openInIde', $event)"
             @open-artifacts="emit('openArtifacts', $event)"
+            @open-subscriptions="emit('openSubscriptions', $event)"
             @move-to-sub-window="emit('moveToSubWindow', $event)"
             @move-to-main-window="emit('moveToMainWindow', $event)"
             @focus-sub-window="emit('focusSubWindow', $event)"
@@ -252,6 +254,7 @@ defineExpose({ addRepository });
             @add-terminal="emit('addTerminal', $event)"
             @open-in-ide="emit('openInIde', $event)"
             @open-artifacts="openArtifacts"
+            @open-subscriptions="emit('openSubscriptions', $event)"
             @move-to-sub-window="emit('moveToSubWindow', $event)"
             @move-to-main-window="emit('moveToMainWindow', $event)"
             @focus-sub-window="emit('focusSubWindow', $event)"

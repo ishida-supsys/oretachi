@@ -24,7 +24,7 @@ import { logDebug } from "./utils/log";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import AutoApprovalPromptDialog from "./components/AutoApprovalPromptDialog.vue";
 import Toast from "primevue/toast";
-import { useEventDeliveryToast } from "./composables/useEventDeliveryToast";
+import { useEventToast } from "./composables/useEventToast";
 import { initTerminalUnread, terminalUnread } from "./composables/useEventSubscriptions";
 import { collectUnreadByTab } from "./utils/terminalUnread";
 import { subWindowShowsDelivery } from "./utils/eventToastScope";
@@ -67,10 +67,10 @@ const terminalUnreadByTab = computed(() =>
   collectUnreadByTab(terminalUnread.value, terminalEntries),
 );
 
-// 配送トースト（#130）。**メインは isDetached のワークツリーを出さない**ので、
-// 分離済みワークツリーの配送を出すのはこのウィンドウの責任。
+// 自動 spawn 拒否のトースト（#130 / #137）。**メインは isDetached のワークツリーを出さない**
+// ので、分離済みワークツリーぶんを出すのはこのウィンドウの責任。
 // `<script setup>` の同期部分で呼ぶ必要がある（onMounted の await を跨ぐと useToast が失敗する）。
-useEventDeliveryToast({ shouldShow: (wid) => subWindowShowsDelivery(wid, worktreeId) });
+useEventToast({ shouldShow: (wid) => subWindowShowsDelivery(wid, worktreeId) });
 
 // 自動承認フラグ
 const autoApproval = ref(false);

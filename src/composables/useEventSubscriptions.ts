@@ -6,6 +6,7 @@ import type {
   SubscriptionView,
   TerminalUnread,
 } from "../types/event";
+import { buildSubscriptionCounts } from "../utils/subscriptionCounts";
 
 /** ワークツリー間イベントの購読状態（issue #120 §7 / #125）。
  *
@@ -35,6 +36,12 @@ export const agentTerminals = computed(() =>
       label: `#${tm.sessionId} ${tm.agentName ?? ""}`.trim(),
     })),
 );
+
+/** worktreeId → 購読件数（ワークツリーカードの購読バッジ用、#137）。
+ *
+ *  `subscriptions` から畳むだけなので、`loadSubscriptions` の直列化ガードと
+ *  `event-inbox-changed` の listen をそのまま共有する（新しい invoke は増やさない）。 */
+export const subscriptionCounts = computed(() => buildSubscriptionCounts(subscriptions.value));
 
 /** 未 ack の総数（トレイ / ホームの見出し用）。 */
 export const totalUnacked = computed(() =>

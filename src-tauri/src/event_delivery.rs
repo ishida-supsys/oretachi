@@ -99,7 +99,7 @@ pub enum DigestReason {
 }
 
 impl DigestReason {
-    /// ログと `event-delivered` の `method` に出す識別子。
+    /// ログに出す識別子（`event-delivered` の `method` は #137 で廃止した）。
     fn label(&self) -> &'static str {
         match self {
             DigestReason::SessionStart => "session",
@@ -717,26 +717,9 @@ async fn collect_digest(
         );
         let _ = app.emit("event-inbox-changed", ());
     }
-    if reason.is_turn_end() {
-        // 待機中への押し込み (`event-delivered`) と同じ形でフロントへ知らせる。
-        // SessionStart / UserPromptSubmit は人間が画面を見ている場面なのでトーストは出さない。
-        let settings = app.state::<SettingsManager>().get();
-        let worktree = items
-            .first()
-            .and_then(|i| i.subscriber_worktree_id.as_deref())
-            .and_then(|id| find_worktree(&settings, id));
-        let _ = app.emit(
-            "event-delivered",
-            serde_json::json!({
-                "terminalId": terminal_id,
-                "worktreeId": worktree.map(|w| w.id.clone()),
-                "worktreeName": worktree.map(|w| w.name.clone()),
-                "count": ids.len(),
-                "text": digest,
-                "method": "stop",
-            }),
-        );
-    }
+    // 配送ごとのトースト (`event-delivered`) は #137 で廃止した。知りたいのは個々の
+    // 配送イベントではなく購読関係の現況で、それはカードのバッジが常時見せている。
+    // 状態の変化そのものは直前の `event-inbox-changed` がフロントへ伝えている。
 }
 
 // ─── 配送の駆動 ───────────────────────────────────────────────────────────────
@@ -922,11 +905,6 @@ async fn push_pending(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerStat
         if allowed.is_empty() {
             continue;
         }
-        // トーストに出す宛先名は代表1件から引く（表示だけなので判定には使わない）。
-        let worktree = allowed
-            .first()
-            .and_then(|i| i.subscriber_worktree_id.as_deref())
-            .and_then(|id| find_worktree(&settings, id));
         // 残りに interrupt が混ざっていれば走行中でも割り込む。
         let delivery = strongest_delivery(&allowed);
         let decision = decide_push(session, &delivery, now);
@@ -996,19 +974,10 @@ async fn push_pending(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerStat
             session.agent_name,
             delivery
         );
-        let _ = app.emit(
-            "event-delivered",
-            serde_json::json!({
-                "terminalId": terminal_id,
-                "sessionId": session.session_id,
-                "worktreeId": worktree.map(|w| w.id.clone()),
-                "worktreeName": worktree.map(|w| w.name.clone()),
-                "agentName": session.agent_name,
-                "count": ids.len(),
-                "text": text,
-                "method": "pty",
-            }),
-        );
+        // 配送トースト (`event-delivered`) は #137 で廃止した。代わりに未配送件数が
+        // 減ったことを伝える（この経路には `event-inbox-changed` が無く、購読パネルと
+        // カードのバッジが押し込み後も古い件数のまま残っていた）。
+        let _ = app.emit("event-inbox-changed", ());
     }
 }
 
