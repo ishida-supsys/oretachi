@@ -883,14 +883,23 @@ async fn push_pending(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerStat
             continue;
         }
 
-        // 自動承認が有効な宛先へは定型イベントしか押し込まない。
-        let worktree = items
+        // 自動承認が有効な宛先へは定型イベントしか押し込まない。判定は
+        // `filter_for_turn_end` と同じく**行ごとにその行自身の `subscriber_worktree_id`**
+        // で行う。代表1件から解決すると、1タブが `cd` して別ワークツリーで再購読した
+        // ときに「実際の宛先ではないワークツリーの設定」で全件を通してしまう。
+        let (allowed, blocked): (Vec<_>, Vec<_>) = items.into_iter().partition(|i| {
+            let worktree = i
+                .subscriber_worktree_id
+                .as_deref()
+                .and_then(|id| find_worktree(&settings, id));
+            auto_approval_allows(worktree, &i.kind)
+        });
+        // トーストに出す宛先名は代表1件から引く（表示だけなので判定には使わない）。
+        let worktree = allowed
             .first()
+            .or_else(|| blocked.first())
             .and_then(|i| i.subscriber_worktree_id.as_deref())
             .and_then(|id| find_worktree(&settings, id));
-        let (allowed, blocked): (Vec<_>, Vec<_>) = items
-            .into_iter()
-            .partition(|i| auto_approval_allows(worktree, &i.kind));
         if !blocked.is_empty() {
             // 保留された分は未配送のまま残り、tick ごとに再評価される（＝毎回ここを通る）ので
             // debug に留める。人間への提示は UI の未読表示が担う。

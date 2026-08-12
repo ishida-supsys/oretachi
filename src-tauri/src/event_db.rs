@@ -1825,7 +1825,7 @@ mod tests {
             }
             let e = event("wt-target", None);
             insert_event(&pool, &e).await.unwrap();
-            assert_eq!(fanout(&pool, &e, now).await.unwrap(), 2, "両タブに積まれる");
+            assert_eq!(fanout_all(&pool, &e, now).await.unwrap(), 2, "両タブに積まれる");
 
             // B タブで Stop が発火した相当の drain
             let b = list_inbox(&pool, "term-b", InboxFilter::Undelivered).await.unwrap();
