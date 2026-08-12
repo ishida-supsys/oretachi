@@ -1276,9 +1276,18 @@ impl NotifyService {
             let _ = hook_tx.send(event);
             reply(true)
         } else {
-            self.app_handle
-                .emit("notify-worktree", &event)
-                .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
+            // トーストの emit に失敗しても `?` で返さない。イベント発行は既に済んでいる
+            // ので、ここで Err にすると成功した配送結果まで呼び出し元から見えなくなる
+            // （上のイベント発行側と同じ理由。2経路は互いを巻き添えにしない）。
+            if let Err(e) = self.app_handle.emit("notify-worktree", &event) {
+                log::warn!("[mcp] notify_worktree の emit に失敗: {}", e);
+                // 報告すべきイベント結果が無い（＝従来どおりの呼び出し）なら、
+                // 従来どおりエラーで返す。`"ok"` を返すと debounce と区別が付かない。
+                if event_result.is_none() {
+                    return Err(McpError::internal_error(e.to_string(), None));
+                }
+                return reply(false);
+            }
             log::info!("[mcp] notify_worktree: {} kind={}", worktree_name, event.kind);
             reply(true)
         }
@@ -2906,6 +2915,20 @@ async fn publish_worktree_message(
             )
         })?
         .to_string();
+    // 自由文は他ワークツリーのエージェントのコンテキストへそのまま注入される。
+    // 上限が無いと相手のセッションを本文で埋められるので入口で弾く（切り詰めではなく
+    // エラーにするのは、勝手に削って「送れた」と誤解させないため）。
+    let text_len = text.chars().count();
+    if text_len > crate::event_db::MESSAGE_TEXT_MAX_CHARS {
+        return Err(McpError::invalid_params(
+            format!(
+                "body が長すぎます（{} 文字 / 上限 {} 文字）。要点を絞って送るか、詳細は共有ファイルや issue に置いて参照を送ってください",
+                text_len,
+                crate::event_db::MESSAGE_TEXT_MAX_CHARS
+            ),
+            None,
+        ));
+    }
 
     // await をまたいで State / settings の参照を持たないよう、ここで所有権のある値へ確定させる
     let (source_terminal_id, source_worktree_id, source_worktree_name, repository_name, workgroup_id) = {

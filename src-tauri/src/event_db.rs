@@ -112,6 +112,28 @@ pub const PUSH_TTL_MS: i64 = 10 * 60 * 1000;
 /// PTY へ流す1メッセージの最大文字数。`sanitize_for_pty` で切り詰める。
 const PTY_TEXT_MAX_CHARS: usize = 600;
 
+/// `worktree.message` の本文の最大文字数（#126）。
+///
+/// 自由文はエージェントが書くので上限が無いと、他ワークツリーの `SessionStart`
+/// 注入（`format_inbox_digest`）に無制限のテキストが流れ込む。押し込み側は
+/// `PTY_TEXT_MAX_CHARS` で切れるが、注入側は切らないので入口で止める。
+pub const MESSAGE_TEXT_MAX_CHARS: usize = 4000;
+
+/// `SessionStart` / `Stop` の `additionalContext` へ一度に注入する本文の上限文字数（#126）。
+///
+/// 溜まった未読を全部並べると、自由文メッセージ数十件で相手のコンテキストを埋め尽くし、
+/// しかも**全件が配送済みになって二度と出てこない**（再送しない方針のため）。
+/// 載らなかった分は未配送のまま次の機会に回す。
+///
+/// **`MESSAGE_TEXT_MAX_CHARS` より行装飾ぶんだけ大きく取る。** 同じ値にすると、
+/// 上限いっぱいのメッセージ1件が `- [<id>] '<from>' からのメッセージ: ` の接頭辞のぶんだけ
+/// 必ず溢れ、切り詰められたまま配送済みになって全文が二度と注入されない。
+pub const DIGEST_MAX_CHARS: usize = MESSAGE_TEXT_MAX_CHARS + 200;
+
+/// 本文を切り詰めたときに添える案内。inbox 側には全文が未 ack で残っているので、
+/// `…` だけで終わらせず取得方法を必ず示す。
+const TRUNCATED_HINT: &str = "…（本文を切り詰めました。全文は oretachi_poll_inbox で取得できます）";
+
 /// sqlite の書き込みロック待ち上限。SessionStart フックのリクエストパスから触るため、
 /// サイドカーの読み取りタイムアウト（2 秒）より短くする。
 const BUSY_TIMEOUT_MS: u64 = 800;
@@ -1408,6 +1430,20 @@ pub fn format_inbox_line(item: &InboxItem) -> String {
     format!("- [{}] {}", item.id, detail)
 }
 
+/// 1行を `max_chars` 以内に切り詰め、切ったことと全文の取得方法を末尾に添える。
+///
+/// 案内文のぶんも `max_chars` の内側に収める（呼び出し元の予算計算を壊さないため）。
+fn truncate_with_hint(line: &str, max_chars: usize) -> String {
+    let hint_len = TRUNCATED_HINT.chars().count();
+    // 案内すら入らないほど予算が小さいときは素直に切るだけ（呼び出し元の予算は常に
+    // これより大きいが、定数を触ったときに黙って壊れないようにしておく）。
+    if max_chars <= hint_len {
+        return line.chars().take(max_chars).collect();
+    }
+    let body: String = line.chars().take(max_chars - hint_len).collect();
+    format!("{}{}", body, TRUNCATED_HINT)
+}
+
 /// PTY へ流す文字列から制御文字を落とし、長さを切り詰める。
 ///
 /// ワークツリー名 / ブランチ名は利用者が自由に付けられる文字列で、`format_inbox_line` を
@@ -1470,6 +1506,16 @@ pub fn format_inbox_push_text(items: &[InboxItem]) -> Option<(String, usize)> {
         if used > 0 && body.chars().count() + sep.len() + line.chars().count() > budget {
             break;
         }
+        // 1件目は必ず載せるが、**予算を超えるなら行のほうを切る**（#126）。切らずに
+        // 通すと全体が上限を超え、`sanitize_for_pty` が末尾から削るせいで tail の
+        // 「oretachi_ack_message で ack してください」が丸ごと消える。自由文の
+        // `worktree.message` は本文が長くなりうるので、この経路は常用される。
+        // 先頭の `- [<id>] ` は残るので ack に必要な ID は読める。
+        let line = if used == 0 && line.chars().count() > budget {
+            truncate_with_hint(&line, budget)
+        } else {
+            line
+        };
         body.push_str(sep);
         body.push_str(&line);
         used += 1;
@@ -1493,34 +1539,64 @@ pub fn format_inbox_push_text(items: &[InboxItem]) -> Option<(String, usize)> {
 ///   唯一の気付き手段がこれ（Phase 1 には UI が無い）。
 ///
 /// どちらも空なら None（呼び出し側で注入をスキップできるようにする）。
-pub fn format_inbox_digest(items: &[InboxItem], carryover: i64) -> Option<String> {
+///
+/// 戻り値は `(本文, 本文に載せた件数)`。**載らなかった分は呼び出し元が打刻してはいけない**
+/// （`format_inbox_push_text` と同じ規約）。載らなかった分は未配送のまま残り、次の
+/// `Stop` / `SessionStart` で出る。
+pub fn format_inbox_digest(items: &[InboxItem], carryover: i64) -> Option<(String, usize)> {
     if items.is_empty() && carryover <= 0 {
         return None;
     }
     if items.is_empty() {
-        return Some(format!(
-            "[oretachi] 未確認（未 ack）のワークツリーイベントが {} 件残っています。\
-             oretachi_poll_inbox で内容を確認し、oretachi_ack_message で ack してください。",
-            carryover
+        return Some((
+            format!(
+                "[oretachi] 未確認（未 ack）のワークツリーイベントが {} 件残っています。\
+                 oretachi_poll_inbox で内容を確認し、oretachi_ack_message で ack してください。",
+                carryover
+            ),
+            0,
         ));
     }
-    let lines: Vec<String> = items.iter().map(format_inbox_line).collect();
-    let carryover_note = if carryover > 0 {
+    // 総量に上限を設ける（#126）。`worktree.message` は自由文なので1件で数千文字になりうる。
+    // 上限が無いと、待機中に溜まった未読が `Stop` / `SessionStart` の additionalContext を
+    // 埋め尽くし、しかも全件が「配送済み」になって二度と出てこない。
+    let mut lines: Vec<String> = Vec::new();
+    let mut used = 0usize;
+    for item in items {
+        let line = format_inbox_line(item);
+        let total: usize = lines.iter().map(|l: &String| l.chars().count() + 1).sum();
+        if used > 0 && total + line.chars().count() > DIGEST_MAX_CHARS {
+            break;
+        }
+        // 1件目だけは必ず載せる。長すぎるときは行を切って、後続の ack 指示を残す。
+        let line = if used == 0 && line.chars().count() > DIGEST_MAX_CHARS {
+            truncate_with_hint(&line, DIGEST_MAX_CHARS)
+        } else {
+            line
+        };
+        lines.push(line);
+        used += 1;
+    }
+    let deferred = items.len() - used;
+    let carryover_note = if carryover > 0 || deferred > 0 {
         format!(
             "\nこのほかに未 ack のまま残っているものが {} 件あります（oretachi_poll_inbox で確認できます）。",
-            carryover
+            carryover + deferred as i64
         )
     } else {
         String::new()
     };
-    Some(format!(
-        "[oretachi] 購読していたワークツリーイベントが {} 件届いています。\n{}\n\n\
-         内容に応じて必要な動作確認や後続作業を進めてください。\
-         確認したら oretachi_ack_message に上記の [] 内の ID を渡して ack してください。\
-         この本文は自動では再掲されません（ack しないまま忘れた場合は oretachi_poll_inbox で取り直せます）。{}",
-        items.len(),
-        lines.join("\n"),
-        carryover_note
+    Some((
+        format!(
+            "[oretachi] 購読していたワークツリーイベントが {} 件届いています。\n{}\n\n\
+             内容に応じて必要な動作確認や後続作業を進めてください。\
+             確認したら oretachi_ack_message に上記の [] 内の ID を渡して ack してください。\
+             この本文は自動では再掲されません（ack しないまま忘れた場合は oretachi_poll_inbox で取り直せます）。{}",
+            used,
+            lines.join("\n"),
+            carryover_note
+        ),
+        used,
     ))
 }
 
@@ -1670,7 +1746,8 @@ mod tests {
     /// （注入喪失に気づく唯一の手段。本文は再掲しない）。
     #[test]
     fn test_format_inbox_digest_carryover_only_mentions_count_without_body() {
-        let digest = format_inbox_digest(&[], 3).unwrap();
+        let (digest, used) = format_inbox_digest(&[], 3).unwrap();
+        assert_eq!(used, 0);
         assert!(digest.contains("3 件"));
         assert!(digest.contains("oretachi_poll_inbox"));
         assert!(!digest.contains("がクローズされました"));
@@ -1682,7 +1759,8 @@ mod tests {
             KIND_WORKTREE_CLOSED,
             r#"{"worktreeId":"a","worktreeName":"wt-a","branchName":"b1"}"#,
         )];
-        let digest = format_inbox_digest(&items, 2).unwrap();
+        let (digest, used) = format_inbox_digest(&items, 2).unwrap();
+        assert_eq!(used, 1);
         assert!(digest.contains("wt-a"));
         assert!(digest.contains("2 件"));
     }
@@ -2688,6 +2766,70 @@ mod tests {
         assert!(text.contains("rm -rf /"), "本文自体は落とさず1行に潰すだけ: {}", text);
     }
 
+    /// 溜まった自由文メッセージで `SessionStart` / `Stop` の注入が膨れ上がらないこと。
+    /// 上限で載らなかった分は**打刻対象から外れる**（`used` に含めない）ので、
+    /// 「本文に出ていないのに配送済み」になって二度と出ない、という事故を防ぐ。
+    #[test]
+    fn test_format_inbox_digest_caps_total_and_defers_rest() {
+        let body = serde_json::json!({ "text": "あ".repeat(1500), "sourceWorktreeName": "src" })
+            .to_string();
+        let items: Vec<InboxItem> = (0..10)
+            .map(|i| {
+                let mut item = inbox_item(KIND_WORKTREE_MESSAGE, &body);
+                item.id = format!("inbox-{}", i);
+                item
+            })
+            .collect();
+        let (digest, used) = format_inbox_digest(&items, 0).unwrap();
+        assert!(used < items.len(), "全件は載らない: used={}", used);
+        assert!(used >= 1, "最低1件は載せる");
+        assert!(digest.chars().count() < DIGEST_MAX_CHARS + 600, "{}", digest.chars().count());
+        // 載らなかった分は「残っている」と伝える（黙って消さない）
+        assert!(
+            digest.contains(&format!("{} 件あります", items.len() - used)),
+            "{}",
+            digest
+        );
+        assert!(digest.contains("oretachi_ack_message"), "{}", digest);
+    }
+
+    /// 長い自由文メッセージが1件だけ来ても、末尾の ack 指示が残ること。
+    /// 「1件目は必ず載せる」を無条件に通すと全体が上限を超え、`sanitize_for_pty` が
+    /// 末尾から削るせいで一番効かせたい指示が消える。
+    #[test]
+    fn test_format_inbox_push_text_keeps_tail_for_long_message() {
+        let body = serde_json::json!({
+            "text": "あ".repeat(MESSAGE_TEXT_MAX_CHARS),
+            "sourceWorktreeName": "design",
+        })
+        .to_string();
+        let item = inbox_item(KIND_WORKTREE_MESSAGE, &body);
+        let (text, used) = format_inbox_push_text(std::slice::from_ref(&item)).unwrap();
+        assert_eq!(used, 1);
+        assert!(text.chars().count() <= 600, "{}", text.chars().count());
+        assert!(text.contains("oretachi_ack_message"), "{}", text);
+        // ack に必要な ID は行頭に残る
+        assert!(text.contains(&item.id), "{}", text);
+        // 切り詰めたことと全文の取得方法を伝える（`…` だけで終わらせない）
+        assert!(text.contains("切り詰めました"), "{}", text);
+    }
+
+    /// 上限いっぱいのメッセージ1件は digest では切り詰められない。切り詰めたまま
+    /// 配送済みにすると、再送しない方針のせいで全文が二度と注入されない。
+    #[test]
+    fn test_format_inbox_digest_fits_one_max_length_message() {
+        let body = serde_json::json!({
+            "text": "あ".repeat(MESSAGE_TEXT_MAX_CHARS),
+            "sourceWorktreeName": "design",
+        })
+        .to_string();
+        let item = inbox_item(KIND_WORKTREE_MESSAGE, &body);
+        let (digest, used) = format_inbox_digest(std::slice::from_ref(&item), 0).unwrap();
+        assert_eq!(used, 1);
+        assert!(!digest.contains("切り詰めました"), "上限いっぱいでも切られない");
+        assert!(digest.contains(&"あ".repeat(MESSAGE_TEXT_MAX_CHARS)), "全文が入る");
+    }
+
     /// 押し込み本文の締めが種別に依存していないこと。`closed` 決め打ちの文言のままだと
     /// `created` / `message` を「作業が完了した」と誤読させる。
     #[test]
@@ -2886,7 +3028,8 @@ mod tests {
                 r#"{"worktreeId":"b","worktreeName":"wt-b","branchName":"b2"}"#,
             ),
         ];
-        let digest = format_inbox_digest(&items, 0).unwrap();
+        let (digest, used) = format_inbox_digest(&items, 0).unwrap();
+        assert_eq!(used, 2);
         assert!(digest.contains("2 件"));
         assert!(digest.contains("oretachi_ack_message"));
         assert!(digest.contains("wt-a"));

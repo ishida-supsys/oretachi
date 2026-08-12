@@ -528,27 +528,24 @@ fn should_deliver_turn(last: Option<&str>, prompt_id: Option<&str>) -> bool {
     }
 }
 
-/// `Stop` 経路で注入してよい未読だけに絞る。
+/// 自動承認が有効な宛先へ注入してよい未読だけに絞る（#120 §5.5）。
 ///
-/// `Stop` の `additionalContext` は**会話を継続させる＝ターンを開始させる**ので、
-/// PTY 押し込みと同じ危険度を持つ。よって押し込みと同じ2つの制限を課す:
+/// **`Stop` / `SessionStart` / `UserPromptSubmit` のすべての注入経路に掛けること。**
+/// `autoApproval` は Claude Code の承認プロンプトを自動応答する機能なので、どの経路で
+/// 入ったかにかかわらず、注入された自由文は人間の確認なしにツール実行へつながる。
+/// 経路によって掛けたり掛けなかったりすると、`AUTO_APPROVAL_PUSHABLE_KINDS` が宣言する
+/// 「自動承認が有効な宛先へは定型イベントのみ」という不変条件が破れる（#126）。
 ///
-/// - `delivery=passive` は「押し込まないでほしい」という購読側の明示指定。同じタブに
-///   他の戦略が混ざっていても巻き込まない（Phase 3 で踏んだバグと同じ轍を踏まない）
-/// - 自動承認が有効な宛先へは定型イベントのみ（#120 §5.5）。自由文は inbox に残して
-///   人間の確認を要求する
-///
-/// 自動承認の判定は**行ごとにその行自身の `subscriber_worktree_id` で行う**。1タブが
-/// `cd` して別ワークツリーで再購読すると同じ `terminal_id` に異なるワークツリー宛の行が
-/// 混ざるため、代表1件から解決すると**実際の宛先ではないワークツリーの設定で全件を
-/// 判定してしまう**（#131 が手動引き継ぎで塞いだのと同じ穴）。
-fn filter_for_turn_end(
+/// 判定は**行ごとにその行自身の `subscriber_worktree_id` で行う**。1タブが `cd` して
+/// 別ワークツリーで再購読すると同じ `terminal_id` に異なるワークツリー宛の行が混ざるため、
+/// 代表1件から解決すると**実際の宛先ではないワークツリーの設定で全件を判定してしまう**
+/// （#131 が手動引き継ぎで塞いだのと同じ穴）。
+fn filter_auto_approval(
     items: Vec<event_db::InboxItem>,
     settings: &AppSettings,
 ) -> Vec<event_db::InboxItem> {
     items
         .into_iter()
-        .filter(|i| i.delivery != event_db::DELIVERY_PASSIVE)
         .filter(|i| {
             let worktree = i
                 .subscriber_worktree_id
@@ -557,6 +554,27 @@ fn filter_for_turn_end(
             auto_approval_allows(worktree, &i.kind)
         })
         .collect()
+}
+
+/// `Stop` 経路で注入してよい未読だけに絞る。
+///
+/// `Stop` の `additionalContext` は**会話を継続させる＝ターンを開始させる**ので、
+/// PTY 押し込みと同じ危険度を持つ。自動承認の制限（上記）に加えて、
+/// `delivery=passive` を除外する —— これは「押し込まないでほしい」という購読側の明示指定で、
+/// 同じタブに他の戦略が混ざっていても巻き込まない（Phase 3 で踏んだバグと同じ轍を踏まない）。
+///
+/// `SessionStart` / `UserPromptSubmit` は人間の操作が起点でターンを勝手に始めないため、
+/// `passive` も含めて回収する（購読ツールの説明どおり「どの戦略でもセッション開始時の
+/// 回収は使える」）。
+fn filter_for_turn_end(
+    items: Vec<event_db::InboxItem>,
+    settings: &AppSettings,
+) -> Vec<event_db::InboxItem> {
+    let items: Vec<_> = items
+        .into_iter()
+        .filter(|i| i.delivery != event_db::DELIVERY_PASSIVE)
+        .collect();
+    filter_auto_approval(items, settings)
 }
 
 /// 指定タブ宛の未読を hook の `additionalContext` 用テキストにまとめ、本文を出した分に
@@ -619,19 +637,23 @@ async fn collect_digest(
             return;
         }
     };
-    let items = if reason.is_turn_end() {
+    // 自動承認のガードは**全経路**に掛ける。`Stop` はさらに `passive` も外す。
+    let items = {
         let settings = app.state::<SettingsManager>().get();
         let before = items.len();
-        let items = filter_for_turn_end(items, &settings);
+        let items = if reason.is_turn_end() {
+            filter_for_turn_end(items, &settings)
+        } else {
+            filter_auto_approval(items, &settings)
+        };
         if items.len() < before {
             log::debug!(
-                "[delivery] Stop 経路では {} 件を注入対象から外した（passive / 自動承認）terminal={}",
+                "[delivery] {} 経路で {} 件を注入対象から外した（自動承認 / passive）terminal={}",
+                reason.label(),
                 before - items.len(),
                 terminal_id
             );
         }
-        items
-    } else {
         items
     };
 
@@ -656,7 +678,7 @@ async fn collect_digest(
             0
         }
     };
-    let Some(digest) = event_db::format_inbox_digest(&items, carryover) else {
+    let Some((digest, used)) = event_db::format_inbox_digest(&items, carryover) else {
         let _ = reply.send(None);
         return;
     };
@@ -673,7 +695,9 @@ async fn collect_digest(
         return;
     }
 
-    let ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
+    // 上限で載らなかった分は打刻しない（未配送のまま次の機会に回す）。全件打刻すると
+    // 本文に出ていない未読が「配送済み」になり、再送しない方針のせいで二度と出ない。
+    let ids: Vec<String> = items.iter().take(used).map(|i| i.id.clone()).collect();
     if let Err(e) = event_db::mark_delivered(pool, &ids, event_db::now_ms()).await {
         // 打刻に失敗しても本文は既に渡している。未配送のまま残るので次の機会に再度出る
         // （取りこぼすより一度重複するほうが安全）。
@@ -870,23 +894,15 @@ async fn push_pending(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerStat
         if items.is_empty() {
             continue;
         }
-        // 残りに interrupt が混ざっていれば走行中でも割り込む。
-        let delivery = strongest_delivery(&items);
-        let decision = decide_push(session, &delivery, now);
-        if let PushDecision::Skip(reason) = decision {
-            log::debug!(
-                "[delivery] 押し込みを見送る terminal={} 件数={} 理由={}",
-                terminal_id,
-                items.len(),
-                reason
-            );
-            continue;
-        }
-
         // 自動承認が有効な宛先へは定型イベントしか押し込まない。判定は
         // `filter_for_turn_end` と同じく**行ごとにその行自身の `subscriber_worktree_id`**
         // で行う。代表1件から解決すると、1タブが `cd` して別ワークツリーで再購読した
         // ときに「実際の宛先ではないワークツリーの設定」で全件を通してしまう。
+        //
+        // **配送戦略を決める前に仕分ける。** 後回しにすると、保留されるはずの
+        // `interrupt` な自由文メッセージが `strongest_delivery` を押し上げ、
+        // `turn_end` しか指定していない定型イベントまで走行中のエージェントへ
+        // 割り込ませてしまう（保留した行が押し込み判定に影響を残す）。
         let (allowed, blocked): (Vec<_>, Vec<_>) = items.into_iter().partition(|i| {
             let worktree = i
                 .subscriber_worktree_id
@@ -894,12 +910,6 @@ async fn push_pending(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerStat
                 .and_then(|id| find_worktree(&settings, id));
             auto_approval_allows(worktree, &i.kind)
         });
-        // トーストに出す宛先名は代表1件から引く（表示だけなので判定には使わない）。
-        let worktree = allowed
-            .first()
-            .or_else(|| blocked.first())
-            .and_then(|i| i.subscriber_worktree_id.as_deref())
-            .and_then(|id| find_worktree(&settings, id));
         if !blocked.is_empty() {
             // 保留された分は未配送のまま残り、tick ごとに再評価される（＝毎回ここを通る）ので
             // debug に留める。人間への提示は UI の未読表示が担う。
@@ -908,6 +918,26 @@ async fn push_pending(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerStat
                 blocked.len(),
                 terminal_id
             );
+        }
+        if allowed.is_empty() {
+            continue;
+        }
+        // トーストに出す宛先名は代表1件から引く（表示だけなので判定には使わない）。
+        let worktree = allowed
+            .first()
+            .and_then(|i| i.subscriber_worktree_id.as_deref())
+            .and_then(|id| find_worktree(&settings, id));
+        // 残りに interrupt が混ざっていれば走行中でも割り込む。
+        let delivery = strongest_delivery(&allowed);
+        let decision = decide_push(session, &delivery, now);
+        if let PushDecision::Skip(reason) = decision {
+            log::debug!(
+                "[delivery] 押し込みを見送る terminal={} 件数={} 理由={}",
+                terminal_id,
+                allowed.len(),
+                reason
+            );
+            continue;
         }
         // 長さ上限で載らなかった分は打刻しない（未配送のまま次回に回す）。
         let Some((text, used)) = event_db::format_inbox_push_text(&allowed) else {
@@ -1553,6 +1583,29 @@ mod tests {
         assert_eq!(ids(&blocked), vec!["c"]);
     }
 
+    /// 保留された行は配送戦略の決定に影響してはいけない。`interrupt` な自由文が
+    /// 混ざっているだけで `turn_end` の定型イベントが走行中のエージェントへ
+    /// 割り込む、という取り違えを固定する（`push_pending` は仕分け後に
+    /// `strongest_delivery` を取る）。
+    #[test]
+    fn test_blocked_items_do_not_escalate_delivery() {
+        let on = worktree(Some(true));
+        let items = vec![
+            item("a", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_CLOSED),
+            item("b", event_db::DELIVERY_INTERRUPT, event_db::KIND_WORKTREE_MESSAGE),
+        ];
+        // 仕分け前の全体では interrupt に見える
+        assert_eq!(strongest_delivery(&items), event_db::DELIVERY_INTERRUPT);
+        let allowed: Vec<_> = items
+            .into_iter()
+            .filter(|i| auto_approval_allows(Some(&on), &i.kind))
+            .collect();
+        // 仕分け後は turn_end。走行中のエージェントへは押し込まれない
+        assert_eq!(strongest_delivery(&allowed), event_db::DELIVERY_TURN_END);
+        let busy = session(Some("claude"), Some("busy"), true);
+        assert!(!is_push(decide_push(&busy, &strongest_delivery(&allowed), 1_000_000)));
+    }
+
     /// `spawn_for_closed_tabs` の判定と同じ形。自由文の未読しか無い宛先では、自動承認が
     /// 有効なら spawn しない（押し込めない未読を根拠にタブを立てない）。
     #[test]
@@ -1687,6 +1740,34 @@ mod tests {
         b.subscriber_worktree_id = Some("wt-auto".to_string());
 
         assert_eq!(ids(&filter_for_turn_end(vec![a, b], &settings)), vec!["a"]);
+    }
+
+    /// **自動承認のガードは全注入経路に掛かること。** `Stop` だけに掛けていると、
+    /// `SessionStart` / `UserPromptSubmit` の additionalContext から自由文が素通りし、
+    /// 自動承認が有効な宛先で人間の確認なしにツール実行へつながる（#126）。
+    /// `passive` の除外だけが `Stop` 固有。
+    #[test]
+    fn test_auto_approval_filter_applies_to_all_injection_paths() {
+        let items = vec![
+            item("a", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_CLOSED),
+            item("b", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_MESSAGE),
+            item("c", event_db::DELIVERY_PASSIVE, event_db::KIND_WORKTREE_CLOSED),
+        ];
+        let auto_on = settings_with(Some(true));
+        // SessionStart / UserPromptSubmit 経路: 自由文は落とし、passive は回収する
+        assert_eq!(
+            ids(&filter_auto_approval(items.clone(), &auto_on)),
+            vec!["a", "c"]
+        );
+        // Stop 経路: 自由文に加えて passive も落とす
+        assert_eq!(ids(&filter_for_turn_end(items.clone(), &auto_on)), vec!["a"]);
+        // 自動承認 OFF なら自由文も通る（passive の扱いだけ経路で違う）
+        let auto_off = settings_with(Some(false));
+        assert_eq!(
+            ids(&filter_auto_approval(items.clone(), &auto_off)),
+            vec!["a", "b", "c"]
+        );
+        assert_eq!(ids(&filter_for_turn_end(items, &auto_off)), vec!["a", "b"]);
     }
 
     /// 宛先ワークツリーが解決できない行（設定から消えた等）は、自動承認の判定材料が
