@@ -6,6 +6,7 @@ import TerminalView from "./components/TerminalView.vue";
 import FrameContainer from "./components/FrameContainer.vue";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import AutoApprovalPromptDialog from "./components/AutoApprovalPromptDialog.vue";
+import TrayArchiveConfirmDialog from "./components/TrayArchiveConfirmDialog.vue";
 import { useWorktreeFrame } from "./composables/useWorktreeFrame";
 import { useSettings } from "./composables/useSettings";
 import { useHotkeyListener } from "./composables/useHotkeys";
@@ -57,8 +58,19 @@ const terminalUnreadByTab = computed(() =>
   collectUnreadByTab(terminalUnread.value, terminalEntries),
 );
 
-// 閉鎖処理の再入防止フラグ
-let closing = false;
+// 閉鎖処理の再入防止フラグ（フッターボタンの disabled にも使うため ref）
+const closing = ref(false);
+// 遷移中フラグ（連打・ホットキー二重発火の抑止 + ボタンの disabled 用）
+const navigating = ref(false);
+// 遷移の世代。await の後で自分が最新でなければ以降の副作用を捨てる
+// （destroy 済みウィンドウへの setSize や、打ち切った遷移の描画を防ぐ）
+let navToken = 0;
+
+// 「次へ ▾」ドロップダウンの開閉
+const menuOpen = ref(false);
+// アーカイブ確認ダイアログ
+const showArchiveConfirm = ref(false);
+const archiveDirtyCount = ref(0);
 
 // フレームレイアウト（useWorktreeFrameで共通化）
 const {
@@ -206,6 +218,9 @@ async function showWorktree(data: TrayWorktreeData) {
 
 const currentWorktree = computed(() => allWorktrees.value[currentIndex.value] ?? null);
 const isLast = computed(() => currentIndex.value >= allWorktrees.value.length - 1);
+const isFirst = computed(() => currentIndex.value <= 0);
+/** ナビゲーション系ボタンを止めるべき状態 */
+const navBusy = computed(() => navigating.value || closing.value);
 
 // IDE で開く
 const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect();
@@ -239,8 +254,20 @@ async function onOpenInIde() {
   await openInIde(wt.worktreePath, { worktreeId: wt.worktreeId, worktreeName: wt.worktreeName, origin: "tray" });
 }
 
-/** 現在のターミナルを detach してから次に進む */
+/** 現在のターミナルを detach する（遷移・閉鎖の共通前処理） */
 async function detachCurrentTerminals() {
+  // 「前へ」で戻ったときに tray-init 時点の古いスナップショットで再アタッチされないよう、
+  // 離脱直前の画面内容を allWorktrees 側へ書き戻しておく。TerminalView の initialSnapshot は
+  // onMounted 時のみ参照されるため、次回マウント時にこの値が使われる。
+  // 制約: 離脱中に pty が exit しても再アタッチでは exit を受け取れない（既存挙動と同じ）。
+  const wt = currentWorktree.value;
+  if (wt) {
+    for (const term of wt.terminals) {
+      // serializeBuffer は内部で batcher.flush() してから serialize するので取りこぼさない
+      const snapshot = terminalRefs.get(term.id)?.serializeBuffer(300);
+      if (snapshot) term.snapshot = snapshot;
+    }
+  }
   returnAllToOffscreen();
   for (const [, ref] of terminalRefs) {
     ref.detach();
@@ -248,55 +275,152 @@ async function detachCurrentTerminals() {
   await nextTick();
 }
 
+type GoToOptions = {
+  /**
+   * 離れる側の通知を既読にする（既定 true）。アーカイブ導線では main 側の
+   * archiveWorktree が内部で clearNotification するため false にする。
+   */
+  clearLeaving?: boolean;
+  /** 呼び出し側で detachCurrentTerminals() を済ませている場合 true */
+  alreadyDetached?: boolean;
+};
+
+/**
+ * index のワークツリーを表示する。前へ / 次へ / アーカイブ後の再表示で共有する。
+ * - 離れる側の副作用: detach（+ 任意で通知クリア）
+ * - 入る側の副作用: tray-current-worktree-changed → showWorktree
+ * アーカイブ後は splice 済みで index が据え置きになるため、同一 index への goTo も
+ * 再表示として成立させる（同一 index を弾かない）。
+ */
+async function goTo(index: number, options: GoToOptions = {}): Promise<void> {
+  const { clearLeaving = true, alreadyDetached = false } = options;
+  if (closing.value || navigating.value) return;
+  if (index < 0 || index >= allWorktrees.value.length) return;
+
+  const token = ++navToken;
+  navigating.value = true;
+  try {
+    const leaving = currentWorktree.value;
+    if (!alreadyDetached) await detachCurrentTerminals();
+    if (clearLeaving && leaving) {
+      await emitTo("main", "tray-clear-notification", { worktreeId: leaving.worktreeId });
+    }
+    // await 中に閉鎖 / 別遷移が始まっていたら以降は行わない
+    if (token !== navToken || closing.value) return;
+
+    currentIndex.value = index;
+    const entering = allWorktrees.value[index];
+    await emitTo("main", "tray-current-worktree-changed", { worktreeId: entering.worktreeId });
+    if (token !== navToken || closing.value) return;
+    await showWorktree(entering);
+  } finally {
+    if (token === navToken) navigating.value = false;
+  }
+}
+
 async function onNext() {
-  const wt = currentWorktree.value;
-  if (!wt) return;
+  if (!isLast.value) await goTo(currentIndex.value + 1);
+}
 
-  await detachCurrentTerminals();
+async function onPrev() {
+  // 「見終わった」の意味づけは方向に依らないので、前へでも離脱側は既読にする（冪等）
+  if (!isFirst.value) await goTo(currentIndex.value - 1);
+}
 
-  // 通知クリアをメインに通知
-  await emitTo("main", "tray-clear-notification", { worktreeId: wt.worktreeId });
-
-  currentIndex.value += 1;
-  if (currentIndex.value < allWorktrees.value.length) {
-    const next = allWorktrees.value[currentIndex.value];
-    await emitTo("main", "tray-current-worktree-changed", { worktreeId: next.worktreeId });
-    await showWorktree(next);
+/**
+ * ポップアップを閉じる共通処理。
+ * 順序: detach → (通知クリア) → extraEmit → tray-closing → destroy
+ * destroy() は close() ではないので onUnmounted が走らない。emit はすべて destroy より
+ * 前に await して、IPC が落ちる前に届かせる。
+ */
+async function closePopup(options: {
+  clearCurrentNotification?: boolean;
+  /** tray-closing の直前に流す追加イベント */
+  extraEmit?: (worktree: TrayWorktreeData) => Promise<void>;
+} = {}): Promise<void> {
+  if (closing.value) return;
+  closing.value = true;
+  navToken++; // 進行中の goTo の続きを打ち切る
+  try {
+    const wt = currentWorktree.value;
+    await detachCurrentTerminals();
+    if (wt && (options.clearCurrentNotification ?? true)) {
+      await emitTo("main", "tray-clear-notification", { worktreeId: wt.worktreeId });
+    }
+    if (wt && options.extraEmit) await options.extraEmit(wt);
+    await emitTo("main", "tray-closing", {});
+    await getCurrentWindow().destroy();
+  } catch (e) {
+    // emit 失敗でボタンが永久に死ぬのを避ける（既存挙動を維持）
+    closing.value = false;
+    throw e;
   }
 }
 
 async function onDone() {
-  if (closing) return;
-  closing = true;
-  try {
-    const wt = currentWorktree.value;
-    if (wt) {
-      await detachCurrentTerminals();
-      await emitTo("main", "tray-clear-notification", { worktreeId: wt.worktreeId });
-    }
-    await emitTo("main", "tray-closing", {});
-    await getCurrentWindow().destroy();
-  } catch (e) {
-    closing = false;
-    throw e;
-  }
+  await closePopup();
 }
 
 async function onClose() {
-  if (closing) return;
-  closing = true;
-  try {
-    const wt = currentWorktree.value;
-    if (wt) {
-      await emitTo("main", "tray-clear-notification", { worktreeId: wt.worktreeId });
-    }
-    await detachCurrentTerminals();
-    await emitTo("main", "tray-closing", {});
-    await getCurrentWindow().destroy();
-  } catch (e) {
-    closing = false;
-    throw e;
+  await closePopup();
+}
+
+/**
+ * 表示中ワークツリーをメイン / サブウィンドウで開いてトレイを閉じる。
+ * トレイはターミナルを offscreen にマウントして掴んでいるため、detach で手放さないと
+ * メイン / サブ側で表示できない。かつメインが前面に出るのにトレイが残っても邪魔なだけ。
+ */
+async function onShowInWindow() {
+  await closePopup({
+    extraEmit: (wt) => emitTo("main", "tray-show-worktree", { worktreeId: wt.worktreeId }),
+  });
+}
+
+/** ▾ メニューの「アーカイブ化して…」→ 確認ダイアログを開く */
+async function onClickArchive() {
+  menuOpen.value = false;
+  const wt = currentWorktree.value;
+  if (!wt || !wt.canArchive || navBusy.value) return;
+  // 未コミット件数は警告表示用。取得に失敗しても確認自体は出す（0 件扱い）
+  archiveDirtyCount.value = await invoke<{ path: string }[]>("git_get_status", { repoPath: wt.worktreePath })
+    .then((files) => files.length)
+    .catch(() => 0);
+  // 取得中に別ワークツリーへ切り替わっていたら開かない
+  if (currentWorktree.value?.worktreeId !== wt.worktreeId) return;
+  showArchiveConfirm.value = true;
+}
+
+/** 確認ダイアログ確定 → main へアーカイブを依頼し、トレイ側は先に進む */
+async function onArchiveConfirmed(options: { deleteBranch: boolean }) {
+  showArchiveConfirm.value = false;
+  const wt = currentWorktree.value;
+  if (!wt || closing.value) return;
+
+  const index = currentIndex.value;
+  const wasLast = isLast.value;
+
+  // main 側のターミナル kill / git worktree remove とトレイの attach が競合しないよう、
+  // アーカイブ依頼より前にトレイ側のターミナルを必ず切り離す
+  await detachCurrentTerminals();
+
+  // アーカイブは数秒〜数十秒かかり、失敗時のエラーダイアログは main 側に出る。
+  // トレイは完了を待たずに次へ進む。通知クリアも archiveWorktree 内の clearNotification
+  // が行うので tray-clear-notification は出さない。
+  await emitTo("main", "tray-archive-worktree", {
+    worktreeId: wt.worktreeId,
+    deleteBranch: options.deleteBranch,
+  });
+
+  if (wasLast) {
+    // 「アーカイブ化して完了」: 表示中が最後の1件 → ポップアップを閉じる
+    await closePopup({ clearCurrentNotification: false });
+    return;
   }
+
+  // 「アーカイブ化して次へ」: 一覧から取り除くと後続が詰まるので、同じ index を再表示する。
+  // wasLast === false なので splice 後も index <= length - 1 が保証される。
+  allWorktrees.value.splice(index, 1);
+  await goTo(index, { clearLeaving: false, alreadyDetached: true });
 }
 
 function onHeaderDrag(e: MouseEvent) {
@@ -331,10 +455,15 @@ const { appliedZoom } = useUiZoom();
 useHotkeyListener(() => {
   const hk = settings.value.hotkeys;
   if (!hk || !initialized.value) return [];
+  // ダイアログ表示中はナビゲーション系を止める。useHotkeyListener は window capture で
+  // 登録されるため、ダイアログ側の stopPropagation より先に発火してしまう。
+  if (showArchiveConfirm.value || showIdeDialog.value || showAutoApprovalPromptDialog.value) return [];
   return [
     {
       binding: hk.trayNext,
       handler: () => {
+        menuOpen.value = false;
+        if (navBusy.value) return;
         if (isLast.value) {
           onDone();
         } else {
@@ -353,7 +482,16 @@ let unlistenSettings: UnlistenFn | null = null;
 let unlistenArtifact: UnlistenFn | null = null;
 let unlistenUnread: UnlistenFn | null = null;
 
+/** ▾ メニューを Escape で閉じる。ダイアログ側は各コンポーネントが自前で処理する */
+function onWindowKeydown(e: KeyboardEvent) {
+  if (e.key !== "Escape" || !menuOpen.value) return;
+  e.preventDefault();
+  e.stopPropagation();
+  menuOpen.value = false;
+}
+
 onMounted(async () => {
+  window.addEventListener("keydown", onWindowKeydown, true);
   await loadSettings();
 
   // タブ未読バッジの同期（#130）。event-inbox-changed は全 webview に届くので中継は不要。
@@ -398,6 +536,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  window.removeEventListener("keydown", onWindowKeydown, true);
   unlistenInit?.();
   unlistenSettings?.();
   unlistenArtifact?.();
@@ -534,19 +673,77 @@ onUnmounted(() => {
 
     <!-- フッター -->
     <div ref="footerRef" class="flex items-center justify-end gap-2 border-t border-[#313244] shrink-0 px-4 py-2" style="background-color: var(--bg-mantle-translucent)">
+      <!-- ウィンドウで開く: 押したらトレイは閉じる（= このワークツリーを開いて確認を終える） -->
       <button
-        v-if="!isLast"
-        class="px-4 py-1.5 text-sm rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors"
-        @click="onNext"
+        class="shrink-0 px-3 py-1.5 text-sm rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[#313244]"
+        :disabled="!currentWorktree || closing"
+        @click="onShowInWindow"
       >
-        {{ t('next') }}
+        {{ t('openInWindow') }}
       </button>
+
+      <!-- 前へ -->
       <button
-        class="px-4 py-1.5 text-sm rounded bg-[#a6e3a1] hover:bg-[#89c98a] text-[#1e1e2e] font-semibold transition-colors"
-        @click="onDone"
+        class="shrink-0 px-3 py-1.5 text-sm rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[#313244]"
+        :disabled="isFirst || navBusy"
+        @click="onPrev"
       >
-        {{ t('done') }}
+        {{ t('prev') }}
       </button>
+
+      <!-- 次へ / 完了 + ▾ (split button)。isLast では primary が「完了」に変わるので
+           「次へ」と「完了」が同時に並ぶことはなく、フッターの要素数は常に一定 -->
+      <div class="relative flex shrink-0">
+        <button
+          v-if="isLast"
+          class="px-4 py-1.5 text-sm rounded-l bg-[#a6e3a1] hover:bg-[#89c98a] text-[#1e1e2e] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          :disabled="closing"
+          @click="onDone"
+        >
+          {{ t('done') }}
+        </button>
+        <button
+          v-else
+          class="px-4 py-1.5 text-sm rounded-l bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          :disabled="navBusy"
+          @click="onNext"
+        >
+          {{ t('next') }}
+        </button>
+        <!-- ▾ は isLast でも有効（「アーカイブ化して完了」に到達させるため） -->
+        <button
+          class="px-2 py-1.5 text-sm rounded-r hover:bg-[#45475a] text-[#cdd6f4] border-l border-[#1e1e2e] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          :class="menuOpen ? 'bg-[#45475a]' : 'bg-[#313244]'"
+          :disabled="closing"
+          :title="t('moreActions')"
+          :aria-expanded="menuOpen"
+          @click="menuOpen = !menuOpen"
+        >
+          <span class="pi pi-chevron-up" style="font-size: 10px" />
+        </button>
+
+        <!-- クリックアウト用の透明バックドロップ（メニューより下、他要素より上） -->
+        <div v-if="menuOpen" class="fixed inset-0 z-[190]" @click="menuOpen = false" />
+
+        <!-- トレイウィンドウは高さ固定なのでメニューは上向きに開く -->
+        <div
+          v-if="menuOpen"
+          class="absolute bottom-full left-0 mb-1 z-[191] min-w-max rounded border border-[#45475a] py-1 shadow-lg"
+          style="background-color: #1e1e2e"
+        >
+          <button
+            v-if="currentWorktree?.canArchive"
+            class="flex w-full items-center gap-2 whitespace-nowrap px-3 py-1.5 text-left text-xs text-[#f38ba8] hover:bg-[#313244]"
+            @click="onClickArchive"
+          >
+            <span class="pi pi-inbox" style="font-size: 11px" />
+            {{ isLast ? t('archiveAndDone') : t('archiveAndNext') }}
+          </button>
+          <span v-else class="block whitespace-nowrap px-3 py-1.5 text-xs text-[#6c7086]">
+            {{ t('noMenuActions') }}
+          </span>
+        </div>
+      </div>
     </div>
 
     <!-- IDE 選択ダイアログ -->
@@ -566,6 +763,17 @@ onUnmounted(() => {
       :last-command="currentWorktree?.lastJudgedCommand ?? ''"
       @save="onSaveAutoApprovalPrompt"
       @cancel="showAutoApprovalPromptDialog = false"
+    />
+
+    <!-- アーカイブ簡易確認ダイアログ -->
+    <TrayArchiveConfirmDialog
+      v-if="showArchiveConfirm && currentWorktree"
+      :worktree-name="currentWorktree.worktreeName"
+      :branch-name="currentWorktree.branchName"
+      :dirty-count="archiveDirtyCount"
+      :is-last="isLast"
+      @confirm="onArchiveConfirmed"
+      @cancel="showArchiveConfirm = false"
     />
 
     <!-- TerminalView のマウント先 -->
@@ -599,8 +807,14 @@ onUnmounted(() => {
     "openArtifacts": "Artifacts",
     "loading": "Loading...",
     "noTerminals": "No terminals",
+    "prev": "← Prev",
     "next": "Next →",
     "done": "Done ✓",
+    "openInWindow": "Open in window",
+    "moreActions": "More actions",
+    "archiveAndNext": "Archive & next",
+    "archiveAndDone": "Archive & done",
+    "noMenuActions": "No actions available",
     "autoApprovalBadge": "Auto approval",
     "aiJudgingBadge": "AI judging",
     "editAutoApprovalPrompt": "Edit additional prompt"
@@ -612,8 +826,14 @@ onUnmounted(() => {
     "openArtifacts": "アーティファクト",
     "loading": "読み込み中...",
     "noTerminals": "ターミナルがありません",
+    "prev": "← 前へ",
     "next": "次へ →",
     "done": "完了 ✓",
+    "openInWindow": "ウィンドウで開く",
+    "moreActions": "その他の操作",
+    "archiveAndNext": "アーカイブ化して次へ",
+    "archiveAndDone": "アーカイブ化して完了",
+    "noMenuActions": "利用できる操作はありません",
     "autoApprovalBadge": "自動承認",
     "aiJudgingBadge": "AI判定中",
     "editAutoApprovalPrompt": "追加プロンプトを編集"
