@@ -1143,6 +1143,13 @@ fn fire_worktree_closed(
         {
             log::warn!("[event] purge_expired failed: {}", e);
         }
+        // 上の3つで購読行が消えているので、カードの購読バッジ（#137）へ知らせる。
+        // ここが無いと、A をクローズしても A を購読していた B のカードが ↓1 を出し
+        // 続ける。`fanout` の `count == 0`（誰も購読していない）ときは
+        // `notify_event_queued` も走らないので、配送ワーカー側の emit には頼れない。
+        // count > 0 でも購読の削除は fanout の後なので、ワーカーの emit がこの削除を
+        // 反映している保証がない。
+        let _ = handle.emit("event-inbox-changed", ());
     });
 }
 

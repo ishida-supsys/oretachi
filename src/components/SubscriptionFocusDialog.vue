@@ -28,9 +28,13 @@ const emit = defineEmits<{
 interface Row {
   key: string;
   label: string;
+  /** 購読者タブの PTY セッション ID。同じワークツリーの複数タブが同じ先を購読すると
+   *  ラベルだけでは行を見分けられないので、購読パネルと同じ `#N` バッジを出す */
+  sessionId: number | null;
+  agentName: string | null;
   /** ワイルドカード購読（`*` / `workgroup:` / `repo:`）の種別。厳密一致なら null */
   wildcardKind: string | null;
-  /** 厳密一致 target なのに名前が引けない = 対象がクローズ済み */
+  /** 相手のワークツリーが settings から消えている（= クローズ済み） */
   closed: boolean;
   orphaned: boolean;
   unacked: number;
@@ -51,6 +55,8 @@ const outgoing = computed<Row[]>(() =>
     .map((s) => ({
       key: s.id,
       label: targetText(s),
+      sessionId: s.subscriberSessionId,
+      agentName: s.agentName,
       // 「クローズ済み」は厳密一致 target でのみ意味を持つ。targetWorktreeName が null で
       // あることだけを根拠にすると、ワイルドカード購読が全部誤表示される（#134）
       wildcardKind: isExactWorktreeTarget(s) ? null : s.targetKind,
@@ -69,13 +75,25 @@ const incoming = computed<Row[]>(() =>
     .map((s) => ({
       key: s.id,
       label: s.subscriberWorktreeName ?? s.subscriberWorktreeId ?? "-",
+      sessionId: s.subscriberSessionId,
+      agentName: s.agentName,
       wildcardKind: null,
-      closed: false,
+      // 購読者ワークツリーが settings から消えていると名前が引けない。↑ 側と同じく
+      // 選択不可にする。ここを truthy な生 ID のまま渡すと、選択できるように見えて
+      // `focusWorktree` が `worktrees` から引けず**無言で何も起きない**行になる。
+      closed: !s.subscriberWorktreeName,
       orphaned: s.state === "orphaned",
       unacked: s.unacked,
-      focusId: s.subscriberWorktreeId,
+      focusId: s.subscriberWorktreeName ? s.subscriberWorktreeId : null,
     })),
 );
+
+/** 2セクションは行の見た目が同じなので、マークアップを1つにまとめて回す。
+ *  （↑ にだけワイルドカードの種別バッジが出るが、↓ 側は `wildcardKind` が常に null） */
+const sections = computed(() => [
+  { key: "outgoing", arrow: "↑", title: t("outgoing"), rows: outgoing.value },
+  { key: "incoming", arrow: "↓", title: t("incoming"), rows: incoming.value },
+]);
 
 function onSelect(row: Row): void {
   if (!row.focusId) return;
@@ -100,11 +118,13 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown, true));
       <h3 class="dialog-title">{{ t('title') }}</h3>
       <p class="dialog-sub">{{ worktreeName ?? worktreeId }}</p>
 
-      <section class="section">
-        <h4 class="section-title">↑ {{ t('outgoing') }} ({{ outgoing.length }})</h4>
-        <p v-if="outgoing.length === 0" class="empty">{{ t('none') }}</p>
+      <section v-for="section in sections" :key="section.key" class="section">
+        <h4 class="section-title">
+          {{ section.arrow }} {{ section.title }} ({{ section.rows.length }})
+        </h4>
+        <p v-if="section.rows.length === 0" class="empty">{{ t('none') }}</p>
         <ul v-else class="row-list">
-          <li v-for="row in outgoing" :key="row.key">
+          <li v-for="row in section.rows" :key="row.key">
             <button
               class="row"
               :class="{ 'row-disabled': !row.focusId }"
@@ -113,32 +133,14 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown, true));
               @click="onSelect(row)"
             >
               <span class="row-label">{{ row.label }}</span>
+              <!-- 同じワークツリーの複数タブが同じ先を購読すると、ラベルだけでは
+                   行を見分けられない（購読パネルと同じ #N / エージェント名を出す） -->
+              <span v-if="row.sessionId !== null" class="tab-badge">#{{ row.sessionId }}</span>
+              <span v-if="row.agentName" class="badge badge-agent">{{ row.agentName }}</span>
               <span v-if="row.wildcardKind" class="badge badge-wildcard">
                 {{ t(`targetKind.${row.wildcardKind}`) }}
               </span>
               <span v-if="row.closed" class="badge badge-muted">{{ t('targetClosed') }}</span>
-              <span v-if="row.orphaned" class="badge badge-orphaned" :title="t('orphanedHint')">
-                {{ t('orphaned') }}
-              </span>
-              <span v-if="row.unacked > 0" class="badge badge-unread">{{ row.unacked }}</span>
-            </button>
-          </li>
-        </ul>
-      </section>
-
-      <section class="section">
-        <h4 class="section-title">↓ {{ t('incoming') }} ({{ incoming.length }})</h4>
-        <p v-if="incoming.length === 0" class="empty">{{ t('none') }}</p>
-        <ul v-else class="row-list">
-          <li v-for="row in incoming" :key="row.key">
-            <button
-              class="row"
-              :class="{ 'row-disabled': !row.focusId }"
-              :disabled="!row.focusId"
-              :title="row.focusId ? t('focusHint') : t('notFocusable')"
-              @click="onSelect(row)"
-            >
-              <span class="row-label">{{ row.label }}</span>
               <span v-if="row.orphaned" class="badge badge-orphaned" :title="t('orphanedHint')">
                 {{ t('orphaned') }}
               </span>
@@ -244,16 +246,32 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown, true));
 
 .row-label {
   font-family: monospace;
+  /* バッジが増えても label 側だけが縮んで省略されるようにする */
+  min-width: 0;
+  flex: 0 1 auto;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
+.tab-badge {
+  flex-shrink: 0;
+  font-family: monospace;
+  font-size: 11px;
+  color: #6c7086;
+}
+
 .badge {
+  flex-shrink: 0;
   font-size: 10px;
   padding: 1px 6px;
   border-radius: 4px;
   white-space: nowrap;
+}
+
+.badge-agent {
+  background: #313244;
+  color: #a6e3a1;
 }
 
 .badge-wildcard {

@@ -686,7 +686,7 @@ async fn collect_digest(
     // **先に渡してから打刻する。** 呼び出し元がタイムアウトで諦めていれば送信は失敗し、
     // その場合は打刻しない（未配送のまま残るので次の機会に再度出る）。逆順にすると
     // 「配送済みだが誰も見ていない」本文が生まれ、再送しない方針のせいで永久に失われる。
-    if reply.send(Some(digest.clone())).is_err() {
+    if reply.send(Some(digest)).is_err() {
         log::warn!(
             "[delivery] 注入本文の受け取り手が既に居ない（タイムアウト）ため打刻しない terminal={} 経路={}",
             terminal_id,
