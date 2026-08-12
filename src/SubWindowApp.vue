@@ -23,6 +23,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { logDebug } from "./utils/log";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import AutoApprovalPromptDialog from "./components/AutoApprovalPromptDialog.vue";
+import Toast from "primevue/toast";
+import { useEventDeliveryToast } from "./composables/useEventDeliveryToast";
+import { initTerminalUnread, terminalUnread } from "./composables/useEventSubscriptions";
+import { collectUnreadByTab } from "./utils/terminalUnread";
+import { subWindowShowsDelivery } from "./utils/eventToastScope";
 import type { SubTerminalEntry, WebSessionInfo, AiSessionInfo } from "./types/terminal";
 import type { FrameNode } from "./types/frame";
 import { useI18n } from "vue-i18n";
@@ -54,6 +59,18 @@ const terminalWebSessions = reactive(new Map<number, WebSessionInfo>());
 
 // terminalId → AIエージェントセッション情報（タブツールチップ用）
 const terminalAiSessions = reactive(new Map<number, AiSessionInfo>());
+
+// タブ（フロントの terminalId）→ 未 ack のワークツリーイベント件数（#120 §7 / #130）。
+// バックエンドは pty の session_id で数えるので、上の pty-ai-agent-changed と同じ
+// session_id → terminalId の逆引きで詰め替える。
+const terminalUnreadByTab = computed(() =>
+  collectUnreadByTab(terminalUnread.value, terminalEntries),
+);
+
+// 配送トースト（#130）。**メインは isDetached のワークツリーを出さない**ので、
+// 分離済みワークツリーの配送を出すのはこのウィンドウの責任。
+// `<script setup>` の同期部分で呼ぶ必要がある（onMounted の await を跨ぐと useToast が失敗する）。
+useEventDeliveryToast({ shouldShow: (wid) => subWindowShowsDelivery(wid, worktreeId) });
 
 // 自動承認フラグ
 const autoApproval = ref(false);
@@ -240,6 +257,9 @@ onMounted(async () => {
   collect(await listen("settings-changed", async () => {
     await loadSettings();
   }));
+
+  // タブ未読バッジの同期（#130）。event-inbox-changed は全 webview に届くので中継は不要。
+  collect(await initTerminalUnread());
 
   // アーティファクト変更時にカウントを更新
   collect(await listen<{ worktreeId: string; artifactId: string; command: string }>("artifact-changed", (event) => {
@@ -605,6 +625,7 @@ async function onCancelAiJudging() {
           :terminal-agent-status="terminalAgentStatus"
           :terminal-web-sessions="terminalWebSessions"
           :terminal-ai-sessions="terminalAiSessions"
+          :terminal-unread="terminalUnreadByTab"
           @switch-terminal="switchTerminal"
           @close-terminal="closeTerminal"
           @title-change="onTerminalTitleChange"
@@ -636,6 +657,21 @@ async function onCancelAiJudging() {
       @save="onSaveAutoApprovalPrompt"
       @cancel="showAutoApprovalPromptDialog = false"
     />
+
+    <!-- 配送トースト (#130)。ToastService は main.ts が全ウィンドウモードに登録済みなので
+         outlet を置くだけでよい。見た目を揃えるため App.vue と同じ #message スロットを使う
+         (スタイルは styles.css の .toast-message-content でグローバル定義済み)。
+         サブウィンドウは進行中トースト (severity=info) を出さないのでスピナーは持たない。 -->
+    <Toast position="bottom-right">
+      <template #message="slotProps">
+        <div class="toast-message-content">
+          <div>
+            <div class="font-semibold">{{ slotProps.message.summary }}</div>
+            <div v-if="slotProps.message.detail" class="text-sm">{{ slotProps.message.detail }}</div>
+          </div>
+        </div>
+      </template>
+    </Toast>
 
     <!-- TerminalView のマウント先。手動 DOM reparenting で terminal-host に移動する -->
     <div data-offscreen style="position:fixed; left:-10000px; top:-10000px; width:1000px; height:1000px; overflow:hidden; pointer-events:none">

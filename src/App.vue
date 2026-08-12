@@ -65,11 +65,10 @@ import {
   reportSpawnResult,
   terminalUnread,
 } from "./composables/useEventSubscriptions";
-import type {
-  DeliveredPayload,
-  SpawnRejectedPayload,
-  SpawnTerminalRequest,
-} from "./types/event";
+import { useEventDeliveryToast } from "./composables/useEventDeliveryToast";
+import { collectUnreadByTab } from "./utils/terminalUnread";
+import { mainWindowShowsDelivery } from "./utils/eventToastScope";
+import type { SpawnTerminalRequest } from "./types/event";
 import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { cancelApproval } from "./utils/autoApproval";
@@ -97,6 +96,9 @@ const { worktrees, loadWorktreesFromSettings, syncWorktreesFromSettings, addWork
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, registerTerminalSession, closeAllSubWindows } = useSubWindows();
 const { autoApprovalPromptMap, lastJudgedCommandMap, showAutoApprovalPromptDialog, autoApprovalPromptTargetId, restoreFromSettings: restoreAutoApprovalPrompts, onClickAutoApproval, onSaveAutoApprovalPrompt } = useAutoApprovalPrompt(settings, scheduleSave, isDetached);
 const { notifications, initNotificationListener, addNotification, clearNotification, purgeStaleNotifications, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
+// 購読イベントの配送トースト（#120 §7 / #130）。Rust 側は全 webview へブロードキャストするので、
+// **そのワークツリーを表示しているウィンドウだけ**が出す。分離済みならサブウィンドウの担当。
+useEventDeliveryToast({ shouldShow: (wid) => mainWindowShowsDelivery(wid, isDetached) });
 const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees, setCurrentTrayWorktreeId, isTrayShowingWorktree, focusTrayWindow } = useTrayPopup();
 const { closeAllCodeReviewWindows } = useCodeReviewWindow();
 const { openArtifactViewer, closeArtifactWindow } = useArtifactWindow();
@@ -180,14 +182,8 @@ const terminalWebSessions = reactive(new Map<number, import("./types/terminal").
 // session_id → terminalId の逆引きで詰め替える。
 const terminalUnreadByTab = computed(() => {
   const result = new Map<number, number>();
-  if (terminalUnread.value.size === 0) return result;
   for (const [, bundle] of worktreeFrameBundles) {
-    for (const [tid, termRef] of bundle.terminalRefs) {
-      const sid = termRef?.sessionId;
-      if (sid == null) continue;
-      const count = terminalUnread.value.get(sid);
-      if (count) result.set(tid, count);
-    }
+    collectUnreadByTab(terminalUnread.value, bundle.terminalRefs, result);
   }
   return result;
 });
@@ -1527,39 +1523,6 @@ onMounted(async () => {
     },
   );
 
-  // 購読イベントの配送（issue #120 §7 / #125）。
-  // 配送を画面に出さないと「勝手にエージェントが動き出した」ように見えるので、
-  // PTY へ押し込んだ瞬間にトーストで知らせる。
-  await listen<DeliveredPayload>("event-delivered", (event) => {
-    const p = event.payload;
-    // 本文は最大 600 字。トーストは幅 260px なので、そのまま出すと画面を埋める。
-    // 全文はエージェント側の画面と購読パネルで読めるので、ここは要約で足りる。
-    const detail = p.text.length > 120 ? `${p.text.slice(0, 120)}…` : p.text;
-    toast.add({
-      severity: "success",
-      summary: t("eventDeliveredSummary", { name: p.worktreeName ?? "", count: p.count }),
-      detail,
-      life: 8000,
-    });
-  });
-
-  // 自動 spawn が端末数上限で拒否された。黙って落とすと「spawn すると言ったのに
-  // 何も起きない」になるので必ず出す。
-  await listen<SpawnRejectedPayload>("event-spawn-rejected", (event) => {
-    const p = event.payload;
-    toast.add({
-      severity: "warn",
-      summary: t("eventSpawnRejectedSummary"),
-      detail: t("eventSpawnRejectedDetail", {
-        name: p.worktreeName,
-        live: p.liveSessions,
-        limit: p.limit,
-        pending: p.pending,
-      }),
-      life: 10000,
-    });
-  });
-
   // 購読者タブが無いワークツリーへ、配送のために新しいタブを立てる（spawn_if_closed）。
   // **成否にかかわらず event_spawn_result を返す**こと。返さないと Rust 側の単一フライトが
   // 60 秒解放されないが、逆に返さないからといって撃ち直しループにはならない。
@@ -2451,7 +2414,9 @@ onMounted(async () => {
           <i v-if="slotProps.message.severity === 'info'" class="pi pi-spinner pi-spin toast-spinner" />
           <div>
             <div class="font-semibold">{{ slotProps.message.summary }}</div>
-            <div class="text-sm">{{ slotProps.message.detail }}</div>
+            <!-- 配送トーストは本文が空になりうる（未知のイベント種別で text が無い場合）。
+                 空の行を描かないようガードする（SubWindowApp.vue の outlet と同じ） -->
+            <div v-if="slotProps.message.detail" class="text-sm">{{ slotProps.message.detail }}</div>
           </div>
         </div>
       </template>
@@ -2468,9 +2433,6 @@ onMounted(async () => {
 <i18n lang="json">
 {
   "en": {
-    "eventDeliveredSummary": "Worktree event delivered ({count})",
-    "eventSpawnRejectedSummary": "Auto spawn declined",
-    "eventSpawnRejectedDetail": "{name} has {pending} unread message(s) but {live} terminals are open (limit {limit}). Close some terminals or open the worktree manually.",
     "eventSpawnedSummary": "Agent started for a subscription",
     "eventSpawnedDetail": "Opened a tab in {name} to deliver {count} unread message(s).",
     "taskAddSummary": "Add Task",
@@ -2509,9 +2471,6 @@ onMounted(async () => {
     "removeRepositoryConfirm": "Unregister \"{name}\"?\n\nThis closes its {terminals} terminal(s) and permanently deletes the artifacts and saved terminal sessions created there. The repository folder itself is not touched."
   },
   "ja": {
-    "eventDeliveredSummary": "ワークツリーイベントを配送しました ({count}件)",
-    "eventSpawnRejectedSummary": "自動 spawn を見送りました",
-    "eventSpawnRejectedDetail": "{name} に未読が {pending} 件ありますが、ターミナルが {live} 個開いています（上限 {limit}）。ターミナルを整理するか、手動でワークツリーを開いてください",
     "eventSpawnedSummary": "購読のためエージェントを起動しました",
     "eventSpawnedDetail": "{name} に未読 {count} 件を届けるためタブを開きました",
     "taskAddSummary": "タスク追加",

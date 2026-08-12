@@ -18,6 +18,8 @@ import type { UrlArtifactEntry } from "./types/artifact";
 import { invoke } from "@tauri-apps/api/core";
 import type { TrayWorktreeData } from "./composables/useTrayPopup";
 import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
+import { initTerminalUnread, terminalUnread } from "./composables/useEventSubscriptions";
+import { collectUnreadByTab } from "./utils/terminalUnread";
 import type { FrameNode } from "./types/frame";
 import type { TrayTerminalEntry } from "./types/terminal";
 import { useI18n } from "vue-i18n";
@@ -46,6 +48,14 @@ const terminalEntries = reactive(new Map<number, TrayTerminalEntry>());
 
 // TerminalView ref 管理
 const terminalRefs = reactive(new Map<number, InstanceType<typeof TerminalView>>());
+
+// タブ（フロントの terminalId）→ 未 ack のワークツリーイベント件数（#120 §7 / #130）。
+// バックエンドは pty の session_id で数えるので詰め替える。terminalEntries は表示中
+// ワークツリーの分だけなので、他ワークツリーの未読が混ざることはない。
+// トレイはトーストを出さない（メイン / サブウィンドウと二重になるため）。バッジのみ。
+const terminalUnreadByTab = computed(() =>
+  collectUnreadByTab(terminalUnread.value, terminalEntries),
+);
 
 // 閉鎖処理の再入防止フラグ
 let closing = false;
@@ -341,9 +351,13 @@ useHotkeyListener(() => {
 let unlistenInit: UnlistenFn | null = null;
 let unlistenSettings: UnlistenFn | null = null;
 let unlistenArtifact: UnlistenFn | null = null;
+let unlistenUnread: UnlistenFn | null = null;
 
 onMounted(async () => {
   await loadSettings();
+
+  // タブ未読バッジの同期（#130）。event-inbox-changed は全 webview に届くので中継は不要。
+  unlistenUnread = await initTerminalUnread();
 
   // 表示中ワークツリーにアーティファクトが登録されたら URL 一覧を追従させる
   unlistenArtifact = await listen<{ worktreeId: string }>("artifact-changed", async (event) => {
@@ -387,6 +401,7 @@ onUnmounted(() => {
   unlistenInit?.();
   unlistenSettings?.();
   unlistenArtifact?.();
+  unlistenUnread?.();
 });
 </script>
 
@@ -500,6 +515,7 @@ onUnmounted(() => {
         v-else-if="terminalEntries.size > 0"
         :node="root"
         :terminal-entries="terminalEntries"
+        :terminal-unread="terminalUnreadByTab"
         @switch-terminal="switchTerminal"
         @close-terminal="closeTerminal"
         @title-change="() => {}"

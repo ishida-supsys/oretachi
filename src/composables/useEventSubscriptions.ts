@@ -1,6 +1,6 @@
 import { computed, ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   OrphanedGroupView,
   SubscriptionView,
@@ -81,14 +81,36 @@ export async function loadSubscriptions(): Promise<void> {
   }
 }
 
+/** `loadSubscriptions` と同じ理由の直列化。`event-inbox-changed` は Reconcile /
+ *  EventQueued / 引き継ぎ / ack など複数箇所から連続で飛ぶので、素朴に叩くと
+ *  `event_terminal_unread` の invoke が並走し、**先発（古い）が後着したときに
+ *  新しいスナップショットを上書き**する。このイベントは変化があったときしか
+ *  飛ばないので、一度ズレると次の変化まで誤った件数で固定される。 */
+let unreadLoading = false;
+let pendingUnreadReload = false;
+
 export async function loadTerminalUnread(): Promise<void> {
-  const rows = await safeInvoke<TerminalUnread[]>("event_terminal_unread", []);
-  liveTerminals.value = rows;
-  const next = new Map<number, number>();
-  for (const row of rows) {
-    if (row.unacked > 0) next.set(row.sessionId, row.unacked);
+  if (unreadLoading) {
+    pendingUnreadReload = true;
+    return;
   }
-  terminalUnread.value = next;
+  unreadLoading = true;
+  try {
+    const rows = await safeInvoke<TerminalUnread[]>("event_terminal_unread", []);
+    liveTerminals.value = rows;
+    const next = new Map<number, number>();
+    for (const row of rows) {
+      if (row.unacked > 0) next.set(row.sessionId, row.unacked);
+    }
+    terminalUnread.value = next;
+  } finally {
+    unreadLoading = false;
+  }
+
+  if (pendingUnreadReload) {
+    pendingUnreadReload = false;
+    await loadTerminalUnread();
+  }
 }
 
 /** 直近の操作エラー。UI が拾ってトーストなどで見せる（握り潰すと黙って失敗する）。 */
@@ -155,4 +177,46 @@ export async function initEventSubscriptions(): Promise<void> {
     void loadSubscriptions();
   });
   await loadSubscriptions();
+}
+
+/** 現在の購読者数。リスナーは1本だけ張り、最後の解除で本当に外す。 */
+let unreadRefCount = 0;
+let unreadUnlisten: UnlistenFn | null = null;
+let unreadPending: Promise<void> | null = null;
+
+/** 未読件数だけを同期する軽量版（#130）。購読パネルを持たないサブウィンドウ /
+ *  トレイポップアップ用。
+ *
+ *  `initEventSubscriptions` との違いは2つ:
+ *  - 購読一覧 / 引き継ぎ待ち一覧は読まない（表示しないので無駄な invoke になる）
+ *  - **unlisten を返す**。サブ / トレイは閉じるウィンドウなので、
+ *    `useEventListeners` の `collect()` や `onUnmounted` で必ず解除する。
+ *
+ *  `initEventSubscriptions` とはフラグを分ける（共有すると片方の抑止でもう片方が
+ *  黙って無効化され、「バッジが出ない」という発見しづらい状態になる）。
+ *  多重呼び出しは参照カウントで扱う。単純な bool ガードだと2人目が no-op の
+ *  unlisten を受け取り、1人目が解除した時点でリスナー不在のまま誰も気づけない。 */
+export async function initTerminalUnread(): Promise<UnlistenFn> {
+  unreadRefCount += 1;
+  if (unreadRefCount === 1) {
+    unreadPending = (async () => {
+      unreadUnlisten = await listen("event-inbox-changed", () => {
+        void loadTerminalUnread();
+      });
+      await loadTerminalUnread();
+    })();
+  }
+  await unreadPending;
+
+  let released = false;
+  return () => {
+    // 同じ購読者が2回解除しても他人のぶんを巻き込まないようにする
+    if (released) return;
+    released = true;
+    unreadRefCount -= 1;
+    if (unreadRefCount > 0) return;
+    unreadUnlisten?.();
+    unreadUnlisten = null;
+    unreadPending = null;
+  };
 }
