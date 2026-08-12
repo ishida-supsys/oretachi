@@ -27,6 +27,17 @@ export default {
     titleApproval: 'Approval Required',
     titleCompleted: 'Task Completed',
   },
+  // Toasts for cross-worktree event delivery (issue #120 §7 / #130).
+  // Shared by the main window and sub-windows through a common composable, so it lives
+  // in the global catalog rather than an SFC-local <i18n> block.
+  eventDelivery: {
+    // The main window shows deliveries for every attached worktree, so without the
+    // destination name you cannot tell which tab just started moving. (#125 passed
+    // {name} but never rendered it.)
+    deliveredSummary: 'Delivered to {name} ({count})',
+    spawnRejectedSummary: 'Auto spawn declined',
+    spawnRejectedDetail: '{name} has {pending} unread message(s) but {live} terminals are open (limit {limit}). Close some terminals or open the worktree manually.',
+  },
   update: {
     title: 'oretachi Update',
     available: 'A new version {version} is available. Update now?',
