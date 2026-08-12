@@ -1266,6 +1266,12 @@ pub async fn purge_expired(
     // 失効した購読の inbox を先に落とす（購読行が消えた後では
     // `purge_subscriber_worktree` の後方互換パスから引けなくなる）。
     // 同じターミナルの**他の**購読宛のメッセージを巻き込まないよう event 単位で絞る。
+    //
+    // 既知の限界（#126）: 突合が `s.target = e.source_worktree_id` なので、
+    // ワイルドカード購読（`*` / `workgroup:` / `repo:`）が失効した場合はここで拾えず、
+    // その未読は `INBOX_RETENTION_DAYS`(30日) まで残る。inbox は行がどの購読由来かを
+    // 持たないため、ワイルドカードを緩く含めると**同じタブの別購読宛のメッセージまで
+    // 消しうる**。取りこぼしより誤削除のほうが害が大きいので、有界な滞留を選んでいる。
     let mut inbox = sqlx::query(
         "DELETE FROM inbox WHERE EXISTS ( \
            SELECT 1 FROM subscriptions s JOIN events e ON e.id = inbox.event_id \

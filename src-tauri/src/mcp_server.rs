@@ -1215,6 +1215,11 @@ impl NotifyService {
         // 経路で、下の `should_send_notify` による debounce（hook 3s / approval 1s）が
         // かかる。購読配送を debounce に載せるとイベントが黙って落ちる（#120 §1）ので、
         // 判定より前にここで発行しきる。
+        //
+        // **失敗しても `?` で早期 return しない。** イベント発行のエラー（DB 未初期化、
+        // terminal_id の解決失敗、body 空など）でトーストまで巻き添えにすると、
+        // 「`kind=approval` に `event_kind` を添えただけで承認待ちトーストが出ない」という
+        // 独立経路の設計と真逆の挙動になる。トーストは必ず送り、失敗はレスポンスで返す。
         let event_result = match event_kind.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
             Some(k) => Some(
                 publish_worktree_message(
@@ -1224,7 +1229,7 @@ impl NotifyService {
                     terminal_id.as_deref(),
                     project_dir.as_deref(),
                 )
-                .await?,
+                .await,
             ),
             None => None,
         };
@@ -1237,12 +1242,25 @@ impl NotifyService {
         };
         // 通知トーストを送ったかどうかにかかわらず、イベント発行の結果は必ず返す
         // （debounce で落ちても購読配送は成立しているため、"ok" だけ返すと嘘になる）。
+        // イベント発行が失敗した場合はツール結果を isError にして呼び出し元に気付かせる
+        // ——トーストは既に送っているので、エラーにしても通知は失われない。
         let reply = |notified: bool| {
-            let text = match &event_result {
-                Some(v) => serde_json::json!({ "ok": true, "notified": notified, "event": v }).to_string(),
-                None => "ok".to_string(),
+            let result = match &event_result {
+                Some(Ok(v)) => CallToolResult::success(vec![Content::text(
+                    serde_json::json!({ "ok": true, "notified": notified, "event": v }).to_string(),
+                )]),
+                Some(Err(e)) => CallToolResult::error(vec![Content::text(
+                    serde_json::json!({
+                        "ok": false,
+                        "notified": notified,
+                        "error": e.message,
+                        "hint": "通知トースト自体は送信済みです。購読イベントの発行だけが失敗しました。",
+                    })
+                    .to_string(),
+                )]),
+                None => CallToolResult::success(vec![Content::text("ok")]),
             };
-            Ok(CallToolResult::success(vec![Content::text(text)]))
+            Ok(result)
         };
 
         let hook_tx = {
@@ -1759,8 +1777,9 @@ impl NotifyService {
             return Err(McpError::invalid_params("target must not be empty", None));
         }
 
-        // 現状 Phase 1 では worktree.closed のみ。未対応種別を黙って受け付けると
-        // 「購読したのに来ない」という分かりにくい失敗になるので明示的に弾く。
+        // 未対応種別を黙って受け付けると「購読したのに来ない」という分かりにくい失敗に
+        // なるので明示的に弾く。既定が `worktree.closed` だけなのは後方互換のため
+        // （`*` の主用途は `worktree.created` なので description で明示している）。
         let kinds = event_kinds
             .unwrap_or_else(|| vec![crate::event_db::KIND_WORKTREE_CLOSED.to_string()]);
         if kinds.is_empty() {
@@ -2699,12 +2718,14 @@ pub fn describe_target(settings: &AppSettings, target: &str) -> (String, Option<
     }
     if let Some(repo) = target.strip_prefix(crate::event_db::TARGET_REPO_PREFIX) {
         // 照合用に小文字化して保存しているので、元の表記が settings にあればそちらを出す。
+        // 比較は `normalize_target` と同じ Unicode の `to_lowercase()` で行う。
+        // `eq_ignore_ascii_case` だと非 ASCII を含む名前で保存値と突き合わなくなる。
         let label = settings
             .repositories
             .iter()
             .map(|r| r.name.as_str())
             .chain(settings.worktrees.iter().map(|w| w.repository_name.as_str()))
-            .find(|name| name.eq_ignore_ascii_case(repo))
+            .find(|name| name.to_lowercase() == repo)
             .unwrap_or(repo)
             .to_string();
         return ("repo".to_string(), Some(label));
@@ -2790,12 +2811,16 @@ fn resolve_subscription_target(
         }
         // 登録済みリポジトリ名と、既存ワークツリーが持つリポジトリ名の両方を突合する
         // （リポジトリ登録を消してもワークツリーだけ残っているケースがあるため）。
+        // 大小の吸収は `normalize_target` と同じ Unicode の `to_lowercase()` で行う
+        // （`eq_ignore_ascii_case` は非 ASCII を畳まないので、日本語混じりの名前を
+        //   大小違いで打つと「見つかりません」になる）。
+        let needle = value.to_lowercase();
         let matched = settings
             .repositories
             .iter()
             .map(|r| r.name.as_str())
             .chain(settings.worktrees.iter().map(|w| w.repository_name.as_str()))
-            .find(|name| name.eq_ignore_ascii_case(value));
+            .find(|name| name.to_lowercase() == needle);
         let Some(name) = matched else {
             let available: Vec<&str> = settings.repositories.iter().map(|r| r.name.as_str()).collect();
             return Err(McpError::invalid_params(
@@ -2848,6 +2873,10 @@ fn resolve_subscription_target(
 /// `depth` はエージェントに申告させず、そのタブが直近に受け取ったイベントから自動計算する。
 /// 申告制にすると「返信時に depth を足す」という約束を破るだけで `MAX_EVENT_DEPTH` の
 /// 暴走防止ガードを無効化できてしまう（A↔B の往復が止まらなくなる）。
+///
+/// 既知の限界（#126）: `depth` が止めるのは**連鎖**であって連打ではない。同じタブから
+/// 立て続けに送れば他ワークツリーの inbox には積まれる。押し込み側は宛先ごとの
+/// 最小間隔（30秒）と保持期限で有界なので、実害は「未読が増える」までに留まる。
 async fn publish_worktree_message(
     app_handle: &AppHandle,
     event_kind: &str,
@@ -4546,6 +4575,27 @@ mod tests {
         let w = resolve_subscription_target(&settings, "oretachi-abcd").unwrap();
         assert_eq!(w.stored, "wt-1");
         assert_eq!(w.worktree_id.as_deref(), Some("wt-1"));
+    }
+
+    /// 非 ASCII を含むリポジトリ名でも、大小を変えて入力できて表示名も元表記に戻る。
+    /// `eq_ignore_ascii_case` は非 ASCII を畳まないので、保存側の `to_lowercase()` と
+    /// 突合方法がずれていると「見つかりません」やラベル崩れになる。
+    #[test]
+    fn resolve_subscription_target_handles_non_ascii_repo_name() {
+        let mut settings = target_settings();
+        settings.repositories[0].name = "テストRepo".into();
+        settings.worktrees[0].repository_name = "テストRepo".into();
+
+        let r = resolve_subscription_target(&settings, "repo:テストREPO").unwrap();
+        assert_eq!(r.stored, "repo:テストrepo");
+        assert!(r.label.contains("テストRepo"), "{}", r.label);
+        assert_eq!(
+            describe_target(&settings, &r.stored),
+            ("repo".to_string(), Some("テストRepo".to_string()))
+        );
+        // 照合側の候補集合とも噛み合う
+        assert!(crate::event_db::matching_targets("wt-1", None, Some("テストRepo"))
+            .contains(&r.stored));
     }
 
     /// 保存値と `matching_targets` の突合が実際に噛み合うこと。ここがずれると

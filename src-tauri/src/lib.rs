@@ -1192,7 +1192,11 @@ fn fire_worktree_created(
         })
         .to_string();
         let event = event_db::EventRow {
-            id: uuid::Uuid::new_v4().to_string(),
+            // **決定的な id にする。** 上の `has_event` は check-then-act なので、
+            // 同時に2回呼ばれると両方が「未発行」を見て2件積みうる。id を固定すると
+            // 2件目は `INSERT OR REPLACE` で同じ行を上書きし、`fanout` も
+            // `UNIQUE(subscriber_terminal_id, event_id)` で弾かれるため構造的に1件になる。
+            id: format!("{}:{}", event_db::KIND_WORKTREE_CREATED, id),
             source_worktree_id: id.clone(),
             // 作成経路も terminal_id を運んでいない（作成を実行したタブは特定できない）。
             source_terminal_id: None,
