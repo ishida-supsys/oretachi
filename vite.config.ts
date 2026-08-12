@@ -31,7 +31,9 @@ export default defineConfig(async () => ({
       ? {
           protocol: "ws",
           host,
-          port: 1421,
+          // 既定 (devPort=1420) では従来どおり 1421。devPort をずらしたときも
+          // HMR ポートが元の dev ポートと衝突しないよう追従させる。
+          port: devPort + 1,
         }
       : undefined,
     watch: {

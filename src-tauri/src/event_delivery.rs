@@ -102,6 +102,16 @@ impl DigestReason {
     fn is_turn_end(&self) -> bool {
         matches!(self, DigestReason::TurnEnd { .. })
     }
+
+    /// 本文が0件でも「未 ack が N 件残っています」だけを伝えてよい経路か。
+    ///
+    /// `SessionStart` だけ `true`。1セッション1回しか発火しないので、Phase 1 の
+    /// 「注入が失われても件数で気づける」（#120 §5.2）がそのまま成立する。
+    /// `Stop` / `UserPromptSubmit` は毎ターン・毎プロンプト発火するため、同じことを
+    /// やると ack するまで永久に催促が付きまとう。
+    fn reports_carryover_only(&self) -> bool {
+        matches!(self, DigestReason::SessionStart)
+    }
 }
 
 pub enum DeliveryMsg {
@@ -575,17 +585,23 @@ async fn collect_digest(
                 terminal_id
             );
         }
-        // **件数だけの通知でターンを開始させない。** `format_inbox_digest` は本文が0件でも
-        // 未 ack の残件があれば「N 件残っています」を返すが、それを `Stop` で注入すると
-        // 毎ターン「残件があります」と言うためだけに会話が継続する。
-        if items.is_empty() {
-            let _ = reply.send(None);
-            return;
-        }
         items
     } else {
         items
     };
+
+    // **件数だけの通知を毎回出さない。** `format_inbox_digest` は本文が0件でも未 ack の
+    // 残件があれば「N 件残っています」を返す。これは「注入が失われても人間とエージェントが
+    // 気づけるように」という Phase 1 の設計（#120 §5.2）だが、**発火頻度が高い経路では害になる**:
+    //
+    // - `Stop`: 残件を報告するためだけに会話が継続してしまう（ターンを開始させる経路なので致命的）
+    // - `UserPromptSubmit`: ack されない限り**ユーザーの全プロンプトの先頭に ack 催促が付く**
+    //
+    // `SessionStart` は1セッション1回なので Phase 1 のまま件数を伝える（本来の目的どおり）。
+    if items.is_empty() && !reason.reports_carryover_only() {
+        let _ = reply.send(None);
+        return;
+    }
 
     // 配送済みだが未 ack のまま残っている件数（今回本文を出す分は差し引く）
     let carryover = match event_db::count_unacked(pool, terminal_id).await {
@@ -1510,5 +1526,15 @@ mod tests {
         assert!(DigestReason::TurnEnd { prompt_id: None }.is_turn_end());
         assert!(!DigestReason::SessionStart.is_turn_end());
         assert!(!DigestReason::PromptSubmit.is_turn_end());
+    }
+
+    /// 本文0件のときに「未 ack が N 件残っています」だけを注入してよいのは
+    /// `SessionStart` だけ。`Stop` は残件報告のためだけに会話を継続させてしまい、
+    /// `UserPromptSubmit` は ack するまでユーザーの全プロンプトに催促が付きまとう。
+    #[test]
+    fn test_only_session_start_reports_carryover_only() {
+        assert!(DigestReason::SessionStart.reports_carryover_only());
+        assert!(!DigestReason::PromptSubmit.reports_carryover_only());
+        assert!(!DigestReason::TurnEnd { prompt_id: Some("p".into()) }.reports_carryover_only());
     }
 }
