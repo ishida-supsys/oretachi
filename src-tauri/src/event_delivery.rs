@@ -105,10 +105,13 @@ impl DigestReason {
 
     /// 本文が0件でも「未 ack が N 件残っています」だけを伝えてよい経路か。
     ///
-    /// `SessionStart` だけ `true`。1セッション1回しか発火しないので、Phase 1 の
-    /// 「注入が失われても件数で気づける」（#120 §5.2）がそのまま成立する。
-    /// `Stop` / `UserPromptSubmit` は毎ターン・毎プロンプト発火するため、同じことを
-    /// やると ack するまで永久に催促が付きまとう。
+    /// `SessionStart` だけ `true`。発火は startup / resume / clear / compact に限られ
+    /// （`claude_plugin.rs` の SessionStart フックは matcher なしで登録している）、
+    /// 毎ターン・毎プロンプトの `Stop` / `UserPromptSubmit` とは頻度が桁違いに低い。
+    /// この頻度なら Phase 1 の「注入が失われても件数で気づける」（#120 §5.2）が
+    /// 実用になる。`Stop` / `UserPromptSubmit` で同じことをやると、`Stop` は残件を
+    /// 報告するためだけに会話が継続し、`UserPromptSubmit` は ack するまで
+    /// **ユーザーの全プロンプトの先頭に催促が付きまとう**。
     fn reports_carryover_only(&self) -> bool {
         matches!(self, DigestReason::SessionStart)
     }
@@ -229,6 +232,16 @@ struct WorkerState {
     /// 1タブが同じワークツリーの死亡タブ全グループを吸い上げ、「新しいタブ1つにつき
     /// 1グループ」という設計不変条件が崩れる。タブが消えたら忘れる。
     claimed: std::collections::HashSet<String>,
+    /// 引き継ぎを試したが**対象が1グループも無かった**タブ（#124 のレビュー指摘）。
+    ///
+    /// `claimed` は「1グループ引き継いだ」タブしか入らないので、引き継ぐものが無いタブは
+    /// 永久に `claimed` に入らない。`Stop` / `UserPromptSubmit` は毎ターン・毎プロンプト
+    /// 発火するため、抑止しないと**全 CC タブが毎ターン `list_orphaned_groups` を叩き続ける**
+    /// （events.db は非 WAL なので書き込みと競合しうる）。
+    ///
+    /// 引き継ぎ待ちグループが新しく生まれるのは `mark_orphaned_subscribers`（＝生存タブ一覧が
+    /// 変化した `Reconcile`）だけなので、そこで捨てれば取りこぼさない。
+    rebind_probed: std::collections::HashSet<String>,
     /// タブごとの「最後に Stop 経路で注入したターン」の `prompt_id`（#124）。
     ///
     /// `Stop` の `additionalContext` は会話を継続させるので、継続したターンが終われば
@@ -297,6 +310,9 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
                 // 放置しても誤動作はしないが、長時間稼働で単調増加する）。
                 state.claimed.retain(|t| live_terminal_ids.contains(t));
                 state.last_turn.retain(|t, _| live_terminal_ids.contains(t));
+                // 引き継ぎ待ちグループが増えるのはこの直後の `mark_orphaned_subscribers`
+                // だけなので、「対象が無かった」という記憶はここで捨てれば十分。
+                state.rebind_probed.clear();
                 match event_db::mark_orphaned_subscribers(pool, &live_terminal_ids, now).await {
                     Ok((subs, inbox, deleted)) if subs > 0 || inbox > 0 || deleted > 0 => {
                         log::info!(
@@ -331,18 +347,9 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
             }
         }
         DeliveryMsg::Rebind { terminal_id } => {
-            // 自動引き継ぎは1タブにつき1グループまで。`resolve_subscriber` は購読系ツールの
-            // 呼び出しごとに要求してくるので、抑止しないと1タブが全グループを吸い上げる。
-            // 人間が明示的に選ぶ `RebindManual` はこの制限を受けない。
-            let result = if state.claimed.contains(&terminal_id) {
-                (0, 0)
-            } else {
-                let moved = rebind_for_terminal(app, pool, &terminal_id).await;
-                if moved != (0, 0) {
-                    state.claimed.insert(terminal_id.clone());
-                }
-                moved
-            };
+            // 自動引き継ぎは1タブにつき1グループまで。人間が明示的に選ぶ `RebindManual` は
+            // この制限を受けない。
+            let result = try_rebind_once(app, pool, state, &terminal_id).await;
             if result != (0, 0) {
                 let _ = app.emit("event-inbox-changed", ());
             }
@@ -440,6 +447,31 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
     }
 }
 
+/// 1タブにつき1グループまでの引き継ぎを、無駄打ちを抑えつつ試す。
+///
+/// - 既に1グループ引き継いだタブ（`claimed`）は対象外。`resolve_subscriber` や hook 経路は
+///   呼び出しのたびに要求してくるので、抑止しないと1タブが全グループを吸い上げる
+/// - 前回試して**対象が無かった**タブ（`rebind_probed`）も対象外。`Stop` は毎ターン発火
+///   するため、これが無いと全 CC タブが毎ターン `list_orphaned_groups` を叩き続ける。
+///   新しい引き継ぎ待ちが生まれる `Reconcile`（生存タブ変化時）で忘れる
+async fn try_rebind_once(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    state: &mut WorkerState,
+    terminal_id: &str,
+) -> (u64, u64) {
+    if state.claimed.contains(terminal_id) || state.rebind_probed.contains(terminal_id) {
+        return (0, 0);
+    }
+    let moved = rebind_for_terminal(app, pool, terminal_id).await;
+    if moved != (0, 0) {
+        state.claimed.insert(terminal_id.to_string());
+    } else {
+        state.rebind_probed.insert(terminal_id.to_string());
+    }
+    moved
+}
+
 /// タブの cwd からワークツリーを引いて、そのワークツリーの引き継ぎ待ちを1グループ引き継ぐ。
 async fn rebind_for_terminal(app: &AppHandle, pool: &SqlitePool, terminal_id: &str) -> (u64, u64) {
     let Some(worktree_id) = worktree_of_terminal(app, terminal_id) else {
@@ -496,14 +528,25 @@ fn should_deliver_turn(last: Option<&str>, prompt_id: Option<&str>) -> bool {
 ///   他の戦略が混ざっていても巻き込まない（Phase 3 で踏んだバグと同じ轍を踏まない）
 /// - 自動承認が有効な宛先へは定型イベントのみ（#120 §5.5）。自由文は inbox に残して
 ///   人間の確認を要求する
+///
+/// 自動承認の判定は**行ごとにその行自身の `subscriber_worktree_id` で行う**。1タブが
+/// `cd` して別ワークツリーで再購読すると同じ `terminal_id` に異なるワークツリー宛の行が
+/// 混ざるため、代表1件から解決すると**実際の宛先ではないワークツリーの設定で全件を
+/// 判定してしまう**（#131 が手動引き継ぎで塞いだのと同じ穴）。
 fn filter_for_turn_end(
     items: Vec<event_db::InboxItem>,
-    worktree: Option<&WorktreeEntry>,
+    settings: &AppSettings,
 ) -> Vec<event_db::InboxItem> {
     items
         .into_iter()
         .filter(|i| i.delivery != event_db::DELIVERY_PASSIVE)
-        .filter(|i| auto_approval_allows(worktree, &i.kind))
+        .filter(|i| {
+            let worktree = i
+                .subscriber_worktree_id
+                .as_deref()
+                .and_then(|id| find_worktree(settings, id));
+            auto_approval_allows(worktree, &i.kind)
+        })
         .collect()
 }
 
@@ -545,19 +588,16 @@ async fn collect_digest(
     // このタブが名乗り出たので、同じワークツリーの引き継ぎ待ち（アプリ再起動やタブ死亡で
     // 宙に浮いた購読と未読）を引き継ぐ。**回収より先に行う**必要がある。引き継ぎ前に
     // list_inbox すると、前回の terminal_id 宛のままの行が見えない。
-    if !state.claimed.contains(terminal_id) {
-        let moved = rebind_for_terminal(app, pool, terminal_id).await;
-        if moved != (0, 0) {
-            state.claimed.insert(terminal_id.to_string());
-            log::info!(
-                "[delivery] 引き継ぎ待ちを回収した terminal={} 購読={} 未読={} 経路={}",
-                terminal_id,
-                moved.0,
-                moved.1,
-                reason.label()
-            );
-            let _ = app.emit("event-inbox-changed", ());
-        }
+    let moved = try_rebind_once(app, pool, state, terminal_id).await;
+    if moved != (0, 0) {
+        log::info!(
+            "[delivery] 引き継ぎ待ちを回収した terminal={} 購読={} 未読={} 経路={}",
+            terminal_id,
+            moved.0,
+            moved.1,
+            reason.label()
+        );
+        let _ = app.emit("event-inbox-changed", ());
     }
 
     let items = match event_db::list_inbox(pool, terminal_id, event_db::InboxFilter::Undelivered)
@@ -572,12 +612,8 @@ async fn collect_digest(
     };
     let items = if reason.is_turn_end() {
         let settings = app.state::<SettingsManager>().get();
-        let worktree = items
-            .first()
-            .and_then(|i| i.subscriber_worktree_id.as_deref())
-            .and_then(|id| find_worktree(&settings, id));
         let before = items.len();
-        let items = filter_for_turn_end(items, worktree);
+        let items = filter_for_turn_end(items, &settings);
         if items.len() < before {
             log::debug!(
                 "[delivery] Stop 経路では {} 件を注入対象から外した（passive / 自動承認）terminal={}",
@@ -1493,6 +1529,13 @@ mod tests {
 
     /// `passive` は「押し込まないでほしい」の明示指定。Stop の注入はターンを開始させる
     /// ので押し込みと同じ扱いにする（同じタブの他戦略に巻き込まない）。
+    /// `worktree()` が返す wt-1 を1件だけ持つ settings。
+    fn settings_with(auto: Option<bool>) -> AppSettings {
+        let mut s = AppSettings::default();
+        s.worktrees = vec![worktree(auto)];
+        s
+    }
+
     #[test]
     fn test_filter_for_turn_end_excludes_passive() {
         let items = vec![
@@ -1501,7 +1544,10 @@ mod tests {
             item("c", event_db::DELIVERY_INTERRUPT, event_db::KIND_WORKTREE_CLOSED),
         ];
         // interrupt は「走行中でも割り込んでよい」の明示指定なので、ターン境界でも当然通す
-        assert_eq!(ids(&filter_for_turn_end(items, None)), vec!["a", "c"]);
+        assert_eq!(
+            ids(&filter_for_turn_end(items, &settings_with(None))),
+            vec!["a", "c"]
+        );
     }
 
     /// 自動承認が有効な宛先は、注入された内容を人間の確認なしに実行する（#120 §5.5）。
@@ -1512,10 +1558,49 @@ mod tests {
             item("a", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_CLOSED),
             item("b", event_db::DELIVERY_TURN_END, "worktree.message"),
         ];
-        let on = worktree(Some(true));
-        assert_eq!(ids(&filter_for_turn_end(items.clone(), Some(&on))), vec!["a"]);
-        let off = worktree(Some(false));
-        assert_eq!(ids(&filter_for_turn_end(items, Some(&off))), vec!["a", "b"]);
+        assert_eq!(
+            ids(&filter_for_turn_end(items.clone(), &settings_with(Some(true)))),
+            vec!["a"]
+        );
+        assert_eq!(
+            ids(&filter_for_turn_end(items, &settings_with(Some(false)))),
+            vec!["a", "b"]
+        );
+    }
+
+    /// 1タブが `cd` して別ワークツリーで再購読すると、同じ terminal_id の inbox に
+    /// 異なる `subscriber_worktree_id` の行が混ざる。代表1件から自動承認を判定すると
+    /// **実際の宛先ではないワークツリーの設定で全件を通してしまう**ので、行ごとに引く。
+    #[test]
+    fn test_filter_for_turn_end_judges_each_row_by_its_own_worktree() {
+        let mut auto_on = worktree(Some(true));
+        auto_on.id = "wt-auto".to_string();
+        let mut auto_off = worktree(Some(false));
+        auto_off.id = "wt-manual".to_string();
+        let mut settings = AppSettings::default();
+        settings.worktrees = vec![auto_on, auto_off];
+
+        // 1件目は自動承認 OFF のワークツリー宛（＝代表にすると全件が通ってしまう）
+        let mut a = item("a", event_db::DELIVERY_TURN_END, "worktree.message");
+        a.subscriber_worktree_id = Some("wt-manual".to_string());
+        let mut b = item("b", event_db::DELIVERY_TURN_END, "worktree.message");
+        b.subscriber_worktree_id = Some("wt-auto".to_string());
+
+        assert_eq!(ids(&filter_for_turn_end(vec![a, b], &settings)), vec!["a"]);
+    }
+
+    /// 宛先ワークツリーが解決できない行（設定から消えた等）は、自動承認の判定材料が
+    /// 無いので `auto_approval_allows(None, _)` の既定（許可）に落ちる。1件目が
+    /// これだったせいで他の行まで巻き込まれないことを固定する。
+    #[test]
+    fn test_filter_for_turn_end_unresolvable_row_does_not_leak_to_others() {
+        let mut a = item("a", event_db::DELIVERY_TURN_END, "worktree.message");
+        a.subscriber_worktree_id = Some("wt-gone".to_string());
+        let b = item("b", event_db::DELIVERY_TURN_END, "worktree.message"); // wt-1 = 自動承認 ON
+        assert_eq!(
+            ids(&filter_for_turn_end(vec![a, b], &settings_with(Some(true)))),
+            vec!["a"]
+        );
     }
 
     #[test]

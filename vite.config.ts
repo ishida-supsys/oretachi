@@ -7,6 +7,8 @@ import VueI18nPlugin from "@intlify/unplugin-vue-i18n/vite";
 const host = process.env.TAURI_DEV_HOST;
 // 別ワークツリーで dev ビルドを同時に立ち上げると 1420 が衝突して起動できないため、
 // env で退避できるようにする（tauri 側は `tauri dev --config` で devUrl を合わせる）。
+// HMR が devPort + 1 を使うので、**複数インスタンスを立てるときは 2 以上離すこと**
+// （strictPort: true なので衝突すると起動に失敗する）。
 // @ts-expect-error process is a nodejs global
 const devPort = Number(process.env.ORETACHI_DEV_PORT) || 1420;
 
