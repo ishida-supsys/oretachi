@@ -52,6 +52,13 @@ const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 /// spawn 要求を出してからフロントの応答を待つ上限。過ぎたら単一フライトを解放する。
 const SPAWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// MCP の購読 / inbox 系ツールが引き継ぎの完了を待つ上限（#137）。
+///
+/// 引き継ぎ自体は `rebind_next_orphaned_group` の UPDATE 数本で、実測でもミリ秒台。
+/// ここが効くのはワーカーが押し込み（`SUBMIT_DELAY` 込み）や spawn の処理中で
+/// 順番待ちになっている場合だけなので、その待ち行列1回分を見込んだ長さにする。
+const REBIND_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_millis(1500);
+
 /// 同じワークツリーへ続けて自動 spawn するまでの最小間隔。
 /// spawn したタブでエージェントが起動しない（`claude` が PATH に無い等）と検出フラグが
 /// 立たないため、これが無いと tick ごとに壊れたタブを上限まで積み増す。
@@ -66,17 +73,24 @@ const SPAWN_MAX_LIVE_SESSIONS: usize = 12;
 /// 自動承認が有効な宛先へは、別のワークツリーから注入された内容が**人間の確認なしに
 /// 実行される**。
 ///
-/// 許可の基準は「**本文を誰が書いたか**」:
-/// - 許可: oretachi 自身が定型 JSON として組み立てるイベント
-///   （`worktree.closed` / `worktree.created`）。可変部分はワークツリー名・ブランチ名だけで、
-///   いずれも `sanitize_for_pty` を通る
-/// - 不許可: エージェントが本文を書けるイベント（`worktree.message`, #126）。押し込まず
-///   inbox に残し、人間が UI で確認して手動で渡すか、自動承認を切ることを要求する
+/// 許可の基準は「**押し込む文字列を誰が書いたか**」:
+/// - 許可: oretachi 自身が組み立てた文字列しか PTY に出ない種別。可変部分はワークツリー名・
+///   ブランチ名・件数だけで、いずれも `sanitize_for_pty` を通る
+///   - `worktree.closed` / `worktree.created` … `format_inbox_line` が定型文に組み直す
+///   - `worktree.message` … 本文は運ばず `format_pointer_text` の告知だけを出す（#137）。
+///     本文は `oretachi_poll_inbox` の**ツール出力**として渡るので、押し込みが人間の入力を
+///     偽装して `ai_judge` に「ユーザーが明示的に依頼した」と誤認させる経路が無い
+/// - 不許可: エージェントが書いた本文がそのまま PTY へ出る種別。`format_inbox_line` の
+///   `other` 分岐は未知種別の本文を丸ごと展開するので、**種別を足しただけでは自動的に
+///   安全にならない**
 ///
 /// **新しい種別を足すときは必ずこの基準で判断すること。** 迷ったら入れない（default-deny）。
+/// 本文をインラインで運ぶかどうかは `event_db::is_free_text_kind` が持っており、
+/// ここへ足すときは向こうも合わせて見直すこと。
 const AUTO_APPROVAL_PUSHABLE_KINDS: &[&str] = &[
     event_db::KIND_WORKTREE_CLOSED,
     event_db::KIND_WORKTREE_CREATED,
+    event_db::KIND_WORKTREE_MESSAGE,
 ];
 
 // ─── ハンドル ─────────────────────────────────────────────────────────────────
@@ -85,9 +99,11 @@ const AUTO_APPROVAL_PUSHABLE_KINDS: &[&str] = &[
 ///
 /// PTY 押し込みと違い、どれも「文字列を返すだけ」で PTY には触らない。ただし
 /// **`TurnEnd` だけはターンを開始させる**（`Stop` の `additionalContext` は会話を継続する）
-/// ため、押し込みと同じ制限（`passive` を巻き込まない・自動承認が有効な宛先へは定型
-/// イベントのみ）を課す。`SessionStart` / `PromptSubmit` は人間の操作が起点なので、
-/// Phase 1 から変わらず全件を渡す。
+/// ため、押し込みと同じく `passive` を巻き込まない制限を課す（`filter_for_turn_end`）。
+///
+/// 自動承認のガードは**経路を問わず全部に掛かる**（`filter_auto_approval` の doc 参照、#126）。
+/// 「`SessionStart` / `PromptSubmit` は人間の操作が起点だから全件渡す」というのは
+/// Phase 1 の設計で、#126 で撤回済み。
 #[derive(Debug, Clone, PartialEq)]
 pub enum DigestReason {
     /// SessionStart フック。アプリ停止中に溜まった分の回収（#123）
@@ -136,9 +152,14 @@ pub enum DeliveryMsg {
         reason: DigestReason,
         reply: oneshot::Sender<Option<String>>,
     },
-    /// このタブへ、同じワークツリーの引き継ぎ待ちグループを1つ引き継ぐ（応答は待たない）。
-    /// 完了を待ちたい経路（hook からの回収）は `CollectDigest` が内包している。
-    Rebind { terminal_id: String },
+    /// このタブへ、同じワークツリーの引き継ぎ待ちグループを1つ引き継ぐ。
+    ///
+    /// `reply` を渡すと完了を待てる。**引き継いだ結果を自分で読む経路は必ず待つこと**
+    /// （`rebind_and_wait` 参照）。hook 経路は `CollectDigest` が内包している。
+    Rebind {
+        terminal_id: String,
+        reply: Option<oneshot::Sender<()>>,
+    },
     /// UI からの手動引き継ぎ（引き継ぎ先グループを人間が選ぶ）
     RebindManual {
         worktree_id: String,
@@ -180,9 +201,51 @@ pub fn reconcile_live_terminals(app: &AppHandle, live_terminal_ids: Vec<String>)
 }
 
 /// AI エージェントが立ち上がったタブから引き継ぎを要求する（応答は待たない）。
+///
+/// **引き継いだ購読 / 未読を自分で読む経路では使わないこと。** 引き継ぎが終わる前に
+/// `subscriber_terminal_id` で SELECT すると、行はまだ死んだタブの ID を向いているので
+/// 0 件に見える。そういう経路は `rebind_and_wait` を使う。
 pub fn request_rebind(app: &AppHandle, terminal_id: String) {
     if let Some(h) = handle(app) {
-        h.try_send(DeliveryMsg::Rebind { terminal_id });
+        h.try_send(DeliveryMsg::Rebind {
+            terminal_id,
+            reply: None,
+        });
+    }
+}
+
+/// 引き継ぎの完了を待つ（#137）。
+///
+/// MCP の購読 / inbox 系ツールは `subscriber_terminal_id` で DB を引くので、タブを
+/// 立て直した直後は**引き継ぎが終わるまで自分の購読も未読も見えない**。`collect_digest` が
+/// `list_inbox` の前に `try_rebind_once` を await しているのと同じ理由で、読む前に待つ。
+///
+/// ワーカーが詰まっている / 応答が来ない場合は待ち続けずに諦めて先へ進む。引き継ぎは
+/// 次の `Reconcile` や hook 経路でも走るので、取りこぼしても一時的に古い結果を返すだけ。
+/// `oretachi_*` は MCP のツール呼び出しなので、ここで長く止めると呼び出し側が固まる。
+pub async fn rebind_and_wait(app: &AppHandle, terminal_id: &str) {
+    let (tx, rx) = oneshot::channel();
+    {
+        let Some(h) = handle(app) else { return };
+        if h.tx
+            .try_send(DeliveryMsg::Rebind {
+                terminal_id: terminal_id.to_string(),
+                reply: Some(tx),
+            })
+            .is_err()
+        {
+            log::debug!(
+                "[delivery] 引き継ぎキューが満杯のため待たずに続行する terminal={}",
+                terminal_id
+            );
+            return;
+        }
+    }
+    if tokio::time::timeout(REBIND_WAIT_BUDGET, rx).await.is_err() {
+        log::warn!(
+            "[delivery] 引き継ぎの完了を待ちきれなかったため古い結果を返す可能性がある terminal={}",
+            terminal_id
+        );
     }
 }
 
@@ -355,12 +418,18 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
                 }
             }
         }
-        DeliveryMsg::Rebind { terminal_id } => {
+        DeliveryMsg::Rebind { terminal_id, reply } => {
             // 自動引き継ぎは1タブにつき1グループまで。人間が明示的に選ぶ `RebindManual` は
             // この制限を受けない。
             let result = try_rebind_once(app, pool, state, &terminal_id).await;
             if result != (0, 0) {
                 let _ = app.emit("event-inbox-changed", ());
+            }
+            // **`drive` より先に応答する。** 待っている側が読みたいのは引き継ぎの結果だけで、
+            // 押し込みの完了ではない。逆順にすると押し込み（PTY への書き込みと
+            // `SUBMIT_DELAY` の待ち）のぶんだけ MCP ツールの応答が遅れる。
+            if let Some(reply) = reply {
+                let _ = reply.send(());
             }
             drive(app, pool, state).await;
         }
@@ -1520,10 +1589,30 @@ mod tests {
         // oretachi 自身が定型 JSON で組み立てるイベントは許可
         assert!(auto_approval_allows(Some(&on), event_db::KIND_WORKTREE_CLOSED));
         assert!(auto_approval_allows(Some(&on), event_db::KIND_WORKTREE_CREATED));
-        // エージェントが本文を書ける自由文（#126）は自動承認宛には押し込まない
-        assert!(!auto_approval_allows(Some(&on), event_db::KIND_WORKTREE_MESSAGE));
-        // 知らない種別も default-deny
+        // `worktree.message` は本文を運ばず告知だけを押し込むようにしたので許可（#137）。
+        // 押し込まれる文字列は `format_pointer_text` の固定文で、発信側は書けない
+        assert!(auto_approval_allows(Some(&on), event_db::KIND_WORKTREE_MESSAGE));
+        // 知らない種別は default-deny。`format_inbox_line` の `other` 分岐が本文を
+        // 丸ごと展開するので、許可リストに足さない限り自動承認宛には出さない
         assert!(!auto_approval_allows(Some(&on), "worktree.unknown"));
+    }
+
+    /// 許可リストと「本文をインラインで運ぶ種別」は別の軸で、**両方の判断が要る**。
+    /// `worktree.message` は「押し込んでよい」が「本文は運ばない」側にいる。
+    #[test]
+    fn test_pushable_kinds_and_inline_body_are_separate_axes() {
+        for kind in [event_db::KIND_WORKTREE_CLOSED, event_db::KIND_WORKTREE_CREATED] {
+            assert!(AUTO_APPROVAL_PUSHABLE_KINDS.contains(&kind));
+            assert!(!event_db::is_free_text_kind(kind), "定型種別は本文を運ぶ");
+        }
+        assert!(AUTO_APPROVAL_PUSHABLE_KINDS.contains(&event_db::KIND_WORKTREE_MESSAGE));
+        assert!(
+            event_db::is_free_text_kind(event_db::KIND_WORKTREE_MESSAGE),
+            "message は押し込めるが本文は運ばない"
+        );
+        // 未知種別は両方で拒否側
+        assert!(!AUTO_APPROVAL_PUSHABLE_KINDS.contains(&"worktree.unknown"));
+        assert!(event_db::is_free_text_kind("worktree.unknown"));
     }
 
     #[test]
@@ -1536,14 +1625,14 @@ mod tests {
     }
 
     /// `push_pending` / `filter_for_turn_end` の仕分けと同じ形。自動承認が有効な宛先では、
-    /// 同じタブに定型と自由文が混ざっていても**自由文だけが保留**され、定型は通る（#126）。
+    /// 同じタブに許可種別と拒否種別が混ざっていても**拒否種別だけが保留**され、残りは通る。
     #[test]
     fn test_auto_approval_partition_blocks_only_free_form() {
         let on = worktree(Some(true));
         let items = vec![
             item("a", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_CLOSED),
-            item("b", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_CREATED),
-            item("c", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_MESSAGE),
+            item("b", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_MESSAGE),
+            item("c", event_db::DELIVERY_TURN_END, "worktree.unknown"),
         ];
         let (allowed, blocked): (Vec<_>, Vec<_>) = items
             .into_iter()
@@ -1552,8 +1641,8 @@ mod tests {
         assert_eq!(ids(&blocked), vec!["c"]);
     }
 
-    /// 保留された行は配送戦略の決定に影響してはいけない。`interrupt` な自由文が
-    /// 混ざっているだけで `turn_end` の定型イベントが走行中のエージェントへ
+    /// 保留された行は配送戦略の決定に影響してはいけない。`interrupt` な拒否種別が
+    /// 混ざっているだけで `turn_end` の許可種別が走行中のエージェントへ
     /// 割り込む、という取り違えを固定する（`push_pending` は仕分け後に
     /// `strongest_delivery` を取る）。
     #[test]
@@ -1561,7 +1650,7 @@ mod tests {
         let on = worktree(Some(true));
         let items = vec![
             item("a", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_CLOSED),
-            item("b", event_db::DELIVERY_INTERRUPT, event_db::KIND_WORKTREE_MESSAGE),
+            item("b", event_db::DELIVERY_INTERRUPT, "worktree.unknown"),
         ];
         // 仕分け前の全体では interrupt に見える
         assert_eq!(strongest_delivery(&items), event_db::DELIVERY_INTERRUPT);
@@ -1575,15 +1664,19 @@ mod tests {
         assert!(!is_push(decide_push(&busy, &strongest_delivery(&allowed), 1_000_000)));
     }
 
-    /// `spawn_for_closed_tabs` の判定と同じ形。自由文の未読しか無い宛先では、自動承認が
-    /// 有効なら spawn しない（押し込めない未読を根拠にタブを立てない）。
+    /// `spawn_for_closed_tabs` の判定と同じ形。押し込めない種別の未読しか無い宛先では、
+    /// 自動承認が有効なら spawn しない（押し込めない未読を根拠にタブを立てない）。
+    ///
+    /// `worktree.message` は #137 で許可側へ移った。spawn したタブへ出るのも
+    /// `format_pointer_text` の告知だけなので、押し込みと同じ基準で通してよい。
     #[test]
     fn test_spawn_pending_count_ignores_blocked_kinds() {
         let on = worktree(Some(true));
         let off = worktree(Some(false));
         let by_kind = vec![
-            (event_db::KIND_WORKTREE_MESSAGE.to_string(), 3i64),
+            ("worktree.unknown".to_string(), 3i64),
             (event_db::KIND_WORKTREE_CLOSED.to_string(), 2i64),
+            (event_db::KIND_WORKTREE_MESSAGE.to_string(), 4i64),
         ];
         let count = |wt: &WorktreeEntry| -> i64 {
             by_kind
@@ -1592,12 +1685,12 @@ mod tests {
                 .map(|(_, c)| *c)
                 .sum()
         };
-        assert_eq!(count(&on), 2, "自動承認 ON では自由文を数えない");
-        assert_eq!(count(&off), 5, "自動承認 OFF なら従来どおり全部数える");
+        assert_eq!(count(&on), 6, "自動承認 ON では未知種別を数えない");
+        assert_eq!(count(&off), 9, "自動承認 OFF なら従来どおり全部数える");
 
-        // 自由文だけの宛先は spawn 対象にならない（pending == 0）
-        let only_message = vec![(event_db::KIND_WORKTREE_MESSAGE.to_string(), 3i64)];
-        let pending: i64 = only_message
+        // 拒否種別だけの宛先は spawn 対象にならない（pending == 0）
+        let only_blocked = vec![("worktree.unknown".to_string(), 3i64)];
+        let pending: i64 = only_blocked
             .iter()
             .filter(|(kind, _)| auto_approval_allows(Some(&on), kind))
             .map(|(_, c)| *c)
@@ -1673,12 +1766,12 @@ mod tests {
     }
 
     /// 自動承認が有効な宛先は、注入された内容を人間の確認なしに実行する（#120 §5.5）。
-    /// #126 で自由文 (`worktree.message`) が入った瞬間に default-deny になるのが目的。
+    /// 許可リストに無い種別がその場で default-deny に落ちるのが目的。
     #[test]
     fn test_filter_for_turn_end_respects_auto_approval() {
         let items = vec![
             item("a", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_CLOSED),
-            item("b", event_db::DELIVERY_TURN_END, "worktree.message"),
+            item("b", event_db::DELIVERY_TURN_END, "worktree.unknown"),
         ];
         assert_eq!(
             ids(&filter_for_turn_end(items.clone(), &settings_with(Some(true)))),
@@ -1703,34 +1796,34 @@ mod tests {
         settings.worktrees = vec![auto_on, auto_off];
 
         // 1件目は自動承認 OFF のワークツリー宛（＝代表にすると全件が通ってしまう）
-        let mut a = item("a", event_db::DELIVERY_TURN_END, "worktree.message");
+        let mut a = item("a", event_db::DELIVERY_TURN_END, "worktree.unknown");
         a.subscriber_worktree_id = Some("wt-manual".to_string());
-        let mut b = item("b", event_db::DELIVERY_TURN_END, "worktree.message");
+        let mut b = item("b", event_db::DELIVERY_TURN_END, "worktree.unknown");
         b.subscriber_worktree_id = Some("wt-auto".to_string());
 
         assert_eq!(ids(&filter_for_turn_end(vec![a, b], &settings)), vec!["a"]);
     }
 
     /// **自動承認のガードは全注入経路に掛かること。** `Stop` だけに掛けていると、
-    /// `SessionStart` / `UserPromptSubmit` の additionalContext から自由文が素通りし、
+    /// `SessionStart` / `UserPromptSubmit` の additionalContext から拒否種別が素通りし、
     /// 自動承認が有効な宛先で人間の確認なしにツール実行へつながる（#126）。
     /// `passive` の除外だけが `Stop` 固有。
     #[test]
     fn test_auto_approval_filter_applies_to_all_injection_paths() {
         let items = vec![
             item("a", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_CLOSED),
-            item("b", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_MESSAGE),
+            item("b", event_db::DELIVERY_TURN_END, "worktree.unknown"),
             item("c", event_db::DELIVERY_PASSIVE, event_db::KIND_WORKTREE_CLOSED),
         ];
         let auto_on = settings_with(Some(true));
-        // SessionStart / UserPromptSubmit 経路: 自由文は落とし、passive は回収する
+        // SessionStart / UserPromptSubmit 経路: 拒否種別は落とし、passive は回収する
         assert_eq!(
             ids(&filter_auto_approval(items.clone(), &auto_on)),
             vec!["a", "c"]
         );
-        // Stop 経路: 自由文に加えて passive も落とす
+        // Stop 経路: 拒否種別に加えて passive も落とす
         assert_eq!(ids(&filter_for_turn_end(items.clone(), &auto_on)), vec!["a"]);
-        // 自動承認 OFF なら自由文も通る（passive の扱いだけ経路で違う）
+        // 自動承認 OFF なら拒否種別も通る（passive の扱いだけ経路で違う）
         let auto_off = settings_with(Some(false));
         assert_eq!(
             ids(&filter_auto_approval(items.clone(), &auto_off)),
@@ -1744,9 +1837,9 @@ mod tests {
     /// これだったせいで他の行まで巻き込まれないことを固定する。
     #[test]
     fn test_filter_for_turn_end_unresolvable_row_does_not_leak_to_others() {
-        let mut a = item("a", event_db::DELIVERY_TURN_END, "worktree.message");
+        let mut a = item("a", event_db::DELIVERY_TURN_END, "worktree.unknown");
         a.subscriber_worktree_id = Some("wt-gone".to_string());
-        let b = item("b", event_db::DELIVERY_TURN_END, "worktree.message"); // wt-1 = 自動承認 ON
+        let b = item("b", event_db::DELIVERY_TURN_END, "worktree.unknown"); // wt-1 = 自動承認 ON
         assert_eq!(
             ids(&filter_for_turn_end(vec![a, b], &settings_with(Some(true)))),
             vec!["a"]

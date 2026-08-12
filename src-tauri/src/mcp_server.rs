@@ -1205,7 +1205,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(result_json)]))
     }
 
-    #[tool(description = "ワークツリーに通知を送信する。event_kind に \"worktree.message\" を指定すると、通知に加えて自分のワークツリーを購読している他のワークツリーへ body を自由文メッセージとして配送する（購読方式なので送信側は宛先を指定しない）")]
+    #[tool(description = "ワークツリーに通知を送信する。event_kind に \"worktree.message\" を指定すると、通知に加えて自分のワークツリーを購読している他のワークツリーへ body を自由文メッセージとして配送する（購読方式なので送信側は宛先を指定しない）。受信側には本文ではなく「届いている」ことだけが提示され、本文は受信側が oretachi_poll_inbox で取得する")]
     async fn notify_worktree(
         &self,
         Parameters(NotifyWorktreeParams { worktree_name, kind, body, event_kind, terminal_id, project_dir }): Parameters<NotifyWorktreeParams>,
@@ -1768,7 +1768,7 @@ impl NotifyService {
         }
     }
 
-    #[tool(description = "他ワークツリーのイベント（クローズ / 作成 / エージェントからの自由文メッセージ）を購読する。別ワークツリーで進めている関連作業の完了や開始を自分のセッションで検知したいときに使う。target には \"*\" / \"workgroup:<ID>\" / \"repo:<名前>\" のワイルドカードも指定でき、まだ存在しないワークツリーの作成も購読できる。届いた通知は待機中なら PTY へ押し込まれ、次のセッション開始時にも自動で提示され、oretachi_poll_inbox でも取得できる。ターミナルを閉じたりアプリを再起動したりしても購読は引き継ぎ待ちとして保持され、同じワークツリーで次に AI エージェントが立ち上がったときに引き継がれる")]
+    #[tool(description = "他ワークツリーのイベント（クローズ / 作成 / エージェントからの自由文メッセージ）を購読する。別ワークツリーで進めている関連作業の完了や開始を自分のセッションで検知したいときに使う。target には \"*\" / \"workgroup:<ID>\" / \"repo:<名前>\" のワイルドカードも指定でき、まだ存在しないワークツリーの作成も購読できる。クローズ / 作成は本文ごと提示される。自由文メッセージは**本文を運ばず「届いている」ことと件数だけ**が提示されるので、本文は oretachi_poll_inbox で取りに来ること。提示のタイミングは待機中なら随時、走行中はターン境界、およびセッション開始時。ターミナルを閉じたりアプリを再起動したりしても購読は引き継ぎ待ちとして保持され、同じワークツリーで次に AI エージェントが立ち上がったときに引き継がれる")]
     async fn oretachi_subscribe_worktree(
         &self,
         Parameters(SubscribeWorktreeParams {
@@ -1960,6 +1960,7 @@ impl NotifyService {
             (subscriber, target_id)
         };
 
+        await_rebind(&self.app_handle, &subscriber).await;
         let pool = event_pool(&self.app_handle)?;
         let deleted = if let Some(id) = subscription_id.as_deref() {
             crate::event_db::delete_subscription(&pool, id, &subscriber.terminal_id).await
@@ -1998,6 +1999,7 @@ impl NotifyService {
             terminal_id.as_deref(),
             project_dir.as_deref(),
         )?;
+        await_rebind(&self.app_handle, &subscriber).await;
         let pool = event_pool(&self.app_handle)?;
         let now = crate::event_db::now_ms();
         let subs = crate::event_db::list_subscriptions(&pool, &subscriber.terminal_id, now)
@@ -2061,6 +2063,7 @@ impl NotifyService {
             terminal_id.as_deref(),
             project_dir.as_deref(),
         )?;
+        await_rebind(&self.app_handle, &subscriber).await;
         let pool = event_pool(&self.app_handle)?;
         // 明示的な pull なので未 ack 全件を返す（自動注入を取りこぼしてもここで必ず回収できる）
         let filter = if include_acked.unwrap_or(false) {
@@ -2142,6 +2145,7 @@ impl NotifyService {
             terminal_id.as_deref(),
             project_dir.as_deref(),
         )?;
+        await_rebind(&self.app_handle, &subscriber).await;
         let pool = event_pool(&self.app_handle)?;
         let acked = crate::event_db::ack(
             &pool,
@@ -3086,6 +3090,11 @@ fn resolve_subscriber(
     if let Some(id) = terminal_id.map(str::trim).filter(|s| !s.is_empty()) {
         // 購読系ツールを叩けている＝このタブでエージェントが走っている。ついでに
         // 引き継ぎ待ちを引き取らせる（非ブロッキング。SessionStart を取り逃した場合の保険）。
+        //
+        // **引き継いだ結果を読むツールはこれだけでは足りない**（#137）。ここは応答を
+        // 待たないので、直後に `subscriber_terminal_id` で SELECT すると行がまだ死んだ
+        // タブの ID を向いていて 0 件に見える。そういうツールは `resolve_subscriber` の
+        // あとで `rebind_and_wait` を await すること（`await_rebind` ヘルパ）。
         crate::event_delivery::request_rebind(app_handle, id.to_string());
         return sessions
             .iter()
@@ -3148,6 +3157,16 @@ fn resolve_subscriber(
             None,
         )),
     }
+}
+
+/// 引き継ぎ待ちの回収を待ってから DB を読むための一手（#137）。
+///
+/// 購読 / inbox の行は `subscriber_terminal_id` で引くので、タブを立て直した直後は
+/// **引き継ぎが終わるまで自分の購読も未読も 0 件に見える**。`collect_digest` が
+/// `list_inbox` の前に `try_rebind_once` を await しているのと同じ手当てを、MCP
+/// ツール側にも入れる。`resolve_subscriber` は同期関数なので分けている。
+async fn await_rebind(app_handle: &AppHandle, subscriber: &SubscriberIdentity) {
+    crate::event_delivery::rebind_and_wait(app_handle, &subscriber.terminal_id).await;
 }
 
 /// 1つの文字列をワークツリー ID としても名前としても解決する（購読の `target` 用）。
