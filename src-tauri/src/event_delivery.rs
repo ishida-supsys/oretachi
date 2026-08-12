@@ -366,8 +366,7 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
             reason,
             reply,
         } => {
-            let digest = collect_digest(app, pool, state, &terminal_id, &reason).await;
-            let _ = reply.send(digest);
+            collect_digest(app, pool, state, &terminal_id, &reason, reply).await;
         }
         DeliveryMsg::EventQueued => {
             let _ = app.emit("event-inbox-changed", ());
@@ -505,13 +504,20 @@ fn filter_for_turn_end(
 /// （#120 §5.2）に反する。ただしそれだけだと、注入が失われたとき（サイドカーの読み取り
 /// タイムアウト等）にエージェントも人間も気づけない。そこで**未 ack の残存件数だけは
 /// 毎回伝える**。件数を見れば `oretachi_poll_inbox` で取り直せる。
+///
+/// **本文を呼び出し元へ渡せたときだけ `delivered_at` を打つ。** 呼び出し元（axum ハンドラ）は
+/// `INBOX_DIGEST_BUDGET_MS` のタイムアウトを持っており、ワーカーが詰まっている間に
+/// 諦めると受信側が消える。先に打刻すると「配送済みだが誰も見ていない」本文が生まれ、
+/// 再送しない方針（#120 §5.2）のせいで二度と出てこない。`push_pending` の
+/// 「`pty.write` が成功してから打刻する」と同じ不変条件。
 async fn collect_digest(
     app: &AppHandle,
     pool: &SqlitePool,
     state: &mut WorkerState,
     terminal_id: &str,
     reason: &DigestReason,
-) -> Option<String> {
+    reply: oneshot::Sender<Option<String>>,
+) {
     if let DigestReason::TurnEnd { prompt_id } = reason {
         if !should_deliver_turn(
             state.last_turn.get(terminal_id).map(String::as_str),
@@ -522,7 +528,8 @@ async fn collect_digest(
                 terminal_id,
                 prompt_id
             );
-            return None;
+            let _ = reply.send(None);
+            return;
         }
     }
     // このタブが名乗り出たので、同じワークツリーの引き継ぎ待ち（アプリ再起動やタブ死亡で
@@ -549,7 +556,8 @@ async fn collect_digest(
         Ok(items) => items,
         Err(e) => {
             log::warn!("[delivery] inbox 取得に失敗: {}", e);
-            return None;
+            let _ = reply.send(None);
+            return;
         }
     };
     let items = if reason.is_turn_end() {
@@ -571,7 +579,8 @@ async fn collect_digest(
         // 未 ack の残件があれば「N 件残っています」を返すが、それを `Stop` で注入すると
         // 毎ターン「残件があります」と言うためだけに会話が継続する。
         if items.is_empty() {
-            return None;
+            let _ = reply.send(None);
+            return;
         }
         items
     } else {
@@ -586,11 +595,26 @@ async fn collect_digest(
             0
         }
     };
-    let digest = event_db::format_inbox_digest(&items, carryover)?;
+    let Some(digest) = event_db::format_inbox_digest(&items, carryover) else {
+        let _ = reply.send(None);
+        return;
+    };
+
+    // **先に渡してから打刻する。** 呼び出し元がタイムアウトで諦めていれば送信は失敗し、
+    // その場合は打刻しない（未配送のまま残るので次の機会に再度出る）。逆順にすると
+    // 「配送済みだが誰も見ていない」本文が生まれ、再送しない方針のせいで永久に失われる。
+    if reply.send(Some(digest.clone())).is_err() {
+        log::warn!(
+            "[delivery] 注入本文の受け取り手が既に居ない（タイムアウト）ため打刻しない terminal={} 経路={}",
+            terminal_id,
+            reason.label()
+        );
+        return;
+    }
 
     let ids: Vec<String> = items.iter().map(|i| i.id.clone()).collect();
     if let Err(e) = event_db::mark_delivered(pool, &ids, event_db::now_ms()).await {
-        // 打刻に失敗しても本文は返す。未配送のまま残るので次の機会に再度出る
+        // 打刻に失敗しても本文は既に渡している。未配送のまま残るので次の機会に再度出る
         // （取りこぼすより一度重複するほうが安全）。
         log::warn!("[delivery] mark_delivered に失敗: {}", e);
     }
@@ -628,7 +652,6 @@ async fn collect_digest(
             }),
         );
     }
-    Some(digest)
 }
 
 // ─── 配送の駆動 ───────────────────────────────────────────────────────────────
