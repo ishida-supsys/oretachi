@@ -1876,9 +1876,16 @@ onMounted(async () => {
     clearNotification(event.payload.worktreeId);
   });
 
-  // トレイポップアップの「ウィンドウで開く」
+  // トレイポップアップの「ウィンドウで開く」。
+  // トレイの destroy はここで行う契約になっている（トレイ側は deferDestroy で待っている）。
+  // フォアグラウンドだったトレイが先に消えるとプロセスがフォアグラウンド権を失い、
+  // showWorktreeInWindows の setFocus が OS に拒否されてメインが前面に出ない。
   await listen<{ worktreeId: string }>("tray-show-worktree", async (event) => {
-    await showWorktreeInWindows(event.payload.worktreeId, "tray-show-worktree");
+    try {
+      await showWorktreeInWindows(event.payload.worktreeId, "tray-show-worktree");
+    } finally {
+      await closeTrayPopup();
+    }
   });
 
   // トレイポップアップからのアーカイブ要求（「アーカイブ化して次へ / 完了」）。

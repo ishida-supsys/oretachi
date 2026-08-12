@@ -66,6 +66,11 @@ const navigating = ref(false);
 // （destroy 済みウィンドウへの setSize や、打ち切った遷移の描画を防ぐ）
 let navToken = 0;
 
+// destroy の二重実行防止（メイン経由と保険タイマーの両方から呼ばれる）
+let destroyed = false;
+// destroy をメインに委ねたのに閉じてもらえなかった場合の保険（メインが落ちている等）
+const DEFERRED_DESTROY_FALLBACK_MS = 3000;
+
 // 「次へ ▾」ドロップダウンの開閉
 const menuOpen = ref(false);
 // アーカイブ確認ダイアログ
@@ -327,6 +332,14 @@ async function onPrev() {
   if (!isFirst.value) await goTo(currentIndex.value - 1);
 }
 
+/** tray-closing を出してこのウィンドウを破棄する。保険タイマーからも呼ぶので冪等にする */
+async function destroySelf(): Promise<void> {
+  if (destroyed) return;
+  destroyed = true;
+  await emitTo("main", "tray-closing", {});
+  await getCurrentWindow().destroy();
+}
+
 /**
  * ポップアップを閉じる共通処理。
  * 順序: detach → (通知クリア) → extraEmit → tray-closing → destroy
@@ -337,6 +350,13 @@ async function closePopup(options: {
   clearCurrentNotification?: boolean;
   /** tray-closing の直前に流す追加イベント */
   extraEmit?: (worktree: TrayWorktreeData) => Promise<void>;
+  /**
+   * destroy をメイン側に任せる。「ウィンドウで開く」で必要。
+   * フォアグラウンドだったトレイが自分で先に消えるとプロセスがフォアグラウンド権を
+   * 失い、後から走るメイン側の setFocus が OS に拒否される（メインが前面に出ず、
+   * Z オーダー次第で別アプリがアクティブになる）。
+   */
+  deferDestroy?: boolean;
 } = {}): Promise<void> {
   if (closing.value) return;
   closing.value = true;
@@ -348,8 +368,12 @@ async function closePopup(options: {
       await emitTo("main", "tray-clear-notification", { worktreeId: wt.worktreeId });
     }
     if (wt && options.extraEmit) await options.extraEmit(wt);
-    await emitTo("main", "tray-closing", {});
-    await getCurrentWindow().destroy();
+    if (options.deferDestroy) {
+      // メインが閉じてくれなかったときだけ自分で閉じる
+      setTimeout(() => { void destroySelf(); }, DEFERRED_DESTROY_FALLBACK_MS);
+      return;
+    }
+    await destroySelf();
   } catch (e) {
     // emit 失敗でボタンが永久に死ぬのを避ける（既存挙動を維持）
     closing.value = false;
@@ -373,6 +397,8 @@ async function onClose() {
 async function onShowInWindow() {
   await closePopup({
     extraEmit: (wt) => emitTo("main", "tray-show-worktree", { worktreeId: wt.worktreeId }),
+    // メインが前面化を終えてから main 側にこのウィンドウを destroy させる
+    deferDestroy: true,
   });
 }
 
@@ -725,10 +751,12 @@ onUnmounted(() => {
         <!-- クリックアウト用の透明バックドロップ（メニューより下、他要素より上） -->
         <div v-if="menuOpen" class="fixed inset-0 z-[190]" @click="menuOpen = false" />
 
-        <!-- トレイウィンドウは高さ固定なのでメニューは上向きに開く -->
+        <!-- トレイウィンドウは高さ固定なのでメニューは上向きに開く。
+             split button はフッター右端にあるので right-0 で右揃えにする
+             （left-0 だと min-w-max がウィンドウ右外へはみ出して項目が切れる） -->
         <div
           v-if="menuOpen"
-          class="absolute bottom-full left-0 mb-1 z-[191] min-w-max rounded border border-[#45475a] py-1 shadow-lg"
+          class="absolute bottom-full right-0 mb-1 z-[191] min-w-max rounded border border-[#45475a] py-1 shadow-lg"
           style="background-color: #1e1e2e"
         >
           <button
