@@ -219,6 +219,30 @@ fn build_hooks_json(notifier_path: &str) -> serde_json::Value {
         );
     }
 
+    // Stop フック（2つ目のグループ）: ターン境界で購読イベントの未読を additionalContext として
+    // 注入する（#124）。Stop は「at the end of the turn (conversation continues so Claude can act
+    // on feedback)」なので、注入すればそのまま会話が継続してエージェントが着手する。
+    //
+    // 上の EVENT_CONFIG_KEYS ループが張る `--notify --event Stop` とは**別グループ**にする:
+    //   - `--notify` は6イベント共有で post_json（read 500ms・body を読まない・失敗時 exit 1）。
+    //     body を読むために post_json_read_body（read 2s）へ切り替えると Stop 以外まで遅くなる
+    //   - additionalContext を返す経路は「失敗しても無出力で必ず exit 0」に倒す必要があり
+    //     （claude 側に警告を出させない）、exit 1 しうる --notify とは方針が逆
+    // PermissionRequest に ExitPlanMode グループを追記しているのと同じ構造。
+    let turn_context_group = serde_json::json!({
+        "matcher": "",
+        "hooks": [{
+            "type": "command",
+            "command": notifier_path,
+            "args": ["--turn-context", "--project-dir", "${CLAUDE_PROJECT_DIR}"]
+        }]
+    });
+    if let Some(arr) = hooks.get_mut("Stop").and_then(|v| v.as_array_mut()) {
+        arr.push(turn_context_group);
+    } else {
+        hooks.insert("Stop".to_string(), serde_json::json!([turn_context_group]));
+    }
+
     // ExitPlanMode フック: プラン確定時に通知サイドカー (oretachi-notify) を起動し、
     // プランを AI 要約してワークツリーの description にセットさせる。
     // ExitPlanMode はユーザー操作を伴うツールのため PreToolUse/PostToolUse は発火せず、
@@ -448,5 +472,51 @@ fn migrate_remove_oretachi_hooks(json: &mut serde_json::Value) {
         if let Some(obj) = json.as_object_mut() {
             obj.remove("hooks");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Stop` には通知用 (`--notify`) とターン境界配送用 (`--turn-context`) の
+    /// **2つのグループ**が並ぶ（#124）。片方に統合すると、6イベント共有の `--notify` が
+    /// レスポンス body を読む必要が出て全イベントの hook が遅くなる。
+    #[test]
+    fn build_hooks_json_registers_turn_context_alongside_notify() {
+        let v = build_hooks_json("X:/bin/oretachi-notify.exe");
+        let stop = v["hooks"]["Stop"].as_array().expect("Stop グループ");
+        assert_eq!(stop.len(), 2, "通知とターン境界配送で2グループ");
+
+        let args_of = |i: usize| -> Vec<String> {
+            stop[i]["hooks"][0]["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap().to_string())
+                .collect()
+        };
+        assert!(args_of(0).contains(&"--notify".to_string()));
+        assert!(args_of(0).contains(&"Stop".to_string()));
+        let turn = args_of(1);
+        assert_eq!(turn[0], "--turn-context");
+        assert!(turn.contains(&"${CLAUDE_PROJECT_DIR}".to_string()));
+        // --turn-context は event / agent を取らない（--notify とは別系統）
+        assert!(!turn.contains(&"--event".to_string()));
+
+        // 他イベントには生えていない（Stop 限定であること）
+        for ev in ["Notification", "PreToolUse", "PostToolUse", "SubagentStop"] {
+            assert_eq!(v["hooks"][ev].as_array().unwrap().len(), 1, "{} は1グループのまま", ev);
+        }
+    }
+
+    /// SessionStart / UserPromptSubmit / PermissionRequest の既存構成を壊していないこと。
+    #[test]
+    fn build_hooks_json_keeps_existing_groups() {
+        let v = build_hooks_json("X:/bin/oretachi-notify.exe");
+        assert_eq!(v["hooks"]["SessionStart"][0]["hooks"][0]["args"][0], "--session-context");
+        assert_eq!(v["hooks"]["UserPromptSubmit"][0]["hooks"][0]["args"][0], "--prompt-context");
+        // PermissionRequest は通知 + ExitPlanMode の2グループ
+        assert_eq!(v["hooks"]["PermissionRequest"].as_array().unwrap().len(), 2);
     }
 }

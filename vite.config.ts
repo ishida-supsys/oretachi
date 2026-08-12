@@ -5,6 +5,10 @@ import VueI18nPlugin from "@intlify/unplugin-vue-i18n/vite";
 
 // @ts-expect-error process is a nodejs global
 const host = process.env.TAURI_DEV_HOST;
+// 別ワークツリーで dev ビルドを同時に立ち上げると 1420 が衝突して起動できないため、
+// env で退避できるようにする（tauri 側は `tauri dev --config` で devUrl を合わせる）。
+// @ts-expect-error process is a nodejs global
+const devPort = Number(process.env.ORETACHI_DEV_PORT) || 1420;
 
 // https://vite.dev/config/
 export default defineConfig(async () => ({
@@ -20,7 +24,7 @@ export default defineConfig(async () => ({
   clearScreen: false,
   // 2. tauri expects a fixed port, fail if that port is not available
   server: {
-    port: 1420,
+    port: devPort,
     strictPort: true,
     host: host || false,
     hmr: host

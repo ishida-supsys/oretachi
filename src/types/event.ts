@@ -57,12 +57,15 @@ export interface TerminalUnread {
 /** 配送トーストのペイロード（Rust の `event-delivered`）。 */
 export interface DeliveredPayload {
   terminalId: string;
-  sessionId: number;
+  /** PTY 押し込み (`method: "pty"`) のみ。Stop フック経由の注入では PTY を触らないので入らない。 */
+  sessionId?: number;
   worktreeId: string | null;
   worktreeName: string | null;
-  agentName: string | null;
+  /** 同上。押し込み時のみ。 */
+  agentName?: string | null;
   count: number;
   text: string;
+  /** `"pty"`（押し込み）または `"stop"`（Stop フックのターン境界配送、#124）。 */
   method: string;
 }
 
