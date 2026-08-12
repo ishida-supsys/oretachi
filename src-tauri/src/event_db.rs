@@ -496,6 +496,12 @@ pub async fn has_event(pool: &SqlitePool, source_worktree_id: &str, kind: &str) 
 /// 「受け取った」とみなす —— エージェントは押し込み / SessionStart 注入で本文を見た時点で
 /// 反応できるため、ack を条件にすると連鎖の起点を数え落とす。
 ///
+/// **数えるのは `worktree.message` だけ。** 往復ループを作れるのは自由文メッセージだけで、
+/// `worktree.created` / `worktree.closed` はワークツリーの追加・削除というユーザー操作から
+/// しか発火せず必ず depth 0 で始まる。これらを数に入れると、`*` を購読して作成通知を
+/// 受けているだけのタブが常に depth 1 以上から送ることになり、**本来の会話が使える
+/// 往復回数だけが減る**（ループ耐性は変わらない）。
+///
 /// 戻り値 `None` は「窓の内側に受信が無い」＝連鎖の起点（depth 0 で送ってよい）。
 pub async fn max_inbound_depth(
     pool: &SqlitePool,
@@ -505,10 +511,11 @@ pub async fn max_inbound_depth(
 ) -> Result<Option<i64>, String> {
     let row: (Option<i64>,) = sqlx::query_as(
         "SELECT MAX(e.depth) FROM inbox i JOIN events e ON e.id = i.event_id \
-         WHERE i.subscriber_terminal_id = ? AND i.created_at > ?",
+         WHERE i.subscriber_terminal_id = ? AND i.created_at > ? AND e.kind = ?",
     )
     .bind(terminal_id)
     .bind(now - window_ms)
+    .bind(KIND_WORKTREE_MESSAGE)
     .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -2510,6 +2517,44 @@ mod tests {
             retry.depth = depth;
             insert_event(&pool, &retry).await.unwrap();
             assert_eq!(fanout_all(&pool, &retry, now).await.unwrap(), 0);
+        });
+    }
+
+    /// `created` / `closed` は必ず depth 0 のユーザー操作起点なので、連鎖の深さに数えない。
+    /// 数えると `*` を購読して作成通知を受けているだけのタブが常に depth 1 から送ることになり、
+    /// 本来の会話に使える往復回数だけが削られる。
+    #[test]
+    fn test_roundtrip_chain_depth_counts_messages_only() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+
+            let mut s = sub("term-a", Some("wt-a"), r#"["worktree.created","worktree.message"]"#);
+            s.target = TARGET_ALL.to_string();
+            upsert_subscription(&pool, &s).await.unwrap();
+
+            // 作成通知を受けても連鎖の起点のまま
+            let mut created = event("wt-b", None);
+            created.id = "ev-created".to_string();
+            created.kind = KIND_WORKTREE_CREATED.to_string();
+            insert_event(&pool, &created).await.unwrap();
+            assert_eq!(fanout_all(&pool, &created, now).await.unwrap(), 1);
+            assert_eq!(
+                max_inbound_depth(&pool, "term-a", now, CHAIN_WINDOW_MS).await.unwrap(),
+                None
+            );
+
+            // 自由文メッセージを受けたときだけ連鎖が進む
+            let mut msg = event("wt-b", Some("term-b"));
+            msg.id = "ev-msg".to_string();
+            msg.kind = KIND_WORKTREE_MESSAGE.to_string();
+            msg.depth = 1;
+            insert_event(&pool, &msg).await.unwrap();
+            fanout_all(&pool, &msg, now).await.unwrap();
+            assert_eq!(
+                max_inbound_depth(&pool, "term-a", now, CHAIN_WINDOW_MS).await.unwrap(),
+                Some(1)
+            );
         });
     }
 

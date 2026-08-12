@@ -1011,15 +1011,6 @@ async fn save_archive(
     archive_db::save(&pool.0, &archive).await
 }
 
-/// `worktree.closed` イベントを event_db へ発行する（issue #123）。
-///
-/// **fire-and-forget**。close フローは既に oneshot + timeout の複雑な経路
-/// （`CloseWorktreeAckRegistry`、ack タイムアウト 45 秒）なので、DB 書き込みと照合で
-/// クローズ処理をブロックしない。DB 未初期化・書き込み失敗はログのみで握りつぶす。
-///
-/// 呼び出し元は `git worktree remove` の成功確認後の経路だけ。フロントの
-/// `useWorktreeRemove.ts` は失敗・キャンセル・多重実行では afterRemove に到達しないため、
-/// `Cancelled` / `Busy` / `Failed` では構造的に発火しない。
 /// イベントの target 照合に必要な、ワークツリーの所属情報を解決する（#126）。
 ///
 /// 呼び出し元から渡された値を優先し、無ければ settings から引く。**closed 経路では
@@ -1050,6 +1041,15 @@ fn resolve_event_scope(
     (repo, group)
 }
 
+/// `worktree.closed` イベントを event_db へ発行する（issue #123）。
+///
+/// **fire-and-forget**。close フローは既に oneshot + timeout の複雑な経路
+/// （`CloseWorktreeAckRegistry`、ack タイムアウト 45 秒）なので、DB 書き込みと照合で
+/// クローズ処理をブロックしない。DB 未初期化・書き込み失敗はログのみで握りつぶす。
+///
+/// 呼び出し元は `git worktree remove` の成功確認後の経路だけ。フロントの
+/// `useWorktreeRemove.ts` は失敗・キャンセル・多重実行では afterRemove に到達しないため、
+/// `Cancelled` / `Busy` / `Failed` では構造的に発火しない。
 fn fire_worktree_closed(
     app_handle: &tauri::AppHandle,
     id: String,
