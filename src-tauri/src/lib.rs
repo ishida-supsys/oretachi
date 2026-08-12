@@ -1440,10 +1440,7 @@ pub fn run() {
     {
         // 別ワークツリーで dev ビルドを同時に立ち上げると 4000 の bind に失敗して
         // 起動そのものが panic するため、env で退避できるようにしておく。
-        let tauri_mcp_port = std::env::var("ORETACHI_TAURI_MCP_PORT")
-            .ok()
-            .and_then(|v| v.parse::<u16>().ok())
-            .unwrap_or(4000);
+        let tauri_mcp_port = mcp_server::env_port_override("ORETACHI_TAURI_MCP_PORT", 4000);
         builder = builder.plugin(tauri_plugin_mcp::init_with_config(
             tauri_plugin_mcp::PluginConfig::new("oretachi".to_string())
                 .tcp_localhost(tauri_mcp_port),

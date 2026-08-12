@@ -3687,14 +3687,28 @@ pub fn cleanup_port_file(app_handle: &AppHandle) {
 
 // ─── Server startup ───────────────────────────────────────────────────────────
 
+/// `.env` 由来のポート上書きを解決する。
+///
+/// **空文字は「未設定」と同じ扱いにする。** `.env` には3つのポート上書きを空値で
+/// 並べてあり（既定値のドキュメントを兼ねる）、`dotenvy` はそれを空文字として
+/// プロセス環境へ載せるため、ここで弾かないと既定値へ落ちない。
+pub fn parse_port_override(raw: Option<&str>, default: u16) -> u16 {
+    raw.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<u16>().ok())
+        .unwrap_or(default)
+}
+
+/// env からポート上書きを読む（未設定・空・数値でない場合は `default`）。
+pub fn env_port_override(name: &str, default: u16) -> u16 {
+    parse_port_override(std::env::var(name).ok().as_deref(), default)
+}
+
 pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
     // `settings.json` は本番と全 dev インスタンスで共有されるため、別ワークツリーで
     // dev ビルドを立ち上げると `mcpPort` を奪い合って bind に失敗する。env で退避できる
     // ようにしておく（`MCP_PORT_OVERWRITE=false` と併用すれば mcp-server.json も奪わない）。
-    let port = std::env::var("ORETACHI_MCP_PORT")
-        .ok()
-        .and_then(|v| v.parse::<u16>().ok())
-        .unwrap_or(port);
+    let port = env_port_override("ORETACHI_MCP_PORT", port);
     let manager = app_handle.state::<McpServerManager>();
 
     // 既存サーバーを停止
@@ -3976,6 +3990,22 @@ mod tests {
         "background_tasks": [],
         "session_crons": []
     }"#;
+
+    /// `.env` にはポート上書き3本を**空値**で並べてある（既定値のドキュメントを兼ねる）。
+    /// `dotenvy` は空値もプロセス環境へ載せるので、「空 = 未設定」がここで崩れると
+    /// 本番の MCP ポートが 0 になったり tauri-mcp が起動に失敗したりする。
+    #[test]
+    fn test_parse_port_override_treats_blank_as_unset() {
+        assert_eq!(parse_port_override(None, 4000), 4000);
+        assert_eq!(parse_port_override(Some(""), 4000), 4000);
+        assert_eq!(parse_port_override(Some("   "), 4000), 4000);
+        // 数値でない値も既定へ落とす（起動を止めない）
+        assert_eq!(parse_port_override(Some("abc"), 4000), 4000);
+        assert_eq!(parse_port_override(Some("70000"), 4000), 4000);
+        // 明示された値は使う
+        assert_eq!(parse_port_override(Some("9163"), 4000), 9163);
+        assert_eq!(parse_port_override(Some(" 9163 "), 4000), 9163);
+    }
 
     #[test]
     fn test_parse_stop_hook_fields_initial_firing() {
