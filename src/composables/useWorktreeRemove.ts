@@ -299,6 +299,8 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
             id: worktree.id,
             name: worktree.name,
             branchName: worktree.branchName,
+            repositoryName: worktree.repositoryName,
+            workgroupId: worktree.workgroupId,
           }).catch(() => { /* 通知失敗は無視 */ });
         }
       },
@@ -308,6 +310,8 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
           id: worktree.id,
           name: worktree.name,
           branchName: worktree.branchName,
+          repositoryName: worktree.repositoryName,
+          workgroupId: worktree.workgroupId,
         });
       },
       onSettled,
@@ -328,6 +332,10 @@ export function useWorktreeRemove(options: WorktreeRemoveOptions) {
         id: worktree.id,
         name: worktree.name,
         branchName: worktree.branchName,
+        // repo: / workgroup: 購読の照合に使う。この時点で settings 上の実体は
+        // 既に消えているため、フロントが持っている値を渡す (issue #126)
+        repositoryName: worktree.repositoryName,
+        workgroupId: worktree.workgroupId,
       }).catch(() => { /* 通知失敗は削除の成否に影響しない */ });
     };
     return await _execute(

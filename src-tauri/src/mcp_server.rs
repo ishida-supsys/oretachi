@@ -437,10 +437,16 @@ pub struct PromptContextPayload {
 pub struct NotifyWorktreeParams {
     #[schemars(description = "通知するワークツリー名")]
     pub worktree_name: String,
-    #[schemars(description = "通知種別: \"approval\"(承認待ち) / \"completed\"(作業完了) / \"general\"(汎用) / \"hook\"(ライフサイクルフック)。省略時は \"general\"")]
+    #[schemars(description = "通知種別: \"approval\"(承認待ち) / \"completed\"(作業完了) / \"general\"(汎用) / \"hook\"(ライフサイクルフック)。省略時は \"general\"。これは画面に出すトーストの種別であり、購読イベントの種別(event_kind)とは別物")]
     pub kind: Option<String>,
     #[schemars(description = "通知本文（ライフサイクルフックのコンテキスト情報など）。省略可")]
     pub body: Option<String>,
+    #[schemars(description = "購読イベントとしても発行する場合の**イベント種別**。現在は \"worktree.message\" のみ。トースト種別 kind とは名前空間が別。指定すると body が自由文メッセージとして、自分のワークツリーを購読している他のワークツリーへ配送される（宛先は購読者が決めるので worktree_name とは無関係）")]
+    pub event_kind: Option<String>,
+    #[schemars(description = "呼び出し元ターミナルの terminal_id。event_kind 指定時の発信元の同定に使う（セッション開始時に oretachi から注入されている）")]
+    pub terminal_id: Option<String>,
+    #[schemars(description = "呼び出し元の作業ディレクトリ絶対パス。event_kind 指定時に terminal_id を省略した場合のフォールバック同定に使う")]
+    pub project_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -718,9 +724,9 @@ pub struct WriteTerminalParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SubscribeWorktreeParams {
-    #[schemars(description = "購読対象のワークツリー名または ID。このワークツリーがクローズされたら通知が届く")]
+    #[schemars(description = "購読対象。ワークツリー名 / ID のほか、ワイルドカードとして \"*\"(全ワークツリー) / \"workgroup:<ID または名前>\" / \"repo:<リポジトリ名>\" を指定できる。**これから作成されるワークツリーの worktree.created を購読したい場合はワイルドカードを使う**（ID 固定では表現できない）")]
     pub target: String,
-    #[schemars(description = "購読するイベント種別。現状 \"worktree.closed\" のみ対応（省略時 [\"worktree.closed\"]）")]
+    #[schemars(description = "購読するイベント種別の配列。\"worktree.closed\"(クローズ) / \"worktree.created\"(作成) / \"worktree.message\"(他ワークツリーのエージェントが notify_worktree で送る自由文)。省略時は [\"worktree.closed\"]")]
     pub event_kinds: Option<Vec<String>>,
     #[schemars(description = "配送戦略: \"turn_end\"(既定。待機中なら PTY へ押し込み、走行中はターン境界を待つ) / \"interrupt\"(走行中でも即 PTY へ割り込む) / \"passive\"(押し込まない。oretachi_poll_inbox で自分から取りに来る)。どの戦略でもセッション開始時の回収と oretachi_poll_inbox は使える")]
     pub delivery: Option<String>,
@@ -1199,33 +1205,91 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(result_json)]))
     }
 
-    #[tool(description = "ワークツリーに通知を送信する")]
-    fn notify_worktree(
+    #[tool(description = "ワークツリーに通知を送信する。event_kind に \"worktree.message\" を指定すると、通知に加えて自分のワークツリーを購読している他のワークツリーへ body を自由文メッセージとして配送する（購読方式なので送信側は宛先を指定しない）")]
+    async fn notify_worktree(
         &self,
-        Parameters(NotifyWorktreeParams { worktree_name, kind, body }): Parameters<NotifyWorktreeParams>,
+        Parameters(NotifyWorktreeParams { worktree_name, kind, body, event_kind, terminal_id, project_dir }): Parameters<NotifyWorktreeParams>,
     ) -> Result<CallToolResult, McpError> {
+        // 購読イベントの発行は通知トーストとは**独立した第三の経路**（event_db → 配送
+        // ワーカー）に載せる。`hook_tx`（broadcast channel）も WebView IPC もトースト用の
+        // 経路で、下の `should_send_notify` による debounce（hook 3s / approval 1s）が
+        // かかる。購読配送を debounce に載せるとイベントが黙って落ちる（#120 §1）ので、
+        // 判定より前にここで発行しきる。
+        //
+        // **失敗しても `?` で早期 return しない。** イベント発行のエラー（DB 未初期化、
+        // terminal_id の解決失敗、body 空など）でトーストまで巻き添えにすると、
+        // 「`kind=approval` に `event_kind` を添えただけで承認待ちトーストが出ない」という
+        // 独立経路の設計と真逆の挙動になる。トーストは必ず送り、失敗はレスポンスで返す。
+        let event_result = match event_kind.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(k) => Some(
+                publish_worktree_message(
+                    &self.app_handle,
+                    k,
+                    body.as_deref(),
+                    terminal_id.as_deref(),
+                    project_dir.as_deref(),
+                )
+                .await,
+            ),
+            None => None,
+        };
+
         let event = NotifyWorktreeEvent {
             worktree_name: worktree_name.clone(),
             kind: kind.unwrap_or_else(|| "general".to_string()),
             body,
             agent: None,
         };
-        let manager = self.app_handle.state::<McpServerManager>();
-        // HTTP 経路と同じ debounce ポリシー (hook=3s, approval=1s, 他は対象外) を適用
-        let should_send = should_send_notify(&manager.notify_last_sent, &event.worktree_name, &event.kind);
-        if !should_send {
-            return Ok(CallToolResult::success(vec![Content::text("ok")]));
-        }
+        // 通知トーストを送ったかどうかにかかわらず、イベント発行の結果は必ず返す
+        // （debounce で落ちても購読配送は成立しているため、"ok" だけ返すと嘘になる）。
+        // イベント発行が失敗した場合はツール結果を isError にして呼び出し元に気付かせる
+        // ——トーストは既に送っているので、エラーにしても通知は失われない。
+        let reply = |notified: bool| {
+            let result = match &event_result {
+                Some(Ok(v)) => CallToolResult::success(vec![Content::text(
+                    serde_json::json!({ "ok": true, "notified": notified, "event": v }).to_string(),
+                )]),
+                Some(Err(e)) => CallToolResult::error(vec![Content::text(
+                    serde_json::json!({
+                        "ok": false,
+                        "notified": notified,
+                        "error": e.message,
+                        "hint": "通知トースト自体は送信済みです。購読イベントの発行だけが失敗しました。",
+                    })
+                    .to_string(),
+                )]),
+                None => CallToolResult::success(vec![Content::text("ok")]),
+            };
+            Ok(result)
+        };
+
+        let hook_tx = {
+            let manager = self.app_handle.state::<McpServerManager>();
+            // HTTP 経路と同じ debounce ポリシー (hook=3s, approval=1s, 他は対象外) を適用
+            if !should_send_notify(&manager.notify_last_sent, &event.worktree_name, &event.kind) {
+                return reply(false);
+            }
+            manager.hook_tx.clone()
+        };
         if event.kind == "hook" {
             // hook イベントは broadcast channel 経由で MCP ピアに直接送信する（WebView IPC をバイパス）
-            let _ = manager.hook_tx.send(event);
-            Ok(CallToolResult::success(vec![Content::text("ok")]))
+            let _ = hook_tx.send(event);
+            reply(true)
         } else {
-            self.app_handle
-                .emit("notify-worktree", &event)
-                .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
+            // トーストの emit に失敗しても `?` で返さない。イベント発行は既に済んでいる
+            // ので、ここで Err にすると成功した配送結果まで呼び出し元から見えなくなる
+            // （上のイベント発行側と同じ理由。2経路は互いを巻き添えにしない）。
+            if let Err(e) = self.app_handle.emit("notify-worktree", &event) {
+                log::warn!("[mcp] notify_worktree の emit に失敗: {}", e);
+                // 報告すべきイベント結果が無い（＝従来どおりの呼び出し）なら、
+                // 従来どおりエラーで返す。`"ok"` を返すと debounce と区別が付かない。
+                if event_result.is_none() {
+                    return Err(McpError::internal_error(e.to_string(), None));
+                }
+                return reply(false);
+            }
             log::info!("[mcp] notify_worktree: {} kind={}", worktree_name, event.kind);
-            Ok(CallToolResult::success(vec![Content::text("ok")]))
+            reply(true)
         }
     }
 
@@ -1704,7 +1768,7 @@ impl NotifyService {
         }
     }
 
-    #[tool(description = "指定ワークツリーのクローズを購読する。別ワークツリーで進めている関連作業が完了（クローズ）したことを、自分のセッションで検知したいときに使う。届いた通知は待機中なら PTY へ押し込まれ、次のセッション開始時にも自動で提示され、oretachi_poll_inbox でも取得できる。ターミナルを閉じたりアプリを再起動したりしても購読は引き継ぎ待ちとして保持され、同じワークツリーで次に AI エージェントが立ち上がったときに引き継がれる")]
+    #[tool(description = "他ワークツリーのイベント（クローズ / 作成 / エージェントからの自由文メッセージ）を購読する。別ワークツリーで進めている関連作業の完了や開始を自分のセッションで検知したいときに使う。target には \"*\" / \"workgroup:<ID>\" / \"repo:<名前>\" のワイルドカードも指定でき、まだ存在しないワークツリーの作成も購読できる。届いた通知は待機中なら PTY へ押し込まれ、次のセッション開始時にも自動で提示され、oretachi_poll_inbox でも取得できる。ターミナルを閉じたりアプリを再起動したりしても購読は引き継ぎ待ちとして保持され、同じワークツリーで次に AI エージェントが立ち上がったときに引き継がれる")]
     async fn oretachi_subscribe_worktree(
         &self,
         Parameters(SubscribeWorktreeParams {
@@ -1722,8 +1786,9 @@ impl NotifyService {
             return Err(McpError::invalid_params("target must not be empty", None));
         }
 
-        // 現状 Phase 1 では worktree.closed のみ。未対応種別を黙って受け付けると
-        // 「購読したのに来ない」という分かりにくい失敗になるので明示的に弾く。
+        // 未対応種別を黙って受け付けると「購読したのに来ない」という分かりにくい失敗に
+        // なるので明示的に弾く。既定が `worktree.closed` だけなのは後方互換のため
+        // （`*` の主用途は `worktree.created` なので description で明示している）。
         let kinds = event_kinds
             .unwrap_or_else(|| vec![crate::event_db::KIND_WORKTREE_CLOSED.to_string()]);
         if kinds.is_empty() {
@@ -1770,29 +1835,18 @@ impl NotifyService {
         }
 
         // await をまたいで State / settings の参照を保持しないよう、ここで所有権のある値へ確定させる
-        let (subscriber, target_id, target_name) = {
+        let (subscriber, resolved) = {
             let subscriber = resolve_subscriber(
                 &self.app_handle,
                 terminal_id.as_deref(),
                 project_dir.as_deref(),
             )?;
             let settings = self.app_handle.state::<SettingsManager>().get();
-            let wt = resolve_worktree_by_name_or_id(&settings, target.as_str())?;
-            // ホーム / リポジトリ擬似ワークツリーは削除自体が禁止されているので
-            // worktree.closed は構造的に永久に発火しない。購読を受け付けると
-            // 「購読成功したのに一生通知が来ない」状態になるため拒否する。
-            if wt.is_home || wt.is_repository {
-                let kind = if wt.is_home { "ホーム" } else { "リポジトリ" };
-                return Err(McpError::invalid_params(
-                    format!(
-                        "'{}' は{}擬似ワークツリーでクローズされることがないため購読できません",
-                        wt.name, kind
-                    ),
-                    None,
-                ));
-            }
-            (subscriber, wt.id.clone(), wt.name.clone())
+            let resolved = resolve_subscription_target(&settings, target.as_str())?;
+            (subscriber, resolved)
         };
+        let target_id = resolved.stored.clone();
+        let target_name = resolved.label.clone();
 
         // 逆引きできないと自己エコー抑止も購読者クローズ時の掃除も効かないため受け付けない
         let Some(subscriber_worktree_id) = subscriber.worktree_id.clone() else {
@@ -1801,10 +1855,13 @@ impl NotifyService {
                 None,
             ));
         };
-        if subscriber_worktree_id == target_id {
+        // 厳密一致のときだけ「自分自身は購読できない」を課す。ワイルドカードでは
+        // 自ワークツリーのイベントも必ず target にマッチするが、そちらは `is_self_echo` が
+        // 配送段階で落とすので購読自体は成立する（他のワークツリーのぶんが届く）。
+        if resolved.worktree_id.as_deref() == Some(subscriber_worktree_id.as_str()) {
             return Err(McpError::invalid_params(
                 format!(
-                    "自分自身が居るワークツリー '{}' のクローズは購読できません（クローズされた時点でこのセッションも消えるため通知先がありません）",
+                    "自分自身が居る{}のクローズは購読できません（クローズされた時点でこのセッションも消えるため通知先がありません）",
                     target_name
                 ),
                 None,
@@ -1850,8 +1907,17 @@ impl NotifyService {
                 "expiresAt": sub.expires_at,
                 "subscriberTerminalId": subscriber.terminal_id,
                 "message": format!(
-                    "ワークツリー '{}' のクローズを購読しました。クローズされると次のセッション開始時に通知が提示されます（oretachi_poll_inbox でも取得できます）。",
-                    target_name
+                    "{}の {} を購読しました。イベントが発生すると次のセッション開始時に通知が提示されます（oretachi_poll_inbox でも取得できます）。{}",
+                    target_name,
+                    kinds.join(" / "),
+                    // `*` は将来立つワークツリーも含めて全部に反応する。自動 spawn と
+                    // 組み合わせると意図せずタブが立つので、そこだけは明示的に警告する
+                    // （端末数上限 / クールダウンで爆発はしないが、驚きは残る）。
+                    if resolved.worktree_id.is_none() && sub.spawn_if_closed != 0 {
+                        " 注意: ワイルドカード購読と spawn_if_closed を併用しているため、未読が溜まると自動でタブが立ちます（生存端末数の上限と再試行のクールダウンで制限されます）。"
+                    } else {
+                        ""
+                    }
                 ),
             })
             .to_string(),
@@ -1879,12 +1945,13 @@ impl NotifyService {
                 project_dir.as_deref(),
             )?;
             // 購読対象が既にクローズ済みで settings から消えている場合もあるため、
-            // 逆引きできなければ渡された文字列をそのまま ID として扱う
+            // 解決できなければ正規化した文字列をそのまま保存値として扱う（#126 の
+            // ワイルドカードも `resolve_subscription_target` が同じ正規化を通す）
             let target_id = target.as_ref().map(|t| {
                 let settings = self.app_handle.state::<SettingsManager>().get();
-                resolve_worktree_by_name_or_id(&settings, t.as_str())
-                    .map(|w| w.id.clone())
-                    .unwrap_or_else(|_| t.clone())
+                resolve_subscription_target(&settings, t.as_str())
+                    .map(|r| r.stored)
+                    .unwrap_or_else(|_| crate::event_db::normalize_target(t))
             });
             (subscriber, target_id)
         };
@@ -1932,18 +1999,18 @@ impl NotifyService {
             .await
             .map_err(|e| McpError::internal_error(e, None))?;
 
-        // ワークツリー名の付与は表示目的のみ。既にクローズ済みなら ID だけになる。
+        // 名前の付与は表示目的のみ。厳密一致 target が既にクローズ済みなら ID だけになる。
         let settings = self.app_handle.state::<SettingsManager>().get();
         let items: Vec<serde_json::Value> = subs
             .iter()
             .map(|s| {
-                let name = settings
-                    .worktrees
-                    .iter()
-                    .find(|w| w.id == s.target)
-                    .map(|w| w.name.clone());
+                let (target_kind, target_label) = describe_target(&settings, &s.target);
+                let name = if target_kind == "worktree" { target_label.clone() } else { None };
                 serde_json::json!({
                     "subscriptionId": s.id,
+                    "target": s.target,
+                    "targetKind": target_kind,
+                    "targetLabel": target_label,
                     "targetWorktreeId": s.target,
                     "targetWorktreeName": name,
                     "eventKinds": serde_json::from_str::<serde_json::Value>(&s.event_kinds).unwrap_or(serde_json::Value::Null),
@@ -2637,6 +2704,336 @@ fn resolve_worktree<'a>(
     Err(McpError::invalid_params(missing_hint.to_string(), None))
 }
 
+/// 保存済みの購読 `target` を `(種別, 表示名)` へ分解する（#126）。
+///
+/// 種別は `worktree` | `all` | `workgroup` | `repo`。**UI / ツール応答はこの種別を見て
+/// 「クローズ済み」の判定をすること。** 名前が引けないことだけを根拠にすると、
+/// ワイルドカード購読がすべて「対象がクローズ済み」と誤表示される。
+///
+/// `*` は表示名を持たない（表示側でローカライズする）。`workgroup:` は表示名を解決する
+/// （未リネームのグループは name が None なので、生の ID を出すと人間が読めない）。
+pub fn describe_target(settings: &AppSettings, target: &str) -> (String, Option<String>) {
+    if target == crate::event_db::TARGET_ALL {
+        return ("all".to_string(), None);
+    }
+    if let Some(gid) = target.strip_prefix(crate::event_db::TARGET_WORKGROUP_PREFIX) {
+        let label = settings
+            .workgroups
+            .iter()
+            .find(|g| g.id == gid)
+            .map(|g| workgroup_display_name(settings, g))
+            .unwrap_or_else(|| gid.to_string());
+        return ("workgroup".to_string(), Some(label));
+    }
+    if let Some(repo) = target.strip_prefix(crate::event_db::TARGET_REPO_PREFIX) {
+        // 照合用に小文字化して保存しているので、元の表記が settings にあればそちらを出す。
+        // 比較は `normalize_target` と同じ Unicode の `to_lowercase()` で行う。
+        // `eq_ignore_ascii_case` だと非 ASCII を含む名前で保存値と突き合わなくなる。
+        let label = settings
+            .repositories
+            .iter()
+            .map(|r| r.name.as_str())
+            .chain(settings.worktrees.iter().map(|w| w.repository_name.as_str()))
+            .find(|name| name.to_lowercase() == repo)
+            .unwrap_or(repo)
+            .to_string();
+        return ("repo".to_string(), Some(label));
+    }
+    (
+        "worktree".to_string(),
+        settings
+            .worktrees
+            .iter()
+            .find(|w| w.id == target)
+            .map(|w| w.name.clone()),
+    )
+}
+
+/// 購読の `target` の解決結果（#126）。
+struct ResolvedTarget {
+    /// DB に保存する正規化済みの target 文字列
+    stored: String,
+    /// 人間 / エージェントへ返す表示名
+    label: String,
+    /// 厳密一致（単一ワークツリー）の場合のみ Some。ワイルドカードでは None
+    worktree_id: Option<String>,
+}
+
+/// 購読の `target` を解決する。ワークツリー ID / 名前のほか、`*` / `workgroup:<id|名前>` /
+/// `repo:<名前>` のワイルドカードを受ける（#126）。
+///
+/// **まだ存在しないワークツリーの `worktree.created` を購読したい**という要求は ID 固定の
+/// target では表現できないため、ワイルドカードは `worktree.created` とセットで必要になる。
+fn resolve_subscription_target(
+    settings: &AppSettings,
+    raw: &str,
+) -> Result<ResolvedTarget, McpError> {
+    let trimmed = raw.trim();
+    if trimmed == crate::event_db::TARGET_ALL {
+        return Ok(ResolvedTarget {
+            stored: crate::event_db::TARGET_ALL.to_string(),
+            label: "全ワークツリー".to_string(),
+            worktree_id: None,
+        });
+    }
+
+    if let Some(value) = trimmed.strip_prefix(crate::event_db::TARGET_WORKGROUP_PREFIX) {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(McpError::invalid_params(
+                "workgroup: の後にワークグループ ID または名前を指定してください",
+                None,
+            ));
+        }
+        // ID 優先、次に表示名。どちらでも解決できなければ利用可能な一覧を添えて返す
+        // （エージェントが自己修復できるようにするのが既存 target 解決の流儀）。
+        let gid = resolve_workgroup_target(settings, Some(value), None)
+            .or_else(|_| resolve_workgroup_target(settings, None, Some(value)))
+            .map_err(|e| McpError::invalid_params(e, None))?
+            .ok_or_else(|| {
+                McpError::invalid_params("ワークグループを解決できませんでした", None)
+            })?;
+        let label = settings
+            .workgroups
+            .iter()
+            .find(|g| g.id == gid)
+            .map(|g| workgroup_display_name(settings, g))
+            .unwrap_or_else(|| gid.clone());
+        return Ok(ResolvedTarget {
+            stored: crate::event_db::normalize_target(&format!(
+                "{}{}",
+                crate::event_db::TARGET_WORKGROUP_PREFIX,
+                gid
+            )),
+            label: format!("ワークグループ '{}'", label),
+            worktree_id: None,
+        });
+    }
+
+    if let Some(value) = trimmed.strip_prefix(crate::event_db::TARGET_REPO_PREFIX) {
+        let value = value.trim();
+        if value.is_empty() {
+            return Err(McpError::invalid_params(
+                "repo: の後にリポジトリ名を指定してください",
+                None,
+            ));
+        }
+        // 登録済みリポジトリ名と、既存ワークツリーが持つリポジトリ名の両方を突合する
+        // （リポジトリ登録を消してもワークツリーだけ残っているケースがあるため）。
+        // 大小の吸収は `normalize_target` と同じ Unicode の `to_lowercase()` で行う
+        // （`eq_ignore_ascii_case` は非 ASCII を畳まないので、日本語混じりの名前を
+        //   大小違いで打つと「見つかりません」になる）。
+        let needle = value.to_lowercase();
+        let matched = settings
+            .repositories
+            .iter()
+            .map(|r| r.name.as_str())
+            .chain(settings.worktrees.iter().map(|w| w.repository_name.as_str()))
+            .find(|name| name.to_lowercase() == needle);
+        let Some(name) = matched else {
+            let available: Vec<&str> = settings.repositories.iter().map(|r| r.name.as_str()).collect();
+            return Err(McpError::invalid_params(
+                format!(
+                    "リポジトリ '{}' が見つかりません。利用可能: [{}]",
+                    value,
+                    available.join(", ")
+                ),
+                None,
+            ));
+        };
+        return Ok(ResolvedTarget {
+            stored: crate::event_db::normalize_target(&format!(
+                "{}{}",
+                crate::event_db::TARGET_REPO_PREFIX,
+                name
+            )),
+            label: format!("リポジトリ '{}'", name),
+            worktree_id: None,
+        });
+    }
+
+    let wt = resolve_worktree_by_name_or_id(settings, trimmed)?;
+    // ホーム / リポジトリ擬似ワークツリーは削除自体が禁止されているので worktree.closed が
+    // 構造的に永久に発火しない。**この制約は厳密一致 target のときだけ**で、`*` を弾く
+    // 理由にはならない（`*` は他のワークツリーのイベントで成立する）。
+    if wt.is_home || wt.is_repository {
+        let kind = if wt.is_home { "ホーム" } else { "リポジトリ" };
+        return Err(McpError::invalid_params(
+            format!(
+                "'{}' は{}擬似ワークツリーでクローズされることがないため購読できません",
+                wt.name, kind
+            ),
+            None,
+        ));
+    }
+    Ok(ResolvedTarget {
+        stored: wt.id.clone(),
+        label: format!("ワークツリー '{}'", wt.name),
+        worktree_id: Some(wt.id.clone()),
+    })
+}
+
+/// `notify_worktree` の `event_kind` 指定時に購読イベントを発行する（#126）。
+///
+/// **発信元は呼び出し元のワークツリー**であって、`notify_worktree` の `worktree_name`
+/// （トーストの宛先）ではない。#120 は「送信側が宛先を知っている前提を置くと破綻する」
+/// ため購読方式を採っており、宛先を決めるのは購読者側。
+///
+/// `depth` はエージェントに申告させず、そのタブが直近に受け取ったイベントから自動計算する。
+/// 申告制にすると「返信時に depth を足す」という約束を破るだけで `MAX_EVENT_DEPTH` の
+/// 暴走防止ガードを無効化できてしまう（A↔B の往復が止まらなくなる）。
+///
+/// 既知の限界（#126）: `depth` が止めるのは**連鎖**であって連打ではない。同じタブから
+/// 立て続けに送れば他ワークツリーの inbox には積まれる。押し込み側は宛先ごとの
+/// 最小間隔（30秒）と保持期限で有界なので、実害は「未読が増える」までに留まる。
+async fn publish_worktree_message(
+    app_handle: &AppHandle,
+    event_kind: &str,
+    body: Option<&str>,
+    terminal_id: Option<&str>,
+    project_dir: Option<&str>,
+) -> Result<serde_json::Value, McpError> {
+    if event_kind != crate::event_db::KIND_WORKTREE_MESSAGE {
+        return Err(McpError::invalid_params(
+            format!(
+                "event_kind '{}' は notify_worktree からは発行できません。指定できるのは '{}' のみです（'{}' / '{}' は oretachi がワークツリーの追加・削除時に自動で発行します）",
+                event_kind,
+                crate::event_db::KIND_WORKTREE_MESSAGE,
+                crate::event_db::KIND_WORKTREE_CREATED,
+                crate::event_db::KIND_WORKTREE_CLOSED,
+            ),
+            None,
+        ));
+    }
+    let text = body
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            McpError::invalid_params(
+                "event_kind を指定する場合は body（購読者へ届けるメッセージ本文）が必要です",
+                None,
+            )
+        })?
+        .to_string();
+    // 自由文は他ワークツリーのエージェントのコンテキストへそのまま注入される。
+    // 上限が無いと相手のセッションを本文で埋められるので入口で弾く（切り詰めではなく
+    // エラーにするのは、勝手に削って「送れた」と誤解させないため）。
+    let text_len = text.chars().count();
+    if text_len > crate::event_db::MESSAGE_TEXT_MAX_CHARS {
+        return Err(McpError::invalid_params(
+            format!(
+                "body が長すぎます（{} 文字 / 上限 {} 文字）。要点を絞って送るか、詳細は共有ファイルや issue に置いて参照を送ってください",
+                text_len,
+                crate::event_db::MESSAGE_TEXT_MAX_CHARS
+            ),
+            None,
+        ));
+    }
+
+    // await をまたいで State / settings の参照を持たないよう、ここで所有権のある値へ確定させる
+    let (source_terminal_id, source_worktree_id, source_worktree_name, repository_name, workgroup_id) = {
+        let subscriber = resolve_subscriber(app_handle, terminal_id, project_dir)?;
+        let Some(worktree_id) = subscriber.worktree_id.clone() else {
+            return Err(McpError::invalid_params(
+                "呼び出し元ターミナルの作業ディレクトリから oretachi 管理下のワークツリーを特定できませんでした。oretachi が管理しているワークツリー内で実行してください",
+                None,
+            ));
+        };
+        let settings = app_handle.state::<SettingsManager>().get();
+        let wt = settings.worktrees.iter().find(|w| w.id == worktree_id);
+        let group = wt
+            .and_then(|w| resolve_workgroup(&settings, w))
+            .map(|g| g.id.clone());
+        (
+            subscriber.terminal_id,
+            worktree_id,
+            wt.map(|w| w.name.clone()),
+            wt.map(|w| w.repository_name.clone()),
+            group,
+        )
+    };
+
+    let pool = event_pool(app_handle)?;
+    let now = crate::event_db::now_ms();
+    // 受信した最大 depth + 1。受信が無ければ 0（連鎖の起点）。
+    let depth = crate::event_db::max_inbound_depth(
+        &pool,
+        &source_terminal_id,
+        now,
+        crate::event_db::CHAIN_WINDOW_MS,
+    )
+    .await
+    .map_err(|e| McpError::internal_error(e, None))?
+    .map_or(0, |d| d + 1);
+
+    let body_json = serde_json::json!({
+        "text": text,
+        "sourceWorktreeName": source_worktree_name,
+    })
+    .to_string();
+    let event = crate::event_db::EventRow {
+        id: uuid::Uuid::new_v4().to_string(),
+        source_worktree_id: source_worktree_id.clone(),
+        // 自己エコー抑止（同じタブへ配り返さない）と depth 伝播の起点になる
+        source_terminal_id: Some(source_terminal_id.clone()),
+        kind: crate::event_db::KIND_WORKTREE_MESSAGE.to_string(),
+        body: body_json,
+        actor: Some("mcp".to_string()),
+        created_at: now,
+        depth,
+        origin: Some(format!("mcp-notify:{}", source_terminal_id)),
+    };
+    // 閾値超過でも events には残す（監査とループ解析用）。配送は `fanout` が落とす。
+    crate::event_db::insert_event(&pool, &event)
+        .await
+        .map_err(|e| McpError::internal_error(e, None))?;
+
+    let targets = crate::event_db::matching_targets(
+        &source_worktree_id,
+        workgroup_id.as_deref(),
+        repository_name.as_deref(),
+    );
+    let delivered = crate::event_db::fanout(&pool, &event, &targets, now)
+        .await
+        .map_err(|e| McpError::internal_error(e, None))?;
+    if delivered > 0 {
+        crate::event_delivery::notify_event_queued(app_handle);
+    }
+    log::info!(
+        "[mcp] notify_worktree event_kind={} source={} terminal={} depth={} targets={:?} delivered={}",
+        event_kind,
+        source_worktree_id,
+        source_terminal_id,
+        depth,
+        targets,
+        delivered
+    );
+
+    // 閾値超過は静かに捨てず呼び出し元へ返す。返さないとエージェントは「送れた」と
+    // 誤解したまま相手の応答を待ち続ける。
+    let message = if depth > crate::event_db::MAX_EVENT_DEPTH {
+        format!(
+            "連鎖の深さが {} に達したためメッセージは配送されませんでした（上限 {}）。ワークツリー間の自動往復を止めるための制限です。続ける場合は人間に確認してください。",
+            depth,
+            crate::event_db::MAX_EVENT_DEPTH
+        )
+    } else if delivered == 0 {
+        "メッセージを発行しましたが、このワークツリーを購読しているセッションがありませんでした。".to_string()
+    } else {
+        format!("{} 件の購読者へメッセージを配送しました。", delivered)
+    };
+    Ok(serde_json::json!({
+        "eventId": event.id,
+        "eventKind": event.kind,
+        "sourceWorktreeId": source_worktree_id,
+        "sourceTerminalId": source_terminal_id,
+        "depth": depth,
+        "maxDepth": crate::event_db::MAX_EVENT_DEPTH,
+        "delivered": delivered,
+        "message": message,
+    }))
+}
+
 /// 購読系ツールを呼んでいるタブの同定結果（issue #123）。
 struct SubscriberIdentity {
     /// 購読の主キー。PTY spawn 時に発番された UUID
@@ -2833,10 +3230,19 @@ fn resolve_artifact_worktree<'a>(
 /// ワークツリーの所属ワークグループを解決する。workgroup_id が未設定/不明な場合は
 /// 先頭グループにフォールバック（フロントの resolvedGroupId と同仕様）。
 fn resolve_workgroup<'a>(settings: &'a AppSettings, worktree: &WorktreeEntry) -> Option<&'a Workgroup> {
-    worktree
-        .workgroup_id
-        .as_ref()
-        .and_then(|id| settings.workgroups.iter().find(|g| &g.id == id))
+    resolve_workgroup_by_id(settings, worktree.workgroup_id.as_deref())
+}
+
+/// `resolve_workgroup` の ID 版。ワークツリーの実体が既に settings から消えた後でも
+/// 所属グループを解決したい経路（`worktree.closed` の target 照合）で使う（#126）。
+pub fn resolve_workgroup_by_id<'a>(
+    settings: &'a AppSettings,
+    workgroup_id: Option<&str>,
+) -> Option<&'a Workgroup> {
+    workgroup_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|id| settings.workgroups.iter().find(|g| g.id == id))
         .or_else(|| settings.workgroups.first())
 }
 
@@ -2844,7 +3250,7 @@ fn resolve_workgroup<'a>(settings: &'a AppSettings, worktree: &WorktreeEntry) ->
 /// （フロントの useWorkgroups.displayName / i18n `workgroup.autoName` と一致させる）。
 /// 生の name をそのまま返すと、リネームしていない既定グループが全部 null になり
 /// レポート側で「グループが出てこない」状態になるため、ここで解決しておく。
-fn workgroup_display_name(settings: &AppSettings, group: &Workgroup) -> String {
+pub fn workgroup_display_name(settings: &AppSettings, group: &Workgroup) -> String {
     if let Some(name) = group.name.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         return name.to_string();
     }
@@ -4129,6 +4535,150 @@ mod tests {
         let err = resolve_workgroup_target(&settings, None, Some("リリース準備")).unwrap_err();
         assert!(err.contains("複数"), "{}", err);
         assert!(err.contains("workgroup_id"), "{}", err);
+    }
+
+    // ─── #126: 購読 target のワイルドカード ──────────────────────────────────
+
+    fn target_settings() -> AppSettings {
+        let mut settings = wg_settings();
+        settings.repositories = vec![crate::settings::Repository {
+            id: "r-1".into(),
+            name: "OreTachi".into(),
+            path: "X:/repo".into(),
+            exec_script: None,
+            copy_targets: None,
+            package_manager: None,
+            package_manager_args: None,
+            notification_hooks: None,
+            pull_before_add: None,
+            branch_name_pattern: None,
+        }];
+        settings.worktrees = vec![WorktreeEntry {
+            id: "wt-1".into(),
+            name: "oretachi-abcd".into(),
+            repository_id: "r-1".into(),
+            repository_name: "OreTachi".into(),
+            path: "X:/wt".into(),
+            branch_name: "feature/x".into(),
+            hotkey_char: None,
+            auto_approval: None,
+            auto_approval_prompt: None,
+            description: None,
+            description_open: None,
+            workgroup_id: Some("wg-2".into()),
+            is_home: false,
+            is_repository: false,
+        }];
+        settings
+    }
+
+    #[test]
+    fn resolve_subscription_target_accepts_wildcards() {
+        let settings = target_settings();
+
+        let all = resolve_subscription_target(&settings, " * ").unwrap();
+        assert_eq!(all.stored, "*");
+        assert!(all.worktree_id.is_none());
+
+        // ワークグループは ID でも表示名でも解決でき、保存は ID に正規化される
+        for raw in ["workgroup:wg-2", "workgroup: リリース準備 "] {
+            let g = resolve_subscription_target(&settings, raw).unwrap();
+            assert_eq!(g.stored, "workgroup:wg-2", "{}", raw);
+            assert!(g.label.contains("リリース準備"), "{}", g.label);
+            assert!(g.worktree_id.is_none());
+        }
+
+        // リポジトリ名は大小を問わず、保存は小文字へ正規化される（照合側と一致）
+        let r = resolve_subscription_target(&settings, "repo:oreTACHI").unwrap();
+        assert_eq!(r.stored, "repo:oretachi");
+        assert!(r.label.contains("OreTachi"), "{}", r.label);
+        assert!(r.worktree_id.is_none());
+
+        // 厳密一致は従来どおりワークツリー ID を保存する
+        let w = resolve_subscription_target(&settings, "oretachi-abcd").unwrap();
+        assert_eq!(w.stored, "wt-1");
+        assert_eq!(w.worktree_id.as_deref(), Some("wt-1"));
+    }
+
+    /// 非 ASCII を含むリポジトリ名でも、大小を変えて入力できて表示名も元表記に戻る。
+    /// `eq_ignore_ascii_case` は非 ASCII を畳まないので、保存側の `to_lowercase()` と
+    /// 突合方法がずれていると「見つかりません」やラベル崩れになる。
+    #[test]
+    fn resolve_subscription_target_handles_non_ascii_repo_name() {
+        let mut settings = target_settings();
+        settings.repositories[0].name = "テストRepo".into();
+        settings.worktrees[0].repository_name = "テストRepo".into();
+
+        let r = resolve_subscription_target(&settings, "repo:テストREPO").unwrap();
+        assert_eq!(r.stored, "repo:テストrepo");
+        assert!(r.label.contains("テストRepo"), "{}", r.label);
+        assert_eq!(
+            describe_target(&settings, &r.stored),
+            ("repo".to_string(), Some("テストRepo".to_string()))
+        );
+        // 照合側の候補集合とも噛み合う
+        assert!(crate::event_db::matching_targets("wt-1", None, Some("テストRepo"))
+            .contains(&r.stored));
+    }
+
+    /// 保存値と `matching_targets` の突合が実際に噛み合うこと。ここがずれると
+    /// 「購読は成功するのに一生届かない」という一番分かりにくい失敗になる。
+    #[test]
+    fn resolve_subscription_target_agrees_with_matching_targets() {
+        let settings = target_settings();
+        let wt = &settings.worktrees[0];
+        let group = resolve_workgroup(&settings, wt).map(|g| g.id.clone());
+        let targets = crate::event_db::matching_targets(
+            &wt.id,
+            group.as_deref(),
+            Some(&wt.repository_name),
+        );
+        for raw in ["*", "workgroup:wg-2", "repo:OreTachi", "oretachi-abcd"] {
+            let resolved = resolve_subscription_target(&settings, raw).unwrap();
+            assert!(
+                targets.contains(&resolved.stored),
+                "target '{}' -> '{}' が {:?} に含まれない",
+                raw,
+                resolved.stored,
+                targets
+            );
+        }
+    }
+
+    #[test]
+    fn resolve_subscription_target_rejects_unknown_wildcards() {
+        let settings = target_settings();
+        assert!(resolve_subscription_target(&settings, "repo:").is_err());
+        assert!(resolve_subscription_target(&settings, "workgroup:").is_err());
+        let err = resolve_subscription_target(&settings, "repo:unknown")
+            .err()
+            .expect("未知のリポジトリはエラー");
+        assert!(format!("{:?}", err).contains("OreTachi"), "利用可能な候補を添える");
+    }
+
+    /// UI / ツール応答は種別で判断する。名前が引けないことだけを根拠にすると、
+    /// ワイルドカード購読がすべて「対象がクローズ済み」と誤表示される。
+    #[test]
+    fn describe_target_distinguishes_wildcards_from_closed_worktree() {
+        let settings = target_settings();
+        assert_eq!(describe_target(&settings, "*"), ("all".to_string(), None));
+        let (kind, label) = describe_target(&settings, "workgroup:wg-1");
+        assert_eq!(kind, "workgroup");
+        // 未リネームのグループでも生の ID ではなく表示名を返す
+        assert_eq!(label.as_deref(), Some("グループ(1)"));
+        assert_eq!(
+            describe_target(&settings, "repo:oretachi"),
+            ("repo".to_string(), Some("OreTachi".to_string()))
+        );
+        assert_eq!(
+            describe_target(&settings, "wt-1"),
+            ("worktree".to_string(), Some("oretachi-abcd".to_string()))
+        );
+        // クローズ済みの厳密一致だけが「名前なしの worktree」になる
+        assert_eq!(
+            describe_target(&settings, "wt-gone"),
+            ("worktree".to_string(), None)
+        );
     }
 
     /// Claude Code は plan モードで `readOnlyHint` が立っていない MCP ツールを

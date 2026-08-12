@@ -328,6 +328,8 @@ export function useTaskExecution(deps: {
         id: entry.id,
         name: entry.name,
         branchName: entry.branchName,
+        repositoryName: entry.repositoryName,
+        workgroupId: entry.workgroupId,
       });
     } catch (e) {
       // ワークツリーは作成済み・永続化済みなのでロールバックしない（settings との乖離=
@@ -338,6 +340,8 @@ export function useTaskExecution(deps: {
           id: entry.id,
           name: entry.name,
           branchName: entry.branchName,
+          repositoryName: entry.repositoryName,
+          workgroupId: entry.workgroupId,
         });
       } catch {
         // 通知失敗はワークツリー追加の成否に影響しない

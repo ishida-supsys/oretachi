@@ -24,6 +24,12 @@ function formatDate(ts: number | null): string {
   return ts ? new Date(ts).toLocaleString() : "-";
 }
 
+/** 購読対象の表示文字列。`*` は表示名を持たないのでローカライズした文言を出す（#126）。 */
+function targetText(item: SubscriptionView): string {
+  if (item.targetKind === "all") return t("targetAll");
+  return item.targetLabel ?? item.targetWorktreeId;
+}
+
 /** そのワークツリーで引き継ぎ先に選べる生存 AI 端末。 */
 function candidatesFor(worktreeId: string) {
   return props.agentTerminals.filter((c) => c.worktreeId === worktreeId);
@@ -76,8 +82,19 @@ function onRebind(worktreeId: string, deadTerminalId: string, event: Event): voi
             <span v-else-if="item.agentName" class="badge badge-agent">{{ item.agentName }}</span>
           </td>
           <td class="cell-target">
-            <span class="branch-badge">{{ item.targetWorktreeName ?? item.targetWorktreeId }}</span>
-            <span v-if="!item.targetWorktreeName" class="badge badge-muted">{{ t('targetClosed') }}</span>
+            <span class="branch-badge">{{ targetText(item) }}</span>
+            <!-- 「クローズ済み」は厳密一致 target でのみ意味を持つ。ワイルドカード購読は
+                 対象ワークツリー名を持たないので、名前の有無だけで判定すると全部誤表示になる -->
+            <span
+              v-if="item.targetKind === 'worktree' && !item.targetWorktreeName"
+              class="badge badge-muted"
+            >{{ t('targetClosed') }}</span>
+            <span v-else-if="item.targetKind !== 'worktree'" class="badge badge-wildcard">
+              {{ t(`targetKind.${item.targetKind}`) }}
+            </span>
+            <span v-for="kind in item.eventKinds" :key="kind" class="badge badge-kind">
+              {{ kind.replace('worktree.', '') }}
+            </span>
           </td>
           <td class="cell-delivery">
             {{ item.delivery }}
@@ -260,6 +277,19 @@ function onRebind(worktreeId: string, deadTerminalId: string, event: Event): voi
   color: #f5c2e7;
 }
 
+/* ワイルドカード target（* / workgroup: / repo:）の種別バッジ */
+.badge-wildcard {
+  background: #313244;
+  color: #94e2d5;
+}
+
+/* 購読中のイベント種別。通知種別(kind)とは別物であることを画面でも区別できるようにする */
+.badge-kind {
+  background: #1e1e2e;
+  color: #cdd6f4;
+  border: 1px solid #45475a;
+}
+
 .tab-badge {
   font-family: monospace;
   font-size: 11px;
@@ -372,6 +402,12 @@ function onRebind(worktreeId: string, deadTerminalId: string, event: Event): voi
     "noCandidate": "no live agent tab",
     "pendingHandover": "Unread messages awaiting handover",
     "targetClosed": "closed",
+    "targetAll": "All worktrees",
+    "targetKind": {
+      "all": "wildcard",
+      "workgroup": "workgroup",
+      "repo": "repository"
+    },
     "ptyOnly": "PTY push only",
     "nonCcHint": "Only Claude Code has hooks. Other agents have no Stop hook, so messages are delivered by writing into the PTY.",
     "spawnIfClosed": "auto spawn",
@@ -395,6 +431,12 @@ function onRebind(worktreeId: string, deadTerminalId: string, event: Event): voi
     "noCandidate": "エージェント端末なし",
     "pendingHandover": "引き継ぎ待ちの未読メッセージ",
     "targetClosed": "クローズ済み",
+    "targetAll": "全ワークツリー",
+    "targetKind": {
+      "all": "ワイルドカード",
+      "workgroup": "ワークグループ",
+      "repo": "リポジトリ"
+    },
     "ptyOnly": "PTY 押し込みのみ",
     "nonCcHint": "フックは Claude Code 固有です。他のエージェントには Stop フックが無いため、PTY への押し込みでのみ通知が届きます",
     "spawnIfClosed": "自動 spawn",
