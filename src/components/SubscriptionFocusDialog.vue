@@ -7,7 +7,7 @@ import { isExactWorktreeTarget } from "../utils/subscriptionCounts";
 
 /** ワークツリーカードの購読バッジから開く購読関係のダイアログ（issue #137）。
  *
- *  ↑（このワークツリーが購読している先）と ↓（このワークツリーを購読している元）を
+ *  outgoing（このワークツリーが購読している先）と incoming（このワークツリーを購読している元）を
  *  並べ、どちらの行からでもフォーカス先を選べる。フォーカスそのものは呼び出し側
  *  （App.vue → `useAppHotkeys` の `focusWorktree`）が担う。 */
 
@@ -48,7 +48,7 @@ function targetText(s: SubscriptionView): string {
   return s.targetLabel ?? s.targetWorktreeName ?? s.targetWorktreeId;
 }
 
-/** ↑ このワークツリーのタブが張っている購読。ワイルドカードもここに出る。 */
+/** このワークツリーのタブが張っている購読（pi-share-alt 側）。ワイルドカードもここに出る。 */
 const outgoing = computed<Row[]>(() =>
   subscriptions.value
     .filter((s) => s.subscriberWorktreeId === props.worktreeId)
@@ -68,7 +68,7 @@ const outgoing = computed<Row[]>(() =>
     })),
 );
 
-/** ↓ このワークツリーを**厳密一致で**対象にしている購読。 */
+/** このワークツリーを**厳密一致で**対象にしている購読（pi-bolt 側）。 */
 const incoming = computed<Row[]>(() =>
   subscriptions.value
     .filter((s) => isExactWorktreeTarget(s) && s.targetWorktreeId === props.worktreeId)
@@ -78,7 +78,7 @@ const incoming = computed<Row[]>(() =>
       sessionId: s.subscriberSessionId,
       agentName: s.agentName,
       wildcardKind: null,
-      // 購読者ワークツリーが settings から消えていると名前が引けない。↑ 側と同じく
+      // 購読者ワークツリーが settings から消えていると名前が引けない。outgoing 側と同じく
       // 選択不可にする。ここを truthy な生 ID のまま渡すと、選択できるように見えて
       // `focusWorktree` が `worktrees` から引けず**無言で何も起きない**行になる。
       closed: !s.subscriberWorktreeName,
@@ -89,10 +89,11 @@ const incoming = computed<Row[]>(() =>
 );
 
 /** 2セクションは行の見た目が同じなので、マークアップを1つにまとめて回す。
- *  （↑ にだけワイルドカードの種別バッジが出るが、↓ 側は `wildcardKind` が常に null） */
+ *  アイコンはカードの購読バッジと揃える（pi-share-alt = 購読している側 / pi-bolt = 届く側）。
+ *  （outgoing にだけワイルドカードの種別バッジが出るが、incoming 側は `wildcardKind` が常に null） */
 const sections = computed(() => [
-  { key: "outgoing", arrow: "↑", title: t("outgoing"), rows: outgoing.value },
-  { key: "incoming", arrow: "↓", title: t("incoming"), rows: incoming.value },
+  { key: "outgoing", icon: "pi-share-alt", title: t("outgoing"), rows: outgoing.value },
+  { key: "incoming", icon: "pi-bolt", title: t("incoming"), rows: incoming.value },
 ]);
 
 function onSelect(row: Row): void {
@@ -120,7 +121,8 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown, true));
 
       <section v-for="section in sections" :key="section.key" class="section">
         <h4 class="section-title">
-          {{ section.arrow }} {{ section.title }} ({{ section.rows.length }})
+          <i class="pi section-icon" :class="section.icon" aria-hidden="true" />
+          {{ section.title }} ({{ section.rows.length }})
         </h4>
         <p v-if="section.rows.length === 0" class="empty">{{ t('none') }}</p>
         <ul v-else class="row-list">
@@ -199,10 +201,19 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown, true));
 }
 
 .section-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   font-size: 13px;
   font-weight: 600;
   color: #cdd6f4;
   margin: 0 0 6px;
+}
+
+/* カードの購読バッジと同じ配色にして、どちらの方向かを一目で結び付ける */
+.section-icon {
+  font-size: 11px;
+  color: #94e2d5;
 }
 
 .empty {
@@ -353,7 +364,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown, true));
     "targetClosed": "クローズ済み",
     "orphaned": "引き継ぎ待ち",
     "orphanedHint": "購読していたタブがありません。メッセージは溜まり続け、同じワークツリーで次に AI エージェントが立ち上がったときに引き継がれます",
-    "wildcardHint": "ワイルドカード購読（全体 / グループ / リポジトリ）は表示のみで、フォーカスできません。↓ の件数にも含まれません。",
+    "wildcardHint": "ワイルドカード購読（全体 / グループ / リポジトリ）は表示のみで、フォーカスできません。「購読している元」の件数にも含まれません。",
     "targetKind": {
       "all": "全体",
       "workgroup": "グループ",

@@ -157,15 +157,26 @@ async function reapplyPluginConfig() {
           {{ artifactCount }}
         </button>
       </ArtifactUrlHoverMenu>
-      <!-- 購読バッジ（#137）。↑=このワークツリーが購読している件数 / ↓=購読されている件数 -->
+      <!-- 購読バッジ（#137）。方向を文字の ↑↓ ではなくアイコンで表す:
+           pi-share-alt = このワークツリーが張っている購読 / pi-bolt = このワークツリーへ届く購読。
+           0 件の側は枠ごと省く。WorktreeCard と同じ作り -->
       <button
         v-if="hasSubscriptions && worktree"
         class="subscription-count-badge"
         :title="t('subscriptionsTooltip', { out: subCounts.outgoing, in: subCounts.incoming })"
         @click.stop="emit('openSubscriptions', worktree.id)"
       >
-        <i class="pi pi-share-alt" style="font-size: 9px" />
-        ↑{{ subCounts.outgoing }} ↓{{ subCounts.incoming }}
+        <span v-if="subCounts.outgoing > 0" class="subscription-leg">
+          <i class="pi pi-share-alt" style="font-size: 9px" />{{ subCounts.outgoing }}
+        </span>
+        <span
+          v-if="subCounts.outgoing > 0 && subCounts.incoming > 0"
+          class="subscription-sep"
+          aria-hidden="true"
+        />
+        <span v-if="subCounts.incoming > 0" class="subscription-leg">
+          <i class="pi pi-bolt" style="font-size: 9px" />{{ subCounts.incoming }}
+        </span>
       </button>
     </div>
 
@@ -347,6 +358,19 @@ async function reapplyPluginConfig() {
 
 .subscription-count-badge:hover {
   border-color: #94e2d5;
+}
+
+/* 発信/受信の2枠。区切り線は高さをバッジいっぱいに伸ばす */
+.subscription-leg {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.subscription-sep {
+  align-self: stretch;
+  width: 1px;
+  background: rgba(148, 226, 213, 0.35);
 }
 
 .card-detached {
