@@ -64,9 +64,17 @@ const REBIND_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_millis
 /// 立たないため、これが無いと tick ごとに壊れたタブを上限まで積み増す。
 const SPAWN_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// これ以上ターミナルがあるときは自動 spawn しない。
-/// 端末数 15+ で webview ハングと強い相関があるため、自動増殖には手前で天井を設ける。
-const SPAWN_MAX_LIVE_SESSIONS: usize = 12;
+/// これ以上ターミナルがあるときは、自動 spawn しても**警告を出す**（止めはしない）。
+///
+/// 端末数 15+ で webview ハングと強い相関があった（#101 の調査。正常時は 5〜7）ため、
+/// かつてはこの値で自動 spawn を拒否していた。だが 15 という数字は**対策前の観測**で、
+/// その後 WebGL を可視端末のみに限定する等の対策が入っている。加えて拒否は
+/// 「spawn すると言ったのに何も起きない」を作り、purpose である配送そのものが止まる。
+///
+/// そこで**判断を人間に返す**: spawn は通し、危険域に入ったことだけ知らせる。
+/// 実際の歯止めは `pty_manager::MAX_PTY_SESSIONS`(32) と、ワークツリーごとの
+/// `SPAWN_COOLDOWN` / 単一フライトが担う。
+const SPAWN_WARN_LIVE_SESSIONS: usize = 12;
 
 /// 自動承認が有効なワークツリーへ押し込み / spawn してよいイベント種別（#120 §5.5）。
 ///
@@ -1141,25 +1149,26 @@ async fn spawn_for_closed_tabs(
             );
             continue;
         }
-        if projected_live >= SPAWN_MAX_LIVE_SESSIONS {
+        // **止めずに知らせる。** 拒否すると配送そのものが止まり「spawn すると言ったのに
+        // 何も起きない」になる。ハングの危険域に入ったかどうかの判断は人間に返す。
+        if projected_live >= SPAWN_WARN_LIVE_SESSIONS {
             log::warn!(
-                "[delivery] ターミナルが {} 個あるため自動 spawn を拒否した（上限 {}）worktree={} 未読={}",
+                "[delivery] ターミナルが {} 個ある状態で自動 spawn する（webview ハングの危険域 {}+）worktree={} 未読={}",
                 projected_live,
-                SPAWN_MAX_LIVE_SESSIONS,
+                SPAWN_WARN_LIVE_SESSIONS,
                 worktree.name,
                 pending
             );
             let _ = app.emit(
-                "event-spawn-rejected",
+                "event-spawn-warning",
                 serde_json::json!({
                     "worktreeId": worktree_id,
                     "worktreeName": worktree.name,
                     "liveSessions": projected_live,
-                    "limit": SPAWN_MAX_LIVE_SESSIONS,
+                    "threshold": SPAWN_WARN_LIVE_SESSIONS,
                     "pending": pending,
                 }),
             );
-            continue;
         }
 
         let request_id = uuid::Uuid::new_v4().to_string();

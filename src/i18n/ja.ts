@@ -27,12 +27,12 @@ export default {
     titleApproval: '承認が必要です',
     titleCompleted: 'タスク完了',
   },
-  // 自動 spawn 拒否のトースト (issue #120 §7 / #130 / #137)。
+  // 自動 spawn の警告トースト (issue #120 §7 / #130 / #137)。
   // メイン / サブウィンドウが共通の composable から引くため、SFC ローカルではなくここに置く。
   // 配送ごとのトースト (deliveredSummary) は #137 で廃止した（購読状態はカードのバッジが見せる）。
   eventDelivery: {
-    spawnRejectedSummary: '自動 spawn を見送りました',
-    spawnRejectedDetail: '{name} に未読が {pending} 件ありますが、ターミナルが {live} 個開いています（上限 {limit}）。ターミナルを整理するか、手動でワークツリーを開いてください',
+    spawnWarningSummary: 'ターミナルが増えています',
+    spawnWarningDetail: '{name} の未読 {pending} 件のためにターミナルを追加しました。開いているターミナルが {live} 個になっています。{threshold} 個以上で画面が固まる事象が報告されているため、使っていないタブを閉じることをおすすめします',
   },
   update: {
     title: 'oretachi アップデート',

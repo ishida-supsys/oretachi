@@ -61,12 +61,16 @@ export interface TerminalUnread {
   unacked: number;
 }
 
-/** 端末数上限で自動 spawn を拒否したときの通知（Rust の `event-spawn-rejected`）。 */
-export interface SpawnRejectedPayload {
+/** 端末数が webview ハングの危険域にある状態で自動 spawn したときの通知
+ *  （Rust の `event-spawn-warning`）。
+ *
+ *  **spawn は止めていない。** `threshold` は拒否の上限ではなく警告のしきい値で、
+ *  実際の歯止めは PTY セッション数のハードリミット側にある。 */
+export interface SpawnWarningPayload {
   worktreeId: string;
   worktreeName: string;
   liveSessions: number;
-  limit: number;
+  threshold: number;
   pending: number;
 }
 

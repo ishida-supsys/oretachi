@@ -1,10 +1,10 @@
 /** イベントトーストの表示責任（issue #130 / #137）。
  *
- *  Rust 側は `event-spawn-rejected` を `app.emit`、つまり全 webview へブロードキャストする。
+ *  Rust 側は `event-spawn-warning` を `app.emit`、つまり全 webview へブロードキャストする。
  *  素直に listen すると1件でメインとサブウィンドウが同時にトーストするので、
  *  「そのワークツリーを表示しているウィンドウ」だけが出すよう振り分ける。
  *
- *  #137 で配送トースト（`event-delivered`）は廃止したが、自動 spawn の拒否通知は残るので
+ *  #137 で配送トースト（`event-delivered`）は廃止したが、自動 spawn の警告は残るので
  *  この振り分けも残る。関数名の "Delivery" は当時の名残（呼び出し側は
  *  `useEventToast.ts` の1箇所ずつ）。
  *
