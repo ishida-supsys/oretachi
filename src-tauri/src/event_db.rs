@@ -145,7 +145,12 @@ pub struct SubscriptionRow {
     pub subscriber_terminal_id: String,
     /// タブが死んだ後の復活先の解決用（不変）。逆引き不能なら None
     pub subscriber_worktree_id: Option<String>,
-    /// 最後に見た Claude Code の session UUID（監査・resume 追跡用）
+    /// **購読を張った時点の** Claude Code の session UUID（監査・resume 追跡用）。
+    ///
+    /// 書き込みは `oretachi_subscribe_worktree` の UPSERT だけで、以降は更新されない。
+    /// `PtySession::agent_session_id` はポーリングが追随しているが、その鮮度はここへ
+    /// 伝播しないので、エージェントが `/clear` 等でセッションを切り替えると古くなる。
+    /// 自動 spawn の `--resume` はこの値を使う（＝購読を張った会話の続きになる）。
     pub subscriber_agent_session: Option<String>,
     /// 購読対象。Phase 1 はワークツリー ID 固定（`*` / `workgroup:` / `repo:` は #126）
     pub target: String,
@@ -1140,6 +1145,30 @@ pub async fn list_spawn_candidates(
     .await
     .map_err(|e| e.to_string())?;
     Ok(rows)
+}
+
+/// spawn 先ワークツリーで購読を張っていたエージェントのセッション UUID を1つ返す。
+///
+/// 自動 spawn したタブを `claude --resume` で**その会話の続き**として立ち上げるために使う。
+/// 新規セッションで立てると、購読を張った経緯も作業中の文脈も失われた状態で
+/// 「未読を確認しろ」とだけ言われることになる。
+///
+/// 見つからないこともある（`worktree.closed` は fanout 直後に購読行が消えるため）。
+/// その場合は `--resume` を付けずに新規セッションで立てる。
+pub async fn latest_agent_session_for_worktree(
+    pool: &SqlitePool,
+    worktree_id: &str,
+) -> Result<Option<String>, String> {
+    let row: Option<(String,)> = sqlx::query_as(
+        "SELECT subscriber_agent_session FROM subscriptions \
+         WHERE subscriber_worktree_id = ? AND subscriber_agent_session IS NOT NULL \
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(worktree_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(row.map(|(s,)| s))
 }
 
 // ─── UI 向けの読み出し（#120 §7） ─────────────────────────────────────────────

@@ -872,12 +872,47 @@ fn find_worktree<'a>(settings: &'a AppSettings, id: &str) -> Option<&'a Worktree
     settings.worktrees.iter().find(|w| w.id == id)
 }
 
+/// `--resume` へ渡してよい session ID か（英数字とハイフンのみ）。
+///
+/// 組み立てたコマンド文字列は**シェルへそのまま流し込まれる**（`App.vue` が `\r` を足して
+/// PTY へ書く）ので、引用符やセミコロンが混ざると別のコマンドとして解釈されうる。
+/// 値の出所は Claude Code の session UUID なので普段は素通りするが、DB を経由する以上
+/// 素性を検証してから渡す。
+fn is_safe_session_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// 自動 spawn したタブへ渡す初期プロンプト（#137）。
+///
+/// **これが無いとエージェントは何もしない。** spawn 直後は SessionStart フックが
+/// `additionalContext` で告知を渡すが、`additionalContext` は**ターンを開始させない**ので、
+/// エージェントは告知を持ったままプロンプトで待機する。しかも SessionStart 側が
+/// `mark_delivered` を打つため、ターンを開始できる PTY 押し込みは候補を失って走らない。
+/// 起動コマンドに位置引数のプロンプトを載せて、最初のターンをこちらから始める。
+///
+/// **oretachi 自身が書く固定文であること。** 発信側のメッセージ本文をここへ入れると、
+/// 押し込みと同じく「人間が打ったプロンプト」に化ける（`format_pointer_text` の doc 参照）。
+const SPAWN_INITIAL_PROMPT: &str =
+    "[oretachi] 購読していたワークツリーイベントの未読があります。oretachi_poll_inbox で内容を確認し、\
+     必要な対応を進めてから oretachi_ack_message で ack してください。";
+
 /// 自動 spawn したタブで起動するエージェントコマンド。
 ///
 /// 解決順はフロントの `useTaskExecution.ts` と同じ（ワークグループ → 全体設定 →
 /// `claudeCode`）。Claude Code の permission-mode も同じく既定は `plan` にする ——
 /// 別のワークツリーからの通知で立ち上がるタブなので、いきなり書き込みを許すのは危険。
-fn agent_command_for_worktree(settings: &AppSettings, worktree: &WorktreeEntry) -> String {
+///
+/// `resume_session` があれば `--resume` でその会話の続きとして立ち上げる。購読を張った
+/// エージェントの文脈を引き継げるので、「未読を確認しろ」だけを新規セッションに投げるより
+/// 話が早い。**Claude Code 以外は初期プロンプトも `--resume` も付けない** —— CLI ごとに
+/// 引数の意味が違い、誤って非対話モードで起動すると spawn したタブが即終了しうる。
+fn agent_command_for_worktree(
+    settings: &AppSettings,
+    worktree: &WorktreeEntry,
+    resume_session: Option<&str>,
+) -> String {
     use crate::ai_provider::AiAgentKind;
     let group = worktree
         .workgroup_id
@@ -896,7 +931,16 @@ fn agent_command_for_worktree(settings: &AppSettings, worktree: &WorktreeEntry) 
                 Some("auto") => "auto",
                 _ => "plan",
             };
-            format!("claude --permission-mode {}", mode)
+            // session UUID は oretachi が発番したものではなく Claude Code 由来なので、
+            // 万一おかしな文字が混ざってもシェルに渡さないよう形だけ検証する。
+            let resume = resume_session
+                .filter(|s| is_safe_session_id(s))
+                .map(|s| format!(" --resume {}", s))
+                .unwrap_or_default();
+            format!(
+                "claude{} --permission-mode {} \"{}\"",
+                resume, mode, SPAWN_INITIAL_PROMPT
+            )
         }
         AiAgentKind::GeminiCli => "gemini".to_string(),
         AiAgentKind::CodexCli => "codex".to_string(),
@@ -1172,7 +1216,18 @@ async fn spawn_for_closed_tabs(
         }
 
         let request_id = uuid::Uuid::new_v4().to_string();
-        let command = agent_command_for_worktree(&settings, worktree);
+        // 購読を張ったエージェントの会話を引き継ぐ。引けなくても spawn は続行する
+        // （新規セッションになるだけで、初期プロンプトは同じように効く）。
+        let resume_session = match event_db::latest_agent_session_for_worktree(pool, &worktree_id)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("[delivery] resume 用の session 取得に失敗: {}", e);
+                None
+            }
+        };
+        let command = agent_command_for_worktree(&settings, worktree, resume_session.as_deref());
         if app
             .emit(
                 "event-spawn-terminal",
@@ -1590,6 +1645,59 @@ mod tests {
             is_home: false,
             is_repository: false,
         }
+    }
+
+    // ─── 自動 spawn のコマンド組み立て（#137） ────────────────────────────────
+
+    /// 初期プロンプトが必ず載ること。**これが無いとエージェントは何もしない**
+    /// （SessionStart の additionalContext はターンを開始させない）。
+    #[test]
+    fn test_spawn_command_always_carries_initial_prompt() {
+        let settings = AppSettings::default();
+        let cmd = agent_command_for_worktree(&settings, &worktree(None), None);
+        assert!(cmd.starts_with("claude "), "{}", cmd);
+        assert!(cmd.contains("--permission-mode plan"), "{}", cmd);
+        assert!(cmd.contains("oretachi_poll_inbox"), "{}", cmd);
+        assert!(!cmd.contains("--resume"), "session が無ければ付けない: {}", cmd);
+    }
+
+    /// session UUID があれば `--resume` でその会話の続きとして立ち上げる。
+    #[test]
+    fn test_spawn_command_resumes_subscriber_session() {
+        let settings = AppSettings::default();
+        let cmd = agent_command_for_worktree(
+            &settings,
+            &worktree(None),
+            Some("3d1ac64b-36ee-4f56-92fa-bc170cb0043f"),
+        );
+        assert!(
+            cmd.contains("--resume 3d1ac64b-36ee-4f56-92fa-bc170cb0043f"),
+            "{}",
+            cmd
+        );
+        assert!(cmd.contains("oretachi_poll_inbox"), "{}", cmd);
+    }
+
+    /// 組み立てた文字列はシェルへそのまま流れるので、素性の怪しい session ID は落とす。
+    /// 落としても spawn は続ける（`--resume` が付かないだけ）。
+    #[test]
+    fn test_spawn_command_rejects_unsafe_session_id() {
+        let settings = AppSettings::default();
+        for evil in ["a\" ; rm -rf /", "a b", "a$(id)", "", &"x".repeat(65)] {
+            let cmd = agent_command_for_worktree(&settings, &worktree(None), Some(evil));
+            assert!(!cmd.contains("--resume"), "evil={:?} cmd={}", evil, cmd);
+            assert!(cmd.contains("oretachi_poll_inbox"), "{}", cmd);
+        }
+        assert!(is_safe_session_id("3d1ac64b-36ee-4f56-92fa-bc170cb0043f"));
+    }
+
+    /// プロンプトを囲む二重引用符を、プロンプト自身が壊さないこと。
+    #[test]
+    fn test_spawn_initial_prompt_has_no_quote_chars() {
+        assert!(!SPAWN_INITIAL_PROMPT.contains('"'));
+        assert!(!SPAWN_INITIAL_PROMPT.contains('\''));
+        assert!(!SPAWN_INITIAL_PROMPT.contains('\r'));
+        assert!(!SPAWN_INITIAL_PROMPT.contains('\n'));
     }
 
     #[test]
