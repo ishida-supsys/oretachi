@@ -25,7 +25,12 @@ import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import AutoApprovalPromptDialog from "./components/AutoApprovalPromptDialog.vue";
 import Toast from "primevue/toast";
 import { useEventToast } from "./composables/useEventToast";
-import { initTerminalUnread, terminalUnread } from "./composables/useEventSubscriptions";
+import {
+  initSubscriptionsScoped,
+  initTerminalUnread,
+  terminalUnread,
+} from "./composables/useEventSubscriptions";
+import SubscriptionFocusDialog from "./components/SubscriptionFocusDialog.vue";
 import { collectUnreadByTab } from "./utils/terminalUnread";
 import { subWindowShowsDelivery } from "./utils/eventToastScope";
 import type { SubTerminalEntry, WebSessionInfo, AiSessionInfo } from "./types/terminal";
@@ -109,6 +114,21 @@ async function onSaveAutoApprovalPrompt(wid: string, prompt: string) {
   additionalPrompt.value = prompt.trim();
   showAutoApprovalPromptDialog.value = false;
   await emitTo("main", "sub-save-auto-approval-prompt", { worktreeId: wid, prompt: prompt.trim() });
+}
+
+/** ヘッダの購読バッジから開く購読関係ダイアログ（#137）。null なら閉じている。
+ *  メインへ投げず**このウィンドウ内で出す**。 */
+const subscriptionDialogWorktreeId = ref<string | null>(null);
+
+/** ダイアログで選ばれたワークツリーへフォーカスする。
+ *
+ *  サブウィンドウが担当するのは自分のワークツリーだけなので、他のワークツリーが
+ *  選ばれたらメインへ中継する（分離中ならメイン側がそのサブウィンドウを前面に出す）。
+ *  自分自身が選ばれた場合は既にここが見えているので、ダイアログを閉じるだけでよい。 */
+async function onFocusFromSubscriptions(wid: string) {
+  subscriptionDialogWorktreeId.value = null;
+  if (wid === worktreeId) return;
+  await emitTo("main", "sub-focus-worktree", { worktreeId: wid });
 }
 
 // AI判定進行中フラグ
@@ -260,6 +280,10 @@ onMounted(async () => {
 
   // タブ未読バッジの同期（#130）。event-inbox-changed は全 webview に届くので中継は不要。
   collect(await initTerminalUnread());
+
+  // ヘッダの購読バッジ用に購読一覧も同期する（#137）。`initTerminalUnread` は未読件数しか
+  // 読まないので、これが無いとバッジが常に 0 件（＝非表示）になる。
+  collect(await initSubscriptionsScoped());
 
   // アーティファクト変更時にカウントを更新
   collect(await listen<{ worktreeId: string; artifactId: string; command: string }>("artifact-changed", (event) => {
@@ -597,6 +621,7 @@ async function onCancelAiJudging() {
     <template v-else>
       <!-- ヘッダー -->
       <WorktreeHeader
+        :worktree-id="worktreeId"
         :worktree-name="worktreeName"
         :branch-name="branchName"
         :hotkey-char="hotkeyChar"
@@ -612,6 +637,7 @@ async function onCancelAiJudging() {
         :home-path="worktreePath"
         @open-in-ide="requestOpenInIde"
         @open-artifacts="requestOpenArtifacts"
+        @open-subscriptions="subscriptionDialogWorktreeId = $event"
         @cancel-ai-judging="onCancelAiJudging"
         @click-auto-approval="showAutoApprovalPromptDialog = true"
       />
@@ -656,6 +682,16 @@ async function onCancelAiJudging() {
       :last-command="lastJudgedCommand"
       @save="onSaveAutoApprovalPrompt"
       @cancel="showAutoApprovalPromptDialog = false"
+    />
+
+    <!-- 購読関係ダイアログ（ヘッダの購読バッジから開く、#137）。
+         メインへ投げずこのウィンドウ内で出す -->
+    <SubscriptionFocusDialog
+      v-if="subscriptionDialogWorktreeId"
+      :worktree-id="subscriptionDialogWorktreeId"
+      :worktree-name="worktreeName"
+      @focus="onFocusFromSubscriptions"
+      @cancel="subscriptionDialogWorktreeId = null"
     />
 
     <!-- 配送トースト (#130)。ToastService は main.ts が全ウィンドウモードに登録済みなので

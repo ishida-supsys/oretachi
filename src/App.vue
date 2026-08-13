@@ -1801,6 +1801,13 @@ onMounted(async () => {
     await handleSubAddTerminalRequest(event.payload.worktreeId);
   });
 
+  // サブウィンドウの購読ダイアログから選ばれたワークツリーへフォーカスする（#137）。
+  // サブが担当するのは自分のワークツリーだけなので、他のワークツリーはここへ中継される。
+  // 分岐は Alt+[char] と共有（分離中はそのサブウィンドウ / タブが無ければ新規ターミナル）。
+  await listen<{ worktreeId: string }>("sub-focus-worktree", (event) => {
+    hotkeys.focusWorktree(event.payload.worktreeId);
+  });
+
   // アーティファクト変更時の処理
   await listen<{ worktreeId: string; artifactId: string; command: string; autoOpen?: boolean }>("artifact-changed", async (event) => {
     const { worktreeId: wid, command, autoOpen } = event.payload;
@@ -2268,6 +2275,7 @@ onMounted(async () => {
         >
           <!-- ワークツリーヘッダー -->
           <WorktreeHeader
+            :worktree-id="wt.id"
             :worktree-name="wt.name"
             :branch-name="wt.branchName"
             :hotkey-char="hotkeyChars.get(wt.id)"
@@ -2282,6 +2290,7 @@ onMounted(async () => {
             :home-path="wt.path"
             @open-in-ide="onOpenInIde(wt.id)"
             @open-artifacts="onOpenArtifacts(wt.id)"
+            @open-subscriptions="subscriptionDialogWorktreeId = $event"
             @cancel-ai-judging="onCancelAiJudging(wt.id)"
             @click-auto-approval="onClickAutoApproval(wt.id)"
           />
