@@ -52,31 +52,53 @@ const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 /// spawn 要求を出してからフロントの応答を待つ上限。過ぎたら単一フライトを解放する。
 const SPAWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// MCP の購読 / inbox 系ツールが引き継ぎの完了を待つ上限（#137）。
+///
+/// 引き継ぎ自体は `rebind_next_orphaned_group` の UPDATE 数本で、実測でもミリ秒台。
+/// ここが効くのはワーカーが押し込み（`SUBMIT_DELAY` 込み）や spawn の処理中で
+/// 順番待ちになっている場合だけなので、その待ち行列1回分を見込んだ長さにする。
+const REBIND_WAIT_BUDGET: std::time::Duration = std::time::Duration::from_millis(1500);
+
 /// 同じワークツリーへ続けて自動 spawn するまでの最小間隔。
 /// spawn したタブでエージェントが起動しない（`claude` が PATH に無い等）と検出フラグが
 /// 立たないため、これが無いと tick ごとに壊れたタブを上限まで積み増す。
 const SPAWN_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(600);
 
-/// これ以上ターミナルがあるときは自動 spawn しない。
-/// 端末数 15+ で webview ハングと強い相関があるため、自動増殖には手前で天井を設ける。
-const SPAWN_MAX_LIVE_SESSIONS: usize = 12;
+/// これ以上ターミナルがあるときは、自動 spawn しても**警告を出す**（止めはしない）。
+///
+/// 端末数 15+ で webview ハングと強い相関があった（#101 の調査。正常時は 5〜7）ため、
+/// かつてはこの値で自動 spawn を拒否していた。だが 15 という数字は**対策前の観測**で、
+/// その後 WebGL を可視端末のみに限定する等の対策が入っている。加えて拒否は
+/// 「spawn すると言ったのに何も起きない」を作り、purpose である配送そのものが止まる。
+///
+/// そこで**判断を人間に返す**: spawn は通し、危険域に入ったことだけ知らせる。
+/// 実際の歯止めは `pty_manager::MAX_PTY_SESSIONS`(32) と、ワークツリーごとの
+/// `SPAWN_COOLDOWN` / 単一フライトが担う。
+const SPAWN_WARN_LIVE_SESSIONS: usize = 12;
 
 /// 自動承認が有効なワークツリーへ押し込み / spawn してよいイベント種別（#120 §5.5）。
 ///
 /// 自動承認が有効な宛先へは、別のワークツリーから注入された内容が**人間の確認なしに
 /// 実行される**。
 ///
-/// 許可の基準は「**本文を誰が書いたか**」:
-/// - 許可: oretachi 自身が定型 JSON として組み立てるイベント
-///   （`worktree.closed` / `worktree.created`）。可変部分はワークツリー名・ブランチ名だけで、
-///   いずれも `sanitize_for_pty` を通る
-/// - 不許可: エージェントが本文を書けるイベント（`worktree.message`, #126）。押し込まず
-///   inbox に残し、人間が UI で確認して手動で渡すか、自動承認を切ることを要求する
+/// 許可の基準は「**押し込む文字列を誰が書いたか**」:
+/// - 許可: oretachi 自身が組み立てた文字列しか PTY に出ない種別。可変部分はワークツリー名・
+///   ブランチ名・件数だけで、いずれも `sanitize_for_pty` を通る
+///   - `worktree.closed` / `worktree.created` … `format_inbox_line` が定型文に組み直す
+///   - `worktree.message` … 本文は運ばず `format_pointer_text` の告知だけを出す（#137）。
+///     本文は `oretachi_poll_inbox` の**ツール出力**として渡るので、押し込みが人間の入力を
+///     偽装して `ai_judge` に「ユーザーが明示的に依頼した」と誤認させる経路が無い
+/// - 不許可: エージェントが書いた本文がそのまま PTY へ出る種別。`format_inbox_line` の
+///   `other` 分岐は未知種別の本文を丸ごと展開するので、**種別を足しただけでは自動的に
+///   安全にならない**
 ///
 /// **新しい種別を足すときは必ずこの基準で判断すること。** 迷ったら入れない（default-deny）。
+/// 本文をインラインで運ぶかどうかは `event_db::is_free_text_kind` が持っており、
+/// ここへ足すときは向こうも合わせて見直すこと。
 const AUTO_APPROVAL_PUSHABLE_KINDS: &[&str] = &[
     event_db::KIND_WORKTREE_CLOSED,
     event_db::KIND_WORKTREE_CREATED,
+    event_db::KIND_WORKTREE_MESSAGE,
 ];
 
 // ─── ハンドル ─────────────────────────────────────────────────────────────────
@@ -85,9 +107,11 @@ const AUTO_APPROVAL_PUSHABLE_KINDS: &[&str] = &[
 ///
 /// PTY 押し込みと違い、どれも「文字列を返すだけ」で PTY には触らない。ただし
 /// **`TurnEnd` だけはターンを開始させる**（`Stop` の `additionalContext` は会話を継続する）
-/// ため、押し込みと同じ制限（`passive` を巻き込まない・自動承認が有効な宛先へは定型
-/// イベントのみ）を課す。`SessionStart` / `PromptSubmit` は人間の操作が起点なので、
-/// Phase 1 から変わらず全件を渡す。
+/// ため、押し込みと同じく `passive` を巻き込まない制限を課す（`filter_for_turn_end`）。
+///
+/// 自動承認のガードは**経路を問わず全部に掛かる**（`filter_auto_approval` の doc 参照、#126）。
+/// 「`SessionStart` / `PromptSubmit` は人間の操作が起点だから全件渡す」というのは
+/// Phase 1 の設計で、#126 で撤回済み。
 #[derive(Debug, Clone, PartialEq)]
 pub enum DigestReason {
     /// SessionStart フック。アプリ停止中に溜まった分の回収（#123）
@@ -99,7 +123,7 @@ pub enum DigestReason {
 }
 
 impl DigestReason {
-    /// ログと `event-delivered` の `method` に出す識別子。
+    /// ログに出す識別子（`event-delivered` の `method` は #137 で廃止した）。
     fn label(&self) -> &'static str {
         match self {
             DigestReason::SessionStart => "session",
@@ -136,9 +160,14 @@ pub enum DeliveryMsg {
         reason: DigestReason,
         reply: oneshot::Sender<Option<String>>,
     },
-    /// このタブへ、同じワークツリーの引き継ぎ待ちグループを1つ引き継ぐ（応答は待たない）。
-    /// 完了を待ちたい経路（hook からの回収）は `CollectDigest` が内包している。
-    Rebind { terminal_id: String },
+    /// このタブへ、同じワークツリーの引き継ぎ待ちグループを1つ引き継ぐ。
+    ///
+    /// `reply` を渡すと完了を待てる。**引き継いだ結果を自分で読む経路は必ず待つこと**
+    /// （`rebind_and_wait` 参照）。hook 経路は `CollectDigest` が内包している。
+    Rebind {
+        terminal_id: String,
+        reply: Option<oneshot::Sender<()>>,
+    },
     /// UI からの手動引き継ぎ（引き継ぎ先グループを人間が選ぶ）
     RebindManual {
         worktree_id: String,
@@ -180,9 +209,51 @@ pub fn reconcile_live_terminals(app: &AppHandle, live_terminal_ids: Vec<String>)
 }
 
 /// AI エージェントが立ち上がったタブから引き継ぎを要求する（応答は待たない）。
+///
+/// **引き継いだ購読 / 未読を自分で読む経路では使わないこと。** 引き継ぎが終わる前に
+/// `subscriber_terminal_id` で SELECT すると、行はまだ死んだタブの ID を向いているので
+/// 0 件に見える。そういう経路は `rebind_and_wait` を使う。
 pub fn request_rebind(app: &AppHandle, terminal_id: String) {
     if let Some(h) = handle(app) {
-        h.try_send(DeliveryMsg::Rebind { terminal_id });
+        h.try_send(DeliveryMsg::Rebind {
+            terminal_id,
+            reply: None,
+        });
+    }
+}
+
+/// 引き継ぎの完了を待つ（#137）。
+///
+/// MCP の購読 / inbox 系ツールは `subscriber_terminal_id` で DB を引くので、タブを
+/// 立て直した直後は**引き継ぎが終わるまで自分の購読も未読も見えない**。`collect_digest` が
+/// `list_inbox` の前に `try_rebind_once` を await しているのと同じ理由で、読む前に待つ。
+///
+/// ワーカーが詰まっている / 応答が来ない場合は待ち続けずに諦めて先へ進む。引き継ぎは
+/// 次の `Reconcile` や hook 経路でも走るので、取りこぼしても一時的に古い結果を返すだけ。
+/// `oretachi_*` は MCP のツール呼び出しなので、ここで長く止めると呼び出し側が固まる。
+pub async fn rebind_and_wait(app: &AppHandle, terminal_id: &str) {
+    let (tx, rx) = oneshot::channel();
+    {
+        let Some(h) = handle(app) else { return };
+        if h.tx
+            .try_send(DeliveryMsg::Rebind {
+                terminal_id: terminal_id.to_string(),
+                reply: Some(tx),
+            })
+            .is_err()
+        {
+            log::debug!(
+                "[delivery] 引き継ぎキューが満杯のため待たずに続行する terminal={}",
+                terminal_id
+            );
+            return;
+        }
+    }
+    if tokio::time::timeout(REBIND_WAIT_BUDGET, rx).await.is_err() {
+        log::warn!(
+            "[delivery] 引き継ぎの完了を待ちきれなかったため古い結果を返す可能性がある terminal={}",
+            terminal_id
+        );
     }
 }
 
@@ -355,12 +426,18 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
                 }
             }
         }
-        DeliveryMsg::Rebind { terminal_id } => {
+        DeliveryMsg::Rebind { terminal_id, reply } => {
             // 自動引き継ぎは1タブにつき1グループまで。人間が明示的に選ぶ `RebindManual` は
             // この制限を受けない。
             let result = try_rebind_once(app, pool, state, &terminal_id).await;
             if result != (0, 0) {
                 let _ = app.emit("event-inbox-changed", ());
+            }
+            // **`drive` より先に応答する。** 待っている側が読みたいのは引き継ぎの結果だけで、
+            // 押し込みの完了ではない。逆順にすると押し込み（PTY への書き込みと
+            // `SUBMIT_DELAY` の待ち）のぶんだけ MCP ツールの応答が遅れる。
+            if let Some(reply) = reply {
+                let _ = reply.send(());
             }
             drive(app, pool, state).await;
         }
@@ -686,7 +763,7 @@ async fn collect_digest(
     // **先に渡してから打刻する。** 呼び出し元がタイムアウトで諦めていれば送信は失敗し、
     // その場合は打刻しない（未配送のまま残るので次の機会に再度出る）。逆順にすると
     // 「配送済みだが誰も見ていない」本文が生まれ、再送しない方針のせいで永久に失われる。
-    if reply.send(Some(digest.clone())).is_err() {
+    if reply.send(Some(digest)).is_err() {
         log::warn!(
             "[delivery] 注入本文の受け取り手が既に居ない（タイムアウト）ため打刻しない terminal={} 経路={}",
             terminal_id,
@@ -717,26 +794,9 @@ async fn collect_digest(
         );
         let _ = app.emit("event-inbox-changed", ());
     }
-    if reason.is_turn_end() {
-        // 待機中への押し込み (`event-delivered`) と同じ形でフロントへ知らせる。
-        // SessionStart / UserPromptSubmit は人間が画面を見ている場面なのでトーストは出さない。
-        let settings = app.state::<SettingsManager>().get();
-        let worktree = items
-            .first()
-            .and_then(|i| i.subscriber_worktree_id.as_deref())
-            .and_then(|id| find_worktree(&settings, id));
-        let _ = app.emit(
-            "event-delivered",
-            serde_json::json!({
-                "terminalId": terminal_id,
-                "worktreeId": worktree.map(|w| w.id.clone()),
-                "worktreeName": worktree.map(|w| w.name.clone()),
-                "count": ids.len(),
-                "text": digest,
-                "method": "stop",
-            }),
-        );
-    }
+    // 配送ごとのトースト (`event-delivered`) は #137 で廃止した。知りたいのは個々の
+    // 配送イベントではなく購読関係の現況で、それはカードのバッジが常時見せている。
+    // 状態の変化そのものは直前の `event-inbox-changed` がフロントへ伝えている。
 }
 
 // ─── 配送の駆動 ───────────────────────────────────────────────────────────────
@@ -812,12 +872,47 @@ fn find_worktree<'a>(settings: &'a AppSettings, id: &str) -> Option<&'a Worktree
     settings.worktrees.iter().find(|w| w.id == id)
 }
 
+/// `--resume` へ渡してよい session ID か（英数字とハイフンのみ）。
+///
+/// 組み立てたコマンド文字列は**シェルへそのまま流し込まれる**（`App.vue` が `\r` を足して
+/// PTY へ書く）ので、引用符やセミコロンが混ざると別のコマンドとして解釈されうる。
+/// 値の出所は Claude Code の session UUID なので普段は素通りするが、DB を経由する以上
+/// 素性を検証してから渡す。
+fn is_safe_session_id(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+/// 自動 spawn したタブへ渡す初期プロンプト（#137）。
+///
+/// **これが無いとエージェントは何もしない。** spawn 直後は SessionStart フックが
+/// `additionalContext` で告知を渡すが、`additionalContext` は**ターンを開始させない**ので、
+/// エージェントは告知を持ったままプロンプトで待機する。しかも SessionStart 側が
+/// `mark_delivered` を打つため、ターンを開始できる PTY 押し込みは候補を失って走らない。
+/// 起動コマンドに位置引数のプロンプトを載せて、最初のターンをこちらから始める。
+///
+/// **oretachi 自身が書く固定文であること。** 発信側のメッセージ本文をここへ入れると、
+/// 押し込みと同じく「人間が打ったプロンプト」に化ける（`format_pointer_text` の doc 参照）。
+const SPAWN_INITIAL_PROMPT: &str =
+    "[oretachi] 購読していたワークツリーイベントの未読があります。oretachi_poll_inbox で内容を確認し、\
+     必要な対応を進めてから oretachi_ack_message で ack してください。";
+
 /// 自動 spawn したタブで起動するエージェントコマンド。
 ///
 /// 解決順はフロントの `useTaskExecution.ts` と同じ（ワークグループ → 全体設定 →
 /// `claudeCode`）。Claude Code の permission-mode も同じく既定は `plan` にする ——
 /// 別のワークツリーからの通知で立ち上がるタブなので、いきなり書き込みを許すのは危険。
-fn agent_command_for_worktree(settings: &AppSettings, worktree: &WorktreeEntry) -> String {
+///
+/// `resume_session` があれば `--resume` でその会話の続きとして立ち上げる。購読を張った
+/// エージェントの文脈を引き継げるので、「未読を確認しろ」だけを新規セッションに投げるより
+/// 話が早い。**Claude Code 以外は初期プロンプトも `--resume` も付けない** —— CLI ごとに
+/// 引数の意味が違い、誤って非対話モードで起動すると spawn したタブが即終了しうる。
+fn agent_command_for_worktree(
+    settings: &AppSettings,
+    worktree: &WorktreeEntry,
+    resume_session: Option<&str>,
+) -> String {
     use crate::ai_provider::AiAgentKind;
     let group = worktree
         .workgroup_id
@@ -836,7 +931,16 @@ fn agent_command_for_worktree(settings: &AppSettings, worktree: &WorktreeEntry) 
                 Some("auto") => "auto",
                 _ => "plan",
             };
-            format!("claude --permission-mode {}", mode)
+            // session UUID は oretachi が発番したものではなく Claude Code 由来なので、
+            // 万一おかしな文字が混ざってもシェルに渡さないよう形だけ検証する。
+            let resume = resume_session
+                .filter(|s| is_safe_session_id(s))
+                .map(|s| format!(" --resume {}", s))
+                .unwrap_or_default();
+            format!(
+                "claude{} --permission-mode {} \"{}\"",
+                resume, mode, SPAWN_INITIAL_PROMPT
+            )
         }
         AiAgentKind::GeminiCli => "gemini".to_string(),
         AiAgentKind::CodexCli => "codex".to_string(),
@@ -922,11 +1026,6 @@ async fn push_pending(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerStat
         if allowed.is_empty() {
             continue;
         }
-        // トーストに出す宛先名は代表1件から引く（表示だけなので判定には使わない）。
-        let worktree = allowed
-            .first()
-            .and_then(|i| i.subscriber_worktree_id.as_deref())
-            .and_then(|id| find_worktree(&settings, id));
         // 残りに interrupt が混ざっていれば走行中でも割り込む。
         let delivery = strongest_delivery(&allowed);
         let decision = decide_push(session, &delivery, now);
@@ -996,19 +1095,10 @@ async fn push_pending(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerStat
             session.agent_name,
             delivery
         );
-        let _ = app.emit(
-            "event-delivered",
-            serde_json::json!({
-                "terminalId": terminal_id,
-                "sessionId": session.session_id,
-                "worktreeId": worktree.map(|w| w.id.clone()),
-                "worktreeName": worktree.map(|w| w.name.clone()),
-                "agentName": session.agent_name,
-                "count": ids.len(),
-                "text": text,
-                "method": "pty",
-            }),
-        );
+        // 配送トースト (`event-delivered`) は #137 で廃止した。代わりに未配送件数が
+        // 減ったことを伝える（この経路には `event-inbox-changed` が無く、購読パネルと
+        // カードのバッジが押し込み後も古い件数のまま残っていた）。
+        let _ = app.emit("event-inbox-changed", ());
     }
 }
 
@@ -1103,29 +1193,41 @@ async fn spawn_for_closed_tabs(
             );
             continue;
         }
-        if projected_live >= SPAWN_MAX_LIVE_SESSIONS {
+        // **止めずに知らせる。** 拒否すると配送そのものが止まり「spawn すると言ったのに
+        // 何も起きない」になる。ハングの危険域に入ったかどうかの判断は人間に返す。
+        if projected_live >= SPAWN_WARN_LIVE_SESSIONS {
             log::warn!(
-                "[delivery] ターミナルが {} 個あるため自動 spawn を拒否した（上限 {}）worktree={} 未読={}",
+                "[delivery] ターミナルが {} 個ある状態で自動 spawn する（webview ハングの危険域 {}+）worktree={} 未読={}",
                 projected_live,
-                SPAWN_MAX_LIVE_SESSIONS,
+                SPAWN_WARN_LIVE_SESSIONS,
                 worktree.name,
                 pending
             );
             let _ = app.emit(
-                "event-spawn-rejected",
+                "event-spawn-warning",
                 serde_json::json!({
                     "worktreeId": worktree_id,
                     "worktreeName": worktree.name,
                     "liveSessions": projected_live,
-                    "limit": SPAWN_MAX_LIVE_SESSIONS,
+                    "threshold": SPAWN_WARN_LIVE_SESSIONS,
                     "pending": pending,
                 }),
             );
-            continue;
         }
 
         let request_id = uuid::Uuid::new_v4().to_string();
-        let command = agent_command_for_worktree(&settings, worktree);
+        // 購読を張ったエージェントの会話を引き継ぐ。引けなくても spawn は続行する
+        // （新規セッションになるだけで、初期プロンプトは同じように効く）。
+        let resume_session = match event_db::latest_agent_session_for_worktree(pool, &worktree_id)
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                log::warn!("[delivery] resume 用の session 取得に失敗: {}", e);
+                None
+            }
+        };
+        let command = agent_command_for_worktree(&settings, worktree, resume_session.as_deref());
         if app
             .emit(
                 "event-spawn-terminal",
@@ -1545,16 +1647,89 @@ mod tests {
         }
     }
 
+    // ─── 自動 spawn のコマンド組み立て（#137） ────────────────────────────────
+
+    /// 初期プロンプトが必ず載ること。**これが無いとエージェントは何もしない**
+    /// （SessionStart の additionalContext はターンを開始させない）。
+    #[test]
+    fn test_spawn_command_always_carries_initial_prompt() {
+        let settings = AppSettings::default();
+        let cmd = agent_command_for_worktree(&settings, &worktree(None), None);
+        assert!(cmd.starts_with("claude "), "{}", cmd);
+        assert!(cmd.contains("--permission-mode plan"), "{}", cmd);
+        assert!(cmd.contains("oretachi_poll_inbox"), "{}", cmd);
+        assert!(!cmd.contains("--resume"), "session が無ければ付けない: {}", cmd);
+    }
+
+    /// session UUID があれば `--resume` でその会話の続きとして立ち上げる。
+    #[test]
+    fn test_spawn_command_resumes_subscriber_session() {
+        let settings = AppSettings::default();
+        let cmd = agent_command_for_worktree(
+            &settings,
+            &worktree(None),
+            Some("3d1ac64b-36ee-4f56-92fa-bc170cb0043f"),
+        );
+        assert!(
+            cmd.contains("--resume 3d1ac64b-36ee-4f56-92fa-bc170cb0043f"),
+            "{}",
+            cmd
+        );
+        assert!(cmd.contains("oretachi_poll_inbox"), "{}", cmd);
+    }
+
+    /// 組み立てた文字列はシェルへそのまま流れるので、素性の怪しい session ID は落とす。
+    /// 落としても spawn は続ける（`--resume` が付かないだけ）。
+    #[test]
+    fn test_spawn_command_rejects_unsafe_session_id() {
+        let settings = AppSettings::default();
+        for evil in ["a\" ; rm -rf /", "a b", "a$(id)", "", &"x".repeat(65)] {
+            let cmd = agent_command_for_worktree(&settings, &worktree(None), Some(evil));
+            assert!(!cmd.contains("--resume"), "evil={:?} cmd={}", evil, cmd);
+            assert!(cmd.contains("oretachi_poll_inbox"), "{}", cmd);
+        }
+        assert!(is_safe_session_id("3d1ac64b-36ee-4f56-92fa-bc170cb0043f"));
+    }
+
+    /// プロンプトを囲む二重引用符を、プロンプト自身が壊さないこと。
+    #[test]
+    fn test_spawn_initial_prompt_has_no_quote_chars() {
+        assert!(!SPAWN_INITIAL_PROMPT.contains('"'));
+        assert!(!SPAWN_INITIAL_PROMPT.contains('\''));
+        assert!(!SPAWN_INITIAL_PROMPT.contains('\r'));
+        assert!(!SPAWN_INITIAL_PROMPT.contains('\n'));
+    }
+
     #[test]
     fn test_auto_approval_allows_canned_kinds_only() {
         let on = worktree(Some(true));
         // oretachi 自身が定型 JSON で組み立てるイベントは許可
         assert!(auto_approval_allows(Some(&on), event_db::KIND_WORKTREE_CLOSED));
         assert!(auto_approval_allows(Some(&on), event_db::KIND_WORKTREE_CREATED));
-        // エージェントが本文を書ける自由文（#126）は自動承認宛には押し込まない
-        assert!(!auto_approval_allows(Some(&on), event_db::KIND_WORKTREE_MESSAGE));
-        // 知らない種別も default-deny
+        // `worktree.message` は本文を運ばず告知だけを押し込むようにしたので許可（#137）。
+        // 押し込まれる文字列は `format_pointer_text` の固定文で、発信側は書けない
+        assert!(auto_approval_allows(Some(&on), event_db::KIND_WORKTREE_MESSAGE));
+        // 知らない種別は default-deny。`format_inbox_line` の `other` 分岐が本文を
+        // 丸ごと展開するので、許可リストに足さない限り自動承認宛には出さない
         assert!(!auto_approval_allows(Some(&on), "worktree.unknown"));
+    }
+
+    /// 許可リストと「本文をインラインで運ぶ種別」は別の軸で、**両方の判断が要る**。
+    /// `worktree.message` は「押し込んでよい」が「本文は運ばない」側にいる。
+    #[test]
+    fn test_pushable_kinds_and_inline_body_are_separate_axes() {
+        for kind in [event_db::KIND_WORKTREE_CLOSED, event_db::KIND_WORKTREE_CREATED] {
+            assert!(AUTO_APPROVAL_PUSHABLE_KINDS.contains(&kind));
+            assert!(!event_db::is_free_text_kind(kind), "定型種別は本文を運ぶ");
+        }
+        assert!(AUTO_APPROVAL_PUSHABLE_KINDS.contains(&event_db::KIND_WORKTREE_MESSAGE));
+        assert!(
+            event_db::is_free_text_kind(event_db::KIND_WORKTREE_MESSAGE),
+            "message は押し込めるが本文は運ばない"
+        );
+        // 未知種別は両方で拒否側
+        assert!(!AUTO_APPROVAL_PUSHABLE_KINDS.contains(&"worktree.unknown"));
+        assert!(event_db::is_free_text_kind("worktree.unknown"));
     }
 
     #[test]
@@ -1567,14 +1742,14 @@ mod tests {
     }
 
     /// `push_pending` / `filter_for_turn_end` の仕分けと同じ形。自動承認が有効な宛先では、
-    /// 同じタブに定型と自由文が混ざっていても**自由文だけが保留**され、定型は通る（#126）。
+    /// 同じタブに許可種別と拒否種別が混ざっていても**拒否種別だけが保留**され、残りは通る。
     #[test]
     fn test_auto_approval_partition_blocks_only_free_form() {
         let on = worktree(Some(true));
         let items = vec![
             item("a", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_CLOSED),
-            item("b", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_CREATED),
-            item("c", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_MESSAGE),
+            item("b", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_MESSAGE),
+            item("c", event_db::DELIVERY_TURN_END, "worktree.unknown"),
         ];
         let (allowed, blocked): (Vec<_>, Vec<_>) = items
             .into_iter()
@@ -1583,8 +1758,8 @@ mod tests {
         assert_eq!(ids(&blocked), vec!["c"]);
     }
 
-    /// 保留された行は配送戦略の決定に影響してはいけない。`interrupt` な自由文が
-    /// 混ざっているだけで `turn_end` の定型イベントが走行中のエージェントへ
+    /// 保留された行は配送戦略の決定に影響してはいけない。`interrupt` な拒否種別が
+    /// 混ざっているだけで `turn_end` の許可種別が走行中のエージェントへ
     /// 割り込む、という取り違えを固定する（`push_pending` は仕分け後に
     /// `strongest_delivery` を取る）。
     #[test]
@@ -1592,7 +1767,7 @@ mod tests {
         let on = worktree(Some(true));
         let items = vec![
             item("a", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_CLOSED),
-            item("b", event_db::DELIVERY_INTERRUPT, event_db::KIND_WORKTREE_MESSAGE),
+            item("b", event_db::DELIVERY_INTERRUPT, "worktree.unknown"),
         ];
         // 仕分け前の全体では interrupt に見える
         assert_eq!(strongest_delivery(&items), event_db::DELIVERY_INTERRUPT);
@@ -1606,15 +1781,19 @@ mod tests {
         assert!(!is_push(decide_push(&busy, &strongest_delivery(&allowed), 1_000_000)));
     }
 
-    /// `spawn_for_closed_tabs` の判定と同じ形。自由文の未読しか無い宛先では、自動承認が
-    /// 有効なら spawn しない（押し込めない未読を根拠にタブを立てない）。
+    /// `spawn_for_closed_tabs` の判定と同じ形。押し込めない種別の未読しか無い宛先では、
+    /// 自動承認が有効なら spawn しない（押し込めない未読を根拠にタブを立てない）。
+    ///
+    /// `worktree.message` は #137 で許可側へ移った。spawn したタブへ出るのも
+    /// `format_pointer_text` の告知だけなので、押し込みと同じ基準で通してよい。
     #[test]
     fn test_spawn_pending_count_ignores_blocked_kinds() {
         let on = worktree(Some(true));
         let off = worktree(Some(false));
         let by_kind = vec![
-            (event_db::KIND_WORKTREE_MESSAGE.to_string(), 3i64),
+            ("worktree.unknown".to_string(), 3i64),
             (event_db::KIND_WORKTREE_CLOSED.to_string(), 2i64),
+            (event_db::KIND_WORKTREE_MESSAGE.to_string(), 4i64),
         ];
         let count = |wt: &WorktreeEntry| -> i64 {
             by_kind
@@ -1623,12 +1802,12 @@ mod tests {
                 .map(|(_, c)| *c)
                 .sum()
         };
-        assert_eq!(count(&on), 2, "自動承認 ON では自由文を数えない");
-        assert_eq!(count(&off), 5, "自動承認 OFF なら従来どおり全部数える");
+        assert_eq!(count(&on), 6, "自動承認 ON では未知種別を数えない");
+        assert_eq!(count(&off), 9, "自動承認 OFF なら従来どおり全部数える");
 
-        // 自由文だけの宛先は spawn 対象にならない（pending == 0）
-        let only_message = vec![(event_db::KIND_WORKTREE_MESSAGE.to_string(), 3i64)];
-        let pending: i64 = only_message
+        // 拒否種別だけの宛先は spawn 対象にならない（pending == 0）
+        let only_blocked = vec![("worktree.unknown".to_string(), 3i64)];
+        let pending: i64 = only_blocked
             .iter()
             .filter(|(kind, _)| auto_approval_allows(Some(&on), kind))
             .map(|(_, c)| *c)
@@ -1704,12 +1883,12 @@ mod tests {
     }
 
     /// 自動承認が有効な宛先は、注入された内容を人間の確認なしに実行する（#120 §5.5）。
-    /// #126 で自由文 (`worktree.message`) が入った瞬間に default-deny になるのが目的。
+    /// 許可リストに無い種別がその場で default-deny に落ちるのが目的。
     #[test]
     fn test_filter_for_turn_end_respects_auto_approval() {
         let items = vec![
             item("a", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_CLOSED),
-            item("b", event_db::DELIVERY_TURN_END, "worktree.message"),
+            item("b", event_db::DELIVERY_TURN_END, "worktree.unknown"),
         ];
         assert_eq!(
             ids(&filter_for_turn_end(items.clone(), &settings_with(Some(true)))),
@@ -1734,34 +1913,34 @@ mod tests {
         settings.worktrees = vec![auto_on, auto_off];
 
         // 1件目は自動承認 OFF のワークツリー宛（＝代表にすると全件が通ってしまう）
-        let mut a = item("a", event_db::DELIVERY_TURN_END, "worktree.message");
+        let mut a = item("a", event_db::DELIVERY_TURN_END, "worktree.unknown");
         a.subscriber_worktree_id = Some("wt-manual".to_string());
-        let mut b = item("b", event_db::DELIVERY_TURN_END, "worktree.message");
+        let mut b = item("b", event_db::DELIVERY_TURN_END, "worktree.unknown");
         b.subscriber_worktree_id = Some("wt-auto".to_string());
 
         assert_eq!(ids(&filter_for_turn_end(vec![a, b], &settings)), vec!["a"]);
     }
 
     /// **自動承認のガードは全注入経路に掛かること。** `Stop` だけに掛けていると、
-    /// `SessionStart` / `UserPromptSubmit` の additionalContext から自由文が素通りし、
+    /// `SessionStart` / `UserPromptSubmit` の additionalContext から拒否種別が素通りし、
     /// 自動承認が有効な宛先で人間の確認なしにツール実行へつながる（#126）。
     /// `passive` の除外だけが `Stop` 固有。
     #[test]
     fn test_auto_approval_filter_applies_to_all_injection_paths() {
         let items = vec![
             item("a", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_CLOSED),
-            item("b", event_db::DELIVERY_TURN_END, event_db::KIND_WORKTREE_MESSAGE),
+            item("b", event_db::DELIVERY_TURN_END, "worktree.unknown"),
             item("c", event_db::DELIVERY_PASSIVE, event_db::KIND_WORKTREE_CLOSED),
         ];
         let auto_on = settings_with(Some(true));
-        // SessionStart / UserPromptSubmit 経路: 自由文は落とし、passive は回収する
+        // SessionStart / UserPromptSubmit 経路: 拒否種別は落とし、passive は回収する
         assert_eq!(
             ids(&filter_auto_approval(items.clone(), &auto_on)),
             vec!["a", "c"]
         );
-        // Stop 経路: 自由文に加えて passive も落とす
+        // Stop 経路: 拒否種別に加えて passive も落とす
         assert_eq!(ids(&filter_for_turn_end(items.clone(), &auto_on)), vec!["a"]);
-        // 自動承認 OFF なら自由文も通る（passive の扱いだけ経路で違う）
+        // 自動承認 OFF なら拒否種別も通る（passive の扱いだけ経路で違う）
         let auto_off = settings_with(Some(false));
         assert_eq!(
             ids(&filter_auto_approval(items.clone(), &auto_off)),
@@ -1775,9 +1954,9 @@ mod tests {
     /// これだったせいで他の行まで巻き込まれないことを固定する。
     #[test]
     fn test_filter_for_turn_end_unresolvable_row_does_not_leak_to_others() {
-        let mut a = item("a", event_db::DELIVERY_TURN_END, "worktree.message");
+        let mut a = item("a", event_db::DELIVERY_TURN_END, "worktree.unknown");
         a.subscriber_worktree_id = Some("wt-gone".to_string());
-        let b = item("b", event_db::DELIVERY_TURN_END, "worktree.message"); // wt-1 = 自動承認 ON
+        let b = item("b", event_db::DELIVERY_TURN_END, "worktree.unknown"); // wt-1 = 自動承認 ON
         assert_eq!(
             ids(&filter_for_turn_end(vec![a, b], &settings_with(Some(true)))),
             vec!["a"]

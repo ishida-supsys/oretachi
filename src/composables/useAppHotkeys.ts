@@ -54,11 +54,11 @@ export function useAppHotkeys(deps: UseAppHotkeysDeps) {
     }
   }
 
-  function focusWorktreeByChar(char: string) {
-    const wt = deps.worktrees.value.find((w) => {
-      const entry = deps.settings.value.worktrees.find((e) => e.id === w.id);
-      return entry?.hotkeyChar === char;
-    });
+  /** ワークツリーへフォーカスする唯一の分岐。Alt+[char] だけでなく、購読ダイアログ
+   *  （#137）からの選択もここを通す。**複製しないこと** — 分離中にサブウィンドウを
+   *  前に出す / タブが無ければ立ち上げる、の扱いが呼び出し口ごとにズレる。 */
+  function focusWorktree(worktreeId: string) {
+    const wt = deps.worktrees.value.find((w) => w.id === worktreeId);
     if (!wt) return;
 
     if (deps.isDetached(wt.id)) {
@@ -68,6 +68,15 @@ export function useAppHotkeys(deps: UseAppHotkeysDeps) {
     } else {
       deps.onAddTerminal(wt.id);
     }
+  }
+
+  function focusWorktreeByChar(char: string) {
+    const wt = deps.worktrees.value.find((w) => {
+      const entry = deps.settings.value.worktrees.find((e) => e.id === w.id);
+      return entry?.hotkeyChar === char;
+    });
+    if (!wt) return;
+    focusWorktree(wt.id);
   }
 
   // Alt+[char] ワークツリーフォーカス（setup時登録）
@@ -171,5 +180,5 @@ export function useAppHotkeys(deps: UseAppHotkeysDeps) {
     });
   }
 
-  return { registerGlobalShortcut, init };
+  return { registerGlobalShortcut, init, focusWorktree };
 }

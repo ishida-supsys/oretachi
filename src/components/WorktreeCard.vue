@@ -16,6 +16,8 @@ import ArtifactIcon from "./ArtifactIcon.vue";
 import Popover from "primevue/popover";
 import Badge from "primevue/badge";
 import type { UrlArtifactEntry } from "../types/artifact";
+import { subscriptionCounts } from "../composables/useEventSubscriptions";
+import { EMPTY_SUBSCRIPTION_COUNTS } from "../utils/subscriptionCounts";
 
 const props = defineProps<{
   worktree: Worktree;
@@ -55,10 +57,22 @@ const emit = defineEmits<{
   duplicateWorktree: [worktreeId: string];
   toggleDescription: [worktreeId: string];
   moveToWorkgroup: [payload: { worktreeId: string; groupId: string }];
+  openSubscriptions: [worktreeId: string];
 }>();
 
 // ホームは git ワークツリーではないため、削除・複製・並べ替えを一切出さない
 const isHome = computed(() => props.worktree.isHome === true);
+
+/** 購読バッジの件数（#137）。`useEventSubscriptions` はモジュールシングルトンなので、
+ *  App → HomeView → RepositoryPanel → カードの props リレーを増やさず直接引く。
+ *  カード一覧はメインウィンドウにしか無く、そこでは `initEventSubscriptions` が
+ *  `event-inbox-changed` を listen して最新に保っている。 */
+const subCounts = computed(
+  () => subscriptionCounts.value.get(props.worktree.id) ?? EMPTY_SUBSCRIPTION_COUNTS,
+);
+const hasSubscriptions = computed(
+  () => subCounts.value.outgoing > 0 || subCounts.value.incoming > 0,
+);
 
 // ドラッグ（カード名のD&D並べ替え）直後に発火しうる click を1回だけ無視するためのフラグ。
 // Chromium は通常 drag 後に click を出さないが、ブラウザ差異に備えてガードする。
@@ -183,7 +197,10 @@ const terminalList = computed(() =>
 <template>
   <div class="worktree-card" :class="{ 'card-detached': detached, 'card-notified': notificationCount && notificationCount > 0 }" @click="onCardClick">
     <Badge v-if="notificationCount && notificationCount > 0" :value="notificationCount" severity="danger" class="notification-badge" />
-    <div v-if="hotkeyChar || (artifactCount && artifactCount > 0)" class="top-left-badges">
+    <div
+      v-if="hotkeyChar || (artifactCount && artifactCount > 0) || hasSubscriptions"
+      class="top-left-badges"
+    >
       <div v-if="hotkeyChar" class="hotkey-badge">Alt+{{ hotkeyChar }}</div>
       <ArtifactUrlHoverMenu v-if="artifactCount && artifactCount > 0" :urls="artifactUrls ?? []">
         <button
@@ -195,6 +212,27 @@ const terminalList = computed(() =>
           {{ artifactCount }}
         </button>
       </ArtifactUrlHoverMenu>
+      <!-- 購読バッジ（#137）。方向を文字の ↑↓ ではなくアイコンで表す:
+           pi-share-alt = このワークツリーが張っている購読 / pi-bolt = このワークツリーへ届く購読。
+           0 件の側は枠ごと省く（大半のワークツリーは片方向しか持たないため幅が縮む）。 -->
+      <button
+        v-if="hasSubscriptions"
+        class="subscription-count-badge"
+        :title="t('subscriptionsTooltip', { out: subCounts.outgoing, in: subCounts.incoming })"
+        @click.stop="emit('openSubscriptions', worktree.id)"
+      >
+        <span v-if="subCounts.outgoing > 0" class="subscription-leg">
+          <i class="pi pi-share-alt" style="font-size: 9px" />{{ subCounts.outgoing }}
+        </span>
+        <span
+          v-if="subCounts.outgoing > 0 && subCounts.incoming > 0"
+          class="subscription-sep"
+          aria-hidden="true"
+        />
+        <span v-if="subCounts.incoming > 0" class="subscription-leg">
+          <i class="pi pi-bolt" style="font-size: 9px" />{{ subCounts.incoming }}
+        </span>
+      </button>
     </div>
     <div class="card-header">
       <div class="card-info">
@@ -388,6 +426,38 @@ const terminalList = computed(() =>
 
 .artifact-count-badge:hover {
   border-color: #89b4fa;
+}
+
+/* 購読バッジ（#137）。アーティファクトバッジと同じ作りで色だけ変える */
+.subscription-count-badge {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  background: rgba(148, 226, 213, 0.15);
+  border: 1px solid rgba(148, 226, 213, 0.4);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 10px;
+  color: #94e2d5;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.subscription-count-badge:hover {
+  border-color: #94e2d5;
+}
+
+/* 発信/受信の2枠。区切り線は高さをバッジいっぱいに伸ばす */
+.subscription-leg {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.subscription-sep {
+  align-self: stretch;
+  width: 1px;
+  background: rgba(148, 226, 213, 0.35);
 }
 
 .card-detached {
@@ -640,6 +710,7 @@ const terminalList = computed(() =>
     "aiJudgingBadge": "AI judging",
     "openInIde": "Open in IDE",
     "openArtifacts": "Open artifacts",
+    "subscriptionsTooltip": "Subscriptions: {out} outgoing / {in} incoming",
     "addTerminal": "Add terminal",
     "noTerminals": "No terminals",
     "deletingText": "Deleting...",
@@ -664,6 +735,7 @@ const terminalList = computed(() =>
     "aiJudgingBadge": "AI判定中",
     "openInIde": "IDE で開く",
     "openArtifacts": "アーティファクト",
+    "subscriptionsTooltip": "購読: このワークツリーから {out} 件 / このワークツリーへ {in} 件",
     "addTerminal": "ターミナルを追加",
     "noTerminals": "ターミナルがありません",
     "deletingText": "削除中...",

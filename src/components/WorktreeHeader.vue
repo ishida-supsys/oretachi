@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { computed } from "vue";
 import { useI18n } from "vue-i18n";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import MacTrafficLights from "./MacTrafficLights.vue";
@@ -6,10 +7,15 @@ import ArtifactUrlHoverMenu from "./ArtifactUrlHoverMenu.vue";
 import ArtifactIcon from "./ArtifactIcon.vue";
 import { isMac } from "../composables/usePlatform";
 import type { UrlArtifactEntry } from "../types/artifact";
+import { subscriptionCounts } from "../composables/useEventSubscriptions";
+import { EMPTY_SUBSCRIPTION_COUNTS } from "../utils/subscriptionCounts";
 
 const { t } = useI18n();
 
 const props = defineProps<{
+  /** 購読バッジの件数を引くのに使う（#137）。ホーム / リポジトリ擬似ワークツリーや、
+   *  まだ ID を渡していない呼び出し元では undefined になりうる。 */
+  worktreeId?: string;
   worktreeName: string;
   branchName: string;
   hotkeyChar?: string;
@@ -34,7 +40,22 @@ defineEmits<{
   "open-artifacts": [];
   "cancel-ai-judging": [];
   "click-auto-approval": [];
+  /** 購読バッジのクリック。開き先のダイアログはウィンドウごとに用意する
+   *  （メインは App.vue、サブは SubWindowApp.vue が自前で出す） */
+  "open-subscriptions": [worktreeId: string];
 }>();
+
+/** 購読バッジの件数（#137）。カードと同じくモジュールシングルトンから直接引く。
+ *  **サブウィンドウでは `initSubscriptionsScoped` を呼んでいないと常に 0 件になる**
+ *  （軽量版の `initTerminalUnread` は購読一覧を読まない）。 */
+const subCounts = computed(() =>
+  props.worktreeId
+    ? subscriptionCounts.value.get(props.worktreeId) ?? EMPTY_SUBSCRIPTION_COUNTS
+    : EMPTY_SUBSCRIPTION_COUNTS,
+);
+const hasSubscriptions = computed(
+  () => subCounts.value.outgoing > 0 || subCounts.value.incoming > 0,
+);
 
 function onHeaderDrag(e: MouseEvent) {
   if ((e.target as HTMLElement).closest('button')) return;
@@ -139,6 +160,29 @@ async function closeWindow() {
           {{ props.artifactCount }}
         </button>
       </ArtifactUrlHoverMenu>
+      <!-- 購読バッジ（#137）。カードと同じ意味づけ:
+           pi-share-alt = このワークツリーが張っている購読 / pi-bolt = このワークツリーへ届く購読。
+           0 件の側は枠ごと省く -->
+      <button
+        v-if="hasSubscriptions && props.worktreeId"
+        class="flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded font-medium cursor-pointer border-none"
+        style="background: rgba(148, 226, 213, 0.15); color: #94e2d5; border: 1px solid rgba(148, 226, 213, 0.3)"
+        :title="t('subscriptionsTooltip', { out: subCounts.outgoing, in: subCounts.incoming })"
+        @click="$emit('open-subscriptions', props.worktreeId)"
+      >
+        <span v-if="subCounts.outgoing > 0" class="flex items-center gap-0.5">
+          <i class="pi pi-share-alt" style="font-size: 9px" />{{ subCounts.outgoing }}
+        </span>
+        <span
+          v-if="subCounts.outgoing > 0 && subCounts.incoming > 0"
+          class="self-stretch w-px"
+          style="background: rgba(148, 226, 213, 0.35)"
+          aria-hidden="true"
+        />
+        <span v-if="subCounts.incoming > 0" class="flex items-center gap-0.5">
+          <i class="pi pi-bolt" style="font-size: 9px" />{{ subCounts.incoming }}
+        </span>
+      </button>
     </div>
     <!-- 右端のボタン列。5つとも hdr-btn で同一寸法・同一アイコンサイズに揃える
          （個別に w-*/h-*/font-size を書くと必ずどれかがずれるため、寸法はここに集約する） -->
@@ -223,6 +267,7 @@ async function closeWindow() {
     "aiJudgingBadge": "AI judging",
     "openInIde": "Open in IDE",
     "openArtifacts": "Artifacts",
+    "subscriptionsTooltip": "Subscriptions: {out} outgoing / {in} incoming",
     "minimize": "Minimize",
     "maximize": "Maximize",
     "close": "Close",
@@ -233,6 +278,7 @@ async function closeWindow() {
     "aiJudgingBadge": "AI判定中",
     "openInIde": "IDE で開く",
     "openArtifacts": "アーティファクト",
+    "subscriptionsTooltip": "購読: このワークツリーから {out} 件 / このワークツリーへ {in} 件",
     "minimize": "最小化",
     "maximize": "最大化",
     "close": "閉じる",

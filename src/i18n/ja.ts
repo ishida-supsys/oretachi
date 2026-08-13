@@ -27,14 +27,12 @@ export default {
     titleApproval: '承認が必要です',
     titleCompleted: 'タスク完了',
   },
-  // ワークツリー間イベントの配送トースト (issue #120 §7 / #130)。
+  // 自動 spawn の警告トースト (issue #120 §7 / #130 / #137)。
   // メイン / サブウィンドウが共通の composable から引くため、SFC ローカルではなくここに置く。
+  // 配送ごとのトースト (deliveredSummary) は #137 で廃止した（購読状態はカードのバッジが見せる）。
   eventDelivery: {
-    // メインは非分離の全ワークツリーぶんを出すので、宛先名が無いとどのタブが
-    // 動き出したのか分からない（#125 の文言は {name} を渡しながら使っていなかった）
-    deliveredSummary: '{name} へワークツリーイベントを配送しました ({count}件)',
-    spawnRejectedSummary: '自動 spawn を見送りました',
-    spawnRejectedDetail: '{name} に未読が {pending} 件ありますが、ターミナルが {live} 個開いています（上限 {limit}）。ターミナルを整理するか、手動でワークツリーを開いてください',
+    spawnWarningSummary: 'ターミナルが増えています',
+    spawnWarningDetail: '{name} の未読 {pending} 件のためにターミナルを追加しました。開いているターミナルが {live} 個になっています。{threshold} 個以上で画面が固まる事象が報告されているため、使っていないタブを閉じることをおすすめします',
   },
   update: {
     title: 'oretachi アップデート',

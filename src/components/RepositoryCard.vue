@@ -11,6 +11,8 @@ import ArtifactIcon from "./ArtifactIcon.vue";
 import Popover from "primevue/popover";
 import Badge from "primevue/badge";
 import type { UrlArtifactEntry } from "../types/artifact";
+import { subscriptionCounts } from "../composables/useEventSubscriptions";
+import { EMPTY_SUBSCRIPTION_COUNTS } from "../utils/subscriptionCounts";
 
 const { t } = useI18n();
 
@@ -44,7 +46,20 @@ const emit = defineEmits<{
   selectExecScript: [repositoryId: string];
   clearExecScript: [repositoryId: string];
   removeRepository: [repositoryId: string];
+  /** 購読バッジのクリック。アーティファクトと違い**ワークツリー ID** を渡す
+   *  （ダイアログから選ぶのはワークツリーで、フォーカス先もワークツリーのため） */
+  openSubscriptions: [worktreeId: string];
 }>();
+
+/** 購読バッジの件数（#137）。`worktree` はマイグレーション完了前に undefined に
+ *  なりうるので、その間はバッジを出さない。 */
+const subCounts = computed(() => {
+  const id = props.worktree?.id;
+  return (id ? subscriptionCounts.value.get(id) : undefined) ?? EMPTY_SUBSCRIPTION_COUNTS;
+});
+const hasSubscriptions = computed(
+  () => subCounts.value.outgoing > 0 || subCounts.value.incoming > 0,
+);
 
 const menuRef = ref<InstanceType<typeof Popover> | null>(null);
 
@@ -127,7 +142,10 @@ async function reapplyPluginConfig() {
       severity="danger"
       class="notification-badge"
     />
-    <div v-if="hotkeyChar || (artifactCount && artifactCount > 0)" class="top-left-badges">
+    <div
+      v-if="hotkeyChar || (artifactCount && artifactCount > 0) || hasSubscriptions"
+      class="top-left-badges"
+    >
       <div v-if="hotkeyChar" class="hotkey-badge">Alt+{{ hotkeyChar }}</div>
       <ArtifactUrlHoverMenu v-if="artifactCount && artifactCount > 0" :urls="artifactUrls ?? []">
         <button
@@ -139,6 +157,27 @@ async function reapplyPluginConfig() {
           {{ artifactCount }}
         </button>
       </ArtifactUrlHoverMenu>
+      <!-- 購読バッジ（#137）。方向を文字の ↑↓ ではなくアイコンで表す:
+           pi-share-alt = このワークツリーが張っている購読 / pi-bolt = このワークツリーへ届く購読。
+           0 件の側は枠ごと省く。WorktreeCard と同じ作り -->
+      <button
+        v-if="hasSubscriptions && worktree"
+        class="subscription-count-badge"
+        :title="t('subscriptionsTooltip', { out: subCounts.outgoing, in: subCounts.incoming })"
+        @click.stop="emit('openSubscriptions', worktree.id)"
+      >
+        <span v-if="subCounts.outgoing > 0" class="subscription-leg">
+          <i class="pi pi-share-alt" style="font-size: 9px" />{{ subCounts.outgoing }}
+        </span>
+        <span
+          v-if="subCounts.outgoing > 0 && subCounts.incoming > 0"
+          class="subscription-sep"
+          aria-hidden="true"
+        />
+        <span v-if="subCounts.incoming > 0" class="subscription-leg">
+          <i class="pi pi-bolt" style="font-size: 9px" />{{ subCounts.incoming }}
+        </span>
+      </button>
     </div>
 
     <div class="card-header">
@@ -300,6 +339,38 @@ async function reapplyPluginConfig() {
 
 .artifact-count-badge:hover {
   border-color: #89b4fa;
+}
+
+/* 購読バッジ（#137）。アーティファクトバッジと同じ作りで色だけ変える */
+.subscription-count-badge {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  background: rgba(148, 226, 213, 0.15);
+  border: 1px solid rgba(148, 226, 213, 0.4);
+  border-radius: 4px;
+  padding: 1px 5px;
+  font-size: 10px;
+  color: #94e2d5;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.subscription-count-badge:hover {
+  border-color: #94e2d5;
+}
+
+/* 発信/受信の2枠。区切り線は高さをバッジいっぱいに伸ばす */
+.subscription-leg {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.subscription-sep {
+  align-self: stretch;
+  width: 1px;
+  background: rgba(148, 226, 213, 0.35);
 }
 
 .card-detached {
@@ -469,6 +540,7 @@ async function reapplyPluginConfig() {
     "subWindowBadge": "Sub window",
     "repositoryBadge": "Repository",
     "artifactsTooltip": "Open artifacts saved to this repository",
+    "subscriptionsTooltip": "Subscriptions: {out} outgoing / {in} incoming",
     "postAdd": {
       "itemsSelected": "{count} selected",
       "hooksCount": "{count} hooks",
@@ -499,6 +571,7 @@ async function reapplyPluginConfig() {
     "subWindowBadge": "サブウィンドウ",
     "repositoryBadge": "リポジトリ",
     "artifactsTooltip": "このリポジトリに保存したアーティファクトを開く",
+    "subscriptionsTooltip": "購読: このワークツリーから {out} 件 / このワークツリーへ {in} 件",
     "postAdd": {
       "itemsSelected": "{count}件選択中",
       "hooksCount": "{count}件フック",

@@ -6,6 +6,7 @@ import type {
   SubscriptionView,
   TerminalUnread,
 } from "../types/event";
+import { buildSubscriptionCounts } from "../utils/subscriptionCounts";
 
 /** ワークツリー間イベントの購読状態（issue #120 §7 / #125）。
  *
@@ -35,6 +36,12 @@ export const agentTerminals = computed(() =>
       label: `#${tm.sessionId} ${tm.agentName ?? ""}`.trim(),
     })),
 );
+
+/** worktreeId → 購読件数（ワークツリーカードの購読バッジ用、#137）。
+ *
+ *  `subscriptions` から畳むだけなので、`loadSubscriptions` の直列化ガードと
+ *  `event-inbox-changed` の listen をそのまま共有する（新しい invoke は増やさない）。 */
+export const subscriptionCounts = computed(() => buildSubscriptionCounts(subscriptions.value));
 
 /** 未 ack の総数（トレイ / ホームの見出し用）。 */
 export const totalUnacked = computed(() =>
@@ -177,6 +184,44 @@ export async function initEventSubscriptions(): Promise<void> {
     void loadSubscriptions();
   });
   await loadSubscriptions();
+}
+
+/** 購読一覧を同期する、閉じるウィンドウ向けの版（#137）。
+ *
+ *  `initEventSubscriptions` はメインウィンドウ専用で unlisten を返さない（アプリと寿命を
+ *  共にする前提）。サブウィンドウのヘッダにも購読バッジを出すことになったので、
+ *  **解除できる形**が要る。`initTerminalUnread` と同じ参照カウントで扱う。
+ *
+ *  読み込みは `loadSubscriptions` をそのまま使う。購読パネルを持たないウィンドウには
+ *  `event_list_orphaned_groups` が余分だが、`subscriptions.value` へ書く経路を1本に
+ *  保つほうが重要（別ローダーを足すと、このファイルが何度も警告している
+ *  「先発（古い）が後着して新しいスナップショットを上書きする」競合が戻る）。 */
+let subsRefCount = 0;
+let subsUnlisten: UnlistenFn | null = null;
+let subsPending: Promise<void> | null = null;
+
+export async function initSubscriptionsScoped(): Promise<UnlistenFn> {
+  subsRefCount += 1;
+  if (subsRefCount === 1) {
+    subsPending = (async () => {
+      subsUnlisten = await listen("event-inbox-changed", () => {
+        void loadSubscriptions();
+      });
+      await loadSubscriptions();
+    })();
+  }
+  await subsPending;
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    subsRefCount -= 1;
+    if (subsRefCount > 0) return;
+    subsUnlisten?.();
+    subsUnlisten = null;
+    subsPending = null;
+  };
 }
 
 /** 現在の購読者数。リスナーは1本だけ張り、最後の解除で本当に外す。 */

@@ -27,16 +27,14 @@ export default {
     titleApproval: 'Approval Required',
     titleCompleted: 'Task Completed',
   },
-  // Toasts for cross-worktree event delivery (issue #120 §7 / #130).
+  // Warning toast for auto spawn (issue #120 §7 / #130 / #137).
   // Shared by the main window and sub-windows through a common composable, so it lives
   // in the global catalog rather than an SFC-local <i18n> block.
+  // The per-delivery toast (deliveredSummary) was dropped in #137 — subscription state
+  // is now shown persistently by the card badges instead.
   eventDelivery: {
-    // The main window shows deliveries for every attached worktree, so without the
-    // destination name you cannot tell which tab just started moving. (#125 passed
-    // {name} but never rendered it.)
-    deliveredSummary: 'Delivered to {name} ({count})',
-    spawnRejectedSummary: 'Auto spawn declined',
-    spawnRejectedDetail: '{name} has {pending} unread message(s) but {live} terminals are open (limit {limit}). Close some terminals or open the worktree manually.',
+    spawnWarningSummary: 'Many terminals open',
+    spawnWarningDetail: 'Added a terminal for {pending} unread message(s) in {name}. {live} terminals are now open. The window has been reported to freeze at {threshold} or more, so closing unused tabs is recommended.',
   },
   update: {
     title: 'oretachi Update',
