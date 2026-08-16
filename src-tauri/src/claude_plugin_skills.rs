@@ -81,4 +81,30 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
         "background-command/SKILL.md",
         include_str!("../skills/background-command/SKILL.md"),
     ),
+    // --- teamwork-parent ---
+    (
+        "teamwork-parent/SKILL.md",
+        include_str!("../skills/teamwork-parent/SKILL.md"),
+    ),
+    (
+        "teamwork-parent/templates/entry-point.jsx",
+        include_str!("../skills/teamwork-parent/templates/entry-point.jsx"),
+    ),
+    (
+        "teamwork-parent/templates/components--TaskNode.jsx",
+        include_str!("../skills/teamwork-parent/templates/components--TaskNode.jsx"),
+    ),
+    (
+        "teamwork-parent/templates/components--DependencyEdge.jsx",
+        include_str!("../skills/teamwork-parent/templates/components--DependencyEdge.jsx"),
+    ),
+    (
+        "teamwork-parent/templates/data--flow.example.jsx",
+        include_str!("../skills/teamwork-parent/templates/data--flow.example.jsx"),
+    ),
+    // --- teamwork-child ---
+    (
+        "teamwork-child/SKILL.md",
+        include_str!("../skills/teamwork-child/SKILL.md"),
+    ),
 ];
