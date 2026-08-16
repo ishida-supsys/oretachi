@@ -6,6 +6,44 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-08-16
+
+### Added
+- teamwork-parent/teamwork-child スキルを追加し、サブイシュー管理をエージェント間で分担できるようにした (#145)
+- ワークツリービューのヘッダにも購読バッジを表示するようにした (#138)
+- 購読バッジの方向をアイコンで表すようにした (#138)
+- 配送トーストを廃止し、カードに購読バッジを追加した (#138)
+- `worktree.created` / `worktree.message` イベントと target ワイルドカードを追加 (#126)
+- Stop フックによるターン境界配送 + UserPromptSubmit での取りこぼし回収を追加 (#124)
+- サブウィンドウ / トレイでの購読配送を可視化した (#130)
+- 購読の再バインド + 待機中への PTY 押し込み + 暴走防止 UI を追加 (#125)
+- event_db と購読/inbox で `worktree.closed` を配送するようにした (#123)
+- `terminal_id` を発番し env / hook / MCP へ貫通させた (#122)
+- `oretachi_add_task` にワークグループ指定を追加 (#116)
+- HOMEタブ周辺の挙動を修正 (#112)
+- URL 型アーティファクトを追加 (#113)
+- HOME/リポジトリ擬似ワークツリーでもアーティファクトを作成できるようにした (#111)
+
+### Fixed
+- サブエージェント内部発火の通知を抑制するよう修正 (#141)
+- 自動 spawn したタブへ初期プロンプトと `--resume` を渡すよう修正 (#138)
+- 自由文メッセージが本文を運ばず告知だけになるよう修正 (#138)
+- bug-review 指摘対応 — ↓ 行の無反応クリック / クローズ時の emit 欠落 ほか (#138)
+- bug-review 指摘対応 — 自動承認ガードの経路漏れ / 注入本文の総量上限 ほか (#126)
+- bug-review 指摘対応 — イベント発行失敗のトースト巻き添え ほか (#126)
+- 連鎖の深さを `worktree.message` だけで数えるよう修正 (#126)
+- 押し込み側の自動承認判定も行単位にするよう修正 (#126)
+- bug-review 指摘対応 — 自動承認判定の行単位化 / 引き継ぎ探索の抑止 (#124)
+- bug-review 指摘対応 — 毎プロンプトの ack 催促 / HMR ポート追従 (#124)
+- 注入本文を渡せてから `delivered_at` を打つよう修正 (#124)
+- bug-review 指摘対応 — 購読パネルのヘッダ誤表示 / 更新要求の取りこぼし / spawn タブの引き継ぎ二重取り ほか (#125)
+- バリデータ指摘対応 — 保持期限の継承 / 切り詰め分の誤打刻 / 生存タブの orphaned 固定 ほか (#125)
+- セルフレビュー指摘対応 — passive の巻き込み配送 / 出力静穏の優先 / spawn 上限の同一tick素通り / 未使用 ack 経路 (#125)
+- レビュー指摘対応 — 継承した `terminal_id` の除去と emit の対称化 (#122)
+
+### Changed
+- 端末数超過で自動 spawn を拒否せず警告するように変更 (#138)
+
 ## [0.28.0] - 2026-08-10
 
 ### Added
@@ -583,7 +621,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.28.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.29.0...HEAD
+[0.29.0]: https://github.com/ishida-supsys/oretachi/compare/0.28.0...0.29.0
 [0.28.0]: https://github.com/ishida-supsys/oretachi/compare/0.27.1...0.28.0
 [0.27.1]: https://github.com/ishida-supsys/oretachi/compare/0.27.0...0.27.1
 [0.27.0]: https://github.com/ishida-supsys/oretachi/compare/0.26.0...0.27.0
