@@ -3387,6 +3387,23 @@ fn resolve_kind_for_event(settings: &AppSettings, worktree: &WorktreeEntry, even
         .unwrap_or_else(|| default_kind_for_event(event).to_string())
 }
 
+/// hook body の JSON にサブエージェント（Task tool）内部発火の目印 `agent_id` があるか判定する（#141）。
+/// メインエージェント発火の hook JSON には存在しない。パースできない body は
+/// 「サブエージェントではない」に倒す（疑わしきは通知する＝安全側）。
+fn hook_body_has_agent_id(body: Option<&str>) -> bool {
+    body.and_then(|b| serde_json::from_str::<serde_json::Value>(b).ok())
+        .map_or(false, |v| v.get("agent_id").is_some())
+}
+
+/// サブエージェント（Task tool）内部発火由来の通知を抑制すべきか判定する（#141）。
+/// - kind 明示指定なし（旧形式/MCP 経由の意図的な通知は対象外）
+/// - agent == "cc"（サイドカーが --agent cc で送る。claude_plugin.rs 参照）
+/// - hook body に agent_id がある（サブエージェント内部発火）
+/// の3条件がすべて揃った場合のみ true。
+fn should_skip_subagent_notify(agent: Option<&str>, kind: Option<&str>, body: Option<&str>) -> bool {
+    kind.is_none() && agent == Some("cc") && hook_body_has_agent_id(body)
+}
+
 // ─── Simple REST endpoint (/notify) ──────────────────────────────────────────
 
 async fn notify_handler(
@@ -3434,6 +3451,17 @@ async fn notify_handler(
                 crate::artifact_url::handle_tool_hook(handle, hook_wt, event_name, body_owned).await;
             });
         }
+    }
+
+    // サブエージェント（Task tool）内部発火の通知を抑制する（#141）。hook JSON の agent_id を
+    // 見て判定し、kind 明示指定や artifact URL 自動登録（上のブロック）には影響させない。
+    if should_skip_subagent_notify(payload.agent.as_deref(), payload.kind.as_deref(), payload.body.as_deref()) {
+        log::debug!(
+            "[notify] skip subagent-internal notify: worktree={} event={:?}",
+            worktree_name,
+            payload.event
+        );
+        return StatusCode::OK;
     }
 
     // ライフサイクルフック由来（event 指定・kind 明示なし）の通知は、通知フックが1件も
@@ -4466,6 +4494,79 @@ mod tests {
             parse_stop_hook_fields(Some(r#"{"prompt_id":"  ","stop_hook_active":true}"#)),
             (None, true)
         );
+    }
+
+    /// 公式ドキュメント記載のサブエージェント（Task tool）内発火 hook JSON の想定形（#141）。
+    /// リポジトリ内に実測サンプルが無いため STOP_PAYLOAD をベースに agent_id/agent_type を
+    /// トップレベルへ追加した形で構成する。
+    const SUBAGENT_PERMISSION_REQUEST_PAYLOAD: &str = r#"{
+        "session_id": "bcbd95af-3066-4bc9-9b6b-98fabdd3ef8b",
+        "transcript_path": "X:/t.jsonl",
+        "cwd": "X:/wt/foo",
+        "hook_event_name": "PermissionRequest",
+        "agent_id": "agent-01",
+        "agent_type": "general-purpose",
+        "tool_name": "Bash",
+        "tool_input": { "command": "ls" }
+    }"#;
+
+    #[test]
+    fn test_hook_body_has_agent_id_present() {
+        assert!(hook_body_has_agent_id(Some(SUBAGENT_PERMISSION_REQUEST_PAYLOAD)));
+    }
+
+    #[test]
+    fn test_hook_body_has_agent_id_absent() {
+        assert!(!hook_body_has_agent_id(Some(STOP_PAYLOAD)));
+    }
+
+    #[test]
+    fn test_hook_body_has_agent_id_missing_or_broken() {
+        assert!(!hook_body_has_agent_id(None));
+        assert!(!hook_body_has_agent_id(Some("not json")));
+        assert!(!hook_body_has_agent_id(Some("{}")));
+    }
+
+    #[test]
+    fn test_should_skip_subagent_notify_true_when_cc_and_agent_id_and_kind_none() {
+        assert!(should_skip_subagent_notify(
+            Some("cc"),
+            None,
+            Some(SUBAGENT_PERMISSION_REQUEST_PAYLOAD)
+        ));
+    }
+
+    #[test]
+    fn test_should_skip_subagent_notify_false_when_agent_not_cc() {
+        assert!(!should_skip_subagent_notify(
+            Some("gemini"),
+            None,
+            Some(SUBAGENT_PERMISSION_REQUEST_PAYLOAD)
+        ));
+        assert!(!should_skip_subagent_notify(
+            None,
+            None,
+            Some(SUBAGENT_PERMISSION_REQUEST_PAYLOAD)
+        ));
+    }
+
+    #[test]
+    fn test_should_skip_subagent_notify_false_when_kind_explicit() {
+        assert!(!should_skip_subagent_notify(
+            Some("cc"),
+            Some("hook"),
+            Some(SUBAGENT_PERMISSION_REQUEST_PAYLOAD)
+        ));
+    }
+
+    #[test]
+    fn test_should_skip_subagent_notify_false_when_no_agent_id() {
+        assert!(!should_skip_subagent_notify(Some("cc"), None, Some(STOP_PAYLOAD)));
+    }
+
+    #[test]
+    fn test_should_skip_subagent_notify_false_when_body_none() {
+        assert!(!should_skip_subagent_notify(Some("cc"), None, None));
     }
 
     /// name 未設定のグループは UI 側 (useWorkgroups.displayName / i18n workgroup.autoName) が

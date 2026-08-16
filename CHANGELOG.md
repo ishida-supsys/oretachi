@@ -6,6 +6,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Fixed
+- Task tool 経由のサブエージェント内部発火の hook で無害な操作にまで通知（承認待ち等）が出てしまう問題を修正。hook JSON の `agent_id` を見て抑制した (#141)
+
 ## [0.28.0] - 2026-08-10
 
 ### Added
