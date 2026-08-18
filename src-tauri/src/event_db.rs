@@ -199,6 +199,10 @@ pub struct InboxItem {
     pub state: String,
     pub created_at: i64,
     pub delivered_at: Option<i64>,
+    /// 「本文を渡したがターンは始まっていない」時刻（SessionStart 経路）。
+    /// `delivered_at` と分ける理由は `run_migrations` の該当マイグレーション参照。
+    #[sqlx(default)]
+    pub notified_at: Option<i64>,
     pub acked_at: Option<i64>,
     /// 購読者タブが死んで宙に浮いた時刻。**inbox 側にも持つのが要点**:
     /// `worktree.closed` は `fanout` 直後に `delete_subscriptions_for_target` で購読行が
@@ -333,6 +337,7 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             state                  TEXT NOT NULL DEFAULT 'pending',
             created_at             INTEGER NOT NULL,
             delivered_at           INTEGER,
+            notified_at            INTEGER,
             acked_at               INTEGER,
             orphaned_at            INTEGER,
             delivery               TEXT NOT NULL DEFAULT 'turn_end',
@@ -358,6 +363,16 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
         .execute(pool)
         .await;
     let _ = sqlx::query("ALTER TABLE inbox ADD COLUMN spawn_if_closed INTEGER NOT NULL DEFAULT 0")
+        .execute(pool)
+        .await;
+    // 「本文は渡したが**ターンは始まっていない**」を `delivered_at` と区別する（SessionStart）。
+    //
+    // SessionStart の `additionalContext` はエージェントの文脈に入るだけでターンを開始しない。
+    // これを `delivered_at` として打つと `list_pushable` の `delivered_at IS NULL` から外れ、
+    // **ターンを開始できる PTY 押し込みが候補を永久に失う**。結果、未 ack バッジが出たまま
+    // 誰も動かない状態で固定される（実 DB で delivered 済み・未 ack のまま化石化した行を確認）。
+    // 二重提示の防止は `InboxFilter::Undelivered` がこの列も見ることで担う。
+    let _ = sqlx::query("ALTER TABLE inbox ADD COLUMN notified_at INTEGER")
         .execute(pool)
         .await;
     sqlx::query(
@@ -733,7 +748,9 @@ pub enum InboxFilter {
 impl InboxFilter {
     fn where_clause(self) -> &'static str {
         match self {
-            InboxFilter::Undelivered => " AND i.delivered_at IS NULL",
+            // **`notified_at` も見る。** SessionStart は「一度だけ提示する」経路なので、
+            // 打刻の列が違っても再掲しない（#120 §5.2 の再送しない方針）。
+            InboxFilter::Undelivered => " AND i.delivered_at IS NULL AND i.notified_at IS NULL",
             InboxFilter::Unacked => " AND i.acked_at IS NULL",
             InboxFilter::All => "",
         }
@@ -747,7 +764,7 @@ pub async fn list_inbox(
     filter: InboxFilter,
 ) -> Result<Vec<InboxItem>, String> {
     let sql = format!(
-        "SELECT i.id, i.subscriber_terminal_id, i.subscriber_worktree_id, i.event_id, i.state, i.created_at, i.delivered_at, i.acked_at, i.orphaned_at, i.delivery, i.spawn_if_closed, e.kind, e.body, e.source_worktree_id, e.actor \
+        "SELECT i.id, i.subscriber_terminal_id, i.subscriber_worktree_id, i.event_id, i.state, i.created_at, i.delivered_at, i.notified_at, i.acked_at, i.orphaned_at, i.delivery, i.spawn_if_closed, e.kind, e.body, e.source_worktree_id, e.actor \
          FROM inbox i JOIN events e ON e.id = i.event_id \
          WHERE i.subscriber_terminal_id = ?{} ORDER BY i.created_at ASC",
         filter.where_clause()
@@ -762,7 +779,7 @@ pub async fn list_inbox(
 /// 未 ack 件数（未配送 / 配送済み未 ack の内訳付き）を返す。
 pub async fn count_unacked(pool: &SqlitePool, terminal_id: &str) -> Result<(i64, i64), String> {
     let row: (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN delivered_at IS NULL THEN 1 ELSE 0 END), 0) FROM inbox WHERE subscriber_terminal_id = ? AND acked_at IS NULL",
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN delivered_at IS NULL AND notified_at IS NULL THEN 1 ELSE 0 END), 0) FROM inbox WHERE subscriber_terminal_id = ? AND acked_at IS NULL",
     )
     .bind(terminal_id)
     .fetch_one(pool)
@@ -786,6 +803,27 @@ pub async fn mark_delivered(pool: &SqlitePool, ids: &[String], now: i64) -> Resu
     }
     let sql = format!(
         "UPDATE inbox SET delivered_at = ? WHERE delivered_at IS NULL AND id IN ({})",
+        placeholders(ids.len())
+    );
+    let mut q = sqlx::query(&sql).bind(now);
+    for id in ids {
+        q = q.bind(id);
+    }
+    Ok(q.execute(pool).await.map_err(|e| e.to_string())?.rows_affected())
+}
+
+/// 「提示はしたがターンは始まっていない」印を打つ（SessionStart 経路）。
+///
+/// `mark_delivered` と分ける理由: `delivered_at` を打つと `list_pushable` の
+/// `delivered_at IS NULL` から外れ、**ターンを開始できる PTY 押し込みが候補を失う**。
+/// SessionStart の `additionalContext` は文脈に載るだけでターンを始めないので、
+/// 押し込みの候補には残したまま「再掲はしない」だけを表現する必要がある。
+pub async fn mark_notified(pool: &SqlitePool, ids: &[String], now: i64) -> Result<u64, String> {
+    if ids.is_empty() {
+        return Ok(0);
+    }
+    let sql = format!(
+        "UPDATE inbox SET notified_at = ? WHERE notified_at IS NULL AND id IN ({})",
         placeholders(ids.len())
     );
     let mut q = sqlx::query(&sql).bind(now);
@@ -1050,6 +1088,112 @@ pub async fn rebind_orphaned_group(
     Ok((subs, inbox))
 }
 
+/// 生存しているが受け取れないタブ宛の未 ack inbox を、同じワークツリーの別の生存タブへ移す。
+///
+/// **`orphaned_at` を経由しないのが要点。** タブが生きている以上、`mark_orphaned_subscribers`
+/// の逆遷移（生存タブの行は `orphaned_at` を NULL に戻す、下記参照）が次の `Reconcile` で
+/// 打ち消してしまう。移送先が決まっているなら `subscriber_terminal_id` を直接書き換えるほうが
+/// 状態が単純で、`spawn_if_closed` を誤って発火させることもない。
+///
+/// **購読行は移さない。** そのタブでまた `claude` が立ち上がれば同じ terminal_id で受け取れる
+/// ようになるので、購読の宛先は据え置く（次のイベントは再びそのタブに積まれ、受け取れなければ
+/// またここで移る）。移送先を人間が選ぶ手動の引き継ぎとは別物なので `state = orphaned` にも
+/// しない。
+///
+/// UNIQUE(subscriber_terminal_id, event_id) と衝突する行（移送先が既に同じイベントを持って
+/// いる）は捨てる。`rebind_orphaned_group` と同じ判断で、移送先は既にその通知を見ている。
+pub async fn move_inbox_to_terminal(
+    pool: &SqlitePool,
+    worktree_id: &str,
+    from_terminal_id: &str,
+    to_terminal_id: &str,
+) -> Result<u64, String> {
+    if from_terminal_id == to_terminal_id {
+        return Ok(0);
+    }
+    let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
+    let moved = sqlx::query(
+        "UPDATE OR IGNORE inbox SET subscriber_terminal_id = ? \
+         WHERE acked_at IS NULL AND orphaned_at IS NULL \
+           AND subscriber_worktree_id = ? AND subscriber_terminal_id = ?",
+    )
+    .bind(to_terminal_id)
+    .bind(worktree_id)
+    .bind(from_terminal_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?
+    .rows_affected();
+
+    // UNIQUE に負けた残骸（移送先が既に同じイベントを持っている）を捨てる
+    sqlx::query(
+        "DELETE FROM inbox WHERE acked_at IS NULL AND orphaned_at IS NULL \
+         AND subscriber_worktree_id = ? AND subscriber_terminal_id = ?",
+    )
+    .bind(worktree_id)
+    .bind(from_terminal_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    tx.commit().await.map_err(|e| e.to_string())?;
+    Ok(moved)
+}
+
+/// 押し込みの窓（`PUSH_TTL_MS`）から外れた未 ack 行を返す。
+///
+/// `list_pushable` の `created_at > ?` を反転させたもの。本文の鮮度は失っているが
+/// **未 ack である事実は生きている**ので、宛先が受け取れる状態に戻ったときに
+/// 「N 件残っています」だけを一度伝えるために使う（`push_stale_pointers`）。
+/// これが無いと、宛先が 10 分以上受け取れない状態だった未読は黙って永久に配送されない。
+pub async fn list_stale_unpushed(
+    pool: &SqlitePool,
+    now: i64,
+    ttl_ms: i64,
+) -> Result<Vec<InboxItem>, String> {
+    sqlx::query_as::<_, InboxItem>(
+        "SELECT i.id, i.subscriber_terminal_id, i.subscriber_worktree_id, i.event_id, i.state, i.created_at, i.delivered_at, i.notified_at, i.acked_at, i.orphaned_at, i.delivery, i.spawn_if_closed, e.kind, e.body, e.source_worktree_id, e.actor \
+         FROM inbox i JOIN events e ON e.id = i.event_id \
+         WHERE i.delivered_at IS NULL AND i.acked_at IS NULL AND i.orphaned_at IS NULL \
+           AND i.created_at <= ? \
+         ORDER BY i.created_at ASC",
+    )
+    .bind(now - ttl_ms)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
+/// 本文を運ばず件数だけを伝える押し込み文（`format_pointer_text` の公開ラッパ）。
+///
+/// 鮮度を失った未読の救済に使う。本文を出さないので **`sanitize_for_pty` を通した
+/// oretachi 自身の固定文**しか PTY へ出ない（自動承認が有効な宛先でも安全な形）。
+pub fn format_pointer_push_text(count: i64) -> String {
+    sanitize_for_pty(&format_pointer_text(count))
+}
+
+/// 押し込みの窓（`PUSH_TTL_MS`）から外れた未 ack 行を数える。戻り値は (件数, 最古の created_at)。
+///
+/// 黙って候補から消えるのが追いづらいので、可視化のためだけに使う。
+/// **条件は `list_stale_unpushed` と揃えること。** ログに出た件数と実際に救済（告知）を試みる
+/// 件数がズレると、ログを見ながらの切り分けが逆に難しくなる。
+pub async fn count_stale_unpushed(
+    pool: &SqlitePool,
+    now: i64,
+    ttl_ms: i64,
+) -> Result<(i64, Option<i64>), String> {
+    let row: (i64, Option<i64>) = sqlx::query_as(
+        "SELECT COUNT(*), MIN(created_at) FROM inbox \
+         WHERE delivered_at IS NULL AND acked_at IS NULL AND orphaned_at IS NULL \
+           AND created_at <= ?",
+    )
+    .bind(now - ttl_ms)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(row)
+}
+
 /// 引き継ぎ待ちの先頭グループ1つを新しいタブへ引き継ぐ。自動トリガ（SessionStart /
 /// AI エージェント検出）はこちらを使う。引き継ぐものが無ければ `(0, 0)`（冪等なので
 /// 複数の経路から同時に呼ばれても無害）。
@@ -1108,7 +1252,7 @@ pub async fn list_pushable(
     push_ttl_ms: i64,
 ) -> Result<Vec<InboxItem>, String> {
     sqlx::query_as::<_, InboxItem>(
-        "SELECT i.id, i.subscriber_terminal_id, i.subscriber_worktree_id, i.event_id, i.state, i.created_at, i.delivered_at, i.acked_at, i.orphaned_at, i.delivery, i.spawn_if_closed, e.kind, e.body, e.source_worktree_id, e.actor \
+        "SELECT i.id, i.subscriber_terminal_id, i.subscriber_worktree_id, i.event_id, i.state, i.created_at, i.delivered_at, i.notified_at, i.acked_at, i.orphaned_at, i.delivery, i.spawn_if_closed, e.kind, e.body, e.source_worktree_id, e.actor \
          FROM inbox i JOIN events e ON e.id = i.event_id \
          WHERE i.delivered_at IS NULL AND i.acked_at IS NULL AND i.orphaned_at IS NULL AND i.created_at > ? \
          ORDER BY i.created_at ASC",
@@ -1191,7 +1335,7 @@ pub async fn list_all_subscriptions(
 /// タブごとの (未 ack 件数, うち未配送件数)。タブの未読バッジに使う。
 pub async fn count_unacked_by_terminal(pool: &SqlitePool) -> Result<Vec<(String, i64, i64)>, String> {
     sqlx::query_as(
-        "SELECT subscriber_terminal_id, COUNT(*), COALESCE(SUM(CASE WHEN delivered_at IS NULL THEN 1 ELSE 0 END), 0) \
+        "SELECT subscriber_terminal_id, COUNT(*), COALESCE(SUM(CASE WHEN delivered_at IS NULL AND notified_at IS NULL THEN 1 ELSE 0 END), 0) \
          FROM inbox WHERE acked_at IS NULL GROUP BY subscriber_terminal_id",
     )
     .fetch_all(pool)
@@ -1770,6 +1914,7 @@ mod tests {
             state: STATE_PENDING.to_string(),
             created_at: 100,
             delivered_at: None,
+            notified_at: None,
             acked_at: None,
             orphaned_at: None,
             delivery: DELIVERY_TURN_END.to_string(),
@@ -2418,6 +2563,203 @@ mod tests {
                 rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new").await.unwrap();
             assert_eq!(inbox, 0);
             assert_eq!(list_inbox(&pool, "term-old", InboxFilter::All).await.unwrap().len(), 1);
+        });
+    }
+
+    /// SessionStart 経路の打刻（`notified_at`）は**押し込み候補を奪わない**。
+    ///
+    /// `additionalContext` はターンを開始しないので、これで `delivered_at` を打つと
+    /// 「誰も動かないのに押し込みもされない」状態で固定される（実際に化石化した行が出た）。
+    /// 再掲防止（`Undelivered` から外れる）だけが効くことを固定する。
+    #[test]
+    fn test_notified_keeps_row_pushable_but_not_undelivered() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-a", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            fanout_all(&pool, &e, now).await.unwrap();
+
+            let ids: Vec<String> = list_inbox(&pool, "term-a", InboxFilter::Undelivered)
+                .await
+                .unwrap()
+                .iter()
+                .map(|i| i.id.clone())
+                .collect();
+            assert_eq!(ids.len(), 1);
+            assert_eq!(mark_notified(&pool, &ids, now).await.unwrap(), 1);
+
+            // 再掲はしない
+            assert!(list_inbox(&pool, "term-a", InboxFilter::Undelivered)
+                .await
+                .unwrap()
+                .is_empty());
+            // が、ターンを開始できる押し込みの候補には残る
+            assert_eq!(list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap().len(), 1);
+            // バッジ（未 ack）も減らない
+            assert_eq!(count_unacked(&pool, "term-a").await.unwrap(), (1, 0));
+
+            // 押し込めば delivered_at が入り、以後は候補から外れる
+            assert_eq!(mark_delivered(&pool, &ids, now).await.unwrap(), 1);
+            assert!(list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap().is_empty());
+        });
+    }
+
+    /// 生存しているが受け取れないタブ宛の未読を、同じワークツリーの別タブへ直接移せること。
+    ///
+    /// **`orphaned_at` を経由しない**のが要点。引き継ぎ待ちにすると
+    /// (1) `mark_orphaned_subscribers` の逆遷移（生存タブなら active に戻す）が打ち消し、
+    /// (2) `spawn_if_closed` の候補になって重複タブを立てる。両方起きないことを固定する。
+    #[test]
+    fn test_move_inbox_to_terminal_keeps_rows_active() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let mut s = sub("term-shell", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            s.spawn_if_closed = 1;
+            upsert_subscription(&pool, &s).await.unwrap();
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            fanout_all(&pool, &e, now).await.unwrap();
+
+            let moved = move_inbox_to_terminal(&pool, "wt-subscriber", "term-shell", "term-agent")
+                .await
+                .unwrap();
+            assert_eq!(moved, 1);
+            assert!(list_inbox(&pool, "term-shell", InboxFilter::All).await.unwrap().is_empty());
+            let items = list_inbox(&pool, "term-agent", InboxFilter::All).await.unwrap();
+            assert_eq!(items.len(), 1);
+            assert_eq!(items[0].orphaned_at, None, "引き継ぎ待ちにはしない");
+
+            // 移送先の宛先で押し込み候補になり、spawn の候補にはならない
+            let pushable = list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap();
+            assert_eq!(pushable.len(), 1);
+            assert_eq!(pushable[0].subscriber_terminal_id, "term-agent");
+            assert!(list_spawn_candidates(&pool, now, PUSH_TTL_MS).await.unwrap().is_empty());
+
+            // 生存タブ一覧の再照合でも状態が揺れない（逆遷移に打ち消されない）
+            mark_orphaned_subscribers(&pool, &["term-shell".into(), "term-agent".into()], now)
+                .await
+                .unwrap();
+            assert_eq!(list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap().len(), 1);
+
+            // 同じタブへの移送と、移すものが無い場合は 0 件（冪等）
+            assert_eq!(
+                move_inbox_to_terminal(&pool, "wt-subscriber", "term-agent", "term-agent")
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(
+                move_inbox_to_terminal(&pool, "wt-subscriber", "term-shell", "term-agent")
+                    .await
+                    .unwrap(),
+                0
+            );
+        });
+    }
+
+    /// 移送先が既に同じイベントを持っている場合は残骸を捨てる（UNIQUE 衝突）。
+    #[test]
+    fn test_move_inbox_to_terminal_drops_duplicates() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            for term in ["term-shell", "term-agent"] {
+                let s = sub(term, Some("wt-subscriber"), r#"["worktree.closed"]"#);
+                let mut s = s;
+                s.id = format!("sub-{}", term);
+                upsert_subscription(&pool, &s).await.unwrap();
+            }
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            assert_eq!(fanout_all(&pool, &e, now).await.unwrap(), 2);
+
+            // 移送先が同じ event_id を持つので UPDATE は通らず、孤児側が消える
+            assert_eq!(
+                move_inbox_to_terminal(&pool, "wt-subscriber", "term-shell", "term-agent")
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert!(list_inbox(&pool, "term-shell", InboxFilter::All).await.unwrap().is_empty());
+            assert_eq!(list_inbox(&pool, "term-agent", InboxFilter::All).await.unwrap().len(), 1);
+        });
+    }
+
+    /// 押し込みの窓から外れた未 ack を、告知だけの救済のために取り出せること。
+    #[test]
+    fn test_list_stale_unpushed() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-a", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            fanout_all(&pool, &e, now).await.unwrap();
+
+            // 窓の内側では鮮度切れ扱いにしない（`list_pushable` と排他）
+            assert!(list_stale_unpushed(&pool, now, PUSH_TTL_MS).await.unwrap().is_empty());
+            let later = now + PUSH_TTL_MS + 1;
+            assert_eq!(list_stale_unpushed(&pool, later, PUSH_TTL_MS).await.unwrap().len(), 1);
+            assert!(list_pushable(&pool, later, PUSH_TTL_MS).await.unwrap().is_empty());
+
+            // 告知したら（打刻したら）二度と出ない
+            let ids = vec![
+                list_stale_unpushed(&pool, later, PUSH_TTL_MS).await.unwrap()[0]
+                    .id
+                    .clone(),
+            ];
+            mark_delivered(&pool, &ids, later).await.unwrap();
+            assert!(list_stale_unpushed(&pool, later, PUSH_TTL_MS).await.unwrap().is_empty());
+            // 未 ack なのでバッジは残る
+            assert_eq!(count_unacked(&pool, "term-a").await.unwrap().0, 1);
+        });
+    }
+
+    /// 告知文には本文が入らない（自動承認が有効な宛先へ押し込んでも安全な形）。
+    #[test]
+    fn test_format_pointer_push_text_carries_no_body() {
+        let text = format_pointer_push_text(3);
+        assert!(text.contains('3'));
+        assert!(text.contains("oretachi_poll_inbox"));
+        assert!(!text.contains(chr_esc()), "制御文字が残っていない");
+    }
+
+    fn chr_esc() -> char {
+        char::from_u32(0x1b).unwrap()
+    }
+
+    /// 押し込みの窓から外れた未 ack を数えられること（可視化のためだけの集計）。
+    #[test]
+    fn test_count_stale_unpushed() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-a", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            fanout_all(&pool, &e, now).await.unwrap();
+
+            assert_eq!(count_stale_unpushed(&pool, now, PUSH_TTL_MS).await.unwrap(), (0, None));
+            let later = now + PUSH_TTL_MS + 1;
+            assert_eq!(
+                count_stale_unpushed(&pool, later, PUSH_TTL_MS).await.unwrap(),
+                (1, Some(now))
+            );
+            // ack すれば数えない
+            let ids: Vec<String> = list_inbox(&pool, "term-a", InboxFilter::All)
+                .await
+                .unwrap()
+                .iter()
+                .map(|i| i.id.clone())
+                .collect();
+            ack(&pool, &ids, "term-a", now).await.unwrap();
+            assert_eq!(count_stale_unpushed(&pool, later, PUSH_TTL_MS).await.unwrap(), (0, None));
         });
     }
 
