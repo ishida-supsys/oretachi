@@ -44,6 +44,10 @@ export default {
     checkFailed: 'Failed to check for updates.\n{error}',
     installFailed: 'Failed to install the update.\n{error}',
   },
+  externalLink: {
+    title: 'Open external link',
+    confirm: 'Open this URL in your default browser?\n\n{url}',
+  },
   panZoom: {
     zoomIn: 'Zoom in (+)',
     zoomOut: 'Zoom out (-)',

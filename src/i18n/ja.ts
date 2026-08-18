@@ -42,6 +42,10 @@ export default {
     checkFailed: 'アップデートの確認に失敗しました。\n{error}',
     installFailed: 'アップデートのインストールに失敗しました。\n{error}',
   },
+  externalLink: {
+    title: '外部リンクを開く',
+    confirm: '既定のブラウザで次の URL を開きますか？\n\n{url}',
+  },
   panZoom: {
     zoomIn: '拡大 (+)',
     zoomOut: '縮小 (-)',
