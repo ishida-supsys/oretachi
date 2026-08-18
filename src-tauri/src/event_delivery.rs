@@ -458,6 +458,14 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
                             subs, inbox, deleted
                         );
                         let _ = app.emit("event-inbox-changed", ());
+                        // **生まれた引き継ぎ待ちを、既に走っているエージェントへ引き取らせる。**
+                        // `Rebind` の要求元は「エージェントの新規検出」と「MCP / hook 呼び出し」
+                        // だけなので、既に立ち上がっていてアイドルで黙っているタブは、
+                        // 次に何か喋るまで引き取らない。その間 `spawn_for_closed_tabs` も
+                        // `has_agent` で見送るため出口が無く、未 ack バッジだけが残る（実機で踏んだ）。
+                        if subs > 0 || inbox > 0 {
+                            claim_orphans_with_live_agents(app, pool, state).await;
+                        }
                     }
                     Ok(_) => {}
                     Err(e) => log::warn!("[delivery] mark_orphaned_subscribers failed: {}", e),
@@ -588,6 +596,40 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
                 ),
             }
         }
+    }
+}
+
+/// 生存している AI タブに、そのワークツリーの引き継ぎ待ちを引き取らせる。
+///
+/// タブが死んだ直後（`mark_orphaned_subscribers` が引き継ぎ待ちを作った直後）に呼ぶ。
+/// 引き取りは1タブ1グループまで（`try_rebind_once` の `claimed`）なので、生存タブの数だけ
+/// グループが減る。引き取れるものが無ければ何も起きない。
+///
+/// 引き取れたら `drive` まで進める。移った先はアイドルのはずなので、次の 30 秒 tick を
+/// 待たずに押し込みたい。
+async fn claim_orphans_with_live_agents(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    state: &mut WorkerState,
+) {
+    // `session_id` 昇順で決定的に回す（どのタブがどのグループを引き取るかを再現可能にする）。
+    let mut agents: Vec<crate::pty_manager::SessionInfo> = app
+        .state::<crate::pty_manager::PtyManager>()
+        .list_sessions()
+        .into_iter()
+        .filter(|s| s.exit_code.is_none() && s.is_ai_agent)
+        .collect();
+    agents.sort_by_key(|s| s.session_id);
+
+    let mut claimed_any = false;
+    for agent in agents {
+        if try_rebind_once(app, pool, state, &agent.terminal_id).await != (0, 0) {
+            claimed_any = true;
+        }
+    }
+    if claimed_any {
+        let _ = app.emit("event-inbox-changed", ());
+        drive(app, pool, state).await;
     }
 }
 
