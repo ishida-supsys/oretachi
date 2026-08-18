@@ -4,9 +4,12 @@ import { useI18n } from "vue-i18n";
 import { MdPreview, config } from "md-editor-v3";
 import "md-editor-v3/lib/preview.css";
 import mermaid from "mermaid";
+import { openUrl } from "@tauri-apps/plugin-opener";
+import { ask } from "@tauri-apps/plugin-dialog";
 import PanZoomCanvas from "./PanZoomCanvas.vue";
 import { mermaidConfig, sanitizeMermaidSvg } from "../../utils/mermaidTheme";
 import { createPanZoom, type PanZoomController } from "../../utils/panZoom";
+import { resolveExternalLink } from "../../utils/externalLink";
 
 const props = defineProps<{
   content: string;
@@ -158,6 +161,41 @@ function onKeydown(e: KeyboardEvent) {
   }
 }
 
+/**
+ * 本文中のリンククリックを横取りする。
+ * 素通しするとこのウィンドウの webview 自身が外部サイトへ遷移してしまい、
+ * Tauri の特権ドキュメントが差し替わったうえ戻る手段もなくなる。
+ * キャプチャ段階で取るのは md-editor-v3 側のハンドラより先に止めるため。
+ */
+function onLinkClick(e: MouseEvent) {
+  const anchor = (e.target as Element | null)?.closest?.("a[href]");
+  if (!anchor) return;
+  const href = anchor.getAttribute("href");
+  // 見出しアンカーは md-editor-v3 のページ内スクロールに任せる
+  if (href?.startsWith("#")) return;
+  // ここから先は開く/開かないに関わらず webview を遷移させない
+  e.preventDefault();
+  e.stopPropagation();
+  const url = resolveExternalLink(href);
+  if (!url) return; // 相対パス・ローカルパス・非 http スキームは何もしない
+  void confirmAndOpen(url);
+}
+
+async function confirmAndOpen(url: string) {
+  try {
+    // アーティファクト本文は AI が自由に書けるためリンクテキストは信用できない。
+    // 実 URL を見せて同意を取ってから外に出す
+    const ok = await ask(t("externalLink.confirm", { url }), {
+      title: t("externalLink.title"),
+      kind: "warning",
+    });
+    if (!ok) return;
+    await openUrl(url);
+  } catch (e) {
+    console.error("openUrl failed", e);
+  }
+}
+
 // mermaid の描画は非同期で、md-editor-v3 がブロック要素を差し替えるため DOM 変化を監視する
 let observer: MutationObserver | null = null;
 
@@ -166,12 +204,18 @@ onMounted(() => {
   if (root.value) {
     observer = new MutationObserver(decorate);
     observer.observe(root.value, { childList: true, subtree: true });
+    root.value.addEventListener("click", onLinkClick, true);
+    // 中クリックは click ではなく auxclick で飛ぶ。塞がないとここだけ遷移が残る
+    root.value.addEventListener("auxclick", onLinkClick, true);
   }
   window.addEventListener("keydown", onKeydown);
 });
 
 onBeforeUnmount(() => {
   observer?.disconnect();
+  // capture 有無を揃えないと解除されない
+  root.value?.removeEventListener("click", onLinkClick, true);
+  root.value?.removeEventListener("auxclick", onLinkClick, true);
   window.removeEventListener("keydown", onKeydown);
   unpinAll();
 });
@@ -215,6 +259,16 @@ watch(() => props.content, () => {
   overflow-y: auto;
   height: 100%;
   box-sizing: border-box;
+  /* 見出しアンカーの着地をスムーズに。親の .content-body は overflow: hidden なので
+     フラグメント遷移で実際にスクロールするのはこの要素 */
+  scroll-behavior: smooth;
+}
+
+/* OS 側でアニメーション抑制を選んでいる場合は即座にジャンプさせる */
+@media (prefers-reduced-motion: reduce) {
+  .markdown-view {
+    scroll-behavior: auto;
+  }
 }
 
 /* 全画面ボタンは md-editor-v3 のアクションバーに入るので、位置とアイコンの装飾は
