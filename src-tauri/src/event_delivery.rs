@@ -306,12 +306,26 @@ pub async fn collect_digest_and_wait(
 
 // ─── ワーカー ─────────────────────────────────────────────────────────────────
 
+/// 自動 spawn の単一フライト1件。
+struct InflightSpawn {
+    request_id: String,
+    requested_at: Instant,
+    /// `--resume` に渡した AI セッション。
+    ///
+    /// **これを持つのが要点。** spawn したタブは定義上このセッションの続きなので、
+    /// 購読の引き継ぎ（同一セッション限定）はこの値で判定してよい。検出された
+    /// `agent_session_id` を待つと、(1) エージェント検出は 10 秒周期で spawn 応答より遅く、
+    /// (2) `claude --resume <uuid>` が `~/.claude/sessions/<pid>.json` に同じ UUID を
+    /// 報告する保証がコード上に無い —— という2つの理由で引き継ぎを取り逃す。
+    resume_session: Option<String>,
+}
+
 #[derive(Default)]
 struct WorkerState {
     /// タブごとの最終押し込み時刻（レート制限）
     last_push: HashMap<String, Instant>,
-    /// spawn 要求中のワークツリー（単一フライト）。request_id と発行時刻
-    inflight_spawn: HashMap<String, (String, Instant)>,
+    /// spawn 要求中のワークツリー（単一フライト）
+    inflight_spawn: HashMap<String, InflightSpawn>,
     /// ワークツリーごとの最終 spawn 時刻。単一フライトは応答で即解除されるので、
     /// 「spawn したがエージェントが検出されない」（`claude` が PATH に無い等）ときに
     /// tick ごとに新しいタブを積み増すのを止めるためのクールダウン。
@@ -330,7 +344,15 @@ struct WorkerState {
     ///
     /// 引き継ぎ待ちグループが新しく生まれるのは `mark_orphaned_subscribers`（＝生存タブ一覧が
     /// 変化した `Reconcile`）だけなので、そこで捨てれば取りこぼさない。
-    rebind_probed: std::collections::HashSet<String>,
+    ///
+    /// **値は「試したときに観測した AI セッション」。** 購読行の引き継ぎは同一セッションに
+    /// 限られる（`event_db::RebindScope`）ので、セッションが変われば結論も変わる。
+    /// 単なる `HashSet` だと、セッションがまだ検出できていない間（spawn 直後 / 状態ファイルが
+    /// 読めない構成 / gemini・codex・cline のようにそもそも session UUID を持たないエージェント）に
+    /// 抑止してしまい、**検出後も `Reconcile` まで引き継ぎが走らない**。逆に抑止しないと
+    /// セッションが永久に `None` のタブが毎ターン DB を叩き続ける。鍵にセッションを含めると
+    /// どちらも起きない。
+    rebind_probed: HashMap<String, Option<String>>,
     /// タブごとの「最後に Stop 経路で注入したターン」の `prompt_id`（#124）。
     ///
     /// `Stop` の `additionalContext` は会話を継続させるので、継続したターンが終われば
@@ -423,7 +445,7 @@ pub fn start(app: AppHandle, pool: SqlitePool) -> DeliveryHandle {
                 // busy / 出力継続中で見送った宛先の再評価と、spawn 待ちの解放
                 state
                     .inflight_spawn
-                    .retain(|_, (_, at)| at.elapsed() < SPAWN_TIMEOUT);
+                    .retain(|_, f| f.requested_at.elapsed() < SPAWN_TIMEOUT);
                 drive(&app, &pool, &mut state).await;
             }
         }
@@ -513,11 +535,15 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
             terminal_id,
             reply,
         } => {
+            // **手動引き継ぎはセッションで絞らない。** 人間が引き継ぎ先を選んでいるので、
+            // 自動引き継ぎが同一セッションに限られること（`RebindScope` の doc）の逃げ道が
+            // ここしかない。縛ると引き継ぎ待ちが保持期限（7日）で黙って消える。
             let result = event_db::rebind_orphaned_group(
                 pool,
                 &worktree_id,
                 &dead_terminal_id,
                 &terminal_id,
+                event_db::RebindScope::AnySession,
             )
             .await
             .unwrap_or_else(|e| {
@@ -548,11 +574,14 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
             let worktree_id = state
                 .inflight_spawn
                 .iter()
-                .find(|(_, (rid, _))| *rid == request_id)
+                .find(|(_, f)| f.request_id == request_id)
                 .map(|(wt, _)| wt.clone());
-            if let Some(wt) = &worktree_id {
-                state.inflight_spawn.remove(wt);
-            }
+            // `--resume` に渡したセッション。spawn したタブはこのセッションの続きなので、
+            // 検出を待たずに購読の引き継ぎ判定へ使える（`InflightSpawn` の doc 参照）。
+            let resume_session = worktree_id
+                .as_ref()
+                .and_then(|wt| state.inflight_spawn.remove(wt))
+                .and_then(|f| f.resume_session);
             let Some(session_id) = session_id else {
                 // サブウィンドウへ分離済みのワークツリーは session_id を回収できないため、
                 // 成功しても None で返ってくる（引き継ぎはエージェント検出のポーリングに任せる）。
@@ -575,8 +604,25 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
                 .map(|s| s.terminal_id);
             match terminal_id {
                 Some(tid) => {
-                    let moved = rebind_for_terminal(app, pool, &tid).await;
-                    if moved != (0, 0) {
+                    // spawn 直後はエージェント検出（10 秒周期）より前なので、購読行の引き継ぎ
+                    // 可否を決める session UUID がまだ無く、移るのは未読だけになりうる。
+                    // **その場合は `claimed` に入れない**（`try_rebind_once` と同じ理由。
+                    // 入れると恒久的に弾かれ、セッション判明後も購読を引き継げない。自動 spawn は
+                    // 購読側の session を `--resume` するので、待てば一致しうる）。
+                    let (moved, session_known) =
+                        match worktree_and_session_of_terminal(app, &tid) {
+                            Some((worktree_id, agent_session)) => {
+                                // 検出済みの値を優先し、まだ無ければ `--resume` に渡した値を使う。
+                                let session = agent_session.or(resume_session);
+                                (
+                                    rebind_group_for(pool, &worktree_id, &tid, session.as_deref())
+                                        .await,
+                                    session.is_some(),
+                                )
+                            }
+                            None => ((0, 0), false),
+                        };
+                    if moved != (0, 0) && session_known {
                         // `Rebind` 経路と同じく引き継ぎ済みの印を付ける。付けないと、この直後に
                         // エージェント検出や購読系ツール呼び出しで再び `Rebind` が来たときに
                         // **2つ目のグループまで吸い上げ**、「1タブ1グループ」が崩れる。
@@ -639,31 +685,55 @@ async fn claim_orphans_with_live_agents(
 ///   呼び出しのたびに要求してくるので、抑止しないと1タブが全グループを吸い上げる
 /// - 前回試して**対象が無かった**タブ（`rebind_probed`）も対象外。`Stop` は毎ターン発火
 ///   するため、これが無いと全 CC タブが毎ターン `list_orphaned_groups` を叩き続ける。
-///   新しい引き継ぎ待ちが生まれる `Reconcile`（生存タブ変化時）で忘れる
+///   新しい引き継ぎ待ちが生まれる `Reconcile`（生存タブ変化時）で忘れる。
+///   **抑止の鍵にはそのタブの AI セッションを含める**（`rebind_probed` の doc 参照）
+/// - **AI セッションが未検出のうちは `claimed` に入れない。** 未読だけが移った状態で
+///   `claimed` を立てると、この関数の冒頭で恒久的に弾かれ、数秒後にセッションが判明しても
+///   購読を引き継げない（エージェント検出の `request_rebind` は false→true 遷移でしか
+///   撃たれないので二度目が来ない）。**同一セッションの `--resume` タブなのに引き継がれない**
+///   という、この制限が成立させたい本命ケースが落ちる
 async fn try_rebind_once(
     app: &AppHandle,
     pool: &SqlitePool,
     state: &mut WorkerState,
     terminal_id: &str,
 ) -> (u64, u64) {
-    if state.claimed.contains(terminal_id) || state.rebind_probed.contains(terminal_id) {
+    if state.claimed.contains(terminal_id) {
         return (0, 0);
     }
-    let moved = rebind_for_terminal(app, pool, terminal_id).await;
-    if moved != (0, 0) {
+    // 抑止の判定にセッションが要るので先に引く。**この解決は1回だけ**にすること
+    // （`SettingsManager::get()` は AppSettings 全体、`list_sessions()` は全セッションの
+    // clone なので、毎ターン全 CC タブが通る経路で二重に払うと無駄が大きい）。
+    let Some((worktree_id, agent_session)) = worktree_and_session_of_terminal(app, terminal_id)
+    else {
+        return (0, 0);
+    };
+    if state.rebind_probed.get(terminal_id) == Some(&agent_session) {
+        return (0, 0);
+    }
+    let moved = rebind_group_for(pool, &worktree_id, terminal_id, agent_session.as_deref()).await;
+    if moved == (0, 0) {
+        state
+            .rebind_probed
+            .insert(terminal_id.to_string(), agent_session);
+    } else if agent_session.is_some() {
         state.claimed.insert(terminal_id.to_string());
-    } else {
-        state.rebind_probed.insert(terminal_id.to_string());
     }
     moved
 }
 
-/// タブの cwd からワークツリーを引いて、そのワークツリーの引き継ぎ待ちを1グループ引き継ぐ。
-async fn rebind_for_terminal(app: &AppHandle, pool: &SqlitePool, terminal_id: &str) -> (u64, u64) {
-    let Some(worktree_id) = worktree_of_terminal(app, terminal_id) else {
-        return (0, 0);
-    };
-    match event_db::rebind_next_orphaned_group(pool, &worktree_id, terminal_id).await {
+/// 指定ワークツリーの引き継ぎ待ちを1グループ、このタブへ引き継ぐ。
+///
+/// ワークツリーとセッションの解決は**呼び出し側**で済ませて渡す（`try_rebind_once` の
+/// コメント参照）。`agent_session` が `None` のときは購読行を移さず未読だけが移る。
+async fn rebind_group_for(
+    pool: &SqlitePool,
+    worktree_id: &str,
+    terminal_id: &str,
+    agent_session: Option<&str>,
+) -> (u64, u64) {
+    match event_db::rebind_next_orphaned_group(pool, worktree_id, terminal_id, agent_session).await
+    {
         Ok((subs, inbox)) => {
             if subs > 0 || inbox > 0 {
                 log::info!(
@@ -673,8 +743,31 @@ async fn rebind_for_terminal(app: &AppHandle, pool: &SqlitePool, terminal_id: &s
                     subs,
                     inbox
                 );
+                return (subs, inbox);
             }
-            (subs, inbox)
+            // **「引き継ぎ待ちバッジが残るのに何も起きない」を追跡可能にする。** 購読行の
+            // 引き継ぎを同一 AI セッションに限った（`RebindScope` の doc）結果、別タスクの
+            // セッションでは正当に引き継がれない。理由をログに出さないと「壊れている」と
+            // 区別できない。この分岐は `rebind_probed` の抑止が効くので連投しない。
+            if let Ok(groups) =
+                event_db::list_orphaned_groups(pool, worktree_id, agent_session).await
+            {
+                let stuck: i64 = groups
+                    .iter()
+                    .filter(|g| g.terminal_id != terminal_id)
+                    .map(|g| g.subscriptions)
+                    .sum();
+                if stuck > 0 {
+                    log::info!(
+                        "[delivery] 引き継ぎ待ちの購読 {} 件は AI セッション（{:?}）が別なので自動引き継ぎしない worktree={} terminal={}（UI から手動で引き継げます）",
+                        stuck,
+                        agent_session,
+                        worktree_id,
+                        terminal_id
+                    );
+                }
+            }
+            (0, 0)
         }
         Err(e) => {
             log::warn!("[delivery] rebind_next_orphaned_group failed: {}", e);
@@ -685,11 +778,24 @@ async fn rebind_for_terminal(app: &AppHandle, pool: &SqlitePool, terminal_id: &s
 
 /// terminal_id → ワークツリー ID。生存セッションの cwd から前方一致＋最長一致で引く。
 fn worktree_of_terminal(app: &AppHandle, terminal_id: &str) -> Option<String> {
+    worktree_and_session_of_terminal(app, terminal_id).map(|(worktree_id, _)| worktree_id)
+}
+
+/// terminal_id → (ワークツリー ID, そのタブで走っている AI エージェントの session UUID)。
+///
+/// session UUID は購読行の引き継ぎを同一セッションに限るための鍵（`rebind_orphaned_group`
+/// の doc 参照）。ポーリングが `~/.claude/sessions/<pid>.json` から拾うので、タブを立てた
+/// 直後や Claude Code 以外のエージェントでは `None` になる。
+fn worktree_and_session_of_terminal(
+    app: &AppHandle,
+    terminal_id: &str,
+) -> Option<(String, Option<String>)> {
     let settings = app.state::<SettingsManager>().get();
     let sessions = app.state::<crate::pty_manager::PtyManager>().list_sessions();
     let session = sessions.iter().find(|s| s.terminal_id == terminal_id)?;
     let cwd = session.cwd.as_deref()?;
-    crate::mcp_server::resolve_worktree_by_cwd(&settings, cwd).map(|w| w.id.clone())
+    crate::mcp_server::resolve_worktree_by_cwd(&settings, cwd)
+        .map(|w| (w.id.clone(), session.agent_session_id.clone()))
 }
 
 // ─── hook 経路への注入（#124） ────────────────────────────────────────────────
@@ -1661,9 +1767,14 @@ async fn spawn_for_closed_tabs(
         );
         projected_live += 1;
         state.last_spawn.insert(worktree_id.clone(), Instant::now());
-        state
-            .inflight_spawn
-            .insert(worktree_id, (request_id, Instant::now()));
+        state.inflight_spawn.insert(
+            worktree_id,
+            InflightSpawn {
+                request_id,
+                requested_at: Instant::now(),
+                resume_session,
+            },
+        );
     }
 }
 
