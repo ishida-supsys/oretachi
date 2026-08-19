@@ -536,6 +536,22 @@ impl SettingsManager {
     }
 
     pub fn save(&self, settings: AppSettings) -> Result<(), String> {
+        self.save_from("unknown", settings)
+    }
+
+    /// `save` に「どのウィンドウの保存か」を添えた版。
+    ///
+    /// 各ウィンドウ（メイン / サブ / トレイ）は settings の完全コピーを持ち、`scheduleSave` は
+    /// 500ms デバウンス後に**自分のスナップショット全体**を渡してくる。ここは無条件上書きなので、
+    /// 古いスナップショットを持つウィンドウの保存が、他ウィンドウで追加されたばかりの
+    /// ワークツリーを消せる（lost update）。「ワークツリーとしては存在するのに画面から消えた」の
+    /// 疑わしい経路のひとつなので、**メモリ上にあって incoming に無いワークツリーを warn に残す**。
+    ///
+    /// 正当な削除でも出る（削除は必ずこの差分を生む）。判断材料は「そのタイミングで人間が
+    /// 削除操作をしたか」と `window` ラベルで、削除していないのに出たらこの経路が原因だと確定できる。
+    pub fn save_from(&self, window: &str, settings: AppSettings) -> Result<(), String> {
+        self.warn_on_dropped_worktrees(window, &settings);
+
         // Mutex の外でファイル I/O を行うため、先にパスをクローンしてロックを解放する
         let path = {
             let guard = match self.file_path.lock() {
@@ -559,6 +575,35 @@ impl SettingsManager {
             Err(e) => *e.into_inner() = settings,
         }
         Ok(())
+    }
+
+    /// 保存で消えるワークツリーを警告する（上記 `save_from` の doc 参照）。
+    fn warn_on_dropped_worktrees(&self, window: &str, incoming: &AppSettings) {
+        let current = match self.settings.lock() {
+            Ok(guard) => guard.worktrees.clone(),
+            Err(e) => e.into_inner().worktrees.clone(),
+        };
+        // 起動直後（まだ load していない）は current が空なので何も出ない。
+        if current.is_empty() {
+            return;
+        }
+        let incoming_ids: std::collections::HashSet<&str> =
+            incoming.worktrees.iter().map(|w| w.id.as_str()).collect();
+        let dropped: Vec<String> = current
+            .iter()
+            .filter(|w| !incoming_ids.contains(w.id.as_str()))
+            .map(|w| format!("{}({}, {})", w.id, w.name, w.path))
+            .collect();
+        if dropped.is_empty() {
+            return;
+        }
+        log::warn!(
+            "[settings] worktrees が {} → {} 件に減った window={} 消えた=[{}]",
+            current.len(),
+            incoming.worktrees.len(),
+            window,
+            dropped.join(", ")
+        );
     }
 }
 

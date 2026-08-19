@@ -68,12 +68,34 @@ function commitWorktree(entry: WorktreeEntry): void {
   scheduleSave();
 }
 
+/**
+ * ランタイム worktrees から1件を id で取り除く。
+ *
+ * **インデックスを await の前後で持ち回らないこと。** `removeWorktree` は
+ * git 操作（ロック時は永続リトライで数分）とカード演出を await するため、その間に
+ * 他ワークツリーの削除完了・ドラッグ並べ替え・他ウィンドウ発 `settings-changed` の
+ * `syncWorktreesFromSettings` で並びが変わる。事前に取ったインデックスで splice すると
+ * **無関係なワークツリーのカードが消える**（settings 側は id で filter しているため
+ * 永続化配列と git ワークツリーには残り、「git 上には存在するのに画面から消えた」になる）。
+ * 消えた原因を追えるよう、並びがずれていた場合は警告を残す。
+ */
+function spliceRuntimeWorktree(worktreeId: string, expectedIndex?: number): void {
+  const at = worktrees.value.findIndex((w) => w.id === worktreeId);
+  if (at === -1) {
+    logWarn(`[worktree] ${worktreeId} is already absent from the runtime list, skipping splice`);
+    return;
+  }
+  if (expectedIndex !== undefined && expectedIndex !== at) {
+    logWarn(
+      `[worktree] runtime list order changed while removing ${worktreeId}: index ${expectedIndex} -> ${at}`
+    );
+  }
+  worktrees.value.splice(at, 1);
+}
+
 /** 仮追加したワークツリーを一覧から削除（失敗時ロールバック用） */
 function rollbackWorktree(worktreeId: string): void {
-  const index = worktrees.value.findIndex((w) => w.id === worktreeId);
-  if (index !== -1) {
-    worktrees.value.splice(index, 1);
-  }
+  spliceRuntimeWorktree(worktreeId);
 }
 
 /**
@@ -97,10 +119,12 @@ interface RemoveWorktreeOptions {
 
 /** ワークツリーを削除（git worktree remove + 設定から削除） */
 async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOptions, onBeforeSplice?: () => Promise<void>): Promise<void> {
-  const index = worktrees.value.findIndex((w) => w.id === worktreeId);
-  if (index === -1) return;
+  // このインデックスは「削除開始時点でどこに居たか」の記録用。以降の await で陳腐化するので
+  // splice には使わず、`spliceRuntimeWorktree` が id から引き直す。
+  const indexAtStart = worktrees.value.findIndex((w) => w.id === worktreeId);
+  if (indexAtStart === -1) return;
 
-  const worktree = worktrees.value[index];
+  const worktree = worktrees.value[indexAtStart];
 
   // ホーム/リポジトリは git ワークツリーではなく、path がワークツリー追加先ディレクトリまたは
   // リポジトリのルートそのもの。削除すると親ごと消えるため、UI で隠すだけでなくここでも止める。
@@ -189,7 +213,7 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
     if (onBeforeSplice) {
       try { await onBeforeSplice(); } catch { /* アニメーション失敗は削除の成否に影響させない */ }
     }
-    worktrees.value.splice(index, 1);
+    spliceRuntimeWorktree(worktreeId, indexAtStart);
     settings.value.worktrees = settings.value.worktrees.filter(
       (w) => w.id !== worktreeId
     );
@@ -209,7 +233,7 @@ async function removeWorktree(worktreeId: string, options?: RemoveWorktreeOption
     try { await onBeforeSplice(); } catch { /* アニメーション失敗は削除の成否に影響させない */ }
   }
 
-  worktrees.value.splice(index, 1);
+  spliceRuntimeWorktree(worktreeId, indexAtStart);
   settings.value.worktrees = settings.value.worktrees.filter(
     (w) => w.id !== worktreeId
   );
