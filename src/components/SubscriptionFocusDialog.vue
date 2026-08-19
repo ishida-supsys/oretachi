@@ -345,7 +345,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown, true));
     "targetAll": "All worktrees",
     "targetClosed": "closed",
     "orphaned": "awaiting handover",
-    "orphanedHint": "The subscribing tab is gone. Messages keep piling up and are handed over to the next AI agent started in the same worktree.",
+    "orphanedHint": "The subscribing tab is gone. Messages keep piling up. Automatic handover only happens for the same AI session (a conversation resumed with --resume); otherwise hand it over from the subscription panel.",
     "wildcardHint": "Wildcard subscriptions (all / group / repository) are listed but cannot be focused, and are not counted in the incoming badge.",
     "targetKind": {
       "all": "all",
@@ -363,7 +363,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown, true));
     "targetAll": "すべてのワークツリー",
     "targetClosed": "クローズ済み",
     "orphaned": "引き継ぎ待ち",
-    "orphanedHint": "購読していたタブがありません。メッセージは溜まり続け、同じワークツリーで次に AI エージェントが立ち上がったときに引き継がれます",
+    "orphanedHint": "購読していたタブがありません。メッセージは溜まり続けます。自動で引き継がれるのは同じ AI セッション（--resume で再開した会話）だけで、それ以外は購読パネルから手動で引き継いでください",
     "wildcardHint": "ワイルドカード購読（全体 / グループ / リポジトリ）は表示のみで、フォーカスできません。「購読している元」の件数にも含まれません。",
     "targetKind": {
       "all": "全体",

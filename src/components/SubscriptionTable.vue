@@ -118,6 +118,10 @@ function onRebind(worktreeId: string, deadTerminalId: string, event: Event): voi
                   :value="c.sessionId"
                 >{{ c.label }}</option>
               </select>
+              <!-- 自動引き継ぎを同じ AI セッションに限ったので、手動引き継ぎが唯一の逃げ道に
+                   なった。候補が無いときに何も出さないと「badge だけあって操作できない」に
+                   見えるため、下の未読テーブルと同じく理由を出す -->
+              <span v-else class="muted">{{ t('noCandidate') }}</span>
             </template>
             <span v-else class="badge badge-active">{{ t('active') }}</span>
           </td>
@@ -396,9 +400,9 @@ function onRebind(worktreeId: string, deadTerminalId: string, event: Event): voi
     "ackAllTitle": "Mark all unread messages for this tab as read",
     "active": "active",
     "orphaned": "awaiting handover",
-    "orphanedHint": "The subscribing tab is gone. Messages keep piling up and are handed over to the next AI agent started in the same worktree (kept for 7 days).",
+    "orphanedHint": "The subscribing tab is gone. Messages keep piling up. Automatic handover only happens for the same AI session (a conversation resumed with --resume), so pick a target tab to hand it to another session (kept for 7 days).",
     "rebindTo": "Hand over to...",
-    "rebindHint": "Hand this subscription and its unread messages over to a live agent tab",
+    "rebindHint": "Hand this subscription and its unread messages over to a live agent tab. Automatic handover is limited to the same AI session, so use this to pass it to a different session.",
     "noCandidate": "no live agent tab",
     "pendingHandover": "Unread messages awaiting handover",
     "targetClosed": "closed",
@@ -425,9 +429,9 @@ function onRebind(worktreeId: string, deadTerminalId: string, event: Event): voi
     "ackAllTitle": "このタブの未読をすべて既読にする",
     "active": "有効",
     "orphaned": "引き継ぎ待ち",
-    "orphanedHint": "購読していたタブがありません。メッセージは溜まり続け、同じワークツリーで次に AI エージェントが立ち上がったときに引き継がれます（7日間保持）",
+    "orphanedHint": "購読していたタブがありません。メッセージは溜まり続けます。自動で引き継がれるのは同じ AI セッション（--resume で再開した会話）だけなので、別のセッションへ渡すには引き継ぎ先を選んでください（7日間保持）",
     "rebindTo": "引き継ぎ先...",
-    "rebindHint": "この購読と未読メッセージを、生存しているエージェント端末へ引き継ぐ",
+    "rebindHint": "この購読と未読メッセージを、生存しているエージェント端末へ引き継ぐ。自動引き継ぎは同じ AI セッションに限られるので、別のセッションへ渡すにはこれを使う",
     "noCandidate": "エージェント端末なし",
     "pendingHandover": "引き継ぎ待ちの未読メッセージ",
     "targetClosed": "クローズ済み",

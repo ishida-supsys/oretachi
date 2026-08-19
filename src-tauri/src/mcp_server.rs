@@ -732,7 +732,7 @@ pub struct SubscribeWorktreeParams {
     pub delivery: Option<String>,
     #[schemars(description = "自分のターミナルが閉じていた場合に新しいターミナルを起動して通知するか（既定 false）。true にすると未読が溜まった時点で oretachi が自動でタブを立ててエージェントを起動する")]
     pub spawn_if_closed: Option<bool>,
-    #[schemars(description = "購読の有効期間（秒）。省略時は無期限。ターミナルが閉じても購読は引き継ぎ待ちとして7日間保持され、同じワークツリーで次に AI エージェントが立ち上がったときに引き継がれる")]
+    #[schemars(description = "購読の有効期間（秒）。省略時は無期限。ターミナルが閉じても購読は引き継ぎ待ちとして7日間保持され、同じワークツリーで**同じ AI セッション**（--resume で再開した会話）が立ち上がったときに引き継がれる")]
     pub expires_in: Option<i64>,
     #[schemars(description = "自分が動いているターミナルの terminal_id。セッション開始時に oretachi から注入されている値をそのまま渡す。省略時は project_dir から AI エージェント端末が1つだけのワークツリーとして推測する")]
     pub terminal_id: Option<String>,
@@ -1768,7 +1768,7 @@ impl NotifyService {
         }
     }
 
-    #[tool(description = "他ワークツリーのイベント（クローズ / 作成 / エージェントからの自由文メッセージ）を購読する。別ワークツリーで進めている関連作業の完了や開始を自分のセッションで検知したいときに使う。target には \"*\" / \"workgroup:<ID>\" / \"repo:<名前>\" のワイルドカードも指定でき、まだ存在しないワークツリーの作成も購読できる。クローズ / 作成は本文ごと提示される。自由文メッセージは**本文を運ばず「届いている」ことと件数だけ**が提示されるので、本文は oretachi_poll_inbox で取りに来ること。提示のタイミングは待機中なら随時、走行中はターン境界、およびセッション開始時。ターミナルを閉じたりアプリを再起動したりしても購読は引き継ぎ待ちとして保持され、同じワークツリーで次に AI エージェントが立ち上がったときに引き継がれる")]
+    #[tool(description = "他ワークツリーのイベント（クローズ / 作成 / エージェントからの自由文メッセージ）を購読する。別ワークツリーで進めている関連作業の完了や開始を自分のセッションで検知したいときに使う。target には \"*\" / \"workgroup:<ID>\" / \"repo:<名前>\" のワイルドカードも指定でき、まだ存在しないワークツリーの作成も購読できる。クローズ / 作成は本文ごと提示される。自由文メッセージは**本文を運ばず「届いている」ことと件数だけ**が提示されるので、本文は oretachi_poll_inbox で取りに来ること。提示のタイミングは待機中なら随時、走行中はターン境界、およびセッション開始時。ターミナルを閉じたりアプリを再起動したりしても購読は引き継ぎ待ちとして保持され、同じワークツリーで**同じ AI セッション**（--resume で再開した会話）が立ち上がったときに自動で引き継がれる。別のセッションへ渡す場合は oretachi の購読パネルから人間が引き継ぎ先を選ぶ（無関係なタスクのセッションが黙って他ワークツリーのイベントを拾わないようにするため）")]
     async fn oretachi_subscribe_worktree(
         &self,
         Parameters(SubscribeWorktreeParams {
@@ -1911,7 +1911,7 @@ impl NotifyService {
                 "expiresAt": sub.expires_at,
                 "subscriberTerminalId": subscriber.terminal_id,
                 "message": format!(
-                    "{}の {} を購読しました。イベントが発生すると次のセッション開始時に通知が提示されます（oretachi_poll_inbox でも取得できます）。{}",
+                    "{}の {} を購読しました。イベントが発生すると次のセッション開始時に通知が提示されます（oretachi_poll_inbox でも取得できます）。{}{}",
                     target_name,
                     kinds.join(" / "),
                     // `*` は将来立つワークツリーも含めて全部に反応する。自動 spawn と
@@ -1919,6 +1919,16 @@ impl NotifyService {
                     // （端末数上限 / クールダウンで爆発はしないが、驚きは残る）。
                     if resolved.worktree_id.is_none() && sub.spawn_if_closed != 0 {
                         " 注意: ワイルドカード購読と spawn_if_closed を併用しているため、未読が溜まると自動でタブが立ちます（生存端末数の上限と再試行のクールダウンで制限されます）。"
+                    } else {
+                        ""
+                    },
+                    // 自動引き継ぎは同一 AI セッション限定なので、セッションを名乗れない
+                    // エージェント（gemini / codex / cline は session UUID を持たない。
+                    // Claude Code でも状態ファイルを辿れない構成では取れない）では
+                    // **タブを閉じた時点で自動復帰の手段が無くなる**。黙って失われるより、
+                    // 購読した本人に伝えて ack を急がせるか手動引き継ぎへ誘導する。
+                    if subscriber.agent_session.is_none() {
+                        " 注意: このターミナルの AI セッションを特定できないため、タブを閉じるとこの購読は自動では引き継がれません（oretachi の購読パネルから手動で引き継いでください）。"
                     } else {
                         ""
                     }

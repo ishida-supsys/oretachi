@@ -235,6 +235,14 @@ pub struct OrphanedGroup {
     pub subscriptions: i64,
     /// 未 ack の inbox 件数
     pub pending: i64,
+    /// グループ内の購読のうち、引き継ぎ先タブの**現在の AI セッションと一致する**件数。
+    ///
+    /// 自動引き継ぎの可否判定にだけ使う（`rebind_next_orphaned_group`）。全ワークツリー
+    /// 横断の一覧（`list_all_orphaned_groups`、UI 用）は引き継ぎ先が決まっていないので
+    /// この列を選ばず、`sqlx(default)` で 0 になる。
+    #[sqlx(default)]
+    #[serde(default)]
+    pub session_subs: i64,
 }
 
 /// UNIX epoch からのミリ秒。task/archive DB と同じ `i64` 流儀で時刻を持つ。
@@ -980,19 +988,25 @@ pub async fn mark_orphaned_subscribers(
 ///
 /// 並び順は `orphaned_at DESC, created_at DESC, terminal_id ASC` の**安定な全順序**。
 /// 起動時の一括遷移では `orphaned_at` が全グループで同値になるため tie-break が必須。
+///
+/// `agent_session` は引き継ぎ先タブの現在の AI セッション。`session_subs`（自動引き継ぎ
+/// できる購読の件数）の集計にだけ使う。`None` を渡すと `subscriber_agent_session = NULL` との
+/// 比較になり、SQL の三値論理でどの行にもマッチしないので `session_subs` は常に 0 になる。
 pub async fn list_orphaned_groups(
     pool: &SqlitePool,
     worktree_id: &str,
+    agent_session: Option<&str>,
 ) -> Result<Vec<OrphanedGroup>, String> {
     sqlx::query_as::<_, OrphanedGroup>(
         "SELECT terminal_id, ? AS worktree_id, MAX(orphaned_at) AS orphaned_at, MIN(created_at) AS created_at, \
-                SUM(is_sub) AS subscriptions, SUM(1 - is_sub) AS pending \
+                SUM(is_sub) AS subscriptions, SUM(1 - is_sub) AS pending, \
+                SUM(CASE WHEN is_sub = 1 AND agent_session IS NOT NULL AND agent_session = ? THEN 1 ELSE 0 END) AS session_subs \
          FROM ( \
-           SELECT subscriber_terminal_id AS terminal_id, orphaned_at, created_at, 1 AS is_sub \
+           SELECT subscriber_terminal_id AS terminal_id, subscriber_agent_session AS agent_session, orphaned_at, created_at, 1 AS is_sub \
              FROM subscriptions \
             WHERE state = 'orphaned' AND orphaned_at IS NOT NULL AND subscriber_worktree_id = ? \
            UNION ALL \
-           SELECT subscriber_terminal_id AS terminal_id, orphaned_at, created_at, 0 AS is_sub \
+           SELECT subscriber_terminal_id AS terminal_id, NULL AS agent_session, orphaned_at, created_at, 0 AS is_sub \
              FROM inbox \
             WHERE orphaned_at IS NOT NULL AND acked_at IS NULL AND subscriber_worktree_id = ? \
          ) \
@@ -1000,11 +1014,27 @@ pub async fn list_orphaned_groups(
          ORDER BY orphaned_at DESC, created_at DESC, terminal_id ASC",
     )
     .bind(worktree_id)
+    .bind(agent_session)
     .bind(worktree_id)
     .bind(worktree_id)
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())
+}
+
+/// 引き継ぎで**購読行**（将来のイベントの宛先）をどこまで移すか。
+///
+/// inbox 行（既に積まれた未読）はどのスコープでもワークツリー単位で移る。詳細は
+/// `rebind_orphaned_group` の doc 参照。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RebindScope<'a> {
+    /// セッションを問わず移す。**人間が引き継ぎ先を明示的に選んだ手動引き継ぎ専用。**
+    /// これが唯一の逃げ道なので、自動経路から使わないこと
+    AnySession,
+    /// この AI セッション（CC の session UUID）で作られた購読だけ移す。自動引き継ぎの既定
+    Session(&'a str),
+    /// 引き継ぎ先の AI セッションが不明。購読行は移さない（未読だけ移す）
+    NoSession,
 }
 
 /// 死亡タブ1つ分の購読と未読を、生存している新しいタブへ引き継ぐ。
@@ -1026,41 +1056,95 @@ pub async fn list_orphaned_groups(
 ///
 /// 一連の UPDATE / DELETE は1トランザクションで行う。分割すると、隙間に走った `fanout`
 /// （orphaned な購読にも積む）が死んだ terminal_id 宛の行を差し込んで取り残す。
+///
+/// ## `scope` によるスコープ
+///
+/// **購読行（＝将来のイベントの宛先）は、引き継ぎ先タブの AI セッションが購読時と同じ
+/// ときだけ移す。** ワークツリー単位でしか絞らないと、まったく別のタスクで開いた新しい
+/// セッションが前のタスクの購読を黙って継承し、**無関係なワークツリーのイベントを拾い
+/// 始める**（実機で踏んだ。`claim_orphans_with_live_agents` が走行中のエージェントへ即座に
+/// 引き取らせるようになってから顕在化した）。エージェントは自分が購読した覚えがないので、
+/// 通知の出どころを追えない。
+///
+/// `NoSession`（＝引き継ぎ先の CC セッション UUID が取れない）なら購読行は1行も触らない。
+/// 引き継ぎ待ちとして残るので、UI から人間が明示的に引き継げる（手動引き継ぎは
+/// `AnySession` を使い、このスコープを受けない）。
+///
+/// **inbox 行（既に積まれた未読）はワークツリー単位のまま移す。** 「待っていた対象が
+/// クローズしたのを後から検知する」（#120 の動機②）はここで成立する必要があり、
+/// 過去の通知が同じワークツリーの次のタブへ渡るのは驚きが小さい。止めたいのは
+/// 「将来のイベントが無関係なセッションへ流れ続ける」ほうだけ。
+///
+/// ただし**別セッションの購読を抱えた group は未読ごと引き継がない**。`fanout` は orphaned な
+/// 購読にも積むため、そうしないと「購読は移らないのに通知だけが無関係なセッションへ渡る」
+/// という同じ症状が残る。この選別は `rebind_next_orphaned_group` が行う（そちらの doc 参照）。
+/// 引き継ぎ先が決まらない未読は引き継ぎ待ちとして UI に出続け、人間が手動で渡せる。
 pub async fn rebind_orphaned_group(
     pool: &SqlitePool,
     worktree_id: &str,
     dead_terminal_id: &str,
     new_terminal_id: &str,
+    scope: RebindScope<'_>,
 ) -> Result<(u64, u64), String> {
     if dead_terminal_id == new_terminal_id {
         return Ok((0, 0));
     }
     let mut tx = pool.begin().await.map_err(|e| e.to_string())?;
 
-    let subs = sqlx::query(
-        "UPDATE OR IGNORE subscriptions SET subscriber_terminal_id = ?, state = ?, orphaned_at = NULL \
-         WHERE state = ? AND subscriber_worktree_id = ? AND subscriber_terminal_id = ?",
-    )
-    .bind(new_terminal_id)
-    .bind(STATE_ACTIVE)
-    .bind(STATE_ORPHANED)
-    .bind(worktree_id)
-    .bind(dead_terminal_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?
-    .rows_affected();
+    // 購読行（＝**将来のイベント**の宛先）をどこまで移すかは `scope` が決める（doc 参照）。
+    // `Some(None)` = 条件なしで移す / `Some(Some(s))` = セッション s のぶんだけ移す /
+    // `None` = 1行も触らない。
+    let session_filter: Option<Option<&str>> = match scope {
+        RebindScope::AnySession => Some(None),
+        RebindScope::Session(s) => Some(Some(s)),
+        RebindScope::NoSession => None,
+    };
+    let mut subs = 0u64;
+    if let Some(session) = session_filter {
+        let cond = if session.is_some() {
+            " AND subscriber_agent_session IS NOT NULL AND subscriber_agent_session = ?"
+        } else {
+            ""
+        };
+        let update_sql = format!(
+            "UPDATE OR IGNORE subscriptions SET subscriber_terminal_id = ?, state = ?, orphaned_at = NULL \
+             WHERE state = ? AND subscriber_worktree_id = ? AND subscriber_terminal_id = ?{}",
+            cond
+        );
+        let mut q = sqlx::query(&update_sql)
+            .bind(new_terminal_id)
+            .bind(STATE_ACTIVE)
+            .bind(STATE_ORPHANED)
+            .bind(worktree_id)
+            .bind(dead_terminal_id);
+        if let Some(s) = session {
+            q = q.bind(s);
+        }
+        subs = q
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| e.to_string())?
+            .rows_affected();
 
-    // UNIQUE(subscriber_terminal_id, target) に負けた残骸 = 新タブが既に同じ対象を購読済み
-    sqlx::query(
-        "DELETE FROM subscriptions WHERE state = ? AND subscriber_worktree_id = ? AND subscriber_terminal_id = ?",
-    )
-    .bind(STATE_ORPHANED)
-    .bind(worktree_id)
-    .bind(dead_terminal_id)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| e.to_string())?;
+        // UNIQUE(subscriber_terminal_id, target) に負けた残骸 = 新タブが既に同じ対象を購読済み。
+        //
+        // **DELETE は UPDATE と同じ条件でスコープすること。** 無条件に消すと、上の UPDATE が
+        // 意図して移さなかった（セッションが別の）購読行まで巻き込んで消える。この DELETE の
+        // 前提は「残っている orphaned 行 = UNIQUE 敗者」であり、それが成り立つのは
+        // UPDATE の対象範囲に限られる。
+        let delete_sql = format!(
+            "DELETE FROM subscriptions WHERE state = ? AND subscriber_worktree_id = ? AND subscriber_terminal_id = ?{}",
+            cond
+        );
+        let mut q = sqlx::query(&delete_sql)
+            .bind(STATE_ORPHANED)
+            .bind(worktree_id)
+            .bind(dead_terminal_id);
+        if let Some(s) = session {
+            q = q.bind(s);
+        }
+        q.execute(&mut *tx).await.map_err(|e| e.to_string())?;
+    }
 
     let inbox = sqlx::query(
         "UPDATE OR IGNORE inbox SET subscriber_terminal_id = ?, orphaned_at = NULL \
@@ -1201,15 +1285,45 @@ pub async fn rebind_next_orphaned_group(
     pool: &SqlitePool,
     worktree_id: &str,
     new_terminal_id: &str,
+    agent_session: Option<&str>,
 ) -> Result<(u64, u64), String> {
-    let groups = list_orphaned_groups(pool, worktree_id).await?;
-    let Some(group) = groups
+    let groups = list_orphaned_groups(pool, worktree_id, agent_session).await?;
+    // **「引き継げるものがある」group を選ぶ。** 先頭を無条件に掴むと、購読しか持たない
+    // かつセッションが別の group で `(0, 0)` を返し、後ろにある引き継ぎ可能な group が
+    // 取り残される（呼び出し側は `(0, 0)` を「引き継ぐものが無い」と解釈して抑止に入れる）。
+    // **別セッションの購読を抱えた group は未読ごと引き継がない。** `fanout` は orphaned な
+    // 購読にも積む（#125）ので、引き継がれずに残った購読宛の新着が死亡タブの inbox に
+    // 溜まり続ける。ここで `pending > 0` だけを見ると、購読は移らないのに**通知だけ**が
+    // 無関係なセッションへ渡り、「購読した覚えがないのに他ワークツリーのイベントが届く」が
+    // 残る（本 issue の症状そのもの）。
+    //
+    // 一方 `subscriptions == 0` の group（＝購読行が既に無い）は引き継ぐ。`worktree.closed` は
+    // `fanout` 直後に購読行が消えるため、「待っていた対象がクローズしたのを後で検知する」
+    // （#120 の動機②）で残るのはこの形だけで、セッションを特定する手段も無い。
+    let mut candidates: Vec<OrphanedGroup> = groups
         .into_iter()
-        .find(|g| g.terminal_id != new_terminal_id)
-    else {
+        .filter(|g| g.terminal_id != new_terminal_id)
+        .filter(|g| g.session_subs > 0 || (g.subscriptions == 0 && g.pending > 0))
+        .collect();
+    // **同一セッションの購読を持つ group を優先する。** 1タブ1グループなので順序が結論を
+    // 決める。未読だけの group を先に掴むと、自分のセッションの購読（＝`--resume` で
+    // 戻ってきた本命）が取り残され、7日の保持期限まで引き継ぎ待ちに留まる。
+    // `sort_by_key` は安定なので `orphaned_at DESC` の並びはバケット内で保たれる。
+    candidates.sort_by_key(|g| i32::from(g.session_subs == 0));
+    let Some(group) = candidates.into_iter().next() else {
         return Ok((0, 0));
     };
-    rebind_orphaned_group(pool, worktree_id, &group.terminal_id, new_terminal_id).await
+    rebind_orphaned_group(
+        pool,
+        worktree_id,
+        &group.terminal_id,
+        new_terminal_id,
+        match agent_session {
+            Some(s) => RebindScope::Session(s),
+            None => RebindScope::NoSession,
+        },
+    )
+    .await
 }
 
 /// 引き継がれないまま保持期限を過ぎた orphaned 行を削除する。
@@ -1829,12 +1943,17 @@ mod tests {
         fanout(pool, event, &targets, now).await
     }
 
+    /// 購読を作った AI セッション（CC の session UUID 相当）の既定値。
+    const TEST_SESSION: &str = "sess-a";
+
     fn sub(terminal: &str, worktree: Option<&str>, kinds: &str) -> SubscriptionRow {
         SubscriptionRow {
             id: "sub-1".to_string(),
             subscriber_terminal_id: terminal.to_string(),
             subscriber_worktree_id: worktree.map(str::to_string),
-            subscriber_agent_session: None,
+            // 引き継ぎのテストが「同一 AI セッション」の既定経路を通るように既定値を入れる。
+            // セッション不一致 / 不明のケースは専用テストで上書きして検証する。
+            subscriber_agent_session: Some(TEST_SESSION.to_string()),
             target: "wt-target".to_string(),
             event_kinds: kinds.to_string(),
             delivery: DELIVERY_TURN_END.to_string(),
@@ -2392,7 +2511,7 @@ mod tests {
 
             // 同じワークツリーで新しいタブが立つ
             let (subs, inbox) =
-                rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new").await.unwrap();
+                rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new", Some(TEST_SESSION)).await.unwrap();
             assert_eq!((subs, inbox), (0, 1), "購読は既に無いが未読は引き継がれる");
             let recovered = list_inbox(&pool, "term-new", InboxFilter::Undelivered).await.unwrap();
             assert_eq!(recovered.len(), 1);
@@ -2414,15 +2533,15 @@ mod tests {
                 upsert_subscription(&pool, &s).await.unwrap();
             }
             mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
-            assert_eq!(list_orphaned_groups(&pool, "wt-subscriber").await.unwrap().len(), 3);
+            assert_eq!(list_orphaned_groups(&pool, "wt-subscriber", Some(TEST_SESSION)).await.unwrap().len(), 3);
 
-            let (subs, _) = rebind_next_orphaned_group(&pool, "wt-subscriber", "new-a").await.unwrap();
+            let (subs, _) = rebind_next_orphaned_group(&pool, "wt-subscriber", "new-a", Some(TEST_SESSION)).await.unwrap();
             assert_eq!(subs, 1);
-            assert_eq!(list_orphaned_groups(&pool, "wt-subscriber").await.unwrap().len(), 2);
+            assert_eq!(list_orphaned_groups(&pool, "wt-subscriber", Some(TEST_SESSION)).await.unwrap().len(), 2);
 
-            let (subs, _) = rebind_next_orphaned_group(&pool, "wt-subscriber", "new-b").await.unwrap();
+            let (subs, _) = rebind_next_orphaned_group(&pool, "wt-subscriber", "new-b", Some(TEST_SESSION)).await.unwrap();
             assert_eq!(subs, 1);
-            assert_eq!(list_orphaned_groups(&pool, "wt-subscriber").await.unwrap().len(), 1);
+            assert_eq!(list_orphaned_groups(&pool, "wt-subscriber", Some(TEST_SESSION)).await.unwrap().len(), 1);
             // 引き継ぎ先の購読は active に戻っている
             assert_eq!(
                 list_subscriptions(&pool, "new-a", now).await.unwrap()[0].state,
@@ -2445,9 +2564,9 @@ mod tests {
             upsert_subscription(&pool, &b).await.unwrap();
             mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
 
-            rebind_next_orphaned_group(&pool, "wt-a", "new-a").await.unwrap();
+            rebind_next_orphaned_group(&pool, "wt-a", "new-a", Some(TEST_SESSION)).await.unwrap();
             assert_eq!(list_subscriptions(&pool, "new-a", now).await.unwrap().len(), 1);
-            assert_eq!(list_orphaned_groups(&pool, "wt-b").await.unwrap().len(), 1);
+            assert_eq!(list_orphaned_groups(&pool, "wt-b", Some(TEST_SESSION)).await.unwrap().len(), 1);
         });
     }
 
@@ -2461,7 +2580,7 @@ mod tests {
             upsert_subscription(&pool, &s).await.unwrap();
 
             let (subs, inbox) =
-                rebind_next_orphaned_group(&pool, "wt-subscriber", "new-a").await.unwrap();
+                rebind_next_orphaned_group(&pool, "wt-subscriber", "new-a", Some(TEST_SESSION)).await.unwrap();
             assert_eq!((subs, inbox), (0, 0));
             assert_eq!(list_subscriptions(&pool, "term-live", now).await.unwrap().len(), 1);
         });
@@ -2473,7 +2592,7 @@ mod tests {
         with_pool(async {
             let pool = memory_pool().await;
             assert_eq!(
-                rebind_next_orphaned_group(&pool, "wt-subscriber", "new-a").await.unwrap(),
+                rebind_next_orphaned_group(&pool, "wt-subscriber", "new-a", Some(TEST_SESSION)).await.unwrap(),
                 (0, 0)
             );
         });
@@ -2496,7 +2615,7 @@ mod tests {
             new.delivery = DELIVERY_INTERRUPT.to_string();
             upsert_subscription(&pool, &new).await.unwrap();
 
-            rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new").await.unwrap();
+            rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new", Some(TEST_SESSION)).await.unwrap();
             let rows = list_subscriptions(&pool, "term-new", now).await.unwrap();
             assert_eq!(rows.len(), 1, "重複せず1行だけ残る");
             assert_eq!(rows[0].delivery, DELIVERY_INTERRUPT, "生存側の設定が勝つ");
@@ -2531,11 +2650,242 @@ mod tests {
             // term-old だけ死亡
             mark_orphaned_subscribers(&pool, &["term-new".to_string()], now).await.unwrap();
 
-            rebind_orphaned_group(&pool, "wt-subscriber", "term-old", "term-new").await.unwrap();
+            rebind_orphaned_group(&pool, "wt-subscriber", "term-old", "term-new", RebindScope::Session(TEST_SESSION)).await.unwrap();
             let rows = list_inbox(&pool, "term-new", InboxFilter::All).await.unwrap();
             assert_eq!(rows.len(), 1, "同じイベントが二重にならない");
             assert_eq!(rows[0].delivered_at, Some(now), "生存側の打刻が保たれる");
             assert!(list_inbox(&pool, "term-old", InboxFilter::All).await.unwrap().is_empty());
+        });
+    }
+
+    /// **本 issue の核心**: 購読行の自動引き継ぎは同一 AI セッションに限る。
+    ///
+    /// セッションが違う（= まったく別のタスクで開いた新しい会話）タブは、前のタスクの購読を
+    /// 継承しない。継承すると「購読した覚えがないのに無関係なワークツリーのイベントが届く」
+    /// になる。**その購読宛の未読も渡さない**（渡すと通知だけが同じ症状を作る）。
+    /// 購読行が既に無い純粋な未読 group は別扱い（`test_rebind_recovers_inbox_without_subscription`）。
+    #[test]
+    fn test_rebind_subscription_requires_same_agent_session() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let old = sub("term-old", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &old).await.unwrap();
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            fanout_all(&pool, &e, now).await.unwrap();
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+
+            // 別セッションのタブが名乗り出た: 購読も未読も渡らない。
+            // 未読だけ渡すと「購読した覚えがないのに他ワークツリーのイベントが届く」が残る。
+            let (subs, inbox) =
+                rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new", Some("sess-other"))
+                    .await
+                    .unwrap();
+            assert_eq!(subs, 0, "別セッションへ購読は移らない");
+            assert_eq!(inbox, 0, "購読を抱えた group なので未読も移らない");
+            assert!(list_subscriptions(&pool, "term-new", now).await.unwrap().is_empty());
+            assert!(list_inbox(&pool, "term-new", InboxFilter::All).await.unwrap().is_empty());
+
+            // **購読行は消えずに引き継ぎ待ちとして残る**（手動引き継ぎの逃げ道が要る）。
+            // 残骸の DELETE をセッションでスコープしていないとここで消える。
+            let groups = list_orphaned_groups(&pool, "wt-subscriber", Some("sess-other"))
+                .await
+                .unwrap();
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].subscriptions, 1);
+            assert_eq!(groups[0].session_subs, 0, "別セッションなので自動引き継ぎ対象外");
+            assert_eq!(groups[0].pending, 1, "未読も引き継がれず残っている");
+        });
+    }
+
+    /// UI の引き継ぎ待ちパネル（`event_list_orphaned_groups`）が引く全ワークツリー横断の
+    /// 一覧は `session_subs` 列を選ばない。`#[sqlx(default)]` が効かないと ColumnNotFound で
+    /// 落ち、フロントの `safeInvoke` が黙って空配列にするため**手動引き継ぎの導線が消える**
+    /// （自動引き継ぎをセッションで縛った以上、ここが唯一の逃げ道）。
+    #[test]
+    fn test_list_all_orphaned_groups_tolerates_missing_session_column() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-old", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+
+            let groups = list_all_orphaned_groups(&pool).await.unwrap();
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].terminal_id, "term-old");
+            assert_eq!(groups[0].subscriptions, 1);
+            assert_eq!(groups[0].session_subs, 0, "列が無いときは既定値の 0");
+        });
+    }
+
+    /// 購読行が既に無い未読 group は、**セッションが違っても**引き継ぐ。
+    ///
+    /// `worktree.closed` は fanout 直後に購読行を消すので、「待っていた対象がクローズしたのを
+    /// 後で検知する」（#120 の動機②）で残るのはこの形だけ。セッションを特定する手段が無く、
+    /// ここを縛ると動機②そのものが成立しない。別セッションの購読を抱えた group を弾く条件
+    /// （`session_subs > 0 || (subscriptions == 0 && pending > 0)`）がこれを取りこぼさないことを固定する。
+    #[test]
+    fn test_rebind_recovers_subscriptionless_inbox_for_any_session() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-old", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            fanout_all(&pool, &e, now).await.unwrap();
+            delete_subscriptions_for_target(&pool, "wt-target").await.unwrap();
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+
+            let (subs, inbox) =
+                rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new", Some("sess-other"))
+                    .await
+                    .unwrap();
+            assert_eq!((subs, inbox), (0, 1), "購読が無い未読はセッションを問わず引き継ぐ");
+        });
+    }
+
+    /// 同一セッション（`--resume` で同じ会話を再開した）なら購読も引き継ぐ。
+    #[test]
+    fn test_rebind_subscription_moves_on_same_agent_session() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let old = sub("term-old", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &old).await.unwrap();
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+
+            let (subs, _) =
+                rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new", Some(TEST_SESSION))
+                    .await
+                    .unwrap();
+            assert_eq!(subs, 1);
+            assert_eq!(list_subscriptions(&pool, "term-new", now).await.unwrap().len(), 1);
+            assert!(list_orphaned_groups(&pool, "wt-subscriber", Some(TEST_SESSION))
+                .await
+                .unwrap()
+                .is_empty());
+        });
+    }
+
+    /// 未読だけの group より、**同一セッションの購読を持つ group** を先に引き継ぐ。
+    ///
+    /// 1タブ1グループなので順序が結論を決める。未読だけの group を先に掴むと、
+    /// `--resume` で戻ってきた本命の購読が取り残され、保持期限まで引き継がれない。
+    #[test]
+    fn test_rebind_next_prefers_same_session_group() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            // 自分のセッションの購読を持つタブ（created_at を古くして並び順で後ろに回す）
+            let mut mine = sub("term-mine", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            mine.created_at = 1;
+            upsert_subscription(&pool, &mine).await.unwrap();
+            // 別セッションの購読 + 未読を持つタブ（並び順では先に来る）
+            let mut other = sub("term-other", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            other.id = "sub-other".to_string();
+            other.created_at = 2;
+            other.subscriber_agent_session = Some("sess-other".to_string());
+            upsert_subscription(&pool, &other).await.unwrap();
+            let e = event("wt-target", None);
+            insert_event(&pool, &e).await.unwrap();
+            fanout_all(&pool, &e, now).await.unwrap();
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+
+            let (subs, _) =
+                rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new", Some(TEST_SESSION))
+                    .await
+                    .unwrap();
+            assert_eq!(subs, 1, "同一セッションの購読を持つ group が選ばれる");
+            let rows = list_subscriptions(&pool, "term-new", now).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].subscriber_agent_session.as_deref(), Some(TEST_SESSION));
+        });
+    }
+
+    /// 引き継ぎ先のセッションが不明（spawn 直後など）なら購読行には一切触らない。
+    #[test]
+    fn test_rebind_without_session_leaves_subscriptions_untouched() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let old = sub("term-old", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &old).await.unwrap();
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+
+            // 未読が無いので引き継げる group が無く、(0, 0) で返る
+            let moved = rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new", None)
+                .await
+                .unwrap();
+            assert_eq!(moved, (0, 0));
+            assert_eq!(list_subscriptions(&pool, "term-old", now).await.unwrap().len(), 1);
+            // 後からセッションが判明すれば引き継げる（= 抑止してはいけない状態）
+            let (subs, _) =
+                rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new", Some(TEST_SESSION))
+                    .await
+                    .unwrap();
+            assert_eq!(subs, 1);
+        });
+    }
+
+    /// 手動引き継ぎ（`RebindScope::AnySession`）はセッションを問わず購読を移す。
+    /// 自動引き継ぎを縛った以上、ここが唯一の逃げ道なので塞がないことを固定する。
+    #[test]
+    fn test_manual_rebind_ignores_agent_session() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let old = sub("term-old", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &old).await.unwrap();
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+
+            let (subs, _) = rebind_orphaned_group(
+                &pool,
+                "wt-subscriber",
+                "term-old",
+                "term-new",
+                RebindScope::AnySession,
+            )
+            .await
+            .unwrap();
+            assert_eq!(subs, 1);
+            assert_eq!(list_subscriptions(&pool, "term-new", now).await.unwrap().len(), 1);
+        });
+    }
+
+    /// 先頭の group が「購読のみ・セッション不一致」で引き継げない場合、後続の
+    /// 引き継ぎ可能な group を選ぶ。無条件に先頭を掴むと `(0, 0)` を返し、呼び出し側が
+    /// 「引き継ぐものが無い」と解釈して抑止に入れるため後続が取り残される。
+    #[test]
+    fn test_rebind_next_skips_unclaimable_group() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            // 別セッションの購読だけを持つ古いタブ（orphaned_at が新しく先頭に来る）
+            let mut other = sub("term-other", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            other.id = "sub-other".to_string();
+            other.subscriber_agent_session = Some("sess-other".to_string());
+            upsert_subscription(&pool, &other).await.unwrap();
+            // 同一セッションの購読を持つタブ
+            let mine = sub("term-mine", Some("wt-subscriber"), r#"["worktree.closed"]"#);
+            upsert_subscription(&pool, &mine).await.unwrap();
+            mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
+
+            let (subs, _) =
+                rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new", Some(TEST_SESSION))
+                    .await
+                    .unwrap();
+            assert_eq!(subs, 1, "引き継げる group を選ぶ");
+            let rows = list_subscriptions(&pool, "term-new", now).await.unwrap();
+            assert_eq!(rows.len(), 1);
+            // 別セッションのぶんは引き継ぎ待ちに残る
+            let groups = list_orphaned_groups(&pool, "wt-subscriber", Some(TEST_SESSION))
+                .await
+                .unwrap();
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].terminal_id, "term-other");
         });
     }
 
@@ -2560,7 +2910,7 @@ mod tests {
             mark_orphaned_subscribers(&pool, &[], now).await.unwrap();
 
             let (_, inbox) =
-                rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new").await.unwrap();
+                rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new", Some(TEST_SESSION)).await.unwrap();
             assert_eq!(inbox, 0);
             assert_eq!(list_inbox(&pool, "term-old", InboxFilter::All).await.unwrap().len(), 1);
         });
@@ -2782,7 +3132,7 @@ mod tests {
             assert!(list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap().is_empty());
 
             // 引き継げば押し込み対象になる
-            rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new").await.unwrap();
+            rebind_next_orphaned_group(&pool, "wt-subscriber", "term-new", Some(TEST_SESSION)).await.unwrap();
             assert_eq!(list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap().len(), 1);
         });
     }

@@ -168,9 +168,15 @@ fn get_settings(state: State<SettingsManager>) -> AppSettings {
 }
 
 #[tauri::command]
-fn save_settings(state: State<SettingsManager>, settings: AppSettings) -> Result<(), String> {
+fn save_settings(
+    window: tauri::Window,
+    state: State<SettingsManager>,
+    settings: AppSettings,
+) -> Result<(), String> {
     let _bc = main_thread_watch::enter(main_thread_watch::Activity::SaveSettings);
-    state.save(settings)
+    // ウィンドウラベルを添えるのは、どのウィンドウの保存が worktrees を減らしたかを
+    // ログから追えるようにするため（`SettingsManager::save_from` の doc 参照）。
+    state.save_from(window.label(), settings)
 }
 
 #[tauri::command]
