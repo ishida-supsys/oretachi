@@ -6,6 +6,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.29.1] - 2026-08-19
+
+### Fixed
+- タブ死亡で生まれた引き継ぎ待ちを走行中のエージェントへ即座に引き取らせるよう修正 (#147)
+- 購読イベントの自動セッション再開が不発になる問題を修正 (#147)
+- 計画フローの四隅オーバーレイを折りたたみ式にした (#148)
+- マークダウンのリンクを webview で開かずブラウザで開くよう修正 (#146)
+
 ## [0.29.0] - 2026-08-16
 
 ### Added
@@ -621,7 +629,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.29.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.29.1...HEAD
+[0.29.1]: https://github.com/ishida-supsys/oretachi/compare/0.29.0...0.29.1
 [0.29.0]: https://github.com/ishida-supsys/oretachi/compare/0.28.0...0.29.0
 [0.28.0]: https://github.com/ishida-supsys/oretachi/compare/0.27.1...0.28.0
 [0.27.1]: https://github.com/ishida-supsys/oretachi/compare/0.27.0...0.27.1
