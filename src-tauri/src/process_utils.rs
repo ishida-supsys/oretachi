@@ -533,3 +533,94 @@ impl WorktreeRemoveManager {
         map.remove(key);
     }
 }
+
+// ============================================================
+// プロセス一覧の列挙（pid, ppid, 名前）
+// ============================================================
+
+/// 全プロセスの `(pid, ppid, プロセス名)` を返す。失敗したら空 Vec。
+///
+/// **呼び出し側は「空 Vec = 列挙失敗」として扱うこと。** 自プロセスは必ず1件は存在するので、
+/// 空が返るのは異常系だけ。ここで空を「子プロセスが居ない」と解釈すると、AI エージェント検出が
+/// 全タブで false に落ちて配送（PTY 押し込み）が静かに止まる（実際に踏んだ: `pty_manager` の
+/// エージェント検出が一度も成功しない環境があり、購読イベントの自動再開が構造的に不発だった）。
+///
+/// Windows 実装は **`CreateToolhelp32Snapshot` の直読み**。以前は `wmic process get` を
+/// 10 秒ごとに spawn していたが、`wmic` は Windows 11 24H2 以降では既定で入っておらず、
+/// 存在しない環境では `spawn` が Err になって**無音で空 Vec を返していた**。
+/// API 直読みなら外部プロセスも起動せず、タイムアウト処理も要らない。
+/// `find_processes_by_cwd` が同じスナップショットの取り方をしている。
+pub fn scan_all_processes() -> Vec<(u32, u32, String)> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,
+            TH32CS_SNAPPROCESS,
+        };
+
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            log::warn!("scan_all_processes: CreateToolhelp32Snapshot failed");
+            return vec![];
+        }
+
+        let mut result = Vec::new();
+        let mut entry: PROCESSENTRY32W = unsafe { std::mem::zeroed() };
+        entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+        if unsafe { Process32FirstW(snapshot, &mut entry) } != 0 {
+            loop {
+                // szExeFile は NUL 終端の固定長配列。終端までを取り出す
+                let len = entry
+                    .szExeFile
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(entry.szExeFile.len());
+                let name = String::from_utf16_lossy(&entry.szExeFile[..len]);
+                if !name.is_empty() {
+                    result.push((entry.th32ProcessID, entry.th32ParentProcessID, name));
+                }
+                if unsafe { Process32NextW(snapshot, &mut entry) } == 0 {
+                    break;
+                }
+            }
+        }
+
+        unsafe { windows_sys::Win32::Foundation::CloseHandle(snapshot) };
+        result
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // `comm` は末尾が切られることがあるが、比較するのは実行ファイル名だけなので足りる。
+        //
+        // 旧実装はここにもタイムアウト付きの spawn ヘルパを被せていたが、恒常的に壊れていたのは
+        // Windows の `wmic` 側で、そこは外部プロセスを起動しなくなった。`ps` は 10 秒周期の
+        // ポーリングスレッドから呼ばれるだけなので、素の `output()` で足りる。
+        let output = match make_command("ps").args(["axo", "pid,ppid,comm"]).output() {
+            Ok(o) => o,
+            Err(e) => {
+                log::warn!("scan_all_processes: ps の実行に失敗: {}", e);
+                return vec![];
+            }
+        };
+        let text = String::from_utf8_lossy(&output.stdout);
+        let mut result = Vec::new();
+        for line in text.lines().skip(1) {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() >= 3 {
+                if let (Ok(pid), Ok(ppid)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                    // フルパスで出る環境があるのでファイル名だけに落とす
+                    let name = parts[2]
+                        .rsplit(['/', '\\'])
+                        .next()
+                        .unwrap_or(parts[2])
+                        .to_string();
+                    result.push((pid, ppid, name));
+                }
+            }
+        }
+        result
+    }
+}

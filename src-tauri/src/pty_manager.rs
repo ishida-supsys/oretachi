@@ -9,6 +9,12 @@ use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 const AI_AGENT_NAMES: &[&str] = &["claude", "gemini", "codex", "cline"];
+/// AI エージェントを探すサブツリーの深さ。
+///
+/// シェル直下に `claude.exe` が来る構成なら 1 で足りるが、npm shim 経由だと
+/// `pwsh → cmd.exe → node.exe → …` と伸びる。プロセス一覧は Win32 API の直読みなので
+/// 深く辿ってもコストは無視できる（旧実装は 10 秒ごとに `wmic` を spawn していた）。
+const AGENT_SEARCH_DEPTH: u32 = 8;
 const MAX_PTY_SESSIONS: usize = 32;
 const OUTPUT_HISTORY_BYTES: usize = 65_536;
 /// シェル本体が自然終了したセッションを map に残しておく寿命。
@@ -206,139 +212,6 @@ pub struct AiAgentChangedPayload {
     pub sessions: HashMap<u32, AiAgentInfo>,
 }
 
-/// 全プロセス一覧を (pid, parent_pid, name) のリストで返す。
-/// タイムアウト付き: wmic/ps が応答しない場合は空リストを返す。
-///
-/// stdout の読み取りとプロセス終了待ちを別スレッドで並行実行する。
-/// パイプバッファ（Windows: ~4KB）が溢れると子プロセスが書き込みブロックし、
-/// 逐次実行ではデッドロックするため。
-fn scan_all_processes() -> Vec<(u32, u32, String)> {
-    const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-
-    /// 子プロセスを spawn し、stdout 読み取りとタイムアウト付き wait を並行実行する。
-    /// パイプバッファデッドロックを回避するため、stdout は別スレッドで先に読み切る。
-    fn run_with_timeout(mut child: std::process::Child) -> Option<String> {
-        let stdout = child.stdout.take()?;
-        // stdout を別スレッドで読み切る（パイプバッファ満杯によるデッドロック回避）
-        // read_to_end + from_utf8_lossy を使い、非UTF8プロセス名（日本語Windows等）でも失敗しない
-        let reader_handle = std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            std::io::Read::read_to_end(&mut std::io::BufReader::new(stdout), &mut buf).ok()?;
-            Some(String::from_utf8_lossy(&buf).into_owned())
-        });
-
-        // タイムアウト付きで終了を待機
-        let deadline = std::time::Instant::now() + TIMEOUT;
-        let mut kill_failed = false;
-        let exited = loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break true,
-                Ok(None) => {
-                    if std::time::Instant::now() >= deadline {
-                        log::warn!("[Terminal] scan_all_processes: process timed out after {:?}", TIMEOUT);
-                        if child.kill().is_ok() {
-                            let _ = child.wait();
-                        } else {
-                            // kill 失敗時は wait() を呼ばない（永久ブロック回避）
-                            kill_failed = true;
-                        }
-                        break false;
-                    }
-                    std::thread::sleep(std::time::Duration::from_millis(50));
-                }
-                Err(_) => break false,
-            }
-        };
-
-        // kill 失敗時はプロセスが生きており reader スレッドも stdout を待機中のため、
-        // join() せずデタッチしてブロックを回避する
-        if kill_failed {
-            drop(reader_handle);
-            return None;
-        }
-
-        // タイムアウト/エラー時もreaderスレッドの終了を待つ（デタッチ防止）
-        let result = reader_handle.join().ok().flatten();
-        if !exited {
-            return None;
-        }
-        result
-    }
-
-    #[cfg(target_os = "windows")]
-    {
-        let child = match crate::process_utils::make_command("wmic")
-            .args(["process", "get", "Name,ProcessId,ParentProcessId", "/FORMAT:CSV"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return vec![],
-        };
-
-        let text = match run_with_timeout(child) {
-            Some(t) => t,
-            None => return vec![],
-        };
-
-        let mut result = Vec::new();
-        for line in text.lines() {
-            let line = line.trim();
-            // Skip header and empty lines
-            if line.is_empty() || line.starts_with("Node") {
-                continue;
-            }
-            let parts: Vec<&str> = line.split(',').collect();
-            // wmic CSV columns (alphabetical): Node, Name, ParentProcessId, ProcessId
-            if parts.len() >= 4 {
-                let name = parts[1].trim().to_string();
-                if let (Ok(ppid), Ok(pid)) = (
-                    parts[2].trim().parse::<u32>(),
-                    parts[3].trim().parse::<u32>(),
-                ) {
-                    if !name.is_empty() {
-                        result.push((pid, ppid, name));
-                    }
-                }
-            }
-        }
-        result
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    {
-        let child = match std::process::Command::new("ps")
-            .args(["axo", "pid,ppid,comm"])
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(c) => c,
-            Err(_) => return vec![],
-        };
-
-        let text = match run_with_timeout(child) {
-            Some(t) => t,
-            None => return vec![],
-        };
-
-        let mut result = Vec::new();
-        for line in text.lines().skip(1) {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            if parts.len() >= 3 {
-                if let (Ok(pid), Ok(ppid)) = (
-                    parts[0].parse::<u32>(),
-                    parts[1].parse::<u32>(),
-                ) {
-                    result.push((pid, ppid, parts[2].to_string()));
-                }
-            }
-        }
-        result
-    }
-}
-
 /// 指定PIDのサブツリーからAIエージェントプロセスを探す（最大depth段）
 /// 見つかった場合は (agent_name, agent_pid) を返す
 fn find_ai_agent_in_subtree(
@@ -352,8 +225,12 @@ fn find_ai_agent_in_subtree(
     if let Some(children) = children_map.get(&root_pid) {
         for (child_pid, child_name) in children {
             let name_lower = child_name.to_lowercase();
-            let name_stem = name_lower.trim_end_matches(".exe");
-            if AI_AGENT_NAMES.iter().any(|&a| name_stem == a) {
+            // 拡張子は全部落として比較する。`claude.exe` だけでなく npm / scoop が置く
+            // `claude.cmd` / `claude.ps1` のような shim もエージェント本体として扱う
+            // （shim が居るなら実体もその配下に居るが、実体は `node.exe` 等で名前から
+            // 判別できないため、shim の時点で確定させる）。
+            let name_stem = name_lower.split('.').next().unwrap_or(&name_lower);
+            if AI_AGENT_NAMES.contains(&name_stem) {
                 return Some((name_stem.to_string(), *child_pid));
             }
             if let Some(found) = find_ai_agent_in_subtree(*child_pid, children_map, depth - 1) {
@@ -368,8 +245,12 @@ fn find_ai_agent_in_subtree(
 pub struct ClaudeSessionFile {
     /// hook の stdin JSON の `session_id` と同一値（#120 で実測済み）
     pub session_id: Option<String>,
-    /// `"busy"` | `"idle"`。走行中 / 待機中の判定に使う（#121 で実測）
+    /// `"busy"` | `"idle"` | `"waiting"`（人間の入力待ち）。走行中 / 待機中の判定に使う
+    /// （#121 で実測。`waiting` は Claude Code 2.1.234 で観測）
     pub status: Option<String>,
+    /// `"interactive"` など。子孫まで辿って拾ったファイルが**タブ本体のものか**を見分けるのに使う
+    /// （`find_claude_session_in_subtree` 参照）。古いバージョンでは無いことがある
+    pub kind: Option<String>,
 }
 
 /// Claude Code の PID から ~/.claude/sessions/<pid>.json を読む。
@@ -391,7 +272,68 @@ fn read_claude_session_file(pid: u32) -> Option<ClaudeSessionFile> {
     Some(ClaudeSessionFile {
         session_id: v.get("sessionId").and_then(|s| s.as_str()).map(str::to_string),
         status: v.get("status").and_then(|s| s.as_str()).map(str::to_string),
+        kind: v.get("kind").and_then(|s| s.as_str()).map(str::to_string),
     })
+}
+
+/// `claude` として検出した PID とその子孫から、最初に見つかった session ファイルを返す。
+///
+/// `~/.claude/sessions/<pid>.json` を書くのは Claude Code の**本体プロセス**だが、
+/// 検出で当たるのはその手前の shim（`claude.cmd` → `cmd.exe`）や
+/// ランチャ（`claude.exe` → 実体）であることがある。検出した PID だけを見ると
+/// `status` が取れず、`decide_push` が「エージェントの状態が不明」で押し込みを見送る。
+/// 子孫まで辿れば idle 判定を諦めずに済む。
+///
+/// **幅優先で探す。** タブから `claude -p` を起動しているとその子も自分の session ファイルを
+/// 書くため、深さ優先だとサブエージェントの `status` を本体のものと誤認しうる。浅い側ほど
+/// 本体に近いので、同じ深さなら先に見つかったものを採る。
+/// なお本体自身のファイルが読めるなら（`claude.exe` 直下の通常構成）そこで確定するので、
+/// この探索に入るのは shim 経由でファイルが見つからなかった場合だけ。
+fn find_claude_session_in_subtree(
+    pid: u32,
+    children_map: &HashMap<u32, Vec<(u32, String)>>,
+    depth: u32,
+) -> Option<ClaudeSessionFile> {
+    // 検出した PID 自身のファイルが読めればそれが正解。ここで確定するのが通常構成
+    // （`claude.exe` がシェルの直下に居る）。
+    if let Some(file) = read_claude_session_file(pid) {
+        return Some(file);
+    }
+    let mut frontier = children_of(pid, children_map);
+    for _ in 0..depth {
+        if frontier.is_empty() {
+            return None;
+        }
+        let mut next = Vec::new();
+        for p in &frontier {
+            match read_claude_session_file(*p) {
+                // **対話セッションのファイルだけ採る。** `claude -p` などの非対話セッションは
+                // 自分の `status` を書くので、そのまま採ると本体が走行中でも `idle` に見えて
+                // 走行中のエージェントへ押し込みうる。`kind` が無い旧バージョンは通す。
+                Some(file)
+                    if file.kind.as_deref().map(|k| k == "interactive").unwrap_or(true) =>
+                {
+                    log::debug!(
+                        "[Terminal] エージェント pid={} の session ファイルが無いので子孫 pid={} のものを使う",
+                        pid,
+                        p
+                    );
+                    return Some(file);
+                }
+                _ => {}
+            }
+            next.extend(children_of(*p, children_map));
+        }
+        frontier = next;
+    }
+    None
+}
+
+fn children_of(pid: u32, children_map: &HashMap<u32, Vec<(u32, String)>>) -> Vec<u32> {
+    children_map
+        .get(&pid)
+        .map(|c| c.iter().map(|(child_pid, _)| *child_pid).collect())
+        .unwrap_or_default()
 }
 
 /// UNIX epoch からのミリ秒（`event_db::now_ms` と同じ流儀。依存を増やさないため再実装）。
@@ -470,6 +412,8 @@ impl PtyManagerCore {
             let mut last_status: HashMap<u32, (bool, Option<String>)> = HashMap::new();
             // 前 tick の PTY 累積出力量。押し込み前の静穏判定に使う
             let mut last_bytes: HashMap<u32, u64> = HashMap::new();
+            // 直前の tick でプロセス列挙に失敗したか（ログを溢れさせないための抑止）
+            let mut scan_failed_before = false;
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(10));
 
@@ -512,7 +456,27 @@ impl PtyManagerCore {
                 }
 
                 // プロセス一覧を一括取得して子プロセスマップを構築
-                let all_procs = scan_all_processes();
+                let all_procs = crate::process_utils::scan_all_processes();
+                // **列挙に失敗した tick は状態を更新しない。** 空を「子プロセスが居ない」と
+                // 解釈すると全タブが `is_ai_agent = false` に落ち、`decide_push` が
+                // 「AI エージェントが走っていない」で押し込みを見送り続ける。それが 10 分
+                // （`event_db::PUSH_TTL_MS`）続くと未読は押し込み候補から永久に外れる。
+                // 最終値を保持して次の tick に任せるほうが安全。
+                if all_procs.is_empty() {
+                    if scan_failed_before {
+                        log::debug!("[Terminal] プロセス一覧の列挙に失敗（継続中）");
+                    } else {
+                        log::warn!(
+                            "[Terminal] プロセス一覧の列挙に失敗したため AI エージェント状態を更新しない（前回値を保持）"
+                        );
+                    }
+                    scan_failed_before = true;
+                    continue;
+                }
+                if scan_failed_before {
+                    log::info!("[Terminal] プロセス一覧の列挙が回復した");
+                    scan_failed_before = false;
+                }
                 let mut children_map: HashMap<u32, Vec<(u32, String)>> = HashMap::new();
                 for (pid, ppid, name) in &all_procs {
                     children_map.entry(*ppid).or_default().push((*pid, name.clone()));
@@ -528,13 +492,17 @@ impl PtyManagerCore {
 
                 for (session_id, child_pid, terminal_id, bytes) in session_pids {
                     let (is_agent, info, claude_status) = if let Some(pid) = child_pid {
-                        match find_ai_agent_in_subtree(pid, &children_map, 4) {
+                        match find_ai_agent_in_subtree(pid, &children_map, AGENT_SEARCH_DEPTH) {
                             Some((agent_name, agent_pid)) => {
                                 // Claude Code 以外（gemini / codex / cline）は
                                 // ~/.claude/sessions/<pid>.json を持たないため status を取れない。
                                 // 「非 CC は busy/idle 判定不能」という #125 §5 の仕様の実体がここ。
                                 let file = if agent_name == "claude" {
-                                    read_claude_session_file(agent_pid)
+                                    find_claude_session_in_subtree(
+                                        agent_pid,
+                                        &children_map,
+                                        AGENT_SEARCH_DEPTH,
+                                    )
                                 } else {
                                     None
                                 };
@@ -1401,6 +1369,100 @@ pub fn strip_ansi(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `(pid, ppid, name)` の列から `find_ai_agent_in_subtree` 用の子マップを作る。
+    fn children_of(procs: &[(u32, u32, &str)]) -> HashMap<u32, Vec<(u32, String)>> {
+        let mut map: HashMap<u32, Vec<(u32, String)>> = HashMap::new();
+        for (pid, ppid, name) in procs {
+            map.entry(*ppid).or_default().push((*pid, name.to_string()));
+        }
+        map
+    }
+
+    /// npm shim 経由だと `pwsh → cmd → node → …` と伸びる。旧実装の深さ 4 では届かず、
+    /// エージェントが走っているのに `is_ai_agent = false` になって押し込みが永久に来なかった。
+    #[test]
+    fn find_agent_deep_in_subtree() {
+        let procs = [
+            (2, 1, "cmd.exe"),
+            (3, 2, "node.exe"),
+            (4, 3, "cmd.exe"),
+            (5, 4, "node.exe"),
+            (6, 5, "claude.exe"),
+        ];
+        let map = children_of(&procs);
+        assert_eq!(
+            find_ai_agent_in_subtree(1, &map, AGENT_SEARCH_DEPTH),
+            Some(("claude".to_string(), 6))
+        );
+        // 旧来の深さでは届かないことも押さえる（回帰時に気づけるように）
+        assert_eq!(find_ai_agent_in_subtree(1, &map, 4), None);
+    }
+
+    /// npm / scoop が置く shim（`claude.cmd` / `claude.ps1`）もエージェント本体として扱う。
+    /// 実体は `node.exe` で名前から判別できないため、shim の時点で確定させるしかない。
+    #[test]
+    fn find_agent_matches_shim_names() {
+        for name in ["claude.cmd", "claude.ps1", "CLAUDE.EXE", "claude"] {
+            let map = children_of(&[(2, 1, name)]);
+            assert_eq!(
+                find_ai_agent_in_subtree(1, &map, AGENT_SEARCH_DEPTH),
+                Some(("claude".to_string(), 2)),
+                "{} を拾えていない",
+                name
+            );
+        }
+        // 部分一致で誤検出しない
+        let map = children_of(&[(2, 1, "claudex.exe"), (3, 1, "node.exe")]);
+        assert_eq!(find_ai_agent_in_subtree(1, &map, AGENT_SEARCH_DEPTH), None);
+    }
+
+    /// プロセス列挙は自プロセスを必ず含む。空 Vec は「列挙失敗」の意味なので、
+    /// 呼び出し側（ポーリング）が状態更新をスキップする判定に使える。
+    #[test]
+    fn scan_all_processes_finds_self() {
+        let procs = crate::process_utils::scan_all_processes();
+        assert!(!procs.is_empty(), "プロセス列挙が空（wmic 依存を外した意味が無い）");
+        let me = std::process::id();
+        assert!(
+            procs.iter().any(|(pid, _, _)| *pid == me),
+            "自プロセス pid={} が列挙に含まれない",
+            me
+        );
+    }
+
+    /// 実機のプロセス表で、走っているエージェントを本当に検出できるかの煙試験。
+    ///
+    /// `scan_all_processes` の列挙と `find_ai_agent_in_subtree` の探索を**実データで**通す。
+    /// エージェントが1つも走っていない環境では意味を持たないので `#[ignore]`。
+    /// 手元確認は `cargo test --lib -- --ignored detects_running_agent_on_this_machine`。
+    #[test]
+    #[ignore = "エージェントが走っている環境でのみ意味がある"]
+    fn detects_running_agent_on_this_machine() {
+        let procs = crate::process_utils::scan_all_processes();
+        let mut map: HashMap<u32, Vec<(u32, String)>> = HashMap::new();
+        for (pid, ppid, name) in &procs {
+            map.entry(*ppid).or_default().push((*pid, name.clone()));
+        }
+        let agents: Vec<&(u32, u32, String)> = procs
+            .iter()
+            .filter(|(_, _, name)| {
+                let lower = name.to_lowercase();
+                AI_AGENT_NAMES.contains(&lower.split('.').next().unwrap_or(&lower))
+            })
+            .collect();
+        assert!(!agents.is_empty(), "エージェントが走っていないので判定できない");
+        for (pid, ppid, name) in agents {
+            let found = find_ai_agent_in_subtree(*ppid, &map, AGENT_SEARCH_DEPTH);
+            assert!(
+                found.is_some(),
+                "親 pid={} の配下に居る {} (pid={}) を検出できない",
+                ppid,
+                name,
+                pid
+            );
+        }
+    }
 
     #[test]
     fn strip_ansi_plain_text() {

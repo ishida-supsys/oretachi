@@ -2108,6 +2108,9 @@ impl NotifyService {
                     "actor": i.actor,
                     "createdAt": i.created_at,
                     "deliveredAt": i.delivered_at,
+                    // セッション開始時に告知だけした時刻（ターンは開始していない）。
+                    // `deliveredAt` と分けているので、どちらの経路で目にしたか区別できる
+                    "notifiedAt": i.notified_at,
                     "ackedAt": i.acked_at,
                     "text": crate::event_db::format_inbox_line(i),
                 })

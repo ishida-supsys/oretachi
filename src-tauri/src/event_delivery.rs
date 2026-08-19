@@ -148,6 +148,15 @@ impl DigestReason {
     fn reports_carryover_only(&self) -> bool {
         matches!(self, DigestReason::SessionStart)
     }
+
+    /// この経路の注入が**エージェントのターンを開始させる**か。
+    ///
+    /// `Stop` の `additionalContext` は会話を継続させ、`UserPromptSubmit` は人間のプロンプトに
+    /// 乗るのでどちらもターンが動く。`SessionStart` だけは文脈に載るだけで動かない ——
+    /// だから `delivered_at` を打ってはいけない（`collect_digest` の打刻分岐参照）。
+    fn starts_turn(&self) -> bool {
+        !matches!(self, DigestReason::SessionStart)
+    }
 }
 
 pub enum DeliveryMsg {
@@ -340,10 +349,57 @@ struct WorkerState {
     last_live: Option<Vec<String>>,
     /// 保持期限切れの掃除を最後に回した時刻。期限は7日なので毎 tick 回す必要はない。
     last_retention_purge: Option<Instant>,
+    /// タブごとの「AI エージェントが居ないと最初に判定した時刻」。
+    /// `NO_AGENT_GRACE` を超えたら、そのタブ宛の未読を引き継ぎ待ちへ落とす。
+    /// 押し込めた / 別の理由で見送った / タブが消えた時点で忘れる。
+    no_agent_since: HashMap<String, Instant>,
+    /// タブごとの直近の見送り理由。**同じ理由の連投を info で溢れさせないため**に持つ。
+    /// 理由が変わった初回だけ info、以降は debug（見送り理由が debug のみだと、
+    /// 「配送されない」の切り分けにログレベルの変更と再現待ちが必要になる）。
+    last_skip_reason: HashMap<String, &'static str>,
+    /// 直近に報告した「押し込みの窓から外れた未 ack」の (件数, 最古の created_at)。
+    /// 件数だけを鍵にすると、同じ間隔で1件が窓から外れ1件が ack されたときに報告が消える。
+    last_stale_report: Option<(i64, Option<i64>)>,
 }
 
 /// 引き継ぎ待ちの保持期限切れを掃除する間隔。
 const RETENTION_PURGE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3600);
+
+/// 「生存しているのに受け取れない」タブ宛の未読を別のタブへ移すまでの猶予。
+///
+/// エージェント検出は 10 秒周期のポーリング（`pty_manager::start_polling`）なので、
+/// タブを立てて `claude` が起動しきるまでの間は正当に「居ない」に見える。人間が手で
+/// 打ち直す猶予も含めて 2 分待つ。これを短くすると、起動途中のタブ宛の未読が毎回
+/// 別タブへ吸われる。
+const NO_AGENT_GRACE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// `decide_push` の見送り理由のうち、**待っても自然には解消しない**もの。
+///
+/// タブは生きているので `mark_orphaned_subscribers` は何もしないが、この状態のままでは
+/// 押し込みが永久に通らない。他のタブへ移す（`handoff_unreachable_terminal`）判断に使う。
+///
+/// - `SKIP_NO_AGENT`: `claude` が終了して素のシェルに戻ったタブ。CR を撃てない
+/// - `SKIP_STATUS_UNKNOWN`: `claude` は居るが `~/.claude/sessions/<pid>.json` が読めない。
+///   子セッション（`CLAUDE_CODE_CHILD_SESSION` を継承）や shim 経由で本体を辿れない構成で
+///   起きる。busy か idle かが永久に分からないので、待っても押し込めない
+///
+/// 一時的な理由（`エージェントが走行中` / `出力が動いている` / 人間の入力待ち）は含めない。
+const SKIP_NO_AGENT: &str = "AI エージェントが走っていない";
+const SKIP_STATUS_UNKNOWN: &str = "エージェントの状態が不明";
+
+/// 人間の入力待ち（Claude Code の `status: "waiting"`）。
+///
+/// 質問プロンプトや承認プロンプトの前で止まっている状態。**押し込んではいけない**
+/// （プロンプトへの回答として解釈される）が、`エージェントが走行中` と混ぜると
+/// 「なぜ配送されないのか」の切り分けを誤らせるので理由を分けている。
+/// 人間が答えれば解消するので `handoff` の対象にはしない。ただし待機が長引くと
+/// `PUSH_TTL_MS` を食い潰すので、その救済は `push_stale_pointers` が担う。
+const SKIP_WAITING_INPUT: &str = "エージェントが人間の入力を待っている";
+
+/// 待っても解消しない見送り理由か（＝別のタブへ移す価値があるか）。
+fn skip_is_terminal(reason: &str) -> bool {
+    reason == SKIP_NO_AGENT || reason == SKIP_STATUS_UNKNOWN
+}
 
 pub fn start(app: AppHandle, pool: SqlitePool) -> DeliveryHandle {
     let (tx, mut rx) = mpsc::channel::<DeliveryMsg>(QUEUE_CAPACITY);
@@ -390,6 +446,8 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
                 // 放置しても誤動作はしないが、長時間稼働で単調増加する）。
                 state.claimed.retain(|t| live_terminal_ids.contains(t));
                 state.last_turn.retain(|t, _| live_terminal_ids.contains(t));
+                state.no_agent_since.retain(|t, _| live_terminal_ids.contains(t));
+                state.last_skip_reason.retain(|t, _| live_terminal_ids.contains(t));
                 // 引き継ぎ待ちグループが増えるのはこの直後の `mark_orphaned_subscribers`
                 // だけなので、「対象が無かった」という記憶はここで捨てれば十分。
                 state.rebind_probed.clear();
@@ -400,6 +458,14 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
                             subs, inbox, deleted
                         );
                         let _ = app.emit("event-inbox-changed", ());
+                        // **生まれた引き継ぎ待ちを、既に走っているエージェントへ引き取らせる。**
+                        // `Rebind` の要求元は「エージェントの新規検出」と「MCP / hook 呼び出し」
+                        // だけなので、既に立ち上がっていてアイドルで黙っているタブは、
+                        // 次に何か喋るまで引き取らない。その間 `spawn_for_closed_tabs` も
+                        // `has_agent` で見送るため出口が無く、未 ack バッジだけが残る（実機で踏んだ）。
+                        if subs > 0 || inbox > 0 {
+                            claim_orphans_with_live_agents(app, pool, state).await;
+                        }
                     }
                     Ok(_) => {}
                     Err(e) => log::warn!("[delivery] mark_orphaned_subscribers failed: {}", e),
@@ -530,6 +596,40 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
                 ),
             }
         }
+    }
+}
+
+/// 生存している AI タブに、そのワークツリーの引き継ぎ待ちを引き取らせる。
+///
+/// タブが死んだ直後（`mark_orphaned_subscribers` が引き継ぎ待ちを作った直後）に呼ぶ。
+/// 引き取りは1タブ1グループまで（`try_rebind_once` の `claimed`）なので、生存タブの数だけ
+/// グループが減る。引き取れるものが無ければ何も起きない。
+///
+/// 引き取れたら `drive` まで進める。移った先はアイドルのはずなので、次の 30 秒 tick を
+/// 待たずに押し込みたい。
+async fn claim_orphans_with_live_agents(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    state: &mut WorkerState,
+) {
+    // `session_id` 昇順で決定的に回す（どのタブがどのグループを引き取るかを再現可能にする）。
+    let mut agents: Vec<crate::pty_manager::SessionInfo> = app
+        .state::<crate::pty_manager::PtyManager>()
+        .list_sessions()
+        .into_iter()
+        .filter(|s| s.exit_code.is_none() && s.is_ai_agent)
+        .collect();
+    agents.sort_by_key(|s| s.session_id);
+
+    let mut claimed_any = false;
+    for agent in agents {
+        if try_rebind_once(app, pool, state, &agent.terminal_id).await != (0, 0) {
+            claimed_any = true;
+        }
+    }
+    if claimed_any {
+        let _ = app.emit("event-inbox-changed", ());
+        drive(app, pool, state).await;
     }
 }
 
@@ -775,10 +875,22 @@ async fn collect_digest(
     // 上限で載らなかった分は打刻しない（未配送のまま次の機会に回す）。全件打刻すると
     // 本文に出ていない未読が「配送済み」になり、再送しない方針のせいで二度と出ない。
     let ids: Vec<String> = items.iter().take(used).map(|i| i.id.clone()).collect();
-    if let Err(e) = event_db::mark_delivered(pool, &ids, event_db::now_ms()).await {
+    // **ターンを開始する経路と、しない経路で打刻先を分ける。**
+    //
+    // `SessionStart` の `additionalContext` は文脈に載るだけでターンを開始しない。ここで
+    // `delivered_at` を打つと `list_pushable` から外れ、ターンを開始できる PTY 押し込みが
+    // 候補を永久に失う（＝誰も動かないまま未 ack バッジが残る）。`notified_at` へ打てば
+    // 「再掲はしない」だけを表現でき、押し込みの候補には残る。
+    // `Stop` / `UserPromptSubmit` は実際にターンが動くので従来どおり `delivered_at`。
+    let stamp = if reason.starts_turn() {
+        event_db::mark_delivered(pool, &ids, event_db::now_ms()).await
+    } else {
+        event_db::mark_notified(pool, &ids, event_db::now_ms()).await
+    };
+    if let Err(e) = stamp {
         // 打刻に失敗しても本文は既に渡している。未配送のまま残るので次の機会に再度出る
         // （取りこぼすより一度重複するほうが安全）。
-        log::warn!("[delivery] mark_delivered に失敗: {}", e);
+        log::warn!("[delivery] 配送の打刻に失敗: {}", e);
     }
     if let DigestReason::TurnEnd { prompt_id } = reason {
         if let Some(p) = prompt_id {
@@ -819,7 +931,7 @@ fn decide_push(
     }
     if !session.is_ai_agent {
         // 素のシェルへ CR を撃つと任意のコマンドが走る。エージェントが居るときだけ押し込む。
-        return PushDecision::Skip("AI エージェントが走っていない");
+        return PushDecision::Skip(SKIP_NO_AGENT);
     }
     if delivery == event_db::DELIVERY_PASSIVE {
         return PushDecision::Skip("delivery=passive（エージェントが自分で取りに来る）");
@@ -829,6 +941,15 @@ fn decide_push(
     // （`idle` の判定は最大10秒古いので、これが最後の砦になる）。
     if !session.output_quiescent {
         return PushDecision::Skip("出力が動いている（入力中の可能性）");
+    }
+    // 人間の入力待ち（質問 / 承認プロンプト）には**`interrupt` でも割り込まない**。
+    //
+    // `interrupt` は「走行中のエージェントに割り込んでよい」というオプトインであって、
+    // 「人間に向けられたプロンプトへ代わりに答えてよい」ではない。ここで押し込むと
+    // ブラケットペーストと CR がプロンプトへの回答として解釈され、選択肢を勝手に確定させる。
+    // 直前の `output_quiescent`（人間が入力中の行を壊さない）と同じ理由で最優先する。
+    if session.agent_status.as_deref() == Some("waiting") {
+        return PushDecision::Skip(SKIP_WAITING_INPUT);
     }
     // `interrupt` は「走行中でも割り込んでよい」という購読側の明示的なオプトイン。
     if delivery == event_db::DELIVERY_INTERRUPT {
@@ -842,12 +963,13 @@ fn decide_push(
     }
     match session.agent_status.as_deref() {
         Some("idle") => {}
+        // `waiting`（人間の入力待ち）は interrupt の手前で確定済み。
         Some(other) => {
             // busy はターン境界配送（#124 の Stop フック）の担当。次の tick で再評価する。
             let _ = other;
             return PushDecision::Skip("エージェントが走行中");
         }
-        None => return PushDecision::Skip("エージェントの状態が不明"),
+        None => return PushDecision::Skip(SKIP_STATUS_UNKNOWN),
     }
     // 鮮度はファイル側の statusUpdatedAt ではなく**こちらがサンプルした時刻**で見る。
     // 長いターンは正当に古い busy を残すので、ファイル側の古さを「不明」と解釈すると
@@ -888,9 +1010,13 @@ fn is_safe_session_id(s: &str) -> bool {
 ///
 /// **これが無いとエージェントは何もしない。** spawn 直後は SessionStart フックが
 /// `additionalContext` で告知を渡すが、`additionalContext` は**ターンを開始させない**ので、
-/// エージェントは告知を持ったままプロンプトで待機する。しかも SessionStart 側が
-/// `mark_delivered` を打つため、ターンを開始できる PTY 押し込みは候補を失って走らない。
-/// 起動コマンドに位置引数のプロンプトを載せて、最初のターンをこちらから始める。
+/// エージェントは告知を持ったままプロンプトで待機する。起動コマンドに位置引数のプロンプトを
+/// 載せて、最初のターンをこちらから始める。
+///
+/// なお SessionStart 側の打刻は `delivered_at` ではなく `notified_at` なので、押し込みは
+/// 候補を失わない（以前は `delivered_at` を打っており、押し込みまで死んでいた）。ただし
+/// 押し込みが走るのは早くても次の tick（最大 30 秒 + エージェント検出の 10 秒）で、
+/// `MIN_PUSH_INTERVAL` にも掛かる。spawn した意味を即座に出すためこのプロンプトは残す。
 ///
 /// **oretachi 自身が書く固定文であること。** 発信側のメッセージ本文をここへ入れると、
 /// 押し込みと同じく「人間が打ったプロンプト」に化ける（`format_pointer_text` の doc 参照）。
@@ -951,7 +1077,145 @@ fn agent_command_for_worktree(
 async fn drive(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState) {
     let now = event_db::now_ms();
     push_pending(app, pool, state, now).await;
+    push_stale_pointers(app, pool, state, now).await;
     spawn_for_closed_tabs(app, pool, state, now).await;
+    report_stale_unpushed(pool, state, now).await;
+}
+
+/// 押し込みの窓（`PUSH_TTL_MS`）から外れた未読を、**告知だけ**で救済する。
+///
+/// TTL は「何日も前の未配送分が再起動直後に一斉に割り込む」のを防ぐためのものだが、
+/// 宛先が受け取れない状態（走行中が長引く / 人間の入力待ち / 検出不能）が 10 分続いただけで
+/// 未読が黙って押し込み候補から消える。バッジは残るのでユーザーからは
+/// 「アイドルなのに不発」に見える。窓を広げると TTL の目的が壊れるので、
+/// **本文は出さず件数だけを 1 回押し込む**という別経路にした。
+///
+/// - 本文を運ばないので、鮮度が失われた内容をいまさら注入することにはならない
+/// - 押し込む文字列は `format_pointer_push_text`（oretachi 自身の固定文）だけなので、
+///   自動承認が有効な宛先でも「エージェントが書いた本文が人間の入力に化ける」経路が無い。
+///   ただし種別ごとの保留判断は `auto_approval_allows` でそのまま行う
+/// - `delivered_at` を打つので 1 タブにつき 1 回。本文は未 ack のまま DB に残り、
+///   `oretachi_poll_inbox` でいつでも取れる（`format_inbox_push_text` の告知形と同じ扱い）
+async fn push_stale_pointers(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    state: &mut WorkerState,
+    now: i64,
+) {
+    let items = match event_db::list_stale_unpushed(pool, now, event_db::PUSH_TTL_MS).await {
+        Ok(items) => items,
+        Err(e) => {
+            log::warn!("[delivery] list_stale_unpushed failed: {}", e);
+            return;
+        }
+    };
+    if items.is_empty() {
+        return;
+    }
+    let sessions = app.state::<crate::pty_manager::PtyManager>().list_sessions();
+    let settings = app.state::<SettingsManager>().get();
+
+    let mut by_terminal: HashMap<String, Vec<event_db::InboxItem>> = HashMap::new();
+    for item in items {
+        by_terminal
+            .entry(item.subscriber_terminal_id.clone())
+            .or_default()
+            .push(item);
+    }
+
+    for (terminal_id, items) in by_terminal {
+        let Some(session) = sessions.iter().find(|s| s.terminal_id == terminal_id) else {
+            continue;
+        };
+        if let Some(prev) = state.last_push.get(&terminal_id) {
+            if prev.elapsed() < MIN_PUSH_INTERVAL {
+                continue;
+            }
+        }
+        // 新鮮な行と同じ仕分けを通す（`passive` は自分で取りに来る、自動承認が有効な宛先へは
+        // 許可種別のみ）。件数だけの告知でも「届いている」ことは伝わるので、保留対象の種別を
+        // 件数に混ぜてはいけない。
+        let allowed: Vec<_> = items
+            .into_iter()
+            .filter(|i| i.delivery != event_db::DELIVERY_PASSIVE)
+            .filter(|i| {
+                let worktree = i
+                    .subscriber_worktree_id
+                    .as_deref()
+                    .and_then(|id| find_worktree(&settings, id));
+                auto_approval_allows(worktree, &i.kind)
+            })
+            .collect();
+        if allowed.is_empty() {
+            continue;
+        }
+        // 押し込み可否の判定は新鮮な行と同一。`interrupt` で走行中に割り込むのは
+        // 「鮮度のある通知」に対して認められた指定なので、ここでは使わない（`turn_end` 相当）。
+        if let PushDecision::Skip(reason) = decide_push(session, event_db::DELIVERY_TURN_END, now) {
+            // **新鮮な行と同じ救済判定を通す。** `push_pending` は `list_pushable`（窓の内側）
+            // しか見ないので、鮮度切れの行だけを抱えた受け取れないタブはここでしか救えない。
+            note_push_skip(app, pool, state, &terminal_id, reason, allowed.len()).await;
+            continue;
+        }
+
+        let text = event_db::format_pointer_push_text(allowed.len() as i64);
+        match write_push(app, session, &text, &terminal_id).await {
+            PushWrite::Sent => {
+                state.last_push.insert(terminal_id.clone(), Instant::now());
+            }
+            // 告知は入力欄に残っている。人間が Enter を押せば送れるので打刻はしない。
+            PushWrite::PastedOnly => {
+                state.last_push.insert(terminal_id.clone(), Instant::now());
+                continue;
+            }
+            PushWrite::Failed => continue,
+        }
+        let ids: Vec<String> = allowed.iter().map(|i| i.id.clone()).collect();
+        if let Err(e) = event_db::mark_delivered(pool, &ids, now).await {
+            log::warn!("[delivery] mark_delivered failed: {}", e);
+        }
+        log::info!(
+            "[delivery] 鮮度切れの未読 {} 件を件数のみで告知した terminal={} session={}",
+            ids.len(),
+            terminal_id,
+            session.session_id
+        );
+        let _ = app.emit("event-inbox-changed", ());
+    }
+}
+
+/// 押し込みの窓（`PUSH_TTL_MS`）から外れた未 ack 件数を報告する。
+///
+/// `list_pushable` / `list_spawn_candidates` の `created_at > now - TTL` は**黙って**候補を
+/// 減らすので、「バッジは出ているのに何も起きない」の原因が特定できなかった。件数が変わった
+/// ときだけ出す（毎 tick 出すと 30 秒ごとに同じ行が並ぶ）。
+///
+/// ここに出た分は `push_stale_pointers` が宛先の復帰を待って件数だけ告知するので、
+/// 残り続けるのは**宛先が受け取れる状態に戻らない**ぶんだけ。
+async fn report_stale_unpushed(pool: &SqlitePool, state: &mut WorkerState, now: i64) {
+    let (count, oldest) = match event_db::count_stale_unpushed(pool, now, event_db::PUSH_TTL_MS)
+        .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            log::debug!("[delivery] count_stale_unpushed failed: {}", e);
+            return;
+        }
+    };
+    if state.last_stale_report == Some((count, oldest)) {
+        return;
+    }
+    state.last_stale_report = Some((count, oldest));
+    if count == 0 {
+        return;
+    }
+    let age_min = oldest.map(|at| (now - at) / 60_000).unwrap_or(0);
+    log::info!(
+        "[delivery] 押し込みの窓（{} 分）から外れた未 ack が {} 件ある（最古 {} 分前）。宛先が受け取れる状態に戻れば件数のみ告知する",
+        event_db::PUSH_TTL_MS / 60_000,
+        count,
+        age_min
+    );
 }
 
 /// 生存タブへの PTY 押し込み。
@@ -1030,58 +1294,29 @@ async fn push_pending(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerStat
         let delivery = strongest_delivery(&allowed);
         let decision = decide_push(session, &delivery, now);
         if let PushDecision::Skip(reason) = decision {
-            log::debug!(
-                "[delivery] 押し込みを見送る terminal={} 件数={} 理由={}",
-                terminal_id,
-                allowed.len(),
-                reason
-            );
+            note_push_skip(app, pool, state, &terminal_id, reason, allowed.len()).await;
             continue;
         }
+        state.no_agent_since.remove(&terminal_id);
+        state.last_skip_reason.remove(&terminal_id);
         // 長さ上限で載らなかった分は打刻しない（未配送のまま次回に回す）。
         let Some((text, used)) = event_db::format_inbox_push_text(&allowed) else {
             continue;
         };
 
-        // ブラケットペーストで囲む。本文は `sanitize_for_pty` 済みなので終端シーケンスを
-        // 埋め込んでペーストを脱出することはできない。
-        //
-        // **ペーストと Enter は別の write に分ける。** `ESC[200~…ESC[201~\r` を1回で書くと
-        // Claude Code はペースト終端と同じ読み取りチャンクに来た CR をペーストの一部として
-        // 扱い、本文が入力欄に残ったままターンが始まらない（実機で確認）。CR を独立した
-        // write にし、間に猶予を入れると確実に送信される。
-        let paste = format!("\x1b[200~{}\x1b[201~", text);
+        // 本文は `sanitize_for_pty` 済みなので、ペーストを脱出する終端シーケンスは混ざらない。
         // **write が成功してから打刻する**。キュー満杯などで捨てられた押し込みを
         // 配送済みにすると、二度と本文が出ないまま失われる。
-        if let Err(e) = app
-            .state::<crate::pty_manager::PtyManager>()
-            .write(session.session_id, paste.into_bytes())
-        {
-            log::warn!(
-                "[delivery] PTY への押し込みに失敗 terminal={} session={}: {}",
-                terminal_id,
-                session.session_id,
-                e
-            );
-            continue;
-        }
-        // ペーストが通った時点でレート制限を進める。この後の Enter が失敗しても本文は
-        // 既に入力欄にあるので、次の tick で同じ本文を重ねて貼らないようにする。
-        state.last_push.insert(terminal_id.clone(), Instant::now());
-        tokio::time::sleep(SUBMIT_DELAY).await;
-        if let Err(e) = app
-            .state::<crate::pty_manager::PtyManager>()
-            .write(session.session_id, b"\r".to_vec())
-        {
-            // 本文は入力欄に残っているので人間が Enter を押せば送れる。打刻はしない
-            // （未配送のままにして次の tick / SessionStart 回収で拾えるようにする）。
-            log::warn!(
-                "[delivery] 押し込み後の Enter に失敗 terminal={} session={}: {}",
-                terminal_id,
-                session.session_id,
-                e
-            );
-            continue;
+        match write_push(app, session, &text, &terminal_id).await {
+            PushWrite::Sent => {
+                // ペーストが通った時点でレート制限を進める（Enter だけ失敗した場合も同じ）。
+                state.last_push.insert(terminal_id.clone(), Instant::now());
+            }
+            PushWrite::PastedOnly => {
+                state.last_push.insert(terminal_id.clone(), Instant::now());
+                continue;
+            }
+            PushWrite::Failed => continue,
         }
         let ids: Vec<String> = allowed.iter().take(used).map(|i| i.id.clone()).collect();
         if let Err(e) = event_db::mark_delivered(pool, &ids, now).await {
@@ -1100,6 +1335,181 @@ async fn push_pending(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerStat
         // カードのバッジが押し込み後も古い件数のまま残っていた）。
         let _ = app.emit("event-inbox-changed", ());
     }
+}
+
+/// 押し込みの見送りを記録する（ログ + 受け取れないタブの救済）。
+///
+/// 新鮮な行（`push_pending`）と鮮度切れの行（`push_stale_pointers`）の両方から呼ぶ。
+/// 片方だけに置くと、もう片方の経路しか候補を持たないタブが救済から漏れる。
+///
+/// ログは**理由が変わった初回だけ info**。同じ理由は 30 秒ごとに出るので debug に落とす。
+/// 見送り理由が debug のみだと「配送されない」の切り分けにログレベル変更と再現待ちが必要で、
+/// 実際にそれで原因特定が遅れた。
+async fn note_push_skip(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    state: &mut WorkerState,
+    terminal_id: &str,
+    reason: &'static str,
+    pending: usize,
+) {
+    if state.last_skip_reason.get(terminal_id) == Some(&reason) {
+        log::debug!(
+            "[delivery] 押し込みを見送る terminal={} 件数={} 理由={}",
+            terminal_id,
+            pending,
+            reason
+        );
+    } else {
+        state.last_skip_reason.insert(terminal_id.to_string(), reason);
+        log::info!(
+            "[delivery] 押し込みを見送る terminal={} 件数={} 理由={}",
+            terminal_id,
+            pending,
+            reason
+        );
+    }
+    if !skip_is_terminal(reason) {
+        // 走行中 / 出力継続 / 人間の入力待ちは待てば解消するので、猶予は測り直す。
+        state.no_agent_since.remove(terminal_id);
+        return;
+    }
+    // **タブは生きているが受け取れない。** 待っても解消しないので、猶予を過ぎたら同じ
+    // ワークツリーの生存 AI タブへ移す。これをやらないと `PUSH_TTL_MS` 経過で押し込み候補から
+    // 静かに消え、未 ack バッジだけが残って誰も動かない状態で固定される。
+    let since = state
+        .no_agent_since
+        .entry(terminal_id.to_string())
+        .or_insert_with(Instant::now);
+    if since.elapsed() >= NO_AGENT_GRACE {
+        state.no_agent_since.remove(terminal_id);
+        handoff_unreachable_terminal(app, pool, terminal_id, reason).await;
+    }
+}
+
+/// 生存しているが受け取れないタブ宛の未読を、同じワークツリーの生存 AI タブへ移す。
+///
+/// `mark_orphaned_subscribers` は「タブが存在するか」しか見ないため、`claude` を終了して
+/// 素のシェルに戻ったタブや、状態が永久に不明なタブ宛の未読は誰にも配送されないまま
+/// `PUSH_TTL_MS` を過ぎ、押し込みの候補から静かに消える（未 ack バッジだけが残る）。
+///
+/// **`orphaned_at` は経由しない。** タブが生きているので、引き継ぎ待ちに落としても
+/// `mark_orphaned_subscribers` の逆遷移が次の `Reconcile` で active に戻してしまう。
+/// さらに引き継ぎ待ちにすると `spawn_if_closed` の候補にもなるため、**検出側が壊れている
+/// 環境（実際に走っている `claude` を見つけられない）では働いているタブから未読を奪って
+/// 重複タブを立て続ける**。移送先が特定できるときだけ直接書き換える。
+///
+/// 移送先が居ない場合は何もしない（＝変更前と同じ挙動）。バッジは残るが、
+/// `report_stale_unpushed` が件数を、`push_stale_pointers` が復帰後の告知を担当する。
+async fn handoff_unreachable_terminal(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    terminal_id: &str,
+    reason: &str,
+) {
+    let Some(worktree_id) = worktree_of_terminal(app, terminal_id) else {
+        return;
+    };
+    // 同じワークツリーの生存 AI タブ。`session_id` 昇順で決定的に選ぶ（同じ状況で
+    // 毎回同じタブへ移す。tick ごとに移送先が揺れると追跡不能になる）。
+    let candidate = {
+        let settings = app.state::<SettingsManager>().get();
+        let mut sessions: Vec<crate::pty_manager::SessionInfo> = app
+            .state::<crate::pty_manager::PtyManager>()
+            .list_sessions()
+            .into_iter()
+            .filter(|s| s.exit_code.is_none() && s.is_ai_agent && s.terminal_id != terminal_id)
+            .filter(|s| {
+                s.cwd
+                    .as_deref()
+                    .and_then(|c| crate::mcp_server::resolve_worktree_by_cwd(&settings, c))
+                    .map(|w| w.id == worktree_id)
+                    .unwrap_or(false)
+            })
+            .collect();
+        sessions.sort_by_key(|s| s.session_id);
+        sessions.into_iter().next().map(|s| s.terminal_id)
+    };
+    let Some(candidate) = candidate else {
+        log::debug!(
+            "[delivery] 受け取れないタブの移送先が同じワークツリーに居ない terminal={} 理由={}",
+            terminal_id,
+            reason
+        );
+        return;
+    };
+
+    match event_db::move_inbox_to_terminal(pool, &worktree_id, terminal_id, &candidate).await {
+        Ok(0) => {}
+        Ok(moved) => {
+            log::info!(
+                "[delivery] 受け取れないタブ（理由={}）の未読 {} 件を同じワークツリーの AI タブへ移した from={} to={}",
+                reason,
+                moved,
+                terminal_id,
+                candidate
+            );
+            let _ = app.emit("event-inbox-changed", ());
+        }
+        Err(e) => log::warn!("[delivery] move_inbox_to_terminal failed: {}", e),
+    }
+}
+
+/// PTY 押し込みの書き込み結果。呼び出し元がレート制限と打刻の扱いを分けるために区別する。
+enum PushWrite {
+    /// ペーストと Enter の両方が通った
+    Sent,
+    /// ペーストは通ったが Enter に失敗した。本文は入力欄に残っているので**打刻しない**が、
+    /// 次の tick で同じ本文を重ねて貼らないようレート制限は進める
+    PastedOnly,
+    /// ペースト自体が失敗した。何も起きていないので打刻もレート制限も進めない
+    Failed,
+}
+
+/// ブラケットペーストで本文を流し、少し待ってから Enter を送る。
+///
+/// **ペーストと Enter は別の write に分ける。** `ESC[200~…ESC[201~\r` を1回で書くと
+/// Claude Code はペースト終端と同じ読み取りチャンクに来た CR をペーストの一部として扱い、
+/// 本文が入力欄に残ったままターンが始まらない（実機で確認）。CR を独立した write にし、
+/// 間に `SUBMIT_DELAY` の猶予を入れると確実に送信される。
+///
+/// `text` は呼び出し元が `sanitize_for_pty` を通した1行であること。ESC が残っていると
+/// ペーストを脱出して任意のコマンドが走る。
+async fn write_push(
+    app: &AppHandle,
+    session: &crate::pty_manager::SessionInfo,
+    text: &str,
+    terminal_id: &str,
+) -> PushWrite {
+    let paste = format!("\x1b[200~{}\x1b[201~", text);
+    if let Err(e) = app
+        .state::<crate::pty_manager::PtyManager>()
+        .write(session.session_id, paste.into_bytes())
+    {
+        log::warn!(
+            "[delivery] PTY への押し込みに失敗 terminal={} session={}: {}",
+            terminal_id,
+            session.session_id,
+            e
+        );
+        return PushWrite::Failed;
+    }
+    tokio::time::sleep(SUBMIT_DELAY).await;
+    if let Err(e) = app
+        .state::<crate::pty_manager::PtyManager>()
+        .write(session.session_id, b"\r".to_vec())
+    {
+        // 本文は入力欄に残っているので人間が Enter を押せば送れる。打刻はしない
+        // （未配送のままにして次の tick / SessionStart 回収で拾えるようにする）。
+        log::warn!(
+            "[delivery] 押し込み後の Enter に失敗 terminal={} session={}: {}",
+            terminal_id,
+            session.session_id,
+            e
+        );
+        return PushWrite::PastedOnly;
+    }
+    PushWrite::Sent
 }
 
 fn strongest_delivery(items: &[event_db::InboxItem]) -> String {
@@ -1582,6 +1992,79 @@ mod tests {
         }
     }
 
+    fn skip_reason(d: PushDecision) -> &'static str {
+        match d {
+            PushDecision::Skip(reason) => reason,
+            PushDecision::Push => panic!("押し込まない想定"),
+        }
+    }
+
+    /// 「待っても解消しない」見送り理由が `skip_is_terminal` で拾えること。
+    ///
+    /// `push_pending` はこの判定で「タブは生きているが受け取れない」を見分け、未読を
+    /// 同じワークツリーの別タブへ移す。理由文字列を書き換えると**静かに救済が止まる**。
+    #[test]
+    fn test_terminal_skip_reasons_are_classified() {
+        // claude が終了して素のシェルに戻ったタブ
+        let mut shell = session(Some("claude"), Some("idle"), true);
+        shell.is_ai_agent = false;
+        shell.agent_name = None;
+        let reason = skip_reason(decide_push(&shell, event_db::DELIVERY_TURN_END, 1_000_000));
+        assert_eq!(reason, SKIP_NO_AGENT);
+        assert!(skip_is_terminal(reason));
+
+        // claude は居るが session ファイルが読めない（状態が永久に不明）
+        let unknown = session(Some("claude"), None, true);
+        let reason = skip_reason(decide_push(&unknown, event_db::DELIVERY_TURN_END, 1_000_000));
+        assert_eq!(reason, SKIP_STATUS_UNKNOWN);
+        assert!(skip_is_terminal(reason));
+    }
+
+    /// 一時的な理由は移送の対象にしない（待てば解消する）。
+    #[test]
+    fn test_transient_skip_reasons_are_not_terminal() {
+        let busy = session(Some("claude"), Some("busy"), true);
+        assert!(!skip_is_terminal(skip_reason(decide_push(
+            &busy,
+            event_db::DELIVERY_TURN_END,
+            1_000_000
+        ))));
+
+        let noisy = session(Some("claude"), Some("idle"), false);
+        assert!(!skip_is_terminal(skip_reason(decide_push(
+            &noisy,
+            event_db::DELIVERY_TURN_END,
+            1_000_000
+        ))));
+    }
+
+    /// Claude Code の `status: "waiting"`（人間の入力待ち）は押し込まないが、
+    /// 走行中とは理由を分ける。プロンプトへの回答に化けるので押してはいけないが、
+    /// 「走行中」と同じ文言だと切り分けを誤らせる。
+    #[test]
+    fn test_waiting_for_input_has_its_own_reason() {
+        let s = session(Some("claude"), Some("waiting"), true);
+        let reason = skip_reason(decide_push(&s, event_db::DELIVERY_TURN_END, 1_000_000));
+        assert_eq!(reason, SKIP_WAITING_INPUT);
+        // 人間が答えれば解消するので別タブへ移さない
+        assert!(!skip_is_terminal(reason));
+    }
+
+    /// `interrupt` でも人間の入力待ちには割り込まない（プロンプトを壊す）。
+    #[test]
+    fn test_interrupt_does_not_answer_a_human_prompt() {
+        let s = session(Some("claude"), Some("waiting"), true);
+        assert!(!is_push(decide_push(&s, event_db::DELIVERY_INTERRUPT, 1_000_000)));
+    }
+
+    /// `SessionStart` だけはターンを開始しない = `delivered_at` を打ってはいけない。
+    #[test]
+    fn test_only_session_start_does_not_start_turn() {
+        assert!(!DigestReason::SessionStart.starts_turn());
+        assert!(DigestReason::TurnEnd { prompt_id: None }.starts_turn());
+        assert!(DigestReason::PromptSubmit.starts_turn());
+    }
+
     #[test]
     fn test_skip_when_status_sample_is_stale() {
         let s = session(Some("claude"), Some("idle"), true);
@@ -1826,6 +2309,7 @@ mod tests {
             state: event_db::STATE_PENDING.to_string(),
             created_at: 1_000_000,
             delivered_at: None,
+            notified_at: None,
             acked_at: None,
             orphaned_at: None,
             delivery: delivery.to_string(),
