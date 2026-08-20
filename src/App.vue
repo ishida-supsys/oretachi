@@ -1194,6 +1194,7 @@ async function onTrayButtonClick() {
         autoApproval: autoApprovalMap.get(worktreeId) ?? false,
         aiJudging: aiJudgingWorktrees.has(worktreeId),
         description: worktree.description,
+        canArchive: !isPseudoWorktree(worktree),
       });
     } else {
       // メインウィンドウのターミナル情報を収集
@@ -1259,6 +1260,7 @@ async function onTrayButtonClick() {
         autoApprovalPrompt: autoApprovalPromptMap.get(worktreeId) ?? '',
         lastJudgedCommand: lastJudgedCommandMap.get(worktreeId) ?? '',
         description: worktree.description,
+        canArchive: !isPseudoWorktree(worktree),
       });
     }
   }
@@ -1266,6 +1268,51 @@ async function onTrayButtonClick() {
   if (worktreeDataList.length === 0) return;
 
   await openTrayPopup(worktreeDataList);
+}
+
+/**
+ * 指定ワークツリーを実ウィンドウの前面に出す。
+ * MCP (mcp-show-worktree) とトレイの「ウィンドウで開く」(tray-show-worktree) で共有する。
+ * ctx はログ識別用の呼び出し元名。
+ */
+async function showWorktreeInWindows(worktreeId: string, ctx: string): Promise<void> {
+  const targetWt = worktrees.value.find((w) => w.id === worktreeId);
+  if (!targetWt) {
+    logDebug(`[Terminal] ${ctx}: worktree ${worktreeId} not found, skipping`);
+    return;
+  }
+  // サブウィンドウへ分離済みならそのウィンドウを前面に出す（メイン側のタブは動かさない）
+  if (isDetached(worktreeId)) {
+    try {
+      await focusSubWindow(worktreeId);
+    } catch (e) {
+      logDebug(`[Terminal] ${ctx}: focusSubWindow failed: ${e}`);
+    }
+    return;
+  }
+  // ホームへ戻ったときにカードが見えるよう、所属グループが非アクティブなら併せて切り替える。
+  // ホーム/リポジトリ擬似ワークツリーは専用パネル側の表示なのでグループ切替の対象外。
+  if (!isPseudoWorktree(targetWt)) {
+    const groupId = resolvedGroupId(targetWt.workgroupId);
+    if (groupId && groupId !== activeWorkgroupId.value) {
+      activeWorkgroupId.value = groupId;
+    }
+    // グループを選んだらリポジトリ一覧ではなくワークツリー一覧を出す
+    // （WorkgroupBar / cycleWorkgroup のグループ切替と同じ扱い）
+    listMode.value = "worktree";
+  }
+  try {
+    await switchToWorktree(worktreeId);
+  } catch (e) {
+    logDebug(`[Terminal] ${ctx}: switchToWorktree failed: ${e}`);
+    return;
+  }
+  // トレイ常駐のためメインウィンドウは hide / minimize されているのが常態。
+  // setFocus だけでは画面に出てこないので show → unminimize から行う。
+  const win = getCurrentWindow();
+  await win.show();
+  await win.unminimize();
+  await win.setFocus();
 }
 
 function onFrameAddTerminal(wid: string, leafId: string) {
@@ -1593,44 +1640,7 @@ onMounted(async () => {
 
   // MCP: 指定ワークツリーをフォーカスする
   await listen<{ worktree_id: string }>("mcp-show-worktree", async (event) => {
-    const { worktree_id } = event.payload;
-    const targetWt = worktrees.value.find((w) => w.id === worktree_id);
-    if (!targetWt) {
-      logDebug(`[Terminal] mcp-show-worktree: worktree ${worktree_id} not found, skipping`);
-      return;
-    }
-    // サブウィンドウへ分離済みならそのウィンドウを前面に出す（メイン側のタブは動かさない）
-    if (isDetached(worktree_id)) {
-      try {
-        await focusSubWindow(worktree_id);
-      } catch (e) {
-        logDebug(`[Terminal] mcp-show-worktree: focusSubWindow failed: ${e}`);
-      }
-      return;
-    }
-    // ホームへ戻ったときにカードが見えるよう、所属グループが非アクティブなら併せて切り替える。
-    // ホーム/リポジトリ擬似ワークツリーは専用パネル側の表示なのでグループ切替の対象外。
-    if (!isPseudoWorktree(targetWt)) {
-      const groupId = resolvedGroupId(targetWt.workgroupId);
-      if (groupId && groupId !== activeWorkgroupId.value) {
-        activeWorkgroupId.value = groupId;
-      }
-      // グループを選んだらリポジトリ一覧ではなくワークツリー一覧を出す
-      // （WorkgroupBar / cycleWorkgroup のグループ切替と同じ扱い）
-      listMode.value = "worktree";
-    }
-    try {
-      await switchToWorktree(worktree_id);
-    } catch (e) {
-      logDebug(`[Terminal] mcp-show-worktree: switchToWorktree failed: ${e}`);
-      return;
-    }
-    // トレイ常駐のためメインウィンドウは hide / minimize されているのが常態。
-    // setFocus だけでは画面に出てこないので show → unminimize から行う。
-    const win = getCurrentWindow();
-    await win.show();
-    await win.unminimize();
-    await win.setFocus();
+    await showWorktreeInWindows(event.payload.worktree_id, "mcp-show-worktree");
   });
 
   // MCP: git 上に存在するが oretachi 未登録のワークツリーを settings へ取り込む。
@@ -1885,6 +1895,48 @@ onMounted(async () => {
   // トレイポップアップからの通知クリア
   await listen<{ worktreeId: string }>("tray-clear-notification", (event) => {
     clearNotification(event.payload.worktreeId);
+  });
+
+  // トレイポップアップの「ウィンドウで開く」。
+  // トレイの destroy はここで行う契約になっている（トレイ側は deferDestroy で待っている）。
+  // フォアグラウンドだったトレイが先に消えるとプロセスがフォアグラウンド権を失い、
+  // showWorktreeInWindows の setFocus が OS に拒否されてメインが前面に出ない。
+  await listen<{ worktreeId: string }>("tray-show-worktree", async (event) => {
+    try {
+      await showWorktreeInWindows(event.payload.worktreeId, "tray-show-worktree");
+    } finally {
+      await closeTrayPopup();
+    }
+  });
+
+  // トレイポップアップからのアーカイブ要求（「アーカイブ化して次へ / 完了」）。
+  // トレイは完了を待たずに次へ進む契約。clearNotification / ローディング表示 /
+  // カードのフェードアウト / MCP 通知 / 二重実行防止 は archiveWorktree 側が面倒を見る。
+  await listen<{ worktreeId: string; deleteBranch: boolean }>("tray-archive-worktree", async (event) => {
+    const { worktreeId, deleteBranch } = event.payload;
+    const targetWt = worktrees.value.find((w) => w.id === worktreeId);
+    // ホーム/リポジトリ擬似ワークツリーは git 操作対象外。
+    // トレイ側も canArchive でメニューを出さないが、ここでも弾いておく。
+    if (!targetWt || isPseudoWorktree(targetWt)) {
+      logDebug(`[Tray] tray-archive-worktree: skip ${worktreeId}`);
+      return;
+    }
+    await archiveWorktree(
+      worktreeId,
+      // マージ先を持たない導線なので forceBranch = deleteBranch && !mergeTo === deleteBranch
+      // （RemoveWorktreeDialog の forceBranch と同じ導出）
+      { mergeTo: "", deleteBranch, forceBranch: deleteBranch },
+      async (result) => {
+        // 失敗時のエラーダイアログはメインが hide / minimize されていると気付けない。
+        // onSettled は message() 表示より前に呼ばれるので、ここでウィンドウを出しておく。
+        if (!result.ok && !result.cancelled && !result.busy) {
+          const win = getCurrentWindow();
+          await win.show().catch(() => {});
+          await win.unminimize().catch(() => {});
+          await win.setFocus().catch(() => {});
+        }
+      },
+    );
   });
 
   // トレイポップアップ閉鎖通知（tray popup自身がdestroyするのでskip）

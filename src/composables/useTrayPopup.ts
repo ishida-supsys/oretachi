@@ -26,6 +26,9 @@ export interface TrayWorktreeData {
   autoApprovalPrompt?: string;
   lastJudgedCommand?: string;
   description?: string; // ホーム画面と同じ AI 生成説明。トレイの情報バーに表示
+  // アーカイブ操作を許可するか。ホーム/リポジトリ擬似ワークツリーもターミナルを持つため
+  // 通知対象になりトレイに載るが、git worktree ではないのでアーカイブしてはいけない
+  canArchive: boolean;
 }
 
 let trayWindow: WebviewWindow | null = null;
