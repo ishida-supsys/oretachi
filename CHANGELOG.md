@@ -6,6 +6,19 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.29.2] - 2026-08-20
+
+### Added
+- トレイポップアップのフッターに 前へ / ウィンドウで開く / アーカイブ化して次へ を追加 (#129)
+
+### Fixed
+- 無関係なセッションが他ワークツリーのイベントを拾う問題を修正 (#149)
+- 削除中に並びが変わると無関係なワークツリーが画面から消える問題を修正 (#149)
+- トレイの ▾ メニューの切れとウィンドウ前面化の失敗を修正 (#129)
+
+### Changed
+- トレイの 次へ / 完了 と ▾ ボタンの色を緑で統一した (#129)
+
 ## [0.29.1] - 2026-08-19
 
 ### Fixed
@@ -629,7 +642,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.29.1...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.29.2...HEAD
+[0.29.2]: https://github.com/ishida-supsys/oretachi/compare/0.29.1...0.29.2
 [0.29.1]: https://github.com/ishida-supsys/oretachi/compare/0.29.0...0.29.1
 [0.29.0]: https://github.com/ishida-supsys/oretachi/compare/0.28.0...0.29.0
 [0.28.0]: https://github.com/ishida-supsys/oretachi/compare/0.27.1...0.28.0
