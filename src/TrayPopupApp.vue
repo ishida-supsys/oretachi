@@ -718,16 +718,23 @@ onUnmounted(() => {
       </button>
 
       <!-- 次へ / 完了 + ▾ (split button)。isLast では primary が「完了」に変わるので
-           「次へ」と「完了」が同時に並ぶことはなく、フッターの要素数は常に一定。
-           状態でラベルと動作だけが変わり、色は他のフッターボタンと同じまま固定する
-           （押す位置の色が状態で入れ替わると誤操作を誘うため） -->
+           「次へ」と「完了」が同時に並ぶことはなく、フッターの要素数は常に一定 -->
       <div class="relative flex shrink-0">
         <button
-          class="px-4 py-1.5 text-sm rounded-l bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-          :disabled="isLast ? closing : navBusy"
-          @click="isLast ? onDone() : onNext()"
+          v-if="isLast"
+          class="px-4 py-1.5 text-sm rounded-l bg-[#a6e3a1] hover:bg-[#89c98a] text-[#1e1e2e] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          :disabled="closing"
+          @click="onDone"
         >
-          {{ isLast ? t('done') : t('next') }}
+          {{ t('done') }}
+        </button>
+        <button
+          v-else
+          class="px-4 py-1.5 text-sm rounded-l bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+          :disabled="navBusy"
+          @click="onNext"
+        >
+          {{ t('next') }}
         </button>
         <!-- ▾ は isLast でも有効（「アーカイブ化して完了」に到達させるため） -->
         <button
