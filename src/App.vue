@@ -137,18 +137,6 @@ const artifactCounts = reactive(new Map<string, number>());
 // ワークツリーごとの URL アーティファクト（アイコン隣のドロップダウン用）
 const artifactUrls = reactive(new Map<string, UrlArtifactEntry[]>());
 
-// トレイ通知の実効値（worktree > workgroup > true）。値をコピーせず参照時に解決するため、
-// ワークグループ既定値を変えると個別未設定のワークツリーへ再起動なしで反映される。
-const trayNotificationMap = computed(() => buildTrayNotificationMap(settings.value));
-
-function onToggleTrayNotification(worktreeId: string) {
-  const entry = settings.value.worktrees.find((w) => w.id === worktreeId);
-  if (!entry) return;
-  // 実効値の反転を個別設定として明示的に書く（3値 UI にはしない）
-  entry.trayNotification = !(trayNotificationMap.value.get(worktreeId) ?? true);
-  scheduleSave();
-}
-
 // ホームカードの description 開閉状態（ワークツリー毎・settings.json に永続化）
 const descriptionOpenMap = reactive(new Map<string, boolean>());
 
@@ -467,7 +455,21 @@ const {
 } = useRemoveWorktreeDialog(worktreeRemoveCore);
 
 // ワークグループ
-const { activeWorkgroupId, cycleWorkgroup, resolvedGroupId, deleteWorkgroupRecord, displayName: workgroupDisplayName } = useWorkgroups();
+const { activeWorkgroupId, cycleWorkgroup, resolvedGroupId, groupOf, deleteWorkgroupRecord, displayName: workgroupDisplayName } = useWorkgroups();
+
+// トレイ通知の実効値（worktree > workgroup > true）。値をコピーせず参照時に解決するため、
+// ワークグループ既定値を変えると個別未設定のワークツリーへ再起動なしで反映される。
+// グループの引き当ては useWorkgroups.groupOf（未設定/不明なら先頭グループ）に委ねて
+// Rust の settings::resolve_workgroup と規則を揃える。
+const trayNotificationMap = computed(() => buildTrayNotificationMap(settings.value, groupOf));
+
+function onToggleTrayNotification(worktreeId: string) {
+  const entry = settings.value.worktrees.find((w) => w.id === worktreeId);
+  if (!entry) return;
+  // 実効値の反転を個別設定として明示的に書く（3値 UI にはしない）
+  entry.trayNotification = !(trayNotificationMap.value.get(worktreeId) ?? true);
+  scheduleSave();
+}
 
 // タスク追加ダイアログ用: 現在表示中グループのタスク実行エージェント（リモート実行チェックボックスの出し分け）
 const activeTaskExecAgent = computed(() => {
