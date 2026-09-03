@@ -410,11 +410,18 @@ const sessionSourceWorktrees = computed(() => settings.value.worktrees.filter((w
 const { showAddTaskDialog, rerunTaskId, rerunPrompt, onAddTaskConfirm, onAddTaskCancel } =
   useAddTaskDialog(async (code) => {
     if (code.type === "add_worktree") {
-      await executeAddWorktree(code);
+      return await executeAddWorktree(code);
     } else if (code.type === "agent_worktree") {
       await executeAgentWorktree(code);
     }
-  }, { isWindowFocused, goHome: () => goHome() });
+  }, {
+    isWindowFocused,
+    isDetached,
+    // 設定画面などを開いている間に横から画面を奪わない
+    goHome: () => {
+      if (viewMode.value === "terminal") goHome();
+    },
+  });
 
 // ワークツリー削除/アーカイブ コア処理
 const worktreeRemoveCore = useWorktreeRemove({
