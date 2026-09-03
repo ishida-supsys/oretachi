@@ -59,6 +59,7 @@ export interface Workgroup {
   name?: string;                    // 未指定時は表示時に「グループ(番号)」を生成
   color?: string;                   // プリセット色。未指定 = 無色
   autoAssignHotkey?: boolean;       // ホットキー自動割り当て（グループ単位）
+  autoReturnHomeAfterTask?: boolean; // タスク完了5秒後にホームタブへ自動復帰（グループ単位、既定 OFF）
   taskAddAgent?: AiAgentKind;       // タスク実行エージェント（グループ単位）
   claudeCodeMode?: ClaudeCodeMode;  // Claude Code モード（既定: plan）
   execPrompt?: string;              // 実行プロンプトテンプレート（置換タグ {{PROMPT}}）

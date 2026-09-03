@@ -1,4 +1,4 @@
-import { ref, computed } from "vue";
+import { ref, computed, watch, onUnmounted, type Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useToast } from "primevue/usetoast";
 import { useI18n } from "vue-i18n";
@@ -8,11 +8,24 @@ import { useSettings } from "./useSettings";
 import { useWorkgroups } from "./useWorkgroups";
 import type { TaskCode, TaskProcessCode } from "../types/task";
 
-type StepExecutor = (code: TaskCode) => Promise<void>;
+/** add_worktree ステップでは生成された worktree ID を返す */
+type StepExecutor = (code: TaskCode) => Promise<string | void>;
+
+/** タスク完了からホームタブへ自動復帰するまでの待ち時間 */
+const AUTO_RETURN_HOME_DELAY_MS = 5000;
+
+interface AutoReturnHomeOptions {
+  /** メインウィンドウのフォーカス状態 */
+  isWindowFocused: Ref<boolean>;
+  /** サブウィンドウへ移されたワークツリーか（メインのタブが動かないので対象外にする） */
+  isDetached: (worktreeId: string) => boolean;
+  /** ホームタブへ戻す */
+  goHome: () => void;
+}
 
 let executionQueue: Promise<void> = Promise.resolve();
 
-export function useAddTaskDialog(executeStep: StepExecutor) {
+export function useAddTaskDialog(executeStep: StepExecutor, autoReturnHome?: AutoReturnHomeOptions) {
   const toast = useToast();
   const { t } = useI18n();
   const { settings, scheduleSave } = useSettings();
@@ -40,10 +53,13 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
     toast.add(options);
   }
 
-  async function executeTaskSteps(taskId: string): Promise<void> {
+  /** 全ステップを実行し、add_worktree で生成された worktree ID を返す（生成なしなら null） */
+  async function executeTaskSteps(taskId: string): Promise<string | null> {
     const { tasks } = useTasks();
     const task = tasks.value.find((t) => t.id === taskId);
-    if (!task) return;
+    if (!task) return null;
+
+    let createdWorktreeId: string | null = null;
 
     for (let i = 0; i < task.steps.length; i++) {
       const step = task.steps[i];
@@ -59,7 +75,10 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
       });
 
       try {
-        await executeStep(step.code);
+        const result = await executeStep(step.code);
+        if (step.code.type === "add_worktree" && typeof result === "string") {
+          createdWorktreeId = result;
+        }
         updateStepStatus(taskId, i, "done");
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
@@ -67,7 +86,53 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
         throw e;
       }
     }
+
+    return createdWorktreeId;
   }
+
+  let autoReturnHomeTimer: ReturnType<typeof setTimeout> | null = null;
+  let autoReturnHomeUnwatch: (() => void) | null = null;
+
+  /** 予約済みの自動ホーム復帰を破棄する */
+  function cancelAutoReturnHome(): void {
+    if (autoReturnHomeTimer !== null) {
+      clearTimeout(autoReturnHomeTimer);
+      autoReturnHomeTimer = null;
+    }
+    if (autoReturnHomeUnwatch) {
+      autoReturnHomeUnwatch();
+      autoReturnHomeUnwatch = null;
+    }
+  }
+
+  /**
+   * タスク完了後、一定時間でホームタブへ戻す予約を入れる。
+   * - ワークツリーを生成したタスクのみ（既存ワークツリーへの agent_worktree のみのタスクはタブが動かない）
+   * - 対象ワークグループで autoReturnHomeAfterTask が有効なときのみ
+   * - サブウィンドウへ移された（メインのタブが動かない）ワークツリーは対象外
+   * - 完了時点でメインウィンドウがフォーカス済みなら、ユーザーが見ているので予約しない
+   * - カウントダウン中にフォーカスされたらキャンセル
+   */
+  function scheduleAutoReturnHome(groupId: string | undefined, createdWorktreeId: string | null): void {
+    if (!autoReturnHome) return;
+    if (!createdWorktreeId) return;
+    const group = settings.value.workgroups?.find((g) => g.id === groupId);
+    if (!group?.autoReturnHomeAfterTask) return;
+    if (autoReturnHome.isDetached(createdWorktreeId)) return;
+    if (autoReturnHome.isWindowFocused.value) return;
+
+    const { isWindowFocused, goHome } = autoReturnHome;
+    autoReturnHomeUnwatch = watch(isWindowFocused, (focused) => {
+      if (focused) cancelAutoReturnHome();
+    });
+    autoReturnHomeTimer = setTimeout(() => {
+      autoReturnHomeTimer = null;
+      cancelAutoReturnHome();
+      goHome();
+    }, AUTO_RETURN_HOME_DELAY_MS);
+  }
+
+  onUnmounted(cancelAutoReturnHome);
 
   async function onAddTaskConfirm(prompt: string, remoteExec: boolean = false, workgroupId?: string): Promise<void> {
     const trimmed = prompt.trim();
@@ -79,6 +144,9 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
     if (workgroupId) {
       activeWorkgroupId.value = workgroupId;
     }
+    // executeAddWorktree は実行開始時の activeWorkgroupId で所属を決めるため、
+    // 自動ホーム復帰の判定に使うグループもこの時点で確定させる
+    const autoReturnGroupId = workgroupId ?? activeWorkgroupId.value;
     if (settings.value.aiAgent) {
       settings.value.aiAgent.remoteExec = remoteExec;
     } else {
@@ -115,10 +183,13 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
       const stepCount = taskProcessCode.code.length;
       updateTaskStatus(task.id, "queued");
 
-      await new Promise<void>((resolve, reject) => {
+      const createdWorktreeId = await new Promise<string | null>((resolve, reject) => {
         executionQueue = executionQueue
           .catch(() => {})
           .then(async () => {
+            // 後続タスクが走り出したら、先行タスクの予約は無効化する
+            // （このタスクが新しいタブを開くので、そこへホームを被せてはいけない）
+            cancelAutoReturnHome();
             updateTaskStatus(task.id, "executing");
             showTaskToast({
               severity: "info",
@@ -126,8 +197,7 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
               detail: t("taskExecutingStartDetail", { count: stepCount }),
             });
             try {
-              await executeTaskSteps(task.id);
-              resolve();
+              resolve(await executeTaskSteps(task.id));
             } catch (e) {
               reject(e);
             }
@@ -135,6 +205,7 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
       });
 
       updateTaskStatus(task.id, "completed");
+      scheduleAutoReturnHome(autoReturnGroupId, createdWorktreeId);
 
       showTaskToast({
         severity: "success",
@@ -145,6 +216,8 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       updateTaskStatus(task.id, "error", msg);
+      // エラー時は scheduleAutoReturnHome を通らないので予約は張られない。
+      // ここで cancelAutoReturnHome() すると別タスクの正当な予約まで消すのでしない。
 
       showTaskToast({
         severity: "error",
