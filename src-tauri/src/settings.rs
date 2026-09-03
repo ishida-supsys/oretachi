@@ -92,18 +92,38 @@ pub struct Workgroup {
     pub tray_notification: Option<bool>,
 }
 
+/// ワークツリーの所属ワークグループを解決する。workgroup_id が未設定/不明な場合は
+/// 先頭グループにフォールバック（フロントの useWorkgroups.resolvedGroupId と同仕様）。
+pub fn resolve_workgroup<'a>(settings: &'a AppSettings, worktree: &WorktreeEntry) -> Option<&'a Workgroup> {
+    resolve_workgroup_by_id(settings, worktree.workgroup_id.as_deref())
+}
+
+/// `resolve_workgroup` の ID 版。ワークツリーの実体が既に settings から消えた後でも
+/// 所属グループを解決したい経路（`worktree.closed` の target 照合）で使う（#126）。
+pub fn resolve_workgroup_by_id<'a>(
+    settings: &'a AppSettings,
+    workgroup_id: Option<&str>,
+) -> Option<&'a Workgroup> {
+    workgroup_id
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|id| settings.workgroups.iter().find(|g| g.id == id))
+        .or_else(|| settings.workgroups.first())
+}
+
 /// フック由来通知をトレイ通知として出すか。worktree > workgroup > true で解決する。
 ///
 /// 新規ワークツリー作成時に値をコピーせず、参照時に毎回解決する。`None` = 未設定 =
 /// 従来どおり通知（既存 settings.json との後方互換）。
+///
+/// ワークグループの引き当ては `resolve_workgroup`（未設定/不明なら先頭グループ）に
+/// 委ねる。ここで直接 `find` すると、UI 上は先頭グループのカードに並んでいるのに
+/// そのグループの `trayNotification` が効かないワークツリーが生まれる
+/// （同じ /notify サブシステムのグループ `system_prompt` 解決も同ヘルパー経由）。
 pub fn resolve_tray_notification(settings: &AppSettings, worktree: &WorktreeEntry) -> bool {
     worktree
         .tray_notification
-        .or_else(|| {
-            worktree.workgroup_id.as_ref().and_then(|gid| {
-                settings.workgroups.iter().find(|g| &g.id == gid)?.tray_notification
-            })
-        })
+        .or_else(|| resolve_workgroup(settings, worktree)?.tray_notification)
         .unwrap_or(true)
 }
 
@@ -962,16 +982,32 @@ mod tests {
         assert!(!resolve_tray_notification(&settings, &entry));
     }
 
-    /// ワークツリー・ワークグループともに未設定、または所属グループが見つからない場合は true。
+    /// workgroup_id が未設定・空文字・削除済み ID のいずれでも、`resolve_workgroup` と
+    /// 同じく先頭グループへフォールバックする。UI 上は先頭グループのカードに並ぶため、
+    /// ここで解決できないとグループ既定値が効かないワークツリーが生まれる。
+    #[test]
+    fn test_resolve_tray_notification_unresolved_workgroup_uses_first_group() {
+        for wg in [None, Some(""), Some("  "), Some("deleted")] {
+            let entry = tray_worktree(None, wg);
+            let settings = tray_settings(entry.clone(), &[("first", Some(false)), ("g", Some(true))]);
+            assert!(
+                !resolve_tray_notification(&settings, &entry),
+                "workgroup_id={:?} は先頭グループの既定値で解決されるべき",
+                wg
+            );
+        }
+    }
+
+    /// ワークツリー・ワークグループともに未設定、またはグループが1件も無い場合は true。
     #[test]
     fn test_resolve_tray_notification_falls_back_to_true() {
         let entry = tray_worktree(None, Some("g"));
         let settings = tray_settings(entry.clone(), &[("g", None)]);
         assert!(resolve_tray_notification(&settings, &entry));
 
-        // 参照先グループが存在しない（削除済み）ケース
-        let entry = tray_worktree(None, Some("missing"));
-        let settings = tray_settings(entry.clone(), &[("g", Some(false))]);
+        // ワークグループが1件も無いケース
+        let entry = tray_worktree(None, Some("g"));
+        let settings = tray_settings(entry.clone(), &[]);
         assert!(resolve_tray_notification(&settings, &entry));
     }
 
