@@ -461,6 +461,29 @@ pub struct SetWorktreeDescriptionParams {
     pub worktree_id: Option<String>,
 }
 
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SetTrayNotificationParams {
+    #[schemars(description = "true=フック由来通知をトレイに出す / false=出さない / **省略時は「未設定」に戻して所属ワークグループの既定値（無ければ true）へフォールバックする**")]
+    pub enabled: Option<bool>,
+    #[schemars(description = "ワークツリーのルートディレクトリ絶対パス（通常は自分の作業ディレクトリ）。worktree_name/worktree_id 未指定時はこれでワークツリーを特定する")]
+    pub project_dir: Option<String>,
+    #[schemars(description = "対象ワークツリー名（project_dir で特定できない場合に指定）")]
+    pub worktree_name: Option<String>,
+    #[schemars(description = "対象ワークツリーID（同名ワークツリーが複数ある場合に指定）")]
+    pub worktree_id: Option<String>,
+}
+
+/// トレイ通知設定の変更をフロント（App.vue）へ伝えるイベント。
+/// フロント側が settings.json への永続化と UI 反映の両方を担う。
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct SetTrayNotificationEvent {
+    pub worktree: String,
+    pub worktree_id: String,
+    /// `None` = 未設定へ戻す（ワークグループ既定値へフォールバック）
+    pub tray_notification: Option<bool>,
+}
+
 fn default_true() -> bool { true }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -1349,6 +1372,61 @@ impl NotifyService {
             "worktree": wt.name,
             "previous": previous,
             "new": description,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string(&json).map_err(|e| McpError::internal_error(e.to_string(), None))?,
+        )]))
+    }
+
+    #[tool(description = "ワークツリーのトレイ通知（フック由来の承認待ち・作業完了通知）のオン/オフを切り替える。enabled=true で通知する / enabled=false で通知しない / **enabled を省略すると「未設定」に戻り、所属ワークグループの既定値（無ければ true）へフォールバックする**。オフにしてもツール `notify_worktree` による明示通知は常にトレイへ出るため、ユーザーの判断を仰ぐ経路は残る。teamwork-parent のような進行管理セッションが自分自身のノイズを止める用途を想定している。他人のワークツリーを勝手にオフにしないこと")]
+    fn oretachi_set_tray_notification(
+        &self,
+        Parameters(SetTrayNotificationParams { enabled, project_dir, worktree_name, worktree_id }): Parameters<SetTrayNotificationParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+
+        // 解決優先順位: worktree_id > worktree_name > project_dir 逆引き（set_description と同じ）
+        let wt = resolve_worktree(
+            &settings,
+            worktree_id.as_deref(),
+            worktree_name.as_deref(),
+            project_dir.as_deref(),
+            "specify one of project_dir / worktree_name / worktree_id",
+        )?;
+
+        let previous = wt.tray_notification;
+        let previous_effective = resolve_tray_notification(&settings, wt);
+        // 変更後の実効値は「値をコピーせず毎回解決する」規則を壊さないよう、
+        // 新しい値を載せたエントリを resolve_tray_notification に通して求める。
+        let new_effective = {
+            let mut probe = wt.clone();
+            probe.tray_notification = enabled;
+            resolve_tray_notification(&settings, &probe)
+        };
+
+        // 永続化と UI 反映はフロント（App.vue）に任せる。Rust 側の SettingsManager を
+        // 直接書き換えると、フロントが持つ settings と食い違って次の save で巻き戻る。
+        let event = SetTrayNotificationEvent {
+            worktree: wt.name.clone(),
+            worktree_id: wt.id.clone(),
+            tray_notification: enabled,
+        };
+        self.app_handle
+            .emit("set-worktree-tray-notification", &event)
+            .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
+        log::info!(
+            "[mcp] oretachi_set_tray_notification: worktree={} {:?} -> {:?} (effective {} -> {})",
+            wt.name, previous, enabled, previous_effective, new_effective
+        );
+
+        let json = serde_json::json!({
+            "ok": true,
+            "worktree": wt.name,
+            "previous": previous,
+            "previousEffective": previous_effective,
+            "new": enabled,
+            "newEffective": new_effective,
         });
         Ok(CallToolResult::success(vec![Content::text(
             serde_json::to_string(&json).map_err(|e| McpError::internal_error(e.to_string(), None))?,
@@ -4894,6 +4972,7 @@ mod tests {
         const NOT_READ_ONLY: &[&str] = &[
             "notify_worktree",
             "oretachi_set_description",
+            "oretachi_set_tray_notification",
             "oretachi_add_task",
             "oretachi_close_worktree",
             "oretachi_spawn_terminal",

@@ -1,7 +1,7 @@
 ---
 name: teamwork-parent
 description: 親issueがsub-issueに分割された場合の進行管理を自動化する。ユーザーが「チームワークスキルを使って」「sub-issueを立てて分担して」等、既存または今後作成するsub-issue群の進行をこのセッションに任せたいときに使う。呼び出し後このセッションは「チームワークセッション」となり、sub-issueのワークツリーを購読し、進行可能なタスクを自動で子ワークツリーとして生成・監視し、全sub-issueがクローズしたら完了報告する。このセッション自身が誰かのsub-issueとして作られている場合は teamwork-child の義務と併用する。
-allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_oretachi_oretachi__oretachi_subscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_unsubscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__plugin_oretachi_oretachi__oretachi_poll_inbox, mcp__plugin_oretachi_oretachi__oretachi_ack_message, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp__plugin_oretachi_oretachi__oretachi_inspect_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_repository, mcp__plugin_oretachi_oretachi__notify_worktree, mcp__plugin_oretachi_oretachi__artifact, mcp__plugin_oretachi_oretachi__artifact_module, mcp__plugin_oretachi_oretachi__search_artifact, Read, Write, Edit, Glob, Grep, Bash(gh issue:*), Bash(gh api:*), Bash(git branch:*)
+allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_oretachi_oretachi__oretachi_subscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_unsubscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__plugin_oretachi_oretachi__oretachi_poll_inbox, mcp__plugin_oretachi_oretachi__oretachi_ack_message, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp__plugin_oretachi_oretachi__oretachi_inspect_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_repository, mcp__plugin_oretachi_oretachi__notify_worktree, mcp__plugin_oretachi_oretachi__oretachi_set_tray_notification, mcp__plugin_oretachi_oretachi__artifact, mcp__plugin_oretachi_oretachi__artifact_module, mcp__plugin_oretachi_oretachi__search_artifact, Read, Write, Edit, Glob, Grep, Bash(gh issue:*), Bash(gh api:*), Bash(git branch:*)
 ---
 
 # teamwork-parent スキル
@@ -10,10 +10,14 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_ore
 
 ## Step 1: 計画とユーザー承認
 
-1. 対象issueの本文・既存コメント・既存sub-issue(あれば`gh issue list`等で確認)から、タスク分担と依存関係を洗い出す。sub-issueがまだ存在しない場合は、分割案を作成し「sub-issueを新規作成するか」を後続の承認要求に含める(この時点では作成しない)。
-2. 各sub-issueに決定的なブランチ名を採番する(例: `issue-<番号>`)。検証sub-issue等、完了前にユーザー確認が必要なものを識別する。
-3. 3章の手順で計画フロー図をartifactとして作成する(状態はすべて`not_started`でよい)。**この計画フローartifactが以後の唯一の進捗管理データになる**(別途マークダウン等は作らない)。
-4. ユーザーに承認を求める。承認内容には次を含める:
+1. **まず自分自身のワークツリーのトレイ通知をオフにする**(承認を待つ必要はない。自分のノイズを止めるだけで他ワークツリーの通知には影響しないため):
+   ```
+   oretachi_set_tray_notification(project_dir: <自分の作業ディレクトリ絶対パス>, enabled: false)
+   ```
+2. 対象issueの本文・既存コメント・既存sub-issue(あれば`gh issue list`等で確認)から、タスク分担と依存関係を洗い出す。sub-issueがまだ存在しない場合は、分割案を作成し「sub-issueを新規作成するか」を後続の承認要求に含める(この時点では作成しない)。
+3. 各sub-issueに決定的なブランチ名を採番する(例: `issue-<番号>`)。検証sub-issue等、完了前にユーザー確認が必要なものを識別する。
+4. 3章の手順で計画フロー図をartifactとして作成する(状態はすべて`not_started`でよい)。**この計画フローartifactが以後の唯一の進捗管理データになる**(別途マークダウン等は作らない)。
+5. ユーザーに承認を求める。承認内容には次を含める:
    - sub-issue新規作成の要否(対象がある場合)
    - 計画フロー(依存関係・検証ポイント・ユーザーが介入するタイミング)
    **承認が得られるまでStep2(`oretachi_add_task`の呼び出し)を行わない。**
@@ -36,6 +40,7 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_ore
 - **`worktree.message`**: `oretachi_poll_inbox`で内容を確認し、`oretachi_ack_message`で既読化する。
   - issueコメントのURLのみの場合は必要に応じて参照し、ユーザーの判断が必要な内容かどうかを見極める。
   - ユーザー判断が必要な内容だけを提示し、それ以外は自動で流れを継続する。
+- **ユーザーの判断・操作が必要になったときは必ず`notify_worktree`を呼ぶ。** Step 1 でトレイ通知をオフにしているため、テキストを出力するだけではユーザーは気付けない。`notify_worktree`(kind明示の意図的な通知)はトレイ通知オフでも常に通る唯一の呼び戻し経路。
 - すべてのイベントを4章の手順で`data/flow`の`MESSAGES`に追記する(新しい順に先頭へ追加)。
 - 状態に迷ったら`oretachi_list_subscriptions`で購読状態を確認してよい。
 
@@ -45,9 +50,13 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_ore
 - ユーザーに完了を報告し、作業を停止する。
 - **このワークツリー自身が誰かのsub-issueである場合**(teamwork-childの義務を負っている場合)は、続けて`teamwork-child`スキルの完了報告手順(親issueへの報告 → `oretachi_close_worktree`の承認)に従う。
 
-## トレイ通知のノイズ対策
+## トレイ通知のノイズ対策(原則)
 
-チームワークセッションは子ワークツリーのイベントを購読するため、自分自身のフック由来通知(ツール実行ごとの`hook`通知等)がトレイに溢れやすい。**親ワークツリーはトレイ通知をオフにしておくとノイズが出ない**(ワークツリー設定の`trayNotification`、またはワークグループ単位の既定値)。
+チームワークセッションは子ワークツリーのイベントを購読するため、自分自身のフック由来通知(ツール実行ごとの`hook`通知等)がトレイに溢れやすい。**原則として親ワークツリー(このセッション)はトレイ通知をオフにし、人の判断・操作が必要なときにのみ明示的に`notify_worktree`で通知する。** Step 1 の最初に`oretachi_set_tray_notification(enabled: false)`で自分自身をオフにすること。
+
+`enabled`を省略して呼ぶと「未設定」に戻り、所属ワークグループの既定値(無ければ`true`)へフォールバックする。作業終了後に元へ戻したい場合はこちらを使う。
+
+**対象は自分自身のワークツリーだけ**。子ワークツリーは承認待ちをユーザーに見せる必要があるため、通知はオンのままにする(子側の設定に触れない)。
 
 オフにしても次は変わらない:
 
@@ -62,6 +71,8 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_ore
 - sub-issueの本文をそのまま`oretachi_add_task`のpromptに転記しない(URLのみ)。
 - `oretachi_add_task`のprompt冒頭の`teamwork-child`読み込み指示を省略しない(子ワークツリーが正しいスキルを読み込む唯一の経路のため)。
 - ユーザー判断が不要なメッセージでユーザーの手を止めない。
+- トレイ通知をオフにしたまま、ユーザー判断が必要な場面で`notify_worktree`を省略しない(ユーザーが永久に気付けなくなる)。
+- 子ワークツリーのトレイ通知を`oretachi_set_tray_notification`でオフにしない(承認待ちが見えなくなる)。
 - 進捗を別ファイル(マークダウン等)へ二重に記録しない。進捗の唯一の記録先は計画フローartifactの`data/flow`。
 
 ---

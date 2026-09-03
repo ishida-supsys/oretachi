@@ -1522,6 +1522,29 @@ onMounted(async () => {
     }
   });
 
+  // MCP (oretachi_set_tray_notification) からのトレイ通知トグル。
+  // 永続化と UI 反映をここで一本化する（Rust 側で settings を直接書き換えると
+  // フロントが持つ settings と食い違い、次の save で巻き戻るため）。
+  await listen<{ worktree: string; worktreeId: string; trayNotification?: boolean | null }>(
+    "set-worktree-tray-notification",
+    (event) => {
+      const { worktree, worktreeId, trayNotification } = event.payload;
+      const entry =
+        settings.value.worktrees.find((w) => w.id === worktreeId) ??
+        settings.value.worktrees.find((w) => w.name === worktree);
+      if (!entry) return;
+      // null / undefined は「未設定に戻す」= ワークグループ既定値へフォールバック。
+      // キー自体を消して save 時に JSON から落とす（Rust 側の None と一致させる）。
+      if (trayNotification === null || trayNotification === undefined) {
+        delete entry.trayNotification;
+      } else {
+        entry.trayNotification = trayNotification;
+      }
+      scheduleSave();
+      logDebug(`[TrayNotification] set for worktree=${worktree}: ${trayNotification ?? "inherit"}`);
+    },
+  );
+
   // MCPからのワークツリークローズ（アーカイブ）
   await listen<{ request_id: string; worktree_id: string; worktree_name: string; merge_to: string; delete_branch: boolean; force_branch: boolean }>("mcp-close-worktree", async (event) => {
     const { request_id, worktree_id, merge_to, delete_branch, force_branch } = event.payload;
