@@ -414,7 +414,7 @@ const { showAddTaskDialog, rerunTaskId, rerunPrompt, onAddTaskConfirm, onAddTask
     } else if (code.type === "agent_worktree") {
       await executeAgentWorktree(code);
     }
-  });
+  }, { isWindowFocused, goHome: () => goHome() });
 
 // ワークツリー削除/アーカイブ コア処理
 const worktreeRemoveCore = useWorktreeRemove({

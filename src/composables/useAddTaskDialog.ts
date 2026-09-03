@@ -1,4 +1,4 @@
-import { ref, computed } from "vue";
+import { ref, computed, watch, onUnmounted, type Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useToast } from "primevue/usetoast";
 import { useI18n } from "vue-i18n";
@@ -10,9 +10,19 @@ import type { TaskCode, TaskProcessCode } from "../types/task";
 
 type StepExecutor = (code: TaskCode) => Promise<void>;
 
+/** タスク完了からホームタブへ自動復帰するまでの待ち時間 */
+const AUTO_RETURN_HOME_DELAY_MS = 5000;
+
+interface AutoReturnHomeOptions {
+  /** メインウィンドウのフォーカス状態 */
+  isWindowFocused: Ref<boolean>;
+  /** ホームタブへ戻す */
+  goHome: () => void;
+}
+
 let executionQueue: Promise<void> = Promise.resolve();
 
-export function useAddTaskDialog(executeStep: StepExecutor) {
+export function useAddTaskDialog(executeStep: StepExecutor, autoReturnHome?: AutoReturnHomeOptions) {
   const toast = useToast();
   const { t } = useI18n();
   const { settings, scheduleSave } = useSettings();
@@ -68,6 +78,52 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
       }
     }
   }
+
+  let autoReturnHomeTimer: ReturnType<typeof setTimeout> | null = null;
+  let autoReturnHomeUnwatch: (() => void) | null = null;
+
+  /** 予約済みの自動ホーム復帰を破棄する */
+  function cancelAutoReturnHome(): void {
+    if (autoReturnHomeTimer !== null) {
+      clearTimeout(autoReturnHomeTimer);
+      autoReturnHomeTimer = null;
+    }
+    if (autoReturnHomeUnwatch) {
+      autoReturnHomeUnwatch();
+      autoReturnHomeUnwatch = null;
+    }
+  }
+
+  /**
+   * タスク完了後、一定時間でホームタブへ戻す予約を入れる。
+   * - 対象ワークグループで autoReturnHomeAfterTask が有効なときのみ
+   * - サブウィンドウ既定 (worktreeDefaults.openInSubWindow) ではメインのタブが動かないので対象外
+   * - 完了時点でメインウィンドウがフォーカス済みなら、ユーザーが見ているので予約しない
+   * - カウントダウン中にフォーカスされたらキャンセル
+   */
+  function scheduleAutoReturnHome(workgroupId: string | undefined): void {
+    if (!autoReturnHome) return;
+    const groupId = workgroupId ?? activeWorkgroupId.value;
+    const group = settings.value.workgroups?.find((g) => g.id === groupId);
+    if (!group?.autoReturnHomeAfterTask) return;
+    if (settings.value.worktreeDefaults?.openInSubWindow) return;
+    if (autoReturnHome.isWindowFocused.value) return;
+
+    // 連続タスク実行で多重に張られないよう、既存の予約は張り直しでクリアする
+    cancelAutoReturnHome();
+
+    const { isWindowFocused, goHome } = autoReturnHome;
+    autoReturnHomeUnwatch = watch(isWindowFocused, (focused) => {
+      if (focused) cancelAutoReturnHome();
+    });
+    autoReturnHomeTimer = setTimeout(() => {
+      autoReturnHomeTimer = null;
+      cancelAutoReturnHome();
+      goHome();
+    }, AUTO_RETURN_HOME_DELAY_MS);
+  }
+
+  onUnmounted(cancelAutoReturnHome);
 
   async function onAddTaskConfirm(prompt: string, remoteExec: boolean = false, workgroupId?: string): Promise<void> {
     const trimmed = prompt.trim();
@@ -135,6 +191,7 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
       });
 
       updateTaskStatus(task.id, "completed");
+      scheduleAutoReturnHome(workgroupId);
 
       showTaskToast({
         severity: "success",
@@ -145,6 +202,8 @@ export function useAddTaskDialog(executeStep: StepExecutor) {
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       updateTaskStatus(task.id, "error", msg);
+      // エラー内容をターミナルで確認する必要があるため、ホームへは戻さない
+      cancelAutoReturnHome();
 
       showTaskToast({
         severity: "error",
