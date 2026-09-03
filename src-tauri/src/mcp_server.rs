@@ -249,10 +249,17 @@ pub struct McpServerManager {
     /// hook 通知をWebView IPCを経由せずMCPピアへ直接配信するチャネル
     /// (WebView IPC を使うと UIスレッドに負荷がかかるため broadcast channel を使用)
     pub hook_tx: broadcast::Sender<NotifyWorktreeEvent>,
-    /// 通知の rate limiting: (worktree_name, kind) → 最終送信時刻 (None=未送信)
+    /// 通知の rate limiting: (worktree_name, kind, tray) → 最終送信時刻 (None=未送信)
     /// hook: 3秒、approval: 1秒 debounce。general/completed や任意の kind は
     /// debounce しない（MCP クライアントの意図的な通知を握り潰さないため）
-    notify_last_sent: Mutex<HashMap<(String, String), Option<std::time::Instant>>>,
+    ///
+    /// `tray` をキーに含めるのが要点（#161）。`tray: false`（トレイ通知オフの
+    /// ワークツリーのフック由来通知）はユーザーに何も見せないが、キーを共有していると
+    /// debounce の窓を消費してしまい、直後の明示 `notify_worktree`（常に `tray: true`）を
+    /// 握り潰す。ユーザーを呼び戻す唯一の経路なので、見えなかった通知が
+    /// 見せるべき通知を弾いてはいけない。窓を分けることで `tray: false` の連投抑制
+    /// （WebView イベントキュー保護）も従来どおり維持する。
+    notify_last_sent: Mutex<HashMap<NotifyDebounceKey, Option<std::time::Instant>>>,
     /// /prompt-context のスロットル: worktree_id → 最終送信時刻。
     /// UserPromptSubmit はプロンプトごとに発火するため、期間内は skip を返して
     /// コンテキスト注入のノイズを抑える。
@@ -272,34 +279,51 @@ fn notify_debounce_secs(kind: &str) -> Option<u64> {
     }
 }
 
-/// worktree_name × kind の組み合わせで debounce 判定する。
+/// 通知 debounce のキー: (worktree_name, kind, tray)
+type NotifyDebounceKey = (String, String, bool);
+
+/// worktree_name × kind × tray の組み合わせで debounce 判定する。
 /// true を返したら送信すべき（初回、または前回送信から debounce 秒数以上経過、
 /// または対象外 kind）。
+///
+/// `tray` を鍵に含めるので、`tray: false` の通知（ユーザーには何も表示されない）は
+/// `tray: true` の窓を消費しない（#161）。
 fn should_send_notify(
-    last_sent: &Mutex<HashMap<(String, String), Option<std::time::Instant>>>,
+    last_sent: &Mutex<HashMap<NotifyDebounceKey, Option<std::time::Instant>>>,
     worktree_name: &str,
     kind: &str,
+    tray: bool,
+) -> bool {
+    should_send_notify_at(last_sent, worktree_name, kind, tray, std::time::Instant::now())
+}
+
+/// `should_send_notify` の本体。`now` を注入してテストから時間を進められるようにする。
+fn should_send_notify_at(
+    last_sent: &Mutex<HashMap<NotifyDebounceKey, Option<std::time::Instant>>>,
+    worktree_name: &str,
+    kind: &str,
+    tray: bool,
+    now: std::time::Instant,
 ) -> bool {
     let Some(debounce) = notify_debounce_secs(kind) else {
         return true;
     };
     let mut map = last_sent.lock().unwrap_or_else(|e| e.into_inner());
-    let now = std::time::Instant::now();
-    let key = (worktree_name.to_string(), kind.to_string());
+    let key = (worktree_name.to_string(), kind.to_string(), tray);
     // Option で初回を None として明示。Instant 減算による underflow panic を
     // 回避しつつ、初回は必ず送信する旧仕様の挙動も維持。
     let entry = map.entry(key).or_insert(None);
     let should = match *entry {
         None => true,
-        Some(prev) => now.duration_since(prev).as_secs() >= debounce,
+        Some(prev) => now.saturating_duration_since(prev).as_secs() >= debounce,
     };
     if should {
         *entry = Some(now);
         true
     } else {
         log::debug!(
-            "[notify] debounced worktree={} kind={} (window={}s)",
-            worktree_name, kind, debounce
+            "[notify] debounced worktree={} kind={} tray={} (window={}s)",
+            worktree_name, kind, tray, debounce
         );
         false
     }
@@ -1279,7 +1303,7 @@ impl NotifyService {
         let hook_tx = {
             let manager = self.app_handle.state::<McpServerManager>();
             // HTTP 経路と同じ debounce ポリシー (hook=3s, approval=1s, 他は対象外) を適用
-            if !should_send_notify(&manager.notify_last_sent, &event.worktree_name, &event.kind) {
+            if !should_send_notify(&manager.notify_last_sent, &event.worktree_name, &event.kind, event.tray) {
                 return reply(false);
             }
             manager.hook_tx.clone()
@@ -3533,7 +3557,10 @@ async fn notify_handler(
     let manager = app_handle.state::<McpServerManager>();
     // hook: 3秒 / approval: 1秒 で (worktree, kind) 単位に送信制限。
     // それ以外の kind (general/completed/任意) は debounce 対象外で常に通す。
-    let should_send = should_send_notify(&manager.notify_last_sent, &event.worktree_name, &event.kind);
+    // `tray` も鍵に含めるので、トレイ通知オフのフック由来通知（tray: false）が
+    // 明示 `notify_worktree`（常に tray: true）の窓を消費することはない（#161）。
+    let should_send =
+        should_send_notify(&manager.notify_last_sent, &event.worktree_name, &event.kind, event.tray);
     if !should_send {
         return StatusCode::OK;
     }
@@ -4920,5 +4947,98 @@ mod tests {
                 name
             );
         }
+    }
+
+    // ─── notify debounce (#161) ──────────────────────────────────────────────
+
+    use std::time::Duration;
+
+    fn debounce_map() -> Mutex<HashMap<NotifyDebounceKey, Option<std::time::Instant>>> {
+        Mutex::new(HashMap::new())
+    }
+
+    /// #152 の完了条件「trayNotification = false でも明示 notify_worktree はトレイに出る」。
+    /// `tray: false` のフック由来 approval が窓を消費してしまうと、その直後の明示
+    /// `notify_worktree`（常に `tray: true`）が黙って落ちてユーザーを呼び戻せなくなる。
+    #[test]
+    fn tray_false_notify_does_not_consume_tray_true_window() {
+        let map = debounce_map();
+        let t0 = std::time::Instant::now();
+        // フック由来（トレイ通知オフ）の approval が届く: ユーザーには何も見えない
+        assert!(should_send_notify_at(&map, "wt", "approval", false, t0));
+        // 同一 tick で明示 notify_worktree（tray: true）が呼ばれても通る
+        assert!(
+            should_send_notify_at(&map, "wt", "approval", true, t0),
+            "tray: false の通知が tray: true の debounce 窓を消費している"
+        );
+        // hook kind（3s 窓）でも同じ
+        assert!(should_send_notify_at(&map, "wt", "hook", false, t0));
+        assert!(
+            should_send_notify_at(&map, "wt", "hook", true, t0),
+            "tray: false の hook 通知が tray: true の debounce 窓を消費している"
+        );
+    }
+
+    /// 逆方向も同じ: 明示通知が出た直後の `tray: false` フック通知は落ちて構わないが、
+    /// 落ちても `tray: true` 側の窓は独立していること（連投抑制の回帰防止）。
+    #[test]
+    fn tray_true_and_false_windows_are_independent() {
+        let map = debounce_map();
+        let t0 = std::time::Instant::now();
+        assert!(should_send_notify_at(&map, "wt", "approval", true, t0));
+        // tray: false は別の窓なので初回として通る
+        assert!(should_send_notify_at(&map, "wt", "approval", false, t0));
+        // それぞれの窓は独立して閉じている
+        assert!(!should_send_notify_at(&map, "wt", "approval", true, t0));
+        assert!(!should_send_notify_at(&map, "wt", "approval", false, t0));
+    }
+
+    /// `tray: true` 同士の debounce（approval 1s / hook 3s）は従来どおり維持する。
+    #[test]
+    fn tray_true_debounce_windows_unchanged() {
+        let map = debounce_map();
+        let t0 = std::time::Instant::now();
+        // approval: 1秒窓
+        assert!(should_send_notify_at(&map, "wt", "approval", true, t0));
+        assert!(!should_send_notify_at(&map, "wt", "approval", true, t0 + Duration::from_millis(999)));
+        assert!(should_send_notify_at(&map, "wt", "approval", true, t0 + Duration::from_millis(1000)));
+        // hook: 3秒窓
+        assert!(should_send_notify_at(&map, "wt", "hook", true, t0));
+        assert!(!should_send_notify_at(&map, "wt", "hook", true, t0 + Duration::from_millis(2999)));
+        assert!(should_send_notify_at(&map, "wt", "hook", true, t0 + Duration::from_secs(3)));
+    }
+
+    /// `tray: false` 同士の連投抑制も維持する（WebView イベントキュー保護のため、
+    /// tray: false でも自動承認トリガとして emit されるので窓自体は必要）。
+    #[test]
+    fn tray_false_debounce_windows_still_apply() {
+        let map = debounce_map();
+        let t0 = std::time::Instant::now();
+        assert!(should_send_notify_at(&map, "wt", "approval", false, t0));
+        assert!(!should_send_notify_at(&map, "wt", "approval", false, t0 + Duration::from_millis(500)));
+        assert!(should_send_notify_at(&map, "wt", "approval", false, t0 + Duration::from_secs(1)));
+    }
+
+    /// debounce 対象外 kind（general/completed/任意）は tray にかかわらず常に通す。
+    #[test]
+    fn non_debounced_kinds_always_pass() {
+        let map = debounce_map();
+        let t0 = std::time::Instant::now();
+        for kind in ["general", "completed", "worktree.message"] {
+            for tray in [true, false] {
+                assert!(should_send_notify_at(&map, "wt", kind, tray, t0));
+                assert!(should_send_notify_at(&map, "wt", kind, tray, t0));
+            }
+        }
+    }
+
+    /// ワークツリーごとに窓が分かれる従来挙動も維持する。
+    #[test]
+    fn debounce_is_scoped_per_worktree() {
+        let map = debounce_map();
+        let t0 = std::time::Instant::now();
+        assert!(should_send_notify_at(&map, "wt-a", "approval", true, t0));
+        assert!(should_send_notify_at(&map, "wt-b", "approval", true, t0));
+        assert!(!should_send_notify_at(&map, "wt-a", "approval", true, t0));
     }
 }
