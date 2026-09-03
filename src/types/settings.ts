@@ -26,6 +26,13 @@ export interface WorktreeEntry {
   hotkeyChar?: string; // Alt+[この文字] でフォーカス
   autoApproval?: boolean;
   autoApprovalPrompt?: string;
+  /**
+   * フック由来通知をトレイ通知として出すか。未設定 = 所属ワークグループの
+   * trayNotification → true の順にフォールバック（解決はバックエンドの
+   * resolve_tray_notification）。false でもイベント自体は流れるため自動承認は動き、
+   * MCP notify_worktree による明示的な通知も常にトレイへ出る。
+   */
+  trayNotification?: boolean;
   description?: string; // 作業全体の目的を表す1行説明（ExitPlanMode hookのAI要約、または MCP oretachi_set_description で直接セット）
   descriptionOpen?: boolean; // ホームカードの description 開閉状態（ワークツリー毎）
   workgroupId?: string; // 所属するワークグループのID（未設定は先頭グループにフォールバック）
@@ -57,6 +64,7 @@ export interface Workgroup {
   claudeCodeMode?: ClaudeCodeMode;  // Claude Code モード（既定: plan）
   execPrompt?: string;              // 実行プロンプトテンプレート（置換タグ {{PROMPT}}）
   systemPrompt?: string;            // Claude Code セッションに常時注入（SessionStart フック経由。/clear 後も維持）
+  trayNotification?: boolean;       // グループ内ワークツリーのトレイ通知既定値（未設定 = true）
 }
 
 export interface TerminalSettings {

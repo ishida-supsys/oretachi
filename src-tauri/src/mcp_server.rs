@@ -18,7 +18,7 @@ use tokio::sync::{broadcast, oneshot, watch, RwLock};
 
 use crate::git_worktree::get_git_remotes;
 use crate::pty_manager::PtyManager;
-use crate::settings::{AppSettings, SettingsManager, Workgroup, WorktreeEntry};
+use crate::settings::{resolve_tray_notification, AppSettings, SettingsManager, Workgroup, WorktreeEntry};
 
 /// artifact / artifact_module の read-modify-write を直列化するグローバルロック。
 /// これらのツールは read_only_hint = true を宣言しているため Claude Code 側が
@@ -461,12 +461,21 @@ pub struct SetWorktreeDescriptionParams {
     pub worktree_id: Option<String>,
 }
 
+fn default_true() -> bool { true }
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NotifyWorktreeEvent {
     pub worktree_name: String,
     pub kind: String,
     pub body: Option<String>,
     pub agent: Option<String>,
+    /// トレイ通知として提示してよいか。`false` はフック由来通知を
+    /// `trayNotification: false` のワークツリーで抑制するケースのみ。
+    /// **イベント自体は drop しない**（自動承認が `notify-worktree` をトリガにしている）。
+    /// MCP ブロードキャスト経路の `from_str::<NotifyWorktreeEvent>` との後方互換のため
+    /// `default` が必須。
+    #[serde(default = "default_true")]
+    pub tray: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1239,6 +1248,10 @@ impl NotifyService {
             kind: kind.unwrap_or_else(|| "general".to_string()),
             body,
             agent: None,
+            // `notify_worktree` ツール経由の通知は意図的な呼び出しなので、`kind` の
+            // 明示有無・trayNotification にかかわらず常にトレイへ出す。
+            // トレイ通知をオフにしていてもユーザー判断を仰げる唯一の経路。
+            tray: true,
         };
         // 通知トーストを送ったかどうかにかかわらず、イベント発行の結果は必ず返す
         // （debounce で落ちても購読配送は成立しているため、"ok" だけ返すと嘘になる）。
@@ -3267,24 +3280,10 @@ fn resolve_artifact_worktree<'a>(
     }
 }
 
-/// ワークツリーの所属ワークグループを解決する。workgroup_id が未設定/不明な場合は
-/// 先頭グループにフォールバック（フロントの resolvedGroupId と同仕様）。
-fn resolve_workgroup<'a>(settings: &'a AppSettings, worktree: &WorktreeEntry) -> Option<&'a Workgroup> {
-    resolve_workgroup_by_id(settings, worktree.workgroup_id.as_deref())
-}
-
-/// `resolve_workgroup` の ID 版。ワークツリーの実体が既に settings から消えた後でも
-/// 所属グループを解決したい経路（`worktree.closed` の target 照合）で使う（#126）。
-pub fn resolve_workgroup_by_id<'a>(
-    settings: &'a AppSettings,
-    workgroup_id: Option<&str>,
-) -> Option<&'a Workgroup> {
-    workgroup_id
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .and_then(|id| settings.workgroups.iter().find(|g| g.id == id))
-        .or_else(|| settings.workgroups.first())
-}
+// ワークグループ解決は settings.rs が正（`resolve_tray_notification` など settings 側の
+// 解決ヘルパーと規則を1本化するため）。既存の呼び出し元（`lib.rs` の
+// `mcp_server::resolve_workgroup_by_id` を含む）を壊さないよう再エクスポートしている。
+pub use crate::settings::{resolve_workgroup, resolve_workgroup_by_id};
 
 /// ワークグループの表示名。UI と同じ規則で、name 未設定なら並び順から自動生成する
 /// （フロントの useWorkgroups.displayName / i18n `workgroup.autoName` と一致させる）。
@@ -3477,6 +3476,20 @@ async fn notify_handler(
         return StatusCode::OK;
     }
 
+    // トレイ通知の可否（#153）。フック由来（event 指定・kind 明示なし）かつ
+    // `resolve_tray_notification == false` のときだけ `tray: false` を載せる。
+    // **イベント自体は drop しない** —— `useAppAutoApproval.ts` / `SubWindowApp.vue` の
+    // 自動承認が `notify-worktree` をトリガにしているため、ここで落とすと
+    // トレイ通知をオフにしたワークツリーで自動承認が止まる。
+    let tray = if payload.kind.is_none() && payload.event.is_some() {
+        match worktree {
+            Some(w) => resolve_tray_notification(&settings, w),
+            None => true,
+        }
+    } else {
+        true
+    };
+
     // ライフサイクルフック由来（event 指定・kind 明示なし）の通知は、通知フックが1件も
     // 設定されていないリポジトリでは破棄する。プラグインは全ワークツリーで無条件有効化される
     // （SessionStart 注入用）ため、未設定リポジトリの通知挙動を従来（プラグイン無効=通知なし）
@@ -3506,12 +3519,14 @@ async fn notify_handler(
         kind,
         body: payload.body,
         agent: payload.agent,
+        tray,
     };
     // terminal_id は現状ログのみ（発火元タブの同定に使う）。購読機構 (#123 以降) で消費する。
     log::info!(
-        "[notify] worktree={} kind={} terminal={:?}",
+        "[notify] worktree={} kind={} tray={} terminal={:?}",
         event.worktree_name,
         event.kind,
+        event.tray,
         payload.terminal_id
     );
 
@@ -4582,6 +4597,29 @@ mod tests {
         assert!(!should_skip_subagent_notify(Some("cc"), None, None));
     }
 
+    /// MCP ブロードキャスト経路（`listen("notify-worktree")` → `from_str`）は `tray` を
+    /// 持たない旧ペイロードも受け取る。default で落とすと全通知が抑制扱いになる (#153)。
+    #[test]
+    fn test_notify_worktree_event_tray_defaults_to_true() {
+        let legacy = r#"{"worktree_name":"wt","kind":"hook","body":null,"agent":null}"#;
+        let event: NotifyWorktreeEvent = serde_json::from_str(legacy).unwrap();
+        assert!(event.tray);
+    }
+
+    #[test]
+    fn test_notify_worktree_event_tray_round_trip() {
+        let event = NotifyWorktreeEvent {
+            worktree_name: "wt".into(),
+            kind: "hook".into(),
+            body: None,
+            agent: None,
+            tray: false,
+        };
+        let restored: NotifyWorktreeEvent =
+            serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
+        assert!(!restored.tray);
+    }
+
     /// name 未設定のグループは UI 側 (useWorkgroups.displayName / i18n workgroup.autoName) が
     /// 並び順から「グループ(N)」を自動生成して表示する。MCP が生の name をそのまま返すと
     /// リネームしていない既定グループが null になり、レポートにグループが出せなくなる。
@@ -4707,6 +4745,7 @@ mod tests {
             description: None,
             description_open: None,
             workgroup_id: Some("wg-2".into()),
+            tray_notification: None,
             is_home: false,
             is_repository: false,
         }];
