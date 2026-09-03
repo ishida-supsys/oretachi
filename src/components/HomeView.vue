@@ -514,7 +514,6 @@ watch(
               @focus-sub-window="emit('focusSubWindow', $event)"
               @set-hotkey-char="emit('setHotkeyChar', $event)"
               @toggle-auto-approval="emit('toggleAutoApproval', $event)"
-        @toggle-tray-notification="emit('toggleTrayNotification', $event)"
               @toggle-tray-notification="emit('toggleTrayNotification', $event)"
               @cancel-ai-judging="emit('cancelAiJudging', $event)"
               @cancel-remove="emit('cancelRemove', $event)"
@@ -555,6 +554,7 @@ watch(
         @focus-sub-window="emit('focusSubWindow', $event)"
         @set-hotkey-char="emit('setHotkeyChar', $event)"
         @toggle-auto-approval="emit('toggleAutoApproval', $event)"
+        @toggle-tray-notification="emit('toggleTrayNotification', $event)"
         @remove-repository="emit('removeRepository', $event)"
       />
     </template>
