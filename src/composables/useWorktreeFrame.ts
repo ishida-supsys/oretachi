@@ -80,8 +80,9 @@ export function useWorktreeFrame(options: {
     if (options.onAfterSwitch) {
       await options.onAfterSwitch(leafId, terminalId);
     }
+    // await しない: 投入は PTY の ready 待ちを含むためタブ切り替えをブロックさせない
     if (options.onTerminalActivated) {
-      await options.onTerminalActivated(terminalId);
+      void options.onTerminalActivated(terminalId);
     }
   }
 

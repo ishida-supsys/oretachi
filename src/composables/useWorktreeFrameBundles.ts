@@ -28,6 +28,8 @@ export function useWorktreeFrameBundles(options: {
   clearNotification: (worktreeId: string) => void;
   /** タブが初めてアクティブ表示されたときの処理（AI セッション resume 投入 / #157） */
   onTerminalActivated?: (terminalId: number) => void | Promise<void>;
+  /** タブが閉じられたときに App.vue 側だけが持つ terminalId 単位の状態を掃除する */
+  onTerminalCleanup?: (terminalId: number) => void;
 }) {
   const {
     worktrees,
@@ -58,6 +60,7 @@ export function useWorktreeFrameBundles(options: {
         terminalAgentStatus.delete(terminalId);
         terminalWebSessions.delete(terminalId);
         terminalAiSessions.delete(terminalId);
+        options.onTerminalCleanup?.(terminalId);
         removeTerminal(worktreeId, terminalId);
       },
       onTerminalActivated: (terminalId) => options.onTerminalActivated?.(terminalId),
@@ -127,7 +130,7 @@ export function useWorktreeFrameBundles(options: {
           if (term) {
             await term.handleTabActivated();
             term.focus();
-            await options.onTerminalActivated?.(leaf.activeTerminalId);
+            void options.onTerminalActivated?.(leaf.activeTerminalId);
           }
         }
       }

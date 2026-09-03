@@ -218,6 +218,7 @@ const {
   removeTerminal,
   clearNotification,
   onTerminalActivated: (terminalId) => maybeInjectAiResume(terminalId),
+  onTerminalCleanup: (terminalId) => pendingAiRestore.delete(terminalId),
 });
 
 const { setup: setupCodeReviewChatListener } = useCodeReviewChatListener({
@@ -309,13 +310,14 @@ async function maybeInjectAiResume(terminalId: number) {
  * プロンプトを流し込む」分岐に使っている（`useCodeReviewLineChat` の投入先選択も同じ）。
  * 未投入の復元タブは素のシェルなので、ここで立てるとタスクのプロンプトがシェルに
  * そのまま貼られる。タブのインジケータ表示は `terminalAiSessions` 側で賄う。
+ *
+ * マーカーは resume 非対応の種別（gemini / cline）でも積む。投入はしないが、
+ * ポーラーの非検出でインジケータが消えるのをタブを開くまで防ぐため。
  */
 function registerRestoredAiSession(terminalId: number, info: import("./types/terminal").AiSessionInfo | undefined) {
   if (!info) return;
   terminalAiSessions.set(terminalId, info);
-  if (buildResumeCommand(info.agentType, info.sessionId)) {
-    pendingAiRestore.set(terminalId, info);
-  }
+  pendingAiRestore.set(terminalId, info);
 }
 // 新規追加ターミナル: autoStart を抑制して reparenting 後に手動 startPty するための ID セット
 const pendingManualStart = new Set<number>();
@@ -671,7 +673,8 @@ async function switchToTerminal(terminalId: number) {
       await term.handleTabActivated();
       logDebug(`[Terminal] switchToTerminal after handleTabActivated terminalId=${terminalId}`);
       term.focus();
-      await maybeInjectAiResume(terminalId);
+      // await しない: 未 ready タブでは最大 5 秒ブロックし、直後の再 fit 登録がずれる
+      void maybeInjectAiResume(terminalId);
       // 安全策: flexレイアウト確定が遅延する場合に備えた再fit
       setTimeout(() => {
         logDebug(`[Terminal] switchToTerminal setTimeout re-fit terminalId=${terminalId}`);
@@ -914,6 +917,7 @@ async function onRemoveRepository(repositoryId: string) {
     terminalWebSessions.delete(terminal.id);
     thumbnailUrls.delete(terminal.id);
     pendingByTerminal.delete(terminal.id);
+    pendingAiRestore.delete(terminal.id);
     readyTerminals.delete(terminal.id);
   }
   worktree?.terminals.splice(0);
@@ -1201,7 +1205,7 @@ async function onMoveToMainWindow(worktreeId: string) {
     // 保存で undefined に上書きされて永久に失われる。
     if (t.aiSession) {
       terminalAiSessions.set(t.id, t.aiSession);
-      if (t.resumePending && buildResumeCommand(t.aiSession.agentType, t.aiSession.sessionId)) {
+      if (t.resumePending) {
         pendingAiRestore.set(t.id, t.aiSession);
       }
     }

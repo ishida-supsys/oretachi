@@ -6,8 +6,14 @@
  * 別のコマンドとして解釈されうる）。
  */
 
-/** `--resume` へ渡してよい session ID か（英数字とハイフンのみ / 1〜64 文字）。 */
+/**
+ * `--resume` へ渡してよい session ID か（英数字とハイフンのみ / 1〜64 文字）。
+ *
+ * 値の出所はディスク上の JSON なので型注釈は当てにならない。`RegExp.test` は
+ * 引数を文字列化するため、`undefined` を渡すと `"undefined"` が通ってしまう。
+ */
 export function isSafeSessionId(sessionId: string): boolean {
+  if (typeof sessionId !== "string") return false;
   return /^[A-Za-z0-9-]{1,64}$/.test(sessionId);
 }
 

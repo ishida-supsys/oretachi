@@ -12,6 +12,12 @@ describe("isSafeSessionId", () => {
     expect(isSafeSessionId("a".repeat(65))).toBe(false);
   });
 
+  it("文字列でない値を弾く（JSON 由来で型注釈が当てにならない）", () => {
+    expect(isSafeSessionId(undefined as unknown as string)).toBe(false);
+    expect(isSafeSessionId(null as unknown as string)).toBe(false);
+    expect(isSafeSessionId(123 as unknown as string)).toBe(false);
+  });
+
   it("シェルのメタ文字を弾く", () => {
     expect(isSafeSessionId("abc; rm -rf /")).toBe(false);
     expect(isSafeSessionId("abc$(id)")).toBe(false);
@@ -40,6 +46,7 @@ describe("buildResumeCommand", () => {
   });
 
   it("不正な sessionId は null", () => {
+    expect(buildResumeCommand("claude", undefined as unknown as string)).toBeNull();
     expect(buildResumeCommand("claude", "")).toBeNull();
     expect(buildResumeCommand("claude", "abc; rm -rf /")).toBeNull();
     expect(buildResumeCommand("codex", "a".repeat(65))).toBeNull();
