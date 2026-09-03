@@ -1271,8 +1271,9 @@ impl NotifyService {
             kind: kind.unwrap_or_else(|| "general".to_string()),
             body,
             agent: None,
-            // `notify_worktree` ツール（kind 明示の意図的な通知）は trayNotification に
-            // かかわらず常にトレイへ出す。オフでもユーザー判断を仰げる唯一の経路。
+            // `notify_worktree` ツール経由の通知は意図的な呼び出しなので、`kind` の
+            // 明示有無・trayNotification にかかわらず常にトレイへ出す。
+            // トレイ通知をオフにしていてもユーザー判断を仰げる唯一の経路。
             tray: true,
         };
         // 通知トーストを送ったかどうかにかかわらず、イベント発行の結果は必ず返す
@@ -3357,24 +3358,10 @@ fn resolve_artifact_worktree<'a>(
     }
 }
 
-/// ワークツリーの所属ワークグループを解決する。workgroup_id が未設定/不明な場合は
-/// 先頭グループにフォールバック（フロントの resolvedGroupId と同仕様）。
-fn resolve_workgroup<'a>(settings: &'a AppSettings, worktree: &WorktreeEntry) -> Option<&'a Workgroup> {
-    resolve_workgroup_by_id(settings, worktree.workgroup_id.as_deref())
-}
-
-/// `resolve_workgroup` の ID 版。ワークツリーの実体が既に settings から消えた後でも
-/// 所属グループを解決したい経路（`worktree.closed` の target 照合）で使う（#126）。
-pub fn resolve_workgroup_by_id<'a>(
-    settings: &'a AppSettings,
-    workgroup_id: Option<&str>,
-) -> Option<&'a Workgroup> {
-    workgroup_id
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .and_then(|id| settings.workgroups.iter().find(|g| g.id == id))
-        .or_else(|| settings.workgroups.first())
-}
+// ワークグループ解決は settings.rs が正（`resolve_tray_notification` など settings 側の
+// 解決ヘルパーと規則を1本化するため）。既存の呼び出し元（`lib.rs` の
+// `mcp_server::resolve_workgroup_by_id` を含む）を壊さないよう再エクスポートしている。
+pub use crate::settings::{resolve_workgroup, resolve_workgroup_by_id};
 
 /// ワークグループの表示名。UI と同じ規則で、name 未設定なら並び順から自動生成する
 /// （フロントの useWorkgroups.displayName / i18n `workgroup.autoName` と一致させる）。

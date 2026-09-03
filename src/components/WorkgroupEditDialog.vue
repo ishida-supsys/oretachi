@@ -29,6 +29,7 @@ const MODES: ClaudeCodeMode[] = ["plan", "manual", "acceptEdit", "auto"];
 const name = ref(props.group.name ?? "");
 const color = ref<string | null>(props.group.color ?? null);
 const autoAssignHotkey = ref(props.group.autoAssignHotkey ?? false);
+const autoReturnHomeAfterTask = ref(props.group.autoReturnHomeAfterTask ?? false);
 const taskAddAgent = ref<AiAgentKind | "">(props.group.taskAddAgent ?? "");
 const claudeCodeMode = ref<ClaudeCodeMode>(props.group.claudeCodeMode ?? "plan");
 const execPrompt = ref(props.group.execPrompt ?? "");
@@ -41,6 +42,7 @@ function save() {
     name: name.value.trim() || undefined,
     color: color.value ?? undefined,
     autoAssignHotkey: autoAssignHotkey.value,
+    autoReturnHomeAfterTask: autoReturnHomeAfterTask.value,
     taskAddAgent: taskAddAgent.value || undefined,
     claudeCodeMode: claudeCodeMode.value,
     execPrompt: execPrompt.value.trim() || undefined,
@@ -83,6 +85,14 @@ function save() {
           <input v-model="autoAssignHotkey" type="checkbox" />
           {{ t('autoAssignHotkey') }}
         </label>
+      </div>
+
+      <div class="field checkbox-field">
+        <label class="checkbox-label">
+          <input v-model="autoReturnHomeAfterTask" type="checkbox" />
+          {{ t('autoReturnHomeAfterTask') }}
+        </label>
+        <p class="hint">{{ t('autoReturnHomeAfterTaskHint') }}</p>
       </div>
 
       <div class="field">
@@ -343,6 +353,8 @@ function save() {
     "color": "Color",
     "noColor": "No color",
     "autoAssignHotkey": "Auto-assign hotkeys",
+    "autoReturnHomeAfterTask": "Return to Home after task",
+    "autoReturnHomeAfterTaskHint": "5 seconds after a task finishes, switch back to the Home tab. Only when the main window is unfocused; cancelled if you focus it.",
     "taskAddAgent": "Task execution agent",
     "notSet": "Not set (use global)",
     "claudeCodeMode": "Claude Code mode",
@@ -365,6 +377,8 @@ function save() {
     "color": "色",
     "noColor": "無色",
     "autoAssignHotkey": "ホットキー自動割り当て",
+    "autoReturnHomeAfterTask": "タスク完了後にホームへ復帰",
+    "autoReturnHomeAfterTaskHint": "タスク完了の5秒後にホームタブへ戻ります。メインウィンドウが非フォーカスのときのみ動作し、フォーカスするとキャンセルされます。",
     "taskAddAgent": "タスク実行エージェント",
     "notSet": "未設定（全体設定を使用）",
     "claudeCodeMode": "Claude Code モード",
