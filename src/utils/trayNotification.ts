@@ -24,8 +24,11 @@ export function resolveTrayNotification(
   worktree: Pick<WorktreeEntry, "trayNotification" | "workgroupId">,
   groupOf: GroupResolver,
 ): boolean {
-  if (worktree.trayNotification !== undefined) return worktree.trayNotification;
-  return groupOf(worktree)?.trayNotification ?? true;
+  // `??` で繋ぐこと。settings.rs の Option フィールドには skip_serializing_if が無いため、
+  // get_settings は未設定を `undefined` ではなく **`null`** で返す（既存 settings.json の
+  // `"autoApproval": null` と同じ形）。`!== undefined` で判定すると null を
+  // 「個別に設定済み」と誤認し、ワークグループ既定値へ落ちなくなる。
+  return worktree.trayNotification ?? groupOf(worktree)?.trayNotification ?? true;
 }
 
 /** settings 全体から Map<worktreeId, 実効値> を組み立てる。 */

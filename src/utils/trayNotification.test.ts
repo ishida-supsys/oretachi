@@ -42,6 +42,16 @@ describe("resolveTrayNotification", () => {
     expect(resolveTrayNotification({ workgroupId: "no-such-group" }, groupOf)).toBe(false);
   });
 
+  // settings.rs の Option フィールドには skip_serializing_if が無いため、get_settings は
+  // 未設定を undefined ではなく null で返す（既存 settings.json の "autoApproval": null と同じ形）。
+  // 型上は boolean | undefined なので type-check では拾えない。
+  it("Rust 由来の null は未設定として扱う", () => {
+    const nulled = { trayNotification: null } as unknown as Partial<WorktreeEntry>;
+    expect(resolveTrayNotification(nulled, groupOf)).toBe(false); // 先頭グループの false へ落ちる
+    expect(resolveTrayNotification({ ...nulled, workgroupId: "g-on" }, groupOf)).toBe(true);
+    expect(resolveTrayNotification({ ...nulled, workgroupId: "g-unset" }, groupOf)).toBe(true);
+  });
+
   it("引き当てたグループが未設定なら true", () => {
     expect(resolveTrayNotification({ workgroupId: "g-unset" }, groupOf)).toBe(true);
     // グループが 1 つも無い（先頭グループも取れない）ケース
