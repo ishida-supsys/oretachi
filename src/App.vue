@@ -73,6 +73,7 @@ import type { SpawnTerminalRequest } from "./types/event";
 import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { cancelApproval } from "./utils/autoApproval";
+import { buildTrayNotificationMap } from "./utils/trayNotification";
 import { useUpdater } from "./composables/useUpdater";
 import Toast from "primevue/toast";
 import Popover from "primevue/popover";
@@ -454,7 +455,21 @@ const {
 } = useRemoveWorktreeDialog(worktreeRemoveCore);
 
 // ワークグループ
-const { activeWorkgroupId, cycleWorkgroup, resolvedGroupId, deleteWorkgroupRecord, displayName: workgroupDisplayName } = useWorkgroups();
+const { activeWorkgroupId, cycleWorkgroup, resolvedGroupId, groupOf, deleteWorkgroupRecord, displayName: workgroupDisplayName } = useWorkgroups();
+
+// トレイ通知の実効値（worktree > workgroup > true）。値をコピーせず参照時に解決するため、
+// ワークグループ既定値を変えると個別未設定のワークツリーへ再起動なしで反映される。
+// グループの引き当ては useWorkgroups.groupOf（未設定/不明なら先頭グループ）に委ねて
+// Rust の settings::resolve_workgroup と規則を揃える。
+const trayNotificationMap = computed(() => buildTrayNotificationMap(settings.value, groupOf));
+
+function onToggleTrayNotification(worktreeId: string) {
+  const entry = settings.value.worktrees.find((w) => w.id === worktreeId);
+  if (!entry) return;
+  // 実効値の反転を個別設定として明示的に書く（3値 UI にはしない）
+  entry.trayNotification = !(trayNotificationMap.value.get(worktreeId) ?? true);
+  scheduleSave();
+}
 
 // タスク追加ダイアログ用: 現在表示中グループのタスク実行エージェント（リモート実行チェックボックスの出し分け）
 const activeTaskExecAgent = computed(() => {
@@ -2290,6 +2305,7 @@ onMounted(async () => {
         :loading-worktrees="loadingWorktrees"
         :cancellable-worktrees="cancellableWorktrees"
         :auto-approvals="autoApprovalMap"
+        :tray-notifications="trayNotificationMap"
         :ai-judging-worktrees="aiJudgingWorktrees"
         :card-tooltips="worktreeCardTooltips"
         :description-opens="descriptionOpenMap"
@@ -2306,6 +2322,7 @@ onMounted(async () => {
         @focus-all-sub-windows="onFocusAllSubWindows"
         @set-hotkey-char="onSetHotkeyChar"
         @toggle-auto-approval="onToggleAutoApproval"
+        @toggle-tray-notification="onToggleTrayNotification"
         @cancel-ai-judging="onCancelAiJudging"
         @cancel-remove="cancelWorktreeRemove"
         @duplicate-worktree="onDuplicateWorktree"
