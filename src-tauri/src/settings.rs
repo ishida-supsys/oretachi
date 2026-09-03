@@ -54,6 +54,10 @@ pub struct WorktreeEntry {
     pub description_open: Option<bool>,
     #[serde(default, rename = "workgroupId")]
     pub workgroup_id: Option<String>,
+    /// フック由来通知をトレイ通知として出すか。`None` = 未設定（ワークグループ既定値へフォールバック）。
+    /// 解決は `resolve_tray_notification` を参照。
+    #[serde(default, rename = "trayNotification")]
+    pub tray_notification: Option<bool>,
     /// ホームワークツリー（ワークツリー追加先ディレクトリを作業ディレクトリとする擬似ワークツリー）。
     /// git ワークツリーではないため merge / branch 削除 / worktree remove は通さない。
     #[serde(default, rename = "isHome")]
@@ -83,6 +87,24 @@ pub struct Workgroup {
     /// Claude Code セッションに常時注入するプロンプト（SessionStart フック経由。/clear 後も維持）
     #[serde(default)]
     pub system_prompt: Option<String>,
+    /// このグループに属するワークツリーのトレイ通知既定値。`None` = 未設定（`true` 扱い）。
+    #[serde(default)]
+    pub tray_notification: Option<bool>,
+}
+
+/// フック由来通知をトレイ通知として出すか。worktree > workgroup > true で解決する。
+///
+/// 新規ワークツリー作成時に値をコピーせず、参照時に毎回解決する。`None` = 未設定 =
+/// 従来どおり通知（既存 settings.json との後方互換）。
+pub fn resolve_tray_notification(settings: &AppSettings, worktree: &WorktreeEntry) -> bool {
+    worktree
+        .tray_notification
+        .or_else(|| {
+            worktree.workgroup_id.as_ref().and_then(|gid| {
+                settings.workgroups.iter().find(|g| &g.id == gid)?.tray_notification
+            })
+        })
+        .unwrap_or(true)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -859,6 +881,98 @@ mod tests {
         assert!(entry.is_home);
         let restored: WorktreeEntry = serde_json::from_str(&serde_json::to_string(&entry).unwrap()).unwrap();
         assert!(restored.is_home);
+    }
+
+    // ─── trayNotification (#153) ──────────────────────────────────────────
+
+    fn tray_worktree(tray: Option<bool>, workgroup_id: Option<&str>) -> WorktreeEntry {
+        let json = r#"{
+            "id": "1", "name": "wt", "repositoryId": "r", "repositoryName": "repo",
+            "path": "/path", "branchName": "main"
+        }"#;
+        let mut entry: WorktreeEntry = serde_json::from_str(json).unwrap();
+        entry.tray_notification = tray;
+        entry.workgroup_id = workgroup_id.map(str::to_string);
+        entry
+    }
+
+    fn tray_settings(worktree: WorktreeEntry, groups: &[(&str, Option<bool>)]) -> AppSettings {
+        let mut settings = AppSettings::default();
+        settings.worktrees = vec![worktree];
+        settings.workgroups = groups
+            .iter()
+            .map(|(id, tray)| Workgroup {
+                id: id.to_string(),
+                tray_notification: *tray,
+                ..Default::default()
+            })
+            .collect();
+        settings
+    }
+
+    /// 未設定の既存 settings.json は従来どおり通知される（後方互換）。
+    #[test]
+    fn test_tray_notification_defaults_to_true() {
+        let json = r#"{
+            "id": "1", "name": "wt", "repositoryId": "r", "repositoryName": "repo",
+            "path": "/path", "branchName": "main"
+        }"#;
+        let entry: WorktreeEntry = serde_json::from_str(json).unwrap();
+        assert_eq!(entry.tray_notification, None);
+        let settings = tray_settings(entry.clone(), &[]);
+        assert!(resolve_tray_notification(&settings, &entry));
+    }
+
+    #[test]
+    fn test_tray_notification_round_trip() {
+        for value in [true, false] {
+            let entry = tray_worktree(Some(value), None);
+            let raw = serde_json::to_string(&entry).unwrap();
+            assert!(raw.contains("\"trayNotification\""), "camelCase で永続化される: {}", raw);
+            let restored: WorktreeEntry = serde_json::from_str(&raw).unwrap();
+            assert_eq!(restored.tray_notification, Some(value));
+        }
+    }
+
+    #[test]
+    fn test_workgroup_tray_notification_round_trip() {
+        let group = Workgroup { id: "g".into(), tray_notification: Some(false), ..Default::default() };
+        let raw = serde_json::to_string(&group).unwrap();
+        let restored: Workgroup = serde_json::from_str(&raw).unwrap();
+        assert_eq!(restored.tray_notification, Some(false));
+    }
+
+    /// ワークツリー個別値がワークグループ既定値より優先される。
+    #[test]
+    fn test_resolve_tray_notification_worktree_overrides_workgroup() {
+        let entry = tray_worktree(Some(true), Some("g"));
+        let settings = tray_settings(entry.clone(), &[("g", Some(false))]);
+        assert!(resolve_tray_notification(&settings, &entry));
+
+        let entry = tray_worktree(Some(false), Some("g"));
+        let settings = tray_settings(entry.clone(), &[("g", Some(true))]);
+        assert!(!resolve_tray_notification(&settings, &entry));
+    }
+
+    /// ワークツリー未設定ならワークグループ既定値へフォールバックする。
+    #[test]
+    fn test_resolve_tray_notification_falls_back_to_workgroup() {
+        let entry = tray_worktree(None, Some("g"));
+        let settings = tray_settings(entry.clone(), &[("g", Some(false))]);
+        assert!(!resolve_tray_notification(&settings, &entry));
+    }
+
+    /// ワークツリー・ワークグループともに未設定、または所属グループが見つからない場合は true。
+    #[test]
+    fn test_resolve_tray_notification_falls_back_to_true() {
+        let entry = tray_worktree(None, Some("g"));
+        let settings = tray_settings(entry.clone(), &[("g", None)]);
+        assert!(resolve_tray_notification(&settings, &entry));
+
+        // 参照先グループが存在しない（削除済み）ケース
+        let entry = tray_worktree(None, Some("missing"));
+        let settings = tray_settings(entry.clone(), &[("g", Some(false))]);
+        assert!(resolve_tray_notification(&settings, &entry));
     }
 
     #[test]

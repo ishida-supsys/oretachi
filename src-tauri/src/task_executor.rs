@@ -385,6 +385,7 @@ mod tests {
             description: None,
             description_open: None,
             workgroup_id: None,
+            tray_notification: None,
             is_home: false,
             is_repository: false,
         }
