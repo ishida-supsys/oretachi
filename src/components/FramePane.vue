@@ -271,7 +271,7 @@ function overlayStyle(zone: DropZone): Record<string, string> {
             {{ terminalUnread.get(tid) }}
           </span>
           <span
-            v-if="terminalAgentStatus?.get(tid)"
+            v-if="terminalAgentStatus?.get(tid) || terminalAiSessions?.get(tid)"
             class="pi pi-microchip text-[10px] text-[#a6e3a1] shrink-0"
             title="AI Agent"
           />
