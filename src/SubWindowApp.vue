@@ -258,8 +258,16 @@ useHotkeyListener(() => {
 });
 
 // Alt+[char] を受けてメインに委譲（自分自身の hotkeyChar は無視）
+// 未割り当ての Alt+英数字は preventDefault せずターミナル(PTY)へ透過させる。
+// これを奪うと Claude Code の Alt+V(画像添付)などがサブウィンドウで効かなくなる (#150)。
+// メインウィンドウ側 (useAppHotkeys.ts) と同じガード条件に揃えている。
 useAltCharKeyListener((char, event) => {
   if (char === hotkeyChar.value?.toLowerCase()) return;
+  // homeTab は useHotkeyListener 側で処理されるのでここでは触らない
+  const homeTab = settings.value.hotkeys?.homeTab;
+  if (homeTab?.alt && homeTab.key.length === 1 && homeTab.key.toLowerCase() === char) return;
+  const hasTarget = settings.value.worktrees.some((w) => w.hotkeyChar === char);
+  if (!hasTarget) return;
   event.preventDefault();
   event.stopPropagation();
   emitTo("main", "sub-alt-char-focus", { char });
