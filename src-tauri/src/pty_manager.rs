@@ -414,6 +414,9 @@ impl PtyManagerCore {
             let mut last_bytes: HashMap<u32, u64> = HashMap::new();
             // 直前の tick でプロセス列挙に失敗したか（ログを溢れさせないための抑止）
             let mut scan_failed_before = false;
+            // codex の session ID 解決結果を PID 単位でキャッシュする（#157）。
+            // 解決には ~/.codex/sessions の走査が要るので毎 tick は回さない。
+            let mut codex_cache = crate::codex_session::CodexSessionCache::default();
             loop {
                 std::thread::sleep(std::time::Duration::from_secs(10));
 
@@ -422,7 +425,7 @@ impl PtyManagerCore {
                 }
 
                 // セッション情報を取得（terminal_id と出力量も一緒に拾う）
-                let session_pids: Vec<(u32, Option<u32>, String, u64)> = {
+                let session_pids: Vec<(u32, Option<u32>, String, u64, Option<String>)> = {
                     let mut sessions = match sessions_arc.lock() {
                         Ok(s) => s,
                         Err(_) => continue,
@@ -436,6 +439,7 @@ impl PtyManagerCore {
                                 s.child_pid,
                                 s.terminal_id.clone(),
                                 s.total_bytes_written.load(std::sync::atomic::Ordering::Relaxed),
+                                s.cwd.clone(),
                             )
                         })
                         .collect()
@@ -446,7 +450,7 @@ impl PtyManagerCore {
                 // 一瞬の再起動で orphaned へフラップさせないよう、あえて除外しない。
                 crate::event_delivery::reconcile_live_terminals(
                     &app_handle,
-                    session_pids.iter().map(|(_, _, tid, _)| tid.clone()).collect(),
+                    session_pids.iter().map(|(_, _, tid, _, _)| tid.clone()).collect(),
                 );
 
                 if session_pids.is_empty() {
@@ -490,7 +494,8 @@ impl PtyManagerCore {
                     Vec::new();
                 let sampled_at = now_ms();
 
-                for (session_id, child_pid, terminal_id, bytes) in session_pids {
+                let mut live_agent_pids: std::collections::HashSet<u32> = std::collections::HashSet::new();
+                for (session_id, child_pid, terminal_id, bytes, cwd) in session_pids {
                     let (is_agent, info, claude_status) = if let Some(pid) = child_pid {
                         match find_ai_agent_in_subtree(pid, &children_map, AGENT_SEARCH_DEPTH) {
                             Some((agent_name, agent_pid)) => {
@@ -506,10 +511,17 @@ impl PtyManagerCore {
                                 } else {
                                     None
                                 };
-                                let (sid, status) = match file {
+                                let (mut sid, status) = match file {
                                     Some(f) => (f.session_id, f.status),
                                     None => (None, None),
                                 };
+                                // codex は PID 起点のセッションファイルを持たないので、
+                                // rollout ファイルから消去法で辿る (#157)。status は
+                                // 相変わらず取れないので busy/idle 判定は None のまま。
+                                if agent_name == "codex" {
+                                    live_agent_pids.insert(agent_pid);
+                                    sid = codex_cache.resolve(agent_pid, cwd.as_deref(), sampled_at);
+                                }
                                 (
                                     true,
                                     AiAgentInfo {
@@ -539,6 +551,8 @@ impl PtyManagerCore {
                     current_status.insert(session_id, (is_agent, session_id_val));
                     new_infos.push((session_id, is_agent, info, claude_status, quiescent, terminal_id));
                 }
+
+                codex_cache.retain_live(&live_agent_pids);
 
                 // 内部状態を更新。
                 // exited セッション（EXITED_SESSION_TTL の間 map に残る死体）は子プロセスが

@@ -5,6 +5,7 @@ mod ai_provider;
 mod archive_db;
 mod artifact_url;
 mod claude_plugin;
+mod codex_session;
 mod claude_plugin_skills;
 mod event_db;
 mod event_delivery;
