@@ -6,6 +6,7 @@ import type { TerminalForApproval } from "../utils/autoApproval";
 import type { Ref } from "vue";
 import type { Worktree } from "../types/worktree";
 import type { AppSettings } from "../types/settings";
+import { isTraySuppressed } from "./useNotifications";
 import type { NotificationKind } from "./useNotifications";
 import type TerminalView from "../components/TerminalView.vue";
 
@@ -115,7 +116,7 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
       if (loopResult.lastCommand) {
         deps.lastJudgedCommandMap.set(wt.id, loopResult.lastCommand);
       }
-      if (!loopResult.approved && !deps.isWorktreeFocused(wt.id)) {
+      if (!loopResult.approved && !deps.isWorktreeFocused(wt.id) && !isTraySuppressed(wt.id)) {
         logDebug(`[AutoApproval] local: not approved → addNotification(${wt.id})`);
         deps.addNotification(wt.id, "approval");
         deps.playSoundForKind("approval");
@@ -134,7 +135,7 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
         if (command) {
           deps.lastJudgedCommandMap.set(wid, command);
         }
-        if (!approved && !deps.isWorktreeFocused(wid)) {
+        if (!approved && !deps.isWorktreeFocused(wid) && !isTraySuppressed(wid)) {
           deps.addNotification(wid, "approval");
           deps.playSoundForKind("approval");
           const wtName = deps.worktrees.value.find((w) => w.id === wid)?.name;
