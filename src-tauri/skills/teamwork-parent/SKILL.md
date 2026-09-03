@@ -47,6 +47,7 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_ore
 ## Step 4: 完了判定
 
 全sub-issueが`done`になったら:
+- `oretachi_set_tray_notification(project_dir: <自分の作業ディレクトリ絶対パス>)`を`enabled`省略で呼び、トレイ通知を「未設定」へ戻す(ワークツリーは完了後も残って再利用されうるため、オフのまま放置しない)。
 - ユーザーに完了を報告し、作業を停止する。
 - **このワークツリー自身が誰かのsub-issueである場合**(teamwork-childの義務を負っている場合)は、続けて`teamwork-child`スキルの完了報告手順(親issueへの報告 → `oretachi_close_worktree`の承認)に従う。
 

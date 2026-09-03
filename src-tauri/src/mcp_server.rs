@@ -4952,6 +4952,60 @@ mod tests {
         );
     }
 
+    /// 「未設定へ戻す」は `trayNotification: null` としてフロントへ渡る。
+    /// キーごと落とすと App.vue 側で「変更なし」と区別が付かないため、
+    /// `skip_serializing_if` を足さないことをテストで固定する。
+    #[test]
+    fn set_tray_notification_event_serializes_inherit_as_null() {
+        let ev = SetTrayNotificationEvent {
+            worktree: "wt".into(),
+            worktree_id: "id".into(),
+            tray_notification: None,
+        };
+        let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["trayNotification"], serde_json::Value::Null);
+        assert_eq!(v["worktreeId"], "id");
+
+        let ev = SetTrayNotificationEvent { tray_notification: Some(false), ..ev };
+        let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
+        assert_eq!(v["trayNotification"], serde_json::Value::Bool(false));
+    }
+
+    /// 変更後の実効値は「値をコピーせず毎回解決する」規則を守り、
+    /// 新しい値を載せた probe を `resolve_tray_notification` に通して求める。
+    #[test]
+    fn set_tray_notification_new_effective_falls_back_to_workgroup() {
+        let mut settings = AppSettings::default();
+        settings.workgroups.push(Workgroup {
+            id: "g".into(),
+            tray_notification: Some(false),
+            ..Default::default()
+        });
+        let wt = WorktreeEntry {
+            id: "wt-1".into(),
+            name: "oretachi-abcd".into(),
+            repository_id: "r-1".into(),
+            repository_name: "OreTachi".into(),
+            path: "X:/wt".into(),
+            branch_name: "feature/x".into(),
+            hotkey_char: None,
+            auto_approval: None,
+            auto_approval_prompt: None,
+            description: None,
+            description_open: None,
+            workgroup_id: Some("g".into()),
+            tray_notification: Some(true),
+            is_home: false,
+            is_repository: false,
+        };
+        assert!(resolve_tray_notification(&settings, &wt));
+
+        // enabled 省略 (= None) で未設定へ戻すと、ワークグループ既定値へ落ちる
+        let mut probe = wt.clone();
+        probe.tray_notification = None;
+        assert!(!resolve_tray_notification(&settings, &probe));
+    }
+
     /// Claude Code は plan モードで `readOnlyHint` が立っていない MCP ツールを
     /// permissions.allow に関わらず一律 ask にする。ここで advertise 内容を固定しておく。
     #[test]

@@ -1529,10 +1529,14 @@ onMounted(async () => {
     "set-worktree-tray-notification",
     (event) => {
       const { worktree, worktreeId, trayNotification } = event.payload;
-      const entry =
-        settings.value.worktrees.find((w) => w.id === worktreeId) ??
-        settings.value.worktrees.find((w) => w.name === worktree);
-      if (!entry) return;
+      // 同定は id のみ（name フォールバックは同名ワークツリーで別エントリを
+      // 書き換えうる）。worktreeId は Rust が読んだ settings.json 由来なので
+      // 通常必ず一致し、外れるのは削除直後のレースだけ。
+      const entry = settings.value.worktrees.find((w) => w.id === worktreeId);
+      if (!entry) {
+        logDebug(`[TrayNotification] worktree not found: ${worktree} (${worktreeId})`);
+        return;
+      }
       // null / undefined は「未設定に戻す」= ワークグループ既定値へフォールバック。
       // キー自体を消して save 時に JSON から落とす（Rust 側の None と一致させる）。
       if (trayNotification === null || trayNotification === undefined) {

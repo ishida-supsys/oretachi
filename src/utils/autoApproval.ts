@@ -61,6 +61,7 @@ export const ORETACHI_AUTO_APPROVE_TOOLS = [
   "search_artifact",
   "notify_worktree",
   "oretachi_set_description",
+  "oretachi_set_tray_notification",
   "oretachi_get_worktree_status",
   "oretachi_get_app_options",
   "oretachi_show_worktree",
