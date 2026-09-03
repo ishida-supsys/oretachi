@@ -19,6 +19,15 @@ export interface SubTerminalEntry {
   isAiAgent?: boolean;
 }
 
+/**
+ * サブ→メイン復帰時に `sub-get-layout` が返すターミナル情報。
+ * `aiSession` / `resumePending` は復元タブの resume 引き継ぎ用 (#157)。
+ */
+export interface SubWindowLayoutTerminal extends SubTerminalEntry {
+  aiSession?: AiSessionInfo;
+  resumePending?: boolean;
+}
+
 /** トレイポップアップ用ターミナルエントリ（PTYサイズ情報付き） */
 export interface TrayTerminalEntry extends SubTerminalEntry {
   rows: number;

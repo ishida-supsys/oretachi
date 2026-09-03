@@ -2,7 +2,7 @@ import { reactive } from "vue";
 import { listen } from "@tauri-apps/api/event";
 import type { Ref } from "vue";
 import type { Worktree } from "../types/worktree";
-import type { SubTerminalEntry, WebSessionInfo } from "../types/terminal";
+import type { SubWindowLayoutTerminal, WebSessionInfo } from "../types/terminal";
 import type { SubLayoutResponse } from "./useSubWindows";
 
 interface UseSubWindowEventsDeps {
@@ -25,7 +25,7 @@ export function useSubWindowEvents(deps: UseSubWindowEventsDeps) {
     const payload = await deps.requestSubWindowLayout(worktreeId);
     return {
       layout: payload?.layout ?? null,
-      terminals: (payload?.terminals ?? []) as SubTerminalEntry[],
+      terminals: (payload?.terminals ?? []) as SubWindowLayoutTerminal[],
     };
   }
 

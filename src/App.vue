@@ -252,16 +252,17 @@ const pendingByTerminal = new Map<number, string>();
 // 記録しておき、waitForTerminalReady 側で即時 resolve できるようにする。
 const readyTerminals = new Set<number>();
 const terminalReadyResolvers = new Map<number, () => void>();
-function waitForTerminalReady(terminalId: number, timeoutMs = 5000): Promise<void> {
-  if (readyTerminals.has(terminalId)) return Promise.resolve();
+/** ready になったら true、timeoutMs を過ぎたら false を返す（呼び出し側は無視してよい）。 */
+function waitForTerminalReady(terminalId: number, timeoutMs = 5000): Promise<boolean> {
+  if (readyTerminals.has(terminalId)) return Promise.resolve(true);
   return new Promise((resolve) => {
     const timer = setTimeout(() => {
       terminalReadyResolvers.delete(terminalId);
-      resolve();
+      resolve(false);
     }, timeoutMs);
     terminalReadyResolvers.set(terminalId, () => {
       clearTimeout(timer);
-      resolve();
+      resolve(true);
     });
   });
 }
@@ -284,9 +285,15 @@ async function maybeInjectAiResume(terminalId: number) {
   const command = buildResumeCommand(info.agentType, info.sessionId);
   if (!command) return;
   try {
-    await waitForTerminalReady(terminalId);
+    const ready = await waitForTerminalReady(terminalId);
     const ref = getTerminalRef(terminalId);
-    if (!ref) return;
+    // usePty.write は sessionId が null だと無言で捨てるので、投入前に PTY の有無を見る。
+    // 未 ready のまま諦めた場合はマーカーを戻し、次のアクティブ化で再試行させる。
+    if (!ready || !ref || ref.sessionId == null) {
+      pendingAiRestore.set(terminalId, info);
+      logDebug(`[Terminal] AI resume deferred (pty not ready) terminalId=${terminalId}`);
+      return;
+    }
     await ref.write(command.endsWith("\r") ? command : `${command}\r`);
     logDebug(`[Terminal] AI resume injected terminalId=${terminalId} agent=${info.agentType}`);
   } catch (e) {
@@ -294,10 +301,17 @@ async function maybeInjectAiResume(terminalId: number) {
   }
 }
 
-/** 復元した AI セッション情報をインジケータへ戻し、resume 可能なら未投入マーカーを積む */
+/**
+ * 復元した AI セッション情報をインジケータへ戻し、resume 可能なら未投入マーカーを積む。
+ *
+ * `terminalAgentStatus` は**立てないこと**。あれは「エージェントプロセスが実際に動いている」
+ * フラグで、`useTaskExecution.executeAgentWorktree` が「起動せずに既存エージェントへ
+ * プロンプトを流し込む」分岐に使っている（`useCodeReviewLineChat` の投入先選択も同じ）。
+ * 未投入の復元タブは素のシェルなので、ここで立てるとタスクのプロンプトがシェルに
+ * そのまま貼られる。タブのインジケータ表示は `terminalAiSessions` 側で賄う。
+ */
 function registerRestoredAiSession(terminalId: number, info: import("./types/terminal").AiSessionInfo | undefined) {
   if (!info) return;
-  terminalAgentStatus.set(terminalId, true);
   terminalAiSessions.set(terminalId, info);
   if (buildResumeCommand(info.agentType, info.sessionId)) {
     pendingAiRestore.set(terminalId, info);
@@ -1182,6 +1196,15 @@ async function onMoveToMainWindow(worktreeId: string) {
     if (t.isAiAgent) {
       terminalAgentStatus.set(t.id, true);
     }
+    // サブ側が持っていた AI セッション情報と未投入マーカーを引き継ぐ (#157)。
+    // 引き継がないと、未投入のまま往復したタブのセッション UUID が次のシャットダウン
+    // 保存で undefined に上書きされて永久に失われる。
+    if (t.aiSession) {
+      terminalAiSessions.set(t.id, t.aiSession);
+      if (t.resumePending && buildResumeCommand(t.aiSession.agentType, t.aiSession.sessionId)) {
+        pendingAiRestore.set(t.id, t.aiSession);
+      }
+    }
   }
   logDebug(`[MoveToMain] pendingSessionAttach set for terminalIds=[${[...pendingSessionAttach.keys()]}]`);
 
@@ -1912,10 +1935,10 @@ onMounted(async () => {
             }
           }
         } else {
-          // 復元直後の未投入タブは素のシェルなのでエージェント非検出になる。resume を
-          // 投入するまでインジケータとツールチップを保たせる (#157)。
-          if (pendingAiRestore.has(tid)) continue;
           terminalAgentStatus.delete(tid);
+          // 復元直後の未投入タブは素のシェルなのでエージェント非検出になる。resume を
+          // 投入するまでインジケータとツールチップの元データを保たせる (#157)。
+          if (pendingAiRestore.has(tid)) continue;
           terminalAiSessions.delete(tid);
         }
       }
