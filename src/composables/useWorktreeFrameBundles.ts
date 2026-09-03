@@ -26,6 +26,8 @@ export function useWorktreeFrameBundles(options: {
   terminalAiSessions: Map<number, AiSessionInfo>;
   removeTerminal: (worktreeId: string, terminalId: number) => void;
   clearNotification: (worktreeId: string) => void;
+  /** タブが初めてアクティブ表示されたときの処理（AI セッション resume 投入 / #157） */
+  onTerminalActivated?: (terminalId: number) => void | Promise<void>;
 }) {
   const {
     worktrees,
@@ -58,6 +60,7 @@ export function useWorktreeFrameBundles(options: {
         terminalAiSessions.delete(terminalId);
         removeTerminal(worktreeId, terminalId);
       },
+      onTerminalActivated: (terminalId) => options.onTerminalActivated?.(terminalId),
     });
 
     const wt = worktrees.value.find((w) => w.id === worktreeId);
@@ -124,6 +127,7 @@ export function useWorktreeFrameBundles(options: {
           if (term) {
             await term.handleTabActivated();
             term.focus();
+            await options.onTerminalActivated?.(leaf.activeTerminalId);
           }
         }
       }

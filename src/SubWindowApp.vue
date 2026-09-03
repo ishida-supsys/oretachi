@@ -21,6 +21,7 @@ import { extractUrlArtifacts } from "./utils/artifactUrl";
 import type { UrlArtifactEntry } from "./types/artifact";
 import { invoke } from "@tauri-apps/api/core";
 import { logDebug } from "./utils/log";
+import { buildResumeCommand } from "./utils/resumeCommand";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import AutoApprovalPromptDialog from "./components/AutoApprovalPromptDialog.vue";
 import Toast from "primevue/toast";
@@ -34,6 +35,7 @@ import SubscriptionFocusDialog from "./components/SubscriptionFocusDialog.vue";
 import { collectUnreadByTab } from "./utils/terminalUnread";
 import { subWindowShowsDelivery } from "./utils/eventToastScope";
 import type { SubTerminalEntry, WebSessionInfo, AiSessionInfo } from "./types/terminal";
+import type { SavedTerminal } from "./types/worktree";
 import type { FrameNode } from "./types/frame";
 import { useI18n } from "vue-i18n";
 import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
@@ -170,14 +172,42 @@ const {
 } = useWorktreeFrame({
   terminalEntries,
   terminalRefs,
+  onTerminalActivated: (terminalId) => maybeInjectAiResume(terminalId),
   onTerminalClosed: async (terminalId) => {
     terminalExitCodes.delete(terminalId);
     terminalAgentStatus.delete(terminalId);
     terminalWebSessions.delete(terminalId);
     terminalAiSessions.delete(terminalId);
+    pendingAiRestore.delete(terminalId);
     await emitTo("main", "sub-remove-terminal", { worktreeId, terminalId });
   },
 });
+
+// terminalId → 未投入の AI resume 情報 (#157)。sub-init の resumeAiSessions から積み、
+// そのタブが初めてアクティブ表示されたときに 1 回だけ投入する。
+const pendingAiRestore = new Map<number, AiSessionInfo>();
+
+/** 復元タブが初めてアクティブ表示されたときに resume コマンドを投入する (#157) */
+async function maybeInjectAiResume(terminalId: number) {
+  const info = pendingAiRestore.get(terminalId);
+  if (!info) return;
+  // 再投入を防ぐため、成否によらず先にマーカーを落とす
+  pendingAiRestore.delete(terminalId);
+  const command = buildResumeCommand(info.agentType, info.sessionId);
+  if (!command) return;
+  const term = terminalRefs.get(terminalId);
+  if (!term) return;
+  try {
+    // waitForReady は attachPty 失敗時に永久にハングしうるため 5 秒のタイムアウトを設ける。
+    const timeout = new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 5000));
+    const result = await Promise.race([term.waitForReady().then(() => "ready" as const), timeout]);
+    if (result !== "ready") return;
+    await term.write(command.endsWith("\r") ? command : `${command}\r`);
+    logDebug(`[Terminal] AI resume injected terminalId=${terminalId} agent=${info.agentType}`);
+  } catch (e) {
+    logDebug(`[Terminal] AI resume injection failed terminalId=${terminalId}: ${e}`);
+  }
+}
 
 // ────────────────────────────────────────────────
 // イベントハンドラ
@@ -316,6 +346,9 @@ onMounted(async () => {
             terminalAiSessions.set(tid, { agentType: info.agentName, sessionId: info.sessionId });
           }
         } else {
+          // 復元直後の未投入タブは素のシェルなのでエージェント非検出になる。resume を
+          // 投入するまでインジケータとツールチップを保たせる (#157)。
+          if (pendingAiRestore.has(tid)) continue;
           terminalAgentStatus.delete(tid);
           terminalAiSessions.delete(tid);
         }
@@ -344,6 +377,7 @@ onMounted(async () => {
     layout?: FrameNode;
     webSessions?: Record<number, WebSessionInfo>;
     aiSessions?: Record<number, AiSessionInfo>;
+    resumeAiSessions?: Record<number, AiSessionInfo>;
   }>(
     "sub-init",
     async (event) => {
@@ -368,6 +402,15 @@ onMounted(async () => {
       if (event.payload.aiSessions) {
         for (const [idStr, info] of Object.entries(event.payload.aiSessions)) {
           terminalAiSessions.set(Number(idStr), info);
+        }
+      }
+
+      if (event.payload.resumeAiSessions) {
+        for (const [idStr, info] of Object.entries(event.payload.resumeAiSessions)) {
+          const tid = Number(idStr);
+          pendingAiRestore.set(tid, info);
+          terminalAgentStatus.set(tid, true);
+          terminalAiSessions.set(tid, info);
         }
       }
 
@@ -398,6 +441,7 @@ onMounted(async () => {
         if (term) {
           await term.handleTabActivated();
           term.focus();
+          await maybeInjectAiResume(firstLeaf.activeTerminalId);
         }
       }
     }
@@ -594,9 +638,13 @@ onMounted(async () => {
 
   // セッション保存リクエスト
   collect(await appWindow.listen("sub-session-save-request", async () => {
-    const terminals = Array.from(terminalEntries.values()).map((entry) => {
+    const terminals: SavedTerminal[] = Array.from(terminalEntries.values()).map((entry) => {
       const termRef = terminalRefs.get(entry.id);
-      return { title: entry.title, buffer: termRef?.serializeBuffer() ?? "" };
+      return {
+        title: entry.title,
+        buffer: termRef?.serializeBuffer() ?? "",
+        aiSession: terminalAiSessions.get(entry.id),
+      };
     }).filter((t) => t.buffer !== "");
     await emitTo("main", "sub-session-save-response", { worktreeId, terminals });
   }));

@@ -34,6 +34,7 @@ import { useWindowFocus } from "./composables/useWindowFocus";
 import { useTasks } from "./composables/useTasks";
 import type { TrayWorktreeData, TrayTerminalData } from "./composables/useTrayPopup";
 import type { WorktreeEntry } from "./types/settings";
+import type { SavedTerminal } from "./types/worktree";
 import type { UrlArtifactEntry } from "./types/artifact";
 import { extractUrlArtifacts } from "./utils/artifactUrl";
 import { useAddTaskDialog } from "./composables/useAddTaskDialog";
@@ -57,6 +58,7 @@ import type { ArchiveRow } from "./types/archive";
 import { logDebug } from "./utils/log";
 import { cssPxToLogical } from "./utils/uiScale";
 import { isHomeWorktree } from "./utils/homeWorktree";
+import { buildResumeCommand } from "./utils/resumeCommand";
 import { isPseudoWorktree, makeRepositoryWorktreeId, sortPseudoFirst } from "./utils/repositoryWorktree";
 import { useUiZoom } from "./composables/useUiZoom";
 import { consumeMaxBlockedMs, startEventLoopMonitor } from "./utils/eventLoopMonitor";
@@ -215,6 +217,7 @@ const {
   terminalAiSessions,
   removeTerminal,
   clearNotification,
+  onTerminalActivated: (terminalId) => maybeInjectAiResume(terminalId),
 });
 
 const { setup: setupCodeReviewChatListener } = useCodeReviewChatListener({
@@ -265,6 +268,41 @@ function waitForTerminalReady(terminalId: number, timeoutMs = 5000): Promise<voi
 
 // terminalId → 復元スナップショット（起動時セッション復元用）
 const pendingSnapshots = new Map<number, string>();
+
+// terminalId → 未投入の AI resume 情報（起動時セッション復元用 / #157）。
+// 復元タブは起動時に全部オフスクリーンでマウントされ PTY も即起動されるので、ここで
+// 一括投入すると復元タブ数ぶんのエージェントが同時起動して重い。投入は「そのタブが
+// 初めてアクティブ表示されたとき」まで遅延させ、投入したらエントリを消す（1 タブ 1 回）。
+const pendingAiRestore = new Map<number, import("./types/terminal").AiSessionInfo>();
+
+/** 復元タブが初めてアクティブ表示されたときに resume コマンドを投入する (#157) */
+async function maybeInjectAiResume(terminalId: number) {
+  const info = pendingAiRestore.get(terminalId);
+  if (!info) return;
+  // 再投入を防ぐため、成否によらず先にマーカーを落とす
+  pendingAiRestore.delete(terminalId);
+  const command = buildResumeCommand(info.agentType, info.sessionId);
+  if (!command) return;
+  try {
+    await waitForTerminalReady(terminalId);
+    const ref = getTerminalRef(terminalId);
+    if (!ref) return;
+    await ref.write(command.endsWith("\r") ? command : `${command}\r`);
+    logDebug(`[Terminal] AI resume injected terminalId=${terminalId} agent=${info.agentType}`);
+  } catch (e) {
+    logDebug(`[Terminal] AI resume injection failed terminalId=${terminalId}: ${e}`);
+  }
+}
+
+/** 復元した AI セッション情報をインジケータへ戻し、resume 可能なら未投入マーカーを積む */
+function registerRestoredAiSession(terminalId: number, info: import("./types/terminal").AiSessionInfo | undefined) {
+  if (!info) return;
+  terminalAgentStatus.set(terminalId, true);
+  terminalAiSessions.set(terminalId, info);
+  if (buildResumeCommand(info.agentType, info.sessionId)) {
+    pendingAiRestore.set(terminalId, info);
+  }
+}
 // 新規追加ターミナル: autoStart を抑制して reparenting 後に手動 startPty するための ID セット
 const pendingManualStart = new Set<number>();
 // terminalId → { sessionId, snapshot } （サブ→メイン移動時のセッション引き継ぎ用）
@@ -619,6 +657,7 @@ async function switchToTerminal(terminalId: number) {
       await term.handleTabActivated();
       logDebug(`[Terminal] switchToTerminal after handleTabActivated terminalId=${terminalId}`);
       term.focus();
+      await maybeInjectAiResume(terminalId);
       // 安全策: flexレイアウト確定が遅延する場合に備えた再fit
       setTimeout(() => {
         logDebug(`[Terminal] switchToTerminal setTimeout re-fit terminalId=${terminalId}`);
@@ -1438,6 +1477,7 @@ onMounted(async () => {
           if (saved.buffer) {
             pendingSnapshots.set(terminal.id, saved.buffer);
           }
+          registerRestoredAiSession(terminal.id, saved.aiSession);
         }
       }
     } catch {
@@ -1720,11 +1760,19 @@ onMounted(async () => {
       // このワークツリーに属するターミナルのWebセッション情報とAIセッション情報を収集
       const webSessions: Record<number, import("./types/terminal").WebSessionInfo> = {};
       const aiSessions: Record<number, import("./types/terminal").AiSessionInfo> = {};
+      // 未投入の resume はサブウィンドウへ引き渡す。以後の投入判断は向こう側が持つので
+      // メイン側のマーカーは落とす（二重投入防止）。
+      const resumeAiSessions: Record<number, import("./types/terminal").AiSessionInfo> = {};
       for (const t of initData.terminals) {
         const webInfo = terminalWebSessions.get(t.id);
         if (webInfo) webSessions[t.id] = webInfo;
         const aiInfo = terminalAiSessions.get(t.id);
         if (aiInfo) aiSessions[t.id] = aiInfo;
+        const resumeInfo = pendingAiRestore.get(t.id);
+        if (resumeInfo) {
+          resumeAiSessions[t.id] = resumeInfo;
+          pendingAiRestore.delete(t.id);
+        }
       }
       await emitTo(`sub-${worktreeId}`, "sub-init", {
         worktreeId,
@@ -1734,6 +1782,7 @@ onMounted(async () => {
         layout: initData.layout,
         webSessions,
         aiSessions,
+        resumeAiSessions,
       });
       clearPendingInitData(worktreeId);
     }
@@ -1756,6 +1805,7 @@ onMounted(async () => {
           const sid = await invoke<number>("pty_spawn", {
             rows: 24, cols: 80, shell: resolveShell(worktreeId) ?? null, cwd: wt.path,
           });
+          registerRestoredAiSession(terminal.id, saved.aiSession);
           subTerminals.push({ id: terminal.id, title: saved.title, sessionId: sid, snapshot: saved.buffer });
         }
       }
@@ -1862,6 +1912,9 @@ onMounted(async () => {
             }
           }
         } else {
+          // 復元直後の未投入タブは素のシェルなのでエージェント非検出になる。resume を
+          // 投入するまでインジケータとツールチップを保たせる (#157)。
+          if (pendingAiRestore.has(tid)) continue;
           terminalAgentStatus.delete(tid);
           terminalAiSessions.delete(tid);
         }
@@ -1994,10 +2047,10 @@ onMounted(async () => {
       for (const wt of worktrees.value) {
         if (!isDetached(wt.id)) continue;
         try {
-          const response = await new Promise<{ terminals: { title: string; buffer: string }[] } | null>((resolve) => {
+          const response = await new Promise<{ terminals: SavedTerminal[] } | null>((resolve) => {
             const timeout = setTimeout(() => { unlisten(); resolve(null); }, 3000);
             let unlisten = () => {};
-            listen<{ worktreeId: string; terminals: { title: string; buffer: string }[] }>(
+            listen<{ worktreeId: string; terminals: SavedTerminal[] }>(
               "sub-session-save-response",
               (event) => {
                 if (event.payload.worktreeId === wt.id) {
@@ -2026,9 +2079,13 @@ onMounted(async () => {
         if (isDetached(wt.id)) continue;
         try {
           const bundle = worktreeFrameBundles.get(wt.id);
-          const terminals = wt.terminals.map((t) => {
+          const terminals: SavedTerminal[] = wt.terminals.map((t) => {
             const termRef = bundle?.terminalRefs.get(t.id) ?? getTerminalRef(t.id);
-            return { title: t.title, buffer: termRef?.serializeBuffer() ?? "" };
+            return {
+              title: t.title,
+              buffer: termRef?.serializeBuffer() ?? "",
+              aiSession: terminalAiSessions.get(t.id),
+            };
           }).filter((t) => t.buffer !== "");
           if (terminals.length > 0) {
             await saveTerminalSession(wt.id, terminals);

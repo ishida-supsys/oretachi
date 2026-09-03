@@ -16,6 +16,11 @@ export function useWorktreeFrame(options: {
   onTerminalClosed?: (terminalId: number) => void | Promise<void>;
   /** switchTerminal 後に呼ばれるコールバック（TrayPopupApp 等の追加処理用） */
   onAfterSwitch?: (leafId: string, terminalId: number) => void | Promise<void>;
+  /**
+   * タブがユーザー操作でアクティブ表示されたときに呼ばれるコールバック (#157)。
+   * レイアウト再計算目的の一括 handleTabActivated（split / drop / close 後）では呼ばない。
+   */
+  onTerminalActivated?: (terminalId: number) => void | Promise<void>;
 }) {
   const { terminalEntries, terminalRefs, onTerminalClosed } = options;
 
@@ -74,6 +79,9 @@ export function useWorktreeFrame(options: {
     }
     if (options.onAfterSwitch) {
       await options.onAfterSwitch(leafId, terminalId);
+    }
+    if (options.onTerminalActivated) {
+      await options.onTerminalActivated(terminalId);
     }
   }
 
