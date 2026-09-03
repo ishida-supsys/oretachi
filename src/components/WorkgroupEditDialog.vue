@@ -33,6 +33,8 @@ const taskAddAgent = ref<AiAgentKind | "">(props.group.taskAddAgent ?? "");
 const claudeCodeMode = ref<ClaudeCodeMode>(props.group.claudeCodeMode ?? "plan");
 const execPrompt = ref(props.group.execPrompt ?? "");
 const systemPrompt = ref(props.group.systemPrompt ?? "");
+// グループ既定値。未設定 = 通知する（true）
+const trayNotification = ref(props.group.trayNotification ?? true);
 
 function save() {
   emit("save", {
@@ -43,6 +45,8 @@ function save() {
     claudeCodeMode: claudeCodeMode.value,
     execPrompt: execPrompt.value.trim() || undefined,
     systemPrompt: systemPrompt.value.trim() || undefined,
+    // 既定値どおり（通知する）のときはキーを落として settings.json をクリーンに保つ
+    trayNotification: trayNotification.value ? undefined : false,
   });
 }
 </script>
@@ -112,6 +116,14 @@ function save() {
         <label class="label">{{ t('systemPrompt') }}</label>
         <textarea v-model="systemPrompt" class="textarea" :placeholder="t('systemPromptPlaceholder')" rows="4" />
         <p class="hint">{{ t('systemPromptHint') }}</p>
+      </div>
+
+      <div class="field checkbox-field">
+        <label class="checkbox-label">
+          <input v-model="trayNotification" type="checkbox" />
+          {{ t('trayNotification') }}
+        </label>
+        <p class="hint">{{ t('trayNotificationHint') }}</p>
       </div>
 
       <div class="dialog-actions">
@@ -338,6 +350,8 @@ function save() {
     "execPrompt": "Execution prompt",
     "execPromptPlaceholder": "e.g. Work on the following task.\n\n{'{{PROMPT}}'}",
     "execPromptHint": "{'{{PROMPT}}'} is replaced with the task prompt. Empty = task prompt only.",
+    "trayNotification": "Tray notification",
+    "trayNotificationHint": "Default for worktrees in this group. Worktrees with their own setting keep it. Explicit MCP notify_worktree calls always reach the tray.",
     "systemPrompt": "System prompt",
     "systemPromptPlaceholder": "e.g. Always respond in Japanese.",
     "systemPromptHint": "Injected into every Claude Code session in this group. Persists across /clear and restarts. Claude Code only.",
@@ -358,6 +372,8 @@ function save() {
     "execPrompt": "実行プロンプト",
     "execPromptPlaceholder": "例: 以下のタスクに取り組んでください。\n\n{'{{PROMPT}}'}",
     "execPromptHint": "{'{{PROMPT}}'} がタスク実行プロンプトに置換されます。未指定ならプロンプトのみと等価。",
+    "trayNotification": "トレイ通知",
+    "trayNotificationHint": "このグループのワークツリーの既定値です。個別に設定済みのワークツリーはそちらが優先されます。MCP notify_worktree による明示的な通知は常にトレイへ出ます。",
     "systemPrompt": "システムプロンプト",
     "systemPromptPlaceholder": "例: 常に日本語で応答してください。",
     "systemPromptHint": "このグループの Claude Code セッションに常時注入されます。/clear や再起動後も維持。Claude Code のみ対応。",

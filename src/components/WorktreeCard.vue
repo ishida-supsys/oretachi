@@ -32,6 +32,8 @@ const props = defineProps<{
   loadingText?: string;
   cancellable?: boolean;
   autoApproval?: boolean;
+  /** トレイ通知の実効値（ワークツリー個別 > ワークグループ既定値 > true で解決済み） */
+  trayNotification?: boolean;
   aiJudging?: boolean;
   tooltip?: string;
   descriptionOpen?: boolean;
@@ -52,6 +54,7 @@ const emit = defineEmits<{
   focusSubWindow: [worktreeId: string];
   setHotkeyChar: [worktreeId: string];
   toggleAutoApproval: [worktreeId: string];
+  toggleTrayNotification: [worktreeId: string];
   cancelAiJudging: [worktreeId: string];
   openArtifacts: [worktreeId: string];
   duplicateWorktree: [worktreeId: string];
@@ -309,6 +312,15 @@ const terminalList = computed(() =>
         >
           <span :class="autoApproval ? 'pi pi-check-circle' : 'pi pi-circle'" />
           {{ t('menu.autoApproval') }}
+        </button>
+        <button
+          class="popup-item"
+          :style="trayNotification !== false ? 'color: var(--p-green-400)' : ''"
+          :disabled="loading"
+          @click="emit('toggleTrayNotification', worktree.id)"
+        >
+          <span :class="trayNotification !== false ? 'pi pi-check-circle' : 'pi pi-circle'" />
+          {{ t('menu.trayNotification') }}
         </button>
         <button class="popup-item" :disabled="loading" @click="onSetHotkeyChar">
           <span class="pi pi-key" />
@@ -717,6 +729,7 @@ const terminalList = computed(() =>
     "cancelRemove": "Cancel",
     "menu": {
       "autoApproval": "Auto approval",
+      "trayNotification": "Tray notification",
       "setHotkey": "Assign hotkey",
       "openArtifacts": "Artifacts",
       "moveToSubWindow": "Move to sub window",
@@ -742,6 +755,7 @@ const terminalList = computed(() =>
     "cancelRemove": "キャンセル",
     "menu": {
       "autoApproval": "自動承認",
+      "trayNotification": "トレイ通知",
       "setHotkey": "ホットキー割り当て",
       "openArtifacts": "アーティファクト",
       "moveToSubWindow": "サブウィンドウに移動",

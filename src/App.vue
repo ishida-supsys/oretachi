@@ -73,6 +73,7 @@ import type { SpawnTerminalRequest } from "./types/event";
 import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { cancelApproval } from "./utils/autoApproval";
+import { buildTrayNotificationMap } from "./utils/trayNotification";
 import { useUpdater } from "./composables/useUpdater";
 import Toast from "primevue/toast";
 import Popover from "primevue/popover";
@@ -135,6 +136,18 @@ const artifactCounts = reactive(new Map<string, number>());
 
 // ワークツリーごとの URL アーティファクト（アイコン隣のドロップダウン用）
 const artifactUrls = reactive(new Map<string, UrlArtifactEntry[]>());
+
+// トレイ通知の実効値（worktree > workgroup > true）。値をコピーせず参照時に解決するため、
+// ワークグループ既定値を変えると個別未設定のワークツリーへ再起動なしで反映される。
+const trayNotificationMap = computed(() => buildTrayNotificationMap(settings.value));
+
+function onToggleTrayNotification(worktreeId: string) {
+  const entry = settings.value.worktrees.find((w) => w.id === worktreeId);
+  if (!entry) return;
+  // 実効値の反転を個別設定として明示的に書く（3値 UI にはしない）
+  entry.trayNotification = !(trayNotificationMap.value.get(worktreeId) ?? true);
+  scheduleSave();
+}
 
 // ホームカードの description 開閉状態（ワークツリー毎・settings.json に永続化）
 const descriptionOpenMap = reactive(new Map<string, boolean>());
@@ -2283,6 +2296,7 @@ onMounted(async () => {
         :loading-worktrees="loadingWorktrees"
         :cancellable-worktrees="cancellableWorktrees"
         :auto-approvals="autoApprovalMap"
+        :tray-notifications="trayNotificationMap"
         :ai-judging-worktrees="aiJudgingWorktrees"
         :card-tooltips="worktreeCardTooltips"
         :description-opens="descriptionOpenMap"
@@ -2299,6 +2313,7 @@ onMounted(async () => {
         @focus-all-sub-windows="onFocusAllSubWindows"
         @set-hotkey-char="onSetHotkeyChar"
         @toggle-auto-approval="onToggleAutoApproval"
+        @toggle-tray-notification="onToggleTrayNotification"
         @cancel-ai-judging="onCancelAiJudging"
         @cancel-remove="cancelWorktreeRemove"
         @duplicate-worktree="onDuplicateWorktree"

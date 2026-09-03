@@ -28,6 +28,8 @@ const props = defineProps<{
   hotkeyChar?: string;
   detached?: boolean;
   autoApproval?: boolean;
+  /** トレイ通知の実効値（ワークツリー個別 > ワークグループ既定値 > true で解決済み） */
+  trayNotification?: boolean;
   /** 配下にワークツリーがあるか（登録解除の可否） */
   hasWorktrees?: boolean;
 }>();
@@ -42,6 +44,7 @@ const emit = defineEmits<{
   focusSubWindow: [worktreeId: string];
   setHotkeyChar: [worktreeId: string];
   toggleAutoApproval: [worktreeId: string];
+  toggleTrayNotification: [worktreeId: string];
   configurePostAdd: [repositoryId: string];
   selectExecScript: [repositoryId: string];
   clearExecScript: [repositoryId: string];
@@ -259,6 +262,14 @@ async function reapplyPluginConfig() {
           >
             <span :class="autoApproval ? 'pi pi-check-circle' : 'pi pi-circle'" />
             {{ t('menu.autoApproval') }}
+          </button>
+          <button
+            class="popup-item"
+            :style="trayNotification !== false ? 'color: var(--p-green-400)' : ''"
+            @click="withMenuHidden(() => emit('toggleTrayNotification', worktreeId!))"
+          >
+            <span :class="trayNotification !== false ? 'pi pi-check-circle' : 'pi pi-circle'" />
+            {{ t('menu.trayNotification') }}
           </button>
           <button class="popup-item" @click="withMenuHidden(() => emit('setHotkeyChar', worktreeId!))">
             <span class="pi pi-key" />
@@ -556,6 +567,7 @@ async function reapplyPluginConfig() {
       "reapplyPluginDone": "Wrote the oretachi plugin settings into .claude/settings.local.json.",
       "reapplyPluginFailed": "Failed to re-apply the plugin settings: {error}",
       "autoApproval": "Auto approval",
+      "trayNotification": "Tray notification",
       "setHotkey": "Assign hotkey",
       "moveToSubWindow": "Move to sub window",
       "moveToMainWindow": "Move to main window",
@@ -587,6 +599,7 @@ async function reapplyPluginConfig() {
       "reapplyPluginDone": ".claude/settings.local.json に oretachi プラグイン設定を書き込みました。",
       "reapplyPluginFailed": "プラグイン設定の再適用に失敗しました: {error}",
       "autoApproval": "自動承認",
+      "trayNotification": "トレイ通知",
       "setHotkey": "ホットキーを割り当て",
       "moveToSubWindow": "サブウィンドウへ移動",
       "moveToMainWindow": "メインウィンドウへ戻す",
