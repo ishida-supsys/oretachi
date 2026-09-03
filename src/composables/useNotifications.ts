@@ -16,6 +16,8 @@ export interface NotifyWorktreeEvent {
   kind: NotificationKind | "hook";
   body?: string;
   agent?: string;
+  /** false のとき通知系（トレイバッジ / ポップアップ / 通知音 / OS通知）を一括で抑制する */
+  tray?: boolean;
 }
 
 interface NotificationEntry {
@@ -86,6 +88,8 @@ export function useNotifications() {
       const { worktree_name: worktreeName, kind } = event.payload;
       // hook はモニタリング目的の MCP ブロードキャスト専用。UI 通知はスキップ
       if (kind === "hook") return;
+      // trayNotification オフのワークツリー由来。自動承認は notify-worktree を別途購読しているのでここだけ止める
+      if (event.payload.tray === false) return;
       const id = resolveWorktreeId(worktreeName);
       if (id) {
         if (shouldHold?.(id, kind)) return;
