@@ -6,8 +6,14 @@ import type { TerminalForApproval } from "../utils/autoApproval";
 import type { Ref } from "vue";
 import type { Worktree } from "../types/worktree";
 import type { AppSettings } from "../types/settings";
-import { isTraySuppressed } from "./useNotifications";
-import type { NotificationKind } from "./useNotifications";
+import type { NotificationKind, NotifyWorktreeEvent } from "./useNotifications";
+import {
+  createPendingNotifyStore,
+  queuePendingNotify,
+  shouldNotifyAfterJudge,
+  takePendingNotify,
+  trayOf,
+} from "../utils/autoApprovalNotify";
 import type TerminalView from "../components/TerminalView.vue";
 
 interface UseAppAutoApprovalDeps {
@@ -29,6 +35,15 @@ interface UseAppAutoApprovalDeps {
 export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
   const autoApprovalMap = reactive(new Map<string, boolean>());
   const aiJudgingWorktrees = reactive(new Set<string>());
+  // AI 判定中に届いた notify-worktree の預かり分（#168）。判定完了後に必ず提示する。
+  const pendingNotify = createPendingNotifyStore();
+
+  /** 承認待ちとしてユーザーに提示する（バッジ + 通知音 + OS通知） */
+  async function notifyApproval(worktreeId: string, worktreeName: string | undefined) {
+    deps.addNotification(worktreeId, "approval");
+    deps.playSoundForKind("approval");
+    if (worktreeName) await deps.sendOsNotification(worktreeName, deps.t("notification.titleApproval"));
+  }
 
   async function onToggleAutoApproval(worktreeId: string) {
     const current = autoApprovalMap.get(worktreeId) ?? false;
@@ -59,6 +74,75 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
     }
   }
 
+  /**
+   * 自動承認 ON のワークツリーに届いた notify-worktree を処理する。
+   * @param tray このイベントをトレイ通知として出してよいか（`tray !== false`）
+   */
+  async function handleNotify(wt: Worktree, tray: boolean) {
+    logDebug(
+      `[AutoApproval] notify-worktree received worktreeName=${wt.name} resolved=${wt.id} autoApproval=true tray=${tray}`
+    );
+
+    if (aiJudgingWorktrees.has(wt.id)) {
+      // ここで捨てると明示 notify_worktree が黙って消える。判定完了後に提示する（#168）
+      queuePendingNotify(pendingNotify, wt.id, tray);
+      logDebug(`[AutoApproval] already in progress for ${wt.id}, queued for later (tray=${tray})`);
+      return;
+    }
+
+    if (deps.isDetached(wt.id)) {
+      logDebug(`[AutoApproval] delegating to sub-window ${wt.id}`);
+      // tray はサブウィンドウ経由で sub-auto-approve-result に載って戻ってくる
+      await emitTo(`sub-${wt.id}`, "sub-try-auto-approve", {
+        additionalPrompt: deps.autoApprovalPromptMap.get(wt.id) ?? "",
+        tray,
+      });
+      return;
+    }
+
+    logDebug(`[AutoApproval] local terminals check, count=${wt.terminals.length}`);
+    aiJudgingWorktrees.add(wt.id);
+    let loopResult: { approved: boolean; lastCommand: string | undefined };
+    try {
+      const terminalForApproval: TerminalForApproval[] = wt.terminals.flatMap((t) => {
+        const ref = deps.getTerminalRef(t.id);
+        if (!ref) return [];
+        return [{ id: t.id, getTerminal: () => ref.getTerminal(), write: (d: string) => ref.write(d) }];
+      });
+      loopResult = await runApprovalLoop(
+        terminalForApproval,
+        wt.id,
+        wt.path,
+        deps.autoApprovalPromptMap.get(wt.id),
+      );
+    } finally {
+      aiJudgingWorktrees.delete(wt.id);
+    }
+    if (loopResult.lastCommand) {
+      deps.lastJudgedCommandMap.set(wt.id, loopResult.lastCommand);
+    }
+    if (
+      shouldNotifyAfterJudge({
+        approved: loopResult.approved,
+        focused: deps.isWorktreeFocused(wt.id),
+        tray,
+      })
+    ) {
+      logDebug(`[AutoApproval] local: not approved → addNotification(${wt.id})`);
+      await notifyApproval(wt.id, wt.name);
+    }
+
+    // 判定中に預かった分。判定を回さなかったイベントなので approved 扱いにはしない。
+    const pending = takePendingNotify(pendingNotify, wt.id);
+    if (
+      pending &&
+      shouldNotifyAfterJudge({ approved: false, focused: deps.isWorktreeFocused(wt.id), tray: pending.tray })
+    ) {
+      logDebug(`[AutoApproval] flush queued notification for ${wt.id}`);
+      await notifyApproval(wt.id, wt.name);
+    }
+  }
+
   async function init() {
     // 保存された自動承認状態を復元
     for (const wt of deps.settings.value.worktrees) {
@@ -68,7 +152,7 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
     }
 
     // notify-worktree → 自動承認チェック
-    await listen<{ worktree_name: string; kind: string }>("notify-worktree", async (event) => {
+    await listen<NotifyWorktreeEvent>("notify-worktree", async (event) => {
       const { worktree_name: worktreeName, kind } = event.payload;
 
       // hook/completed はこのリスナーでは不要。フィルタをすべての async 処理の前に置く
@@ -78,68 +162,27 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
       if (!wt) return;
       if (!autoApprovalMap.get(wt.id)) return;
 
-      logDebug(
-        `[AutoApproval] notify-worktree received worktreeName=${worktreeName} resolved=${wt.id} autoApproval=true`
-      );
-
-      if (aiJudgingWorktrees.has(wt.id)) {
-        logDebug(`[AutoApproval] already in progress for ${wt.id}, skipping`);
-        return;
-      }
-
-      if (deps.isDetached(wt.id)) {
-        logDebug(`[AutoApproval] delegating to sub-window ${wt.id}`);
-        await emitTo(`sub-${wt.id}`, "sub-try-auto-approve", {
-          additionalPrompt: deps.autoApprovalPromptMap.get(wt.id) ?? "",
-        });
-        return;
-      }
-
-      logDebug(`[AutoApproval] local terminals check, count=${wt.terminals.length}`);
-      aiJudgingWorktrees.add(wt.id);
-      let loopResult: { approved: boolean; lastCommand: string | undefined };
-      try {
-        const terminalForApproval: TerminalForApproval[] = wt.terminals.flatMap((t) => {
-          const ref = deps.getTerminalRef(t.id);
-          if (!ref) return [];
-          return [{ id: t.id, getTerminal: () => ref.getTerminal(), write: (d: string) => ref.write(d) }];
-        });
-        loopResult = await runApprovalLoop(
-          terminalForApproval,
-          wt.id,
-          wt.path,
-          deps.autoApprovalPromptMap.get(wt.id),
-        );
-      } finally {
-        aiJudgingWorktrees.delete(wt.id);
-      }
-      if (loopResult.lastCommand) {
-        deps.lastJudgedCommandMap.set(wt.id, loopResult.lastCommand);
-      }
-      if (!loopResult.approved && !deps.isWorktreeFocused(wt.id) && !isTraySuppressed(wt.id)) {
-        logDebug(`[AutoApproval] local: not approved → addNotification(${wt.id})`);
-        deps.addNotification(wt.id, "approval");
-        deps.playSoundForKind("approval");
-        await deps.sendOsNotification(wt.name, deps.t("notification.titleApproval"));
-      }
+      // tray は**イベント単位**の属性なので、ここで値を取り出して以降の判定へ持ち回る。
+      // ワークツリー単位のラッチに置くと、判定中に届いた `tray: false` のイベントが
+      // 直前の明示通知まで抑制してしまう（#168）。
+      await handleNotify(wt, trayOf(event.payload));
     });
 
     // サブウィンドウからの自動承認結果 → 拒否時のみ通知
-    await listen<{ worktreeId: string; approved: boolean; command?: string }>(
+    await listen<{ worktreeId: string; approved: boolean; command?: string; tray?: boolean }>(
       "sub-auto-approve-result",
       async (event) => {
         const { worktreeId: wid, approved, command } = event.payload;
+        // tray は sub-try-auto-approve で渡した値がそのまま返ってくる（イベント単位・#168）
+        const tray = trayOf(event.payload);
         logDebug(
-          `[AutoApproval] sub-auto-approve-result worktreeId=${wid} approved=${approved} command=${command ?? "none"}`
+          `[AutoApproval] sub-auto-approve-result worktreeId=${wid} approved=${approved} tray=${tray} command=${command ?? "none"}`
         );
         if (command) {
           deps.lastJudgedCommandMap.set(wid, command);
         }
-        if (!approved && !deps.isWorktreeFocused(wid) && !isTraySuppressed(wid)) {
-          deps.addNotification(wid, "approval");
-          deps.playSoundForKind("approval");
-          const wtName = deps.worktrees.value.find((w) => w.id === wid)?.name;
-          if (wtName) await deps.sendOsNotification(wtName, deps.t("notification.titleApproval"));
+        if (shouldNotifyAfterJudge({ approved, focused: deps.isWorktreeFocused(wid), tray })) {
+          await notifyApproval(wid, deps.worktrees.value.find((w) => w.id === wid)?.name);
         }
       },
     );
