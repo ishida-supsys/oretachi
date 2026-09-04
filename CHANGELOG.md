@@ -6,6 +6,33 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-09-04
+
+### Added
+- ワークグループ単位でトレイ通知を切り替える `trayNotification` 設定と `/notify` の tray フラグを追加 (#153, #154)
+- トレイ通知トグルの UI を追加した (#155)
+- トレイ通知を切り替える MCP ツールを追加し、teamwork-parent スキルを対応させた (#158)
+- 既存ワークツリーへ `trayNotification` を一度だけ移行焼き込みするようにした (#171)
+- 再起動時に AI ターミナルのセッションを自動復元するようにした (#157)
+- codex の対話セッション ID を rollout から解決するようにした (#157)
+- タスク完了後にホームタブへ自動復帰する設定を追加 (#156)
+
+### Fixed
+- 自動承認 ON のときに明示的な `notify_worktree` が消える2経路を塞いだ (#168)
+- 預かり分の取り出し順と通知の重複を修正 (#168)
+- 自動承認経路の通知も tray=false で抑制するよう修正 (#154)
+- tray=false の通知が debounce 窓を消費しないよう修正 (#161)
+- トレイ通知の実効値を `useWorkgroups.groupOf` 経由で解決するよう修正 (#155)
+- Rust 由来の null を未設定として扱うよう修正 (#155)
+- HomeView の `toggle-tray-notification` の重複と中継漏れを修正 (#155)
+- 復元タブのフラグ分離と resume 投入の取りこぼしを修正 (#157)
+- 自動ホーム復帰の発火条件を厳格化した (#156)
+- 未割り当ての Alt+英数字をサブウィンドウから PTY へ透過するよう修正 (#150)
+
+### Changed
+- ワークグループ解決を `resolve_workgroup` に1本化した (#153)
+- `trayNotification` のワークグループ設定を作成時の初期値として扱うよう変更 (#171)
+
 ## [0.29.2] - 2026-08-20
 
 ### Added
@@ -642,7 +669,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.29.2...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.30.0...HEAD
+[0.30.0]: https://github.com/ishida-supsys/oretachi/compare/0.29.2...0.30.0
 [0.29.2]: https://github.com/ishida-supsys/oretachi/compare/0.29.1...0.29.2
 [0.29.1]: https://github.com/ishida-supsys/oretachi/compare/0.29.0...0.29.1
 [0.29.0]: https://github.com/ishida-supsys/oretachi/compare/0.28.0...0.29.0
