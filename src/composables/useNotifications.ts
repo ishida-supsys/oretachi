@@ -88,10 +88,10 @@ export function useNotifications() {
       const { worktree_name: worktreeName, kind } = event.payload;
       // hook はモニタリング目的の MCP ブロードキャスト専用。UI 通知はスキップ
       if (kind === "hook") return;
-      const id = resolveWorktreeId(worktreeName);
       // trayNotification オフのワークツリー由来。自動承認は notify-worktree を別途購読しており、
       // そちらは `tray` をイベント単位で持ち回って判定する（#168）ので、ここだけ止める
       if (event.payload.tray === false) return;
+      const id = resolveWorktreeId(worktreeName);
       if (id) {
         if (shouldHold?.(id, kind)) return;
         addNotification(id, kind);

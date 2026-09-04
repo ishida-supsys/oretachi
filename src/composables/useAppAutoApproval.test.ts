@@ -38,7 +38,12 @@ function makeWorktree(): Worktree {
 
 interface Harness {
   notify: (payload: { kind?: string; tray?: boolean; worktree_name?: string }) => Promise<void>;
-  subResult: (payload: { approved: boolean; tray?: boolean; command?: string }) => Promise<void>;
+  subResult: (payload: {
+    approved: boolean;
+    tray?: boolean;
+    command?: string;
+    pendingTray?: boolean;
+  }) => Promise<void>;
   addNotification: ReturnType<typeof vi.fn>;
   playSoundForKind: ReturnType<typeof vi.fn>;
   sendOsNotification: ReturnType<typeof vi.fn>;
@@ -213,6 +218,44 @@ describe("useAppAutoApproval: AI 判定中に届いた通知（#168）", () => {
     // 判定結果ぶん + 預かりぶんで 2 件
     expect(h.addNotification).toHaveBeenCalledTimes(2);
   });
+
+  it("判定結果ぶんと預かりぶんが同時でも通知音と OS 通知は 1 回に畳む", async () => {
+    const h = await setup();
+    const first = deferApprovalLoop();
+    const judging = h.notify({ tray: true });
+
+    await h.notify({ tray: true });
+
+    first.resolve(false);
+    await judging;
+
+    expect(h.addNotification).toHaveBeenCalledTimes(2); // バッジ count はイベント件数ぶん
+    expect(h.playSoundForKind).toHaveBeenCalledTimes(1);
+    expect(h.sendOsNotification).toHaveBeenCalledTimes(1);
+  });
+
+  it("提示不要なら通知音も OS 通知も鳴らさない", async () => {
+    const h = await setup();
+    h.focused.value = true;
+    await h.notify({ tray: true });
+    expect(h.playSoundForKind).not.toHaveBeenCalled();
+    expect(h.sendOsNotification).not.toHaveBeenCalled();
+  });
+
+  it("預かり分は通知の前に取り出すので、通知処理が落ちても次回に持ち越さない", async () => {
+    const h = await setup();
+    h.sendOsNotification.mockRejectedValueOnce(new Error("permission denied"));
+    const first = deferApprovalLoop();
+    const judging = h.notify({ tray: true });
+    await h.notify({ tray: true });
+    first.resolve(false);
+    await expect(judging).rejects.toThrow("permission denied");
+
+    // 次の判定で預かり分が蒸し返されない
+    h.addNotification.mockClear();
+    await h.notify({ tray: true });
+    expect(h.addNotification).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("useAppAutoApproval: サブウィンドウ経由", () => {
@@ -250,5 +293,27 @@ describe("useAppAutoApproval: サブウィンドウ経由", () => {
     const h = await setup();
     await h.subResult({ approved: false });
     expect(h.addNotification).toHaveBeenCalledTimes(1);
+  });
+
+  it("サブウィンドウが預かった分は pendingTray で運ばれ、判定結果とは別に提示される", async () => {
+    const h = await setup();
+    // AI が承認した = 判定結果ぶんの通知は無いが、預かり分は提示する
+    await h.subResult({ approved: true, tray: true, pendingTray: true });
+    expect(h.addNotification).toHaveBeenCalledTimes(1);
+    expect(h.playSoundForKind).toHaveBeenCalledTimes(1);
+  });
+
+  it("pendingTray が tray:false なら提示しない", async () => {
+    const h = await setup();
+    await h.subResult({ approved: true, tray: true, pendingTray: false });
+    expect(h.addNotification).not.toHaveBeenCalled();
+  });
+
+  it("判定結果ぶんと pendingTray ぶんが同時でも通知音は 1 回", async () => {
+    const h = await setup();
+    await h.subResult({ approved: false, tray: true, pendingTray: true });
+    expect(h.addNotification).toHaveBeenCalledTimes(2);
+    expect(h.playSoundForKind).toHaveBeenCalledTimes(1);
+    expect(h.sendOsNotification).toHaveBeenCalledTimes(1);
   });
 });

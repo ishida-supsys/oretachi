@@ -594,14 +594,17 @@ onMounted(async () => {
     }
     logDebug(`[AutoApproval] sub result: approved=${loopResult.approved} command=${loopResult.lastCommand ?? "none"}`);
     if (loopResult.lastCommand) lastJudgedCommand.value = loopResult.lastCommand;
-    await emitTo("main", "sub-auto-approve-result", { worktreeId, approved: loopResult.approved, command: loopResult.lastCommand, tray });
-
-    // 判定中に預かった分。判定を回していないので approved: false として返す
+    // 判定中に預かった分は同じ結果イベントに載せて返す。2 回 emit すると通知音と
+    // OS 通知が重なるため、提示の畳み込みはメイン側 1 箇所に任せる（#168）
     const pending = takePendingNotify(pendingNotify, worktreeId);
-    if (pending) {
-      logDebug(`[AutoApproval] flush queued notification for sub-window ${worktreeId}`);
-      await emitTo("main", "sub-auto-approve-result", { worktreeId, approved: false, tray: pending.tray });
-    }
+    if (pending) logDebug(`[AutoApproval] flush queued notification for sub-window ${worktreeId}`);
+    await emitTo("main", "sub-auto-approve-result", {
+      worktreeId,
+      approved: loopResult.approved,
+      command: loopResult.lastCommand,
+      tray,
+      pendingTray: pending?.tray,
+    });
   }));
 
   // AI判定キャンセル

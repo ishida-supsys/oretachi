@@ -7,7 +7,16 @@
  * その経路で通知が黙って消えないよう、判定中に届いたイベントをここで預かる。
  */
 
-/** 判定中に預かった通知 1 ワークツリー分 */
+/**
+ * 判定中に預かった通知 1 ワークツリー分。
+ *
+ * 注意: `tray: true` は「明示 `notify_worktree` 由来」と同義ではない。
+ * `mcp_server.rs` が `tray: false` を載せるのは「`kind` 未指定 + `event` 指定」の
+ * フック由来かつ `resolve_tray_notification === false` のときだけなので、
+ * `trayNotification` ON のワークツリーではフック由来の通知にも `tray: true` が載る。
+ * 預かり分は判定を回していない = 承認済みか判別できないため、
+ * 「握り潰すより余分に出すほうがマシ」という方針で提示する側に倒している。
+ */
 export interface PendingNotify {
   /**
    * 預かったイベント群のうち 1 件でもトレイ表示対象（`tray !== false`）だったか。

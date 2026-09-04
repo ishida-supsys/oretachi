@@ -38,9 +38,14 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
   // AI 判定中に届いた notify-worktree の預かり分（#168）。判定完了後に必ず提示する。
   const pendingNotify = createPendingNotifyStore();
 
-  /** 承認待ちとしてユーザーに提示する（バッジ + 通知音 + OS通知） */
-  async function notifyApproval(worktreeId: string, worktreeName: string | undefined) {
-    deps.addNotification(worktreeId, "approval");
+  /**
+   * 承認待ちとしてユーザーに提示する（バッジ + 通知音 + OS通知）。
+   * バッジの count はイベント件数ぶん加算するが、通知音と OS 通知は 1 回に畳む
+   * （判定結果ぶんと預かりぶんが同時に立つと音が重なるため）。
+   */
+  async function notifyApproval(worktreeId: string, worktreeName: string | undefined, count: number) {
+    if (count <= 0) return;
+    for (let i = 0; i < count; i++) deps.addNotification(worktreeId, "approval");
     deps.playSoundForKind("approval");
     if (worktreeName) await deps.sendOsNotification(worktreeName, deps.t("notification.titleApproval"));
   }
@@ -84,7 +89,10 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
     );
 
     if (aiJudgingWorktrees.has(wt.id)) {
-      // ここで捨てると明示 notify_worktree が黙って消える。判定完了後に提示する（#168）
+      // ここで捨てると明示 notify_worktree（自動承認 ON では shouldHold で保留されるため
+      // この経路しか出口が無い）が黙って消える。判定完了後に提示する（#168）。
+      // 預かり分は判定を回さないので、承認済みプロンプト由来のフック通知が
+      // 紛れ込むと余分な通知になりうるが、握り潰すより優先している。
       queuePendingNotify(pendingNotify, wt.id, tray);
       logDebug(`[AutoApproval] already in progress for ${wt.id}, queued for later (tray=${tray})`);
       return;
@@ -121,26 +129,21 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
     if (loopResult.lastCommand) {
       deps.lastJudgedCommandMap.set(wt.id, loopResult.lastCommand);
     }
-    if (
-      shouldNotifyAfterJudge({
-        approved: loopResult.approved,
-        focused: deps.isWorktreeFocused(wt.id),
-        tray,
-      })
-    ) {
-      logDebug(`[AutoApproval] local: not approved → addNotification(${wt.id})`);
-      await notifyApproval(wt.id, wt.name);
-    }
-
-    // 判定中に預かった分。判定を回さなかったイベントなので approved 扱いにはしない。
+    // 預かり分は通知より先に取り出す。後続が throw してもストアに残さない
+    // （残すと次回の判定完了時に古いイベント由来の通知が余分に出る）。
     const pending = takePendingNotify(pendingNotify, wt.id);
-    if (
-      pending &&
-      shouldNotifyAfterJudge({ approved: false, focused: deps.isWorktreeFocused(wt.id), tray: pending.tray })
-    ) {
-      logDebug(`[AutoApproval] flush queued notification for ${wt.id}`);
-      await notifyApproval(wt.id, wt.name);
+    const focused = deps.isWorktreeFocused(wt.id);
+    let count = 0;
+    if (shouldNotifyAfterJudge({ approved: loopResult.approved, focused, tray })) {
+      logDebug(`[AutoApproval] local: not approved → addNotification(${wt.id})`);
+      count++;
     }
+    // 預かり分は判定を回していないので approved 扱いにはしない
+    if (pending && shouldNotifyAfterJudge({ approved: false, focused, tray: pending.tray })) {
+      logDebug(`[AutoApproval] flush queued notification for ${wt.id}`);
+      count++;
+    }
+    await notifyApproval(wt.id, wt.name, count);
   }
 
   async function init() {
@@ -169,21 +172,32 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
     });
 
     // サブウィンドウからの自動承認結果 → 拒否時のみ通知
-    await listen<{ worktreeId: string; approved: boolean; command?: string; tray?: boolean }>(
+    await listen<{
+      worktreeId: string;
+      approved: boolean;
+      command?: string;
+      tray?: boolean;
+      /** サブウィンドウが AI 判定中に預かったイベントの tray（あれば判定結果とは別に 1 件提示する・#168） */
+      pendingTray?: boolean;
+    }>(
       "sub-auto-approve-result",
       async (event) => {
-        const { worktreeId: wid, approved, command } = event.payload;
+        const { worktreeId: wid, approved, command, pendingTray } = event.payload;
         // tray は sub-try-auto-approve で渡した値がそのまま返ってくる（イベント単位・#168）
         const tray = trayOf(event.payload);
         logDebug(
-          `[AutoApproval] sub-auto-approve-result worktreeId=${wid} approved=${approved} tray=${tray} command=${command ?? "none"}`
+          `[AutoApproval] sub-auto-approve-result worktreeId=${wid} approved=${approved} tray=${tray} pendingTray=${pendingTray ?? "none"} command=${command ?? "none"}`
         );
         if (command) {
           deps.lastJudgedCommandMap.set(wid, command);
         }
-        if (shouldNotifyAfterJudge({ approved, focused: deps.isWorktreeFocused(wid), tray })) {
-          await notifyApproval(wid, deps.worktrees.value.find((w) => w.id === wid)?.name);
+        const focused = deps.isWorktreeFocused(wid);
+        let count = 0;
+        if (shouldNotifyAfterJudge({ approved, focused, tray })) count++;
+        if (pendingTray !== undefined && shouldNotifyAfterJudge({ approved: false, focused, tray: pendingTray })) {
+          count++;
         }
+        await notifyApproval(wid, deps.worktrees.value.find((w) => w.id === wid)?.name, count);
       },
     );
 
