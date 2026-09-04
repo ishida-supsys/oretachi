@@ -450,6 +450,13 @@ pub struct AppSettings {
     /// (init() で既存ファイルなら Some(true)、新規なら Some(false) にシーディングする)
     #[serde(default, rename = "wizardCompleted")]
     pub wizard_completed: Option<bool>,
+    /// `trayNotification` 移行フラグ（#171）。ワークグループ既定値へのフォールバックを
+    /// 廃止した際に、個別未設定のワークツリーへ当時の実効値を一度だけ焼き込んだかどうか。
+    /// **必ずここに持つこと** —— フロントの migrate だけで判定すると、
+    /// `oretachi_set_tray_notification` の省略呼び出し（= キー削除）のたびに
+    /// グループ既定値が無言で再適用され、「未設定に戻す」が機能しなくなる。
+    #[serde(default, rename = "trayNotificationMigrated")]
+    pub tray_notification_migrated: Option<bool>,
 }
 
 impl AppSettings {
@@ -490,6 +497,7 @@ impl Default for AppSettings {
             move_to_sub_window_on_mcp_spawn: default_move_to_sub_window_on_mcp_spawn(),
             home_agent_prompt: None,
             wizard_completed: None,
+            tray_notification_migrated: None,
         }
     }
 }

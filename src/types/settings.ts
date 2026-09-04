@@ -164,4 +164,7 @@ export interface AppSettings {
   moveToSubWindowOnMcpSpawn?: boolean; // MCP 経由のターミナル追加時にサブウィンドウへ自動移行するか (デフォルト: false)
   homeAgentPrompt?: string; // home のセッションに SessionStart で注入するプロンプト (空なら Rust 側の既定値)
   wizardCompleted?: boolean; // 初回起動ウィザード完了フラグ (Rust 側 init() でシーディング)
+  // trayNotification 移行フラグ (#171)。グループ既定値を既存ワークツリーへ一度だけ焼き込んだか。
+  // 一度きりを保証するために永続化する（migrateTrayNotification のコメント参照）
+  trayNotificationMigrated?: boolean;
 }

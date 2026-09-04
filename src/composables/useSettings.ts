@@ -128,6 +128,41 @@ function migrateWorkgroups(loaded: AppSettings): boolean {
 }
 
 /**
+ * trayNotification 移行 (#171、一度きり):
+ *
+ * 旧仕様では `trayNotification` 未設定のワークツリーは所属ワークグループの既定値へ
+ * フォールバックしていた。新仕様ではフォールバックしない（未設定 = 実効値 true）ため、
+ * 移行しないとグループを OFF にしていたユーザーのワークツリーが一斉に通知オンへ戻る。
+ * ここで**当時の実効値**を個別値として焼き直し、アップデート前後で実効値を保つ。
+ *
+ * **冪等ではなく一度きり**なので `trayNotificationMigrated` フラグで実行済みを覚える。
+ * 毎回走らせると、`oretachi_set_tray_notification` の `enabled` 省略呼び出し
+ * （= キー削除で「未設定に戻す」）のたびに次回起動でグループ既定値が無言で再適用され、
+ * 未設定へ戻せなくなる。フラグは Rust 側 `AppSettings` にも持たせること
+ * （serde が未知フィールドを落とすため、フロントだけに足すと保存時に消えて毎回走る）。
+ *
+ * `migrateWorkgroups` の後に呼ぶこと（workgroupId の補完が済んでいる前提）。
+ * 変更があれば true を返す。
+ */
+export function migrateTrayNotification(loaded: AppSettings): boolean {
+  if (loaded.trayNotificationMigrated) return false;
+  loaded.trayNotificationMigrated = true;
+
+  const groups = loaded.workgroups ?? [];
+  const groupOf = (wt: Pick<WorktreeEntry, "workgroupId">) =>
+    groups.find((g) => g.id === wt.workgroupId) ?? groups[0];
+
+  for (const wt of loaded.worktrees) {
+    // 既に個別値があるものは触らない（null は Rust 由来の「未設定」なので対象）
+    if (wt.trayNotification === true || wt.trayNotification === false) continue;
+    const inherited = initialTrayNotification(wt, groupOf);
+    if (inherited !== undefined) wt.trayNotification = inherited;
+  }
+  // フラグ自体の永続化が必要なので、値を書かなくても必ず true を返す
+  return true;
+}
+
+/**
  * ホームワークツリー移行 (冪等):
  * 1. worktreeBaseDir が未設定なら何もしない（ホームは作らない）
  * 2. isHome エントリが無ければ配列先頭に挿入する
@@ -322,7 +357,9 @@ async function loadSettingsOnce() {
   const homeChanged = migrateHomeWorktree(loaded);
   const { changed: repositoryChanged, pruned: prunedRepoIds } = migrateRepositoryWorktrees(loaded);
   const workgroupChanged = migrateWorkgroups(loaded);
-  if (hotkeyChanged || homeChanged || repositoryChanged || workgroupChanged) {
+  // ワークグループ確定後に実行する（workgroupId の補完結果を使うため）
+  const trayChanged = migrateTrayNotification(loaded);
+  if (hotkeyChanged || homeChanged || repositoryChanged || workgroupChanged || trayChanged) {
     try {
       await invoke("save_settings", { settings: loaded });
     } catch (e) {
