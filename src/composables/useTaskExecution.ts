@@ -10,6 +10,7 @@ import type { AddWorktreeTaskCode, AgentWorktreeTaskCode } from "../types/task";
 import type { WebSessionInfo } from "../types/terminal";
 import { decodePtyOutput } from "../utils/decodePtyOutput";
 import { useWorkgroups } from "./useWorkgroups";
+import { initialTrayNotification } from "../utils/trayNotification";
 
 /** Claude Code モード → permission-mode フラグ */
 function claudeModeFlag(mode?: ClaudeCodeMode): string {
@@ -253,6 +254,10 @@ export function useTaskExecution(deps: {
       branchName: code.branch,
       workgroupId: code.workgroupId ?? (activeWorkgroupId.value || undefined),
     };
+    // 所属ワークグループのトレイ通知既定値を作成時に1度だけ焼き込む（#171）。
+    // グループ側が未設定なら書かない（未設定のまま = 実効値 true）。
+    const initialTray = initialTrayNotification(entry, groupOf);
+    if (initialTray !== undefined) entry.trayNotification = initialTray;
 
     addWorktreePlaceholder(entry);
     loadingWorktrees.set(entry.id, t("creatingText"));

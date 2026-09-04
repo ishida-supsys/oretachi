@@ -75,7 +75,7 @@ import type { SpawnTerminalRequest } from "./types/event";
 import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { cancelApproval } from "./utils/autoApproval";
-import { buildTrayNotificationMap } from "./utils/trayNotification";
+import { buildTrayNotificationMap, initialTrayNotification } from "./utils/trayNotification";
 import { useUpdater } from "./composables/useUpdater";
 import Toast from "primevue/toast";
 import Popover from "primevue/popover";
@@ -511,11 +511,10 @@ const {
 // ワークグループ
 const { activeWorkgroupId, cycleWorkgroup, resolvedGroupId, groupOf, deleteWorkgroupRecord, displayName: workgroupDisplayName } = useWorkgroups();
 
-// トレイ通知の実効値（worktree > workgroup > true）。値をコピーせず参照時に解決するため、
-// ワークグループ既定値を変えると個別未設定のワークツリーへ再起動なしで反映される。
-// グループの引き当ては useWorkgroups.groupOf（未設定/不明なら先頭グループ）に委ねて
-// Rust の settings::resolve_workgroup と規則を揃える。
-const trayNotificationMap = computed(() => buildTrayNotificationMap(settings.value, groupOf));
+// トレイ通知の実効値（worktree > true）。ワークグループの trayNotification は
+// 新規ワークツリー作成時に initialTrayNotification で焼き込まれる初期値でしかなく、
+// ここでは参照しない（Rust の settings::resolve_tray_notification と同規則 / #171）。
+const trayNotificationMap = computed(() => buildTrayNotificationMap(settings.value));
 
 function onToggleTrayNotification(worktreeId: string) {
   const entry = settings.value.worktrees.find((w) => w.id === worktreeId);
@@ -966,6 +965,10 @@ async function onRemoveRepository(repositoryId: string) {
 async function onAddWorktreeConfirm(entry: WorktreeEntry, sourceBranch?: string, sessionSourcePath?: string, copyWorkingChangesFrom?: string) {
   // 現在表示中のワークグループに所属させる（仮追加の前に設定しないとランタイムコピーに反映されない）
   if (activeWorkgroupId.value) entry.workgroupId = activeWorkgroupId.value;
+  // 所属ワークグループのトレイ通知既定値を作成時に1度だけ焼き込む（#171）。
+  // グループ側が未設定なら書かない（未設定のまま = 実効値 true）。workgroupId 確定後に行う。
+  const initialTray = initialTrayNotification(entry, groupOf);
+  if (initialTray !== undefined) entry.trayNotification = initialTray;
   // ダイアログを即閉じ、一覧に仮エントリを表示
   showAddDialog.value = false;
   duplicateSourceData.value = null;
@@ -1801,6 +1804,9 @@ onMounted(async () => {
         // 手動追加 (onAddWorktreeConfirm) と初期状態を揃える
         ...(settings.value.worktreeDefaults?.autoApproval ? { autoApproval: true } : {}),
       };
+      // 所属ワークグループのトレイ通知既定値を焼き込む（#171）。workgroupId 確定後に行う。
+      const initialTray = initialTrayNotification(entry, groupOf);
+      if (initialTray !== undefined) entry.trayNotification = initialTray;
       commitWorktree(entry);
     } catch (e) {
       await ack("failed", undefined, String(e));

@@ -55,7 +55,7 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_ore
 
 チームワークセッションは子ワークツリーのイベントを購読して待機と再開を繰り返すため、自分自身のフック由来通知(`Stop`→`completed` / `PermissionRequest`→`approval` 等)がトレイに溢れやすい。**原則として親ワークツリー(このセッション)はトレイ通知をオフにし、人の判断・操作が必要なときにのみ明示的に`notify_worktree`で通知する。** Step 1 の最初に`oretachi_set_tray_notification(enabled: false)`で自分自身をオフにすること。
 
-`enabled`を省略して呼ぶと「未設定」に戻り、所属ワークグループの既定値(無ければ`true`)へフォールバックする。作業終了後に元へ戻したい場合はこちらを使う(Step 4)。
+`enabled`を省略して呼ぶと「未設定」に戻る(実効値は`true` = 通知する)。ワークグループの`trayNotification`は新規ワークツリー作成時の初期値でしかなく、フォールバック先にはならない。作業終了後に元へ戻したい場合はこちらを使う(Step 4)。
 
 **対象は自分自身のワークツリーだけ**。子ワークツリーは承認待ちをユーザーに見せる必要があるため、通知はオンのままにする(子側の設定に触れない)。
 
