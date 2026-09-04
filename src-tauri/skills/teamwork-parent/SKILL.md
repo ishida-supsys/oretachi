@@ -47,7 +47,7 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_ore
 ## Step 4: 完了判定
 
 全sub-issueが`done`になったら:
-- `oretachi_set_tray_notification(project_dir: <自分の作業ディレクトリ絶対パス>)`を`enabled`省略で呼び、トレイ通知を「未設定」へ戻す(ワークツリーは完了後も残って再利用されうるため、オフのまま放置しない)。
+- `oretachi_set_tray_notification(project_dir: <自分の作業ディレクトリ絶対パス>, enabled: true)`を呼び、トレイ通知をオンへ戻す(ワークツリーは完了後も残って再利用されうるため、オフのまま放置しない)。ワークツリー作成時にトレイ通知オフが焼き込まれていた場合は、`enabled: false`のままにするかをユーザーに確認してから戻すこと。
 - ユーザーに完了を報告し、作業を停止する。
 - **このワークツリー自身が誰かのsub-issueである場合**(teamwork-childの義務を負っている場合)は、続けて`teamwork-child`スキルの完了報告手順(親issueへの報告 → `oretachi_close_worktree`の承認)に従う。
 
@@ -55,7 +55,7 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_ore
 
 チームワークセッションは子ワークツリーのイベントを購読して待機と再開を繰り返すため、自分自身のフック由来通知(`Stop`→`completed` / `PermissionRequest`→`approval` 等)がトレイに溢れやすい。**原則として親ワークツリー(このセッション)はトレイ通知をオフにし、人の判断・操作が必要なときにのみ明示的に`notify_worktree`で通知する。** Step 1 の最初に`oretachi_set_tray_notification(enabled: false)`で自分自身をオフにすること。
 
-`enabled`を省略して呼ぶと「未設定」に戻り、所属ワークグループの既定値(無ければ`true`)へフォールバックする。作業終了後に元へ戻したい場合はこちらを使う(Step 4)。
+`enabled`を省略して呼ぶと「未設定」に戻る(実効値は`true` = 通知する)。ワークグループの`trayNotification`は**新規ワークツリー作成時の初期値**でしかなく、フォールバック先にはならないので、省略呼び出しは「作成時の設定へ戻す」ことにはならない点に注意する(Step 4)。
 
 **対象は自分自身のワークツリーだけ**。子ワークツリーは承認待ちをユーザーに見せる必要があるため、通知はオンのままにする(子側の設定に触れない)。
 

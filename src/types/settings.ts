@@ -27,9 +27,10 @@ export interface WorktreeEntry {
   autoApproval?: boolean;
   autoApprovalPrompt?: string;
   /**
-   * フック由来通知をトレイ通知として出すか。未設定 = 所属ワークグループの
-   * trayNotification → true の順にフォールバック（解決はバックエンドの
-   * resolve_tray_notification）。false でもイベント自体は流れるため自動承認は動き、
+   * フック由来通知をトレイ通知として出すか。未設定 = true（解決はバックエンドの
+   * resolve_tray_notification / フロントの resolveTrayNotification）。所属ワークグループの
+   * 既定値は**作成時に一度だけ焼き込まれる**ので、実効値を決めるのはここだけ。
+   * false でもイベント自体は流れるため自動承認は動き、
    * MCP notify_worktree による明示的な通知も常にトレイへ出る。
    */
   trayNotification?: boolean;
@@ -64,7 +65,7 @@ export interface Workgroup {
   claudeCodeMode?: ClaudeCodeMode;  // Claude Code モード（既定: plan）
   execPrompt?: string;              // 実行プロンプトテンプレート（置換タグ {{PROMPT}}）
   systemPrompt?: string;            // Claude Code セッションに常時注入（SessionStart フック経由。/clear 後も維持）
-  trayNotification?: boolean;       // グループ内ワークツリーのトレイ通知既定値（未設定 = true）
+  trayNotification?: boolean;       // 新規ワークツリー作成時のトレイ通知初期値。既存ワークツリーには影響しない（未設定 = 焼き込まない = 実効値 true）
 }
 
 export interface TerminalSettings {
@@ -163,4 +164,7 @@ export interface AppSettings {
   moveToSubWindowOnMcpSpawn?: boolean; // MCP 経由のターミナル追加時にサブウィンドウへ自動移行するか (デフォルト: false)
   homeAgentPrompt?: string; // home のセッションに SessionStart で注入するプロンプト (空なら Rust 側の既定値)
   wizardCompleted?: boolean; // 初回起動ウィザード完了フラグ (Rust 側 init() でシーディング)
+  // trayNotification 移行フラグ (#171)。グループ既定値を既存ワークツリーへ一度だけ焼き込んだか。
+  // 一度きりを保証するために永続化する（migrateTrayNotification のコメント参照）
+  trayNotificationMigrated?: boolean;
 }

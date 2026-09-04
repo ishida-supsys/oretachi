@@ -54,7 +54,8 @@ pub struct WorktreeEntry {
     pub description_open: Option<bool>,
     #[serde(default, rename = "workgroupId")]
     pub workgroup_id: Option<String>,
-    /// フック由来通知をトレイ通知として出すか。`None` = 未設定（ワークグループ既定値へフォールバック）。
+    /// フック由来通知をトレイ通知として出すか。`None` = 未設定（`true` 扱い）。
+    /// 所属ワークグループの既定値は**作成時に一度だけ焼き込まれる**ので、ここが唯一の実効値。
     /// 解決は `resolve_tray_notification` を参照。
     #[serde(default, rename = "trayNotification")]
     pub tray_notification: Option<bool>,
@@ -87,7 +88,8 @@ pub struct Workgroup {
     /// Claude Code セッションに常時注入するプロンプト（SessionStart フック経由。/clear 後も維持）
     #[serde(default)]
     pub system_prompt: Option<String>,
-    /// このグループに属するワークツリーのトレイ通知既定値。`None` = 未設定（`true` 扱い）。
+    /// **新規ワークツリー作成時の初期値**として `WorktreeEntry.tray_notification` に焼き込まれる。
+    /// `None` = 未設定（焼き込まない = 実効値 `true`）。既存ワークツリーには影響しない。
     #[serde(default)]
     pub tray_notification: Option<bool>,
 }
@@ -111,20 +113,16 @@ pub fn resolve_workgroup_by_id<'a>(
         .or_else(|| settings.workgroups.first())
 }
 
-/// フック由来通知をトレイ通知として出すか。worktree > workgroup > true で解決する。
+/// フック由来通知をトレイ通知として出すか。**ワークツリー個別 > true** のみで解決する。
 ///
-/// 新規ワークツリー作成時に値をコピーせず、参照時に毎回解決する。`None` = 未設定 =
-/// 従来どおり通知（既存 settings.json との後方互換）。
+/// `None` = 未設定 = 従来どおり通知（既存 settings.json との後方互換）。
 ///
-/// ワークグループの引き当ては `resolve_workgroup`（未設定/不明なら先頭グループ）に
-/// 委ねる。ここで直接 `find` すると、UI 上は先頭グループのカードに並んでいるのに
-/// そのグループの `trayNotification` が効かないワークツリーが生まれる
-/// （同じ /notify サブシステムのグループ `system_prompt` 解決も同ヘルパー経由）。
-pub fn resolve_tray_notification(settings: &AppSettings, worktree: &WorktreeEntry) -> bool {
-    worktree
-        .tray_notification
-        .or_else(|| resolve_workgroup(settings, worktree)?.tray_notification)
-        .unwrap_or(true)
+/// ワークグループの `trayNotification` は参照しない。あれは「新規ワークツリー作成時の
+/// 初期値」であり、作成時に一度だけ `WorktreeEntry.tray_notification` へ焼き込まれる
+/// （`worktreeDefaults.autoApproval` と同じ流儀）。ここでフォールバックすると、
+/// グループ設定の変更が既存ワークツリーへ遡って効いてしまう。
+pub fn resolve_tray_notification(worktree: &WorktreeEntry) -> bool {
+    worktree.tray_notification.unwrap_or(true)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -452,6 +450,13 @@ pub struct AppSettings {
     /// (init() で既存ファイルなら Some(true)、新規なら Some(false) にシーディングする)
     #[serde(default, rename = "wizardCompleted")]
     pub wizard_completed: Option<bool>,
+    /// `trayNotification` 移行フラグ（#171）。ワークグループ既定値へのフォールバックを
+    /// 廃止した際に、個別未設定のワークツリーへ当時の実効値を一度だけ焼き込んだかどうか。
+    /// **必ずここに持つこと** —— フロントの migrate だけで判定すると、
+    /// `oretachi_set_tray_notification` の省略呼び出し（= キー削除）のたびに
+    /// グループ既定値が無言で再適用され、「未設定に戻す」が機能しなくなる。
+    #[serde(default, rename = "trayNotificationMigrated")]
+    pub tray_notification_migrated: Option<bool>,
 }
 
 impl AppSettings {
@@ -492,6 +497,7 @@ impl Default for AppSettings {
             move_to_sub_window_on_mcp_spawn: default_move_to_sub_window_on_mcp_spawn(),
             home_agent_prompt: None,
             wizard_completed: None,
+            tray_notification_migrated: None,
         }
     }
 }
@@ -939,8 +945,7 @@ mod tests {
         }"#;
         let entry: WorktreeEntry = serde_json::from_str(json).unwrap();
         assert_eq!(entry.tray_notification, None);
-        let settings = tray_settings(entry.clone(), &[]);
-        assert!(resolve_tray_notification(&settings, &entry));
+        assert!(resolve_tray_notification(&entry));
     }
 
     #[test]
@@ -962,53 +967,31 @@ mod tests {
         assert_eq!(restored.tray_notification, Some(false));
     }
 
-    /// ワークツリー個別値がワークグループ既定値より優先される。
+    /// 実効値はワークツリー個別値のみで決まる。
     #[test]
-    fn test_resolve_tray_notification_worktree_overrides_workgroup() {
-        let entry = tray_worktree(Some(true), Some("g"));
-        let settings = tray_settings(entry.clone(), &[("g", Some(false))]);
-        assert!(resolve_tray_notification(&settings, &entry));
-
-        let entry = tray_worktree(Some(false), Some("g"));
-        let settings = tray_settings(entry.clone(), &[("g", Some(true))]);
-        assert!(!resolve_tray_notification(&settings, &entry));
+    fn test_resolve_tray_notification_uses_worktree_value_only() {
+        assert!(resolve_tray_notification(&tray_worktree(Some(true), Some("g"))));
+        assert!(!resolve_tray_notification(&tray_worktree(Some(false), Some("g"))));
+        assert!(resolve_tray_notification(&tray_worktree(None, Some("g"))));
+        assert!(resolve_tray_notification(&tray_worktree(None, None)));
     }
 
-    /// ワークツリー未設定ならワークグループ既定値へフォールバックする。
+    /// ワークグループ既定値は**新規作成時の初期値**であり、既存ワークツリーの実効値には
+    /// 一切影響しない（#171 でワークグループへのフォールバックを外した）。
+    /// グループ側を `false` にしても、個別未設定のワークツリーは通知され続ける。
     #[test]
-    fn test_resolve_tray_notification_falls_back_to_workgroup() {
-        let entry = tray_worktree(None, Some("g"));
-        let settings = tray_settings(entry.clone(), &[("g", Some(false))]);
-        assert!(!resolve_tray_notification(&settings, &entry));
-    }
-
-    /// workgroup_id が未設定・空文字・削除済み ID のいずれでも、`resolve_workgroup` と
-    /// 同じく先頭グループへフォールバックする。UI 上は先頭グループのカードに並ぶため、
-    /// ここで解決できないとグループ既定値が効かないワークツリーが生まれる。
-    #[test]
-    fn test_resolve_tray_notification_unresolved_workgroup_uses_first_group() {
-        for wg in [None, Some(""), Some("  "), Some("deleted")] {
+    fn test_resolve_tray_notification_ignores_workgroup_default() {
+        for wg in [None, Some(""), Some("  "), Some("g"), Some("deleted")] {
             let entry = tray_worktree(None, wg);
-            let settings = tray_settings(entry.clone(), &[("first", Some(false)), ("g", Some(true))]);
+            let settings = tray_settings(entry.clone(), &[("first", Some(false)), ("g", Some(false))]);
+            // settings 側にグループ既定値 false があっても実効値は true のまま
+            assert!(!settings.workgroups.is_empty());
             assert!(
-                !resolve_tray_notification(&settings, &entry),
-                "workgroup_id={:?} は先頭グループの既定値で解決されるべき",
+                resolve_tray_notification(&entry),
+                "workgroup_id={:?}: グループ既定値は既存ワークツリーへ遡って効かない",
                 wg
             );
         }
-    }
-
-    /// ワークツリー・ワークグループともに未設定、またはグループが1件も無い場合は true。
-    #[test]
-    fn test_resolve_tray_notification_falls_back_to_true() {
-        let entry = tray_worktree(None, Some("g"));
-        let settings = tray_settings(entry.clone(), &[("g", None)]);
-        assert!(resolve_tray_notification(&settings, &entry));
-
-        // ワークグループが1件も無いケース
-        let entry = tray_worktree(None, Some("g"));
-        let settings = tray_settings(entry.clone(), &[]);
-        assert!(resolve_tray_notification(&settings, &entry));
     }
 
     #[test]

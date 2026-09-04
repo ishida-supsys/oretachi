@@ -10,6 +10,7 @@ import type {
   HotkeySettings,
   NotificationHookEntry,
   Workgroup,
+  WorktreeEntry,
 } from "../types/settings";
 import { setLocale } from "../i18n";
 import { setVerboseLogging } from "../utils/log";
@@ -19,6 +20,23 @@ import {
   makeRepositoryWorktreeEntry,
   makeRepositoryWorktreeId,
 } from "../utils/repositoryWorktree";
+import { initialTrayNotification } from "../utils/trayNotification";
+
+/**
+ * 擬似ワークツリー（ホーム / リポジトリ）を新規生成するときの `trayNotification` 初期値を焼き込む。
+ *
+ * これらは `workgroupId` を持たずに作られ、後段の `migrateWorkgroups` が先頭グループへ
+ * 割り当てる。`useWorkgroups.groupOf` の「未設定なら先頭グループ」規則に従うと、
+ * 生成時点で参照すべきグループは先頭グループになるので、その resolver を渡す。
+ *
+ * 通常ワークツリーの作成経路（App.vue / useTaskExecution）と同じく、グループ側が
+ * 未設定なら何も書かない（未設定のまま = 実効値 true）。
+ */
+function bakeTrayNotification(entry: WorktreeEntry, loaded: AppSettings): WorktreeEntry {
+  const initial = initialTrayNotification(entry, () => loaded.workgroups?.[0]);
+  if (initial !== undefined) entry.trayNotification = initial;
+  return entry;
+}
 
 const isMac = platform() === "macos";
 
@@ -110,6 +128,41 @@ function migrateWorkgroups(loaded: AppSettings): boolean {
 }
 
 /**
+ * trayNotification 移行 (#171、一度きり):
+ *
+ * 旧仕様では `trayNotification` 未設定のワークツリーは所属ワークグループの既定値へ
+ * フォールバックしていた。新仕様ではフォールバックしない（未設定 = 実効値 true）ため、
+ * 移行しないとグループを OFF にしていたユーザーのワークツリーが一斉に通知オンへ戻る。
+ * ここで**当時の実効値**を個別値として焼き直し、アップデート前後で実効値を保つ。
+ *
+ * **冪等ではなく一度きり**なので `trayNotificationMigrated` フラグで実行済みを覚える。
+ * 毎回走らせると、`oretachi_set_tray_notification` の `enabled` 省略呼び出し
+ * （= キー削除で「未設定に戻す」）のたびに次回起動でグループ既定値が無言で再適用され、
+ * 未設定へ戻せなくなる。フラグは Rust 側 `AppSettings` にも持たせること
+ * （serde が未知フィールドを落とすため、フロントだけに足すと保存時に消えて毎回走る）。
+ *
+ * `migrateWorkgroups` の後に呼ぶこと（workgroupId の補完が済んでいる前提）。
+ * 変更があれば true を返す。
+ */
+export function migrateTrayNotification(loaded: AppSettings): boolean {
+  if (loaded.trayNotificationMigrated) return false;
+  loaded.trayNotificationMigrated = true;
+
+  const groups = loaded.workgroups ?? [];
+  const groupOf = (wt: Pick<WorktreeEntry, "workgroupId">) =>
+    groups.find((g) => g.id === wt.workgroupId) ?? groups[0];
+
+  for (const wt of loaded.worktrees) {
+    // 既に個別値があるものは触らない（null は Rust 由来の「未設定」なので対象）
+    if (wt.trayNotification === true || wt.trayNotification === false) continue;
+    const inherited = initialTrayNotification(wt, groupOf);
+    if (inherited !== undefined) wt.trayNotification = inherited;
+  }
+  // フラグ自体の永続化が必要なので、値を書かなくても必ず true を返す
+  return true;
+}
+
+/**
  * ホームワークツリー移行 (冪等):
  * 1. worktreeBaseDir が未設定なら何もしない（ホームは作らない）
  * 2. isHome エントリが無ければ配列先頭に挿入する
@@ -122,7 +175,7 @@ export function migrateHomeWorktree(loaded: AppSettings): boolean {
 
   const existing = loaded.worktrees.find(isHomeWorktree);
   if (!existing) {
-    loaded.worktrees.unshift(makeHomeWorktreeEntry(baseDir));
+    loaded.worktrees.unshift(bakeTrayNotification(makeHomeWorktreeEntry(baseDir), loaded));
     return true;
   }
   if (existing.path !== baseDir) {
@@ -196,7 +249,11 @@ export function migrateRepositoryWorktrees(
   const missing = repositories.filter((r) => !existingIds.has(makeRepositoryWorktreeId(r.id)));
   if (missing.length > 0) {
     const insertAt = loaded.worktrees.findIndex(isHomeWorktree) + 1;
-    loaded.worktrees.splice(insertAt, 0, ...missing.map(makeRepositoryWorktreeEntry));
+    loaded.worktrees.splice(
+      insertAt,
+      0,
+      ...missing.map((r) => bakeTrayNotification(makeRepositoryWorktreeEntry(r), loaded)),
+    );
     changed = true;
   }
 
@@ -300,7 +357,9 @@ async function loadSettingsOnce() {
   const homeChanged = migrateHomeWorktree(loaded);
   const { changed: repositoryChanged, pruned: prunedRepoIds } = migrateRepositoryWorktrees(loaded);
   const workgroupChanged = migrateWorkgroups(loaded);
-  if (hotkeyChanged || homeChanged || repositoryChanged || workgroupChanged) {
+  // ワークグループ確定後に実行する（workgroupId の補完結果を使うため）
+  const trayChanged = migrateTrayNotification(loaded);
+  if (hotkeyChanged || homeChanged || repositoryChanged || workgroupChanged || trayChanged) {
     try {
       await invoke("save_settings", { settings: loaded });
     } catch (e) {

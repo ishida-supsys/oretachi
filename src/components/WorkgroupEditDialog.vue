@@ -34,7 +34,7 @@ const taskAddAgent = ref<AiAgentKind | "">(props.group.taskAddAgent ?? "");
 const claudeCodeMode = ref<ClaudeCodeMode>(props.group.claudeCodeMode ?? "plan");
 const execPrompt = ref(props.group.execPrompt ?? "");
 const systemPrompt = ref(props.group.systemPrompt ?? "");
-// グループ既定値。未設定 = 通知する（true）
+// 新規ワークツリー作成時の初期値。未設定 = 通知する（true）
 const trayNotification = ref(props.group.trayNotification ?? true);
 
 function save() {
@@ -47,7 +47,8 @@ function save() {
     claudeCodeMode: claudeCodeMode.value,
     execPrompt: execPrompt.value.trim() || undefined,
     systemPrompt: systemPrompt.value.trim() || undefined,
-    // 既定値どおり（通知する）のときはキーを落として settings.json をクリーンに保つ
+    // 既定どおり（通知する）のときはキーを落として settings.json をクリーンに保つ。
+    // 未設定なら新規ワークツリーへ何も焼き込まない（実効値 true）。
     trayNotification: trayNotification.value ? undefined : false,
   });
 }
@@ -363,7 +364,7 @@ function save() {
     "execPromptPlaceholder": "e.g. Work on the following task.\n\n{'{{PROMPT}}'}",
     "execPromptHint": "{'{{PROMPT}}'} is replaced with the task prompt. Empty = task prompt only.",
     "trayNotification": "Tray notification",
-    "trayNotificationHint": "Default for worktrees in this group. Worktrees with their own setting keep it. Explicit MCP notify_worktree calls always reach the tray.",
+    "trayNotificationHint": "Initial value applied when a worktree is created in this group. Changing it never affects existing worktrees — switch those from each worktree's own menu. Explicit MCP notify_worktree calls always reach the tray.",
     "systemPrompt": "System prompt",
     "systemPromptPlaceholder": "e.g. Always respond in Japanese.",
     "systemPromptHint": "Injected into every Claude Code session in this group. Persists across /clear and restarts. Claude Code only.",
@@ -387,7 +388,7 @@ function save() {
     "execPromptPlaceholder": "例: 以下のタスクに取り組んでください。\n\n{'{{PROMPT}}'}",
     "execPromptHint": "{'{{PROMPT}}'} がタスク実行プロンプトに置換されます。未指定ならプロンプトのみと等価。",
     "trayNotification": "トレイ通知",
-    "trayNotificationHint": "このグループのワークツリーの既定値です。個別に設定済みのワークツリーはそちらが優先されます。MCP notify_worktree による明示的な通知は常にトレイへ出ます。",
+    "trayNotificationHint": "このグループで新規ワークツリーを作成したときの初期値です。変更しても既存のワークツリーには影響しません（既存はワークツリー個別のメニューから切り替えてください）。MCP notify_worktree による明示的な通知は常にトレイへ出ます。",
     "systemPrompt": "システムプロンプト",
     "systemPromptPlaceholder": "例: 常に日本語で応答してください。",
     "systemPromptHint": "このグループの Claude Code セッションに常時注入されます。/clear や再起動後も維持。Claude Code のみ対応。",

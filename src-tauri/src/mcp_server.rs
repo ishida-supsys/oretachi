@@ -1403,7 +1403,7 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "ワークツリーのトレイ通知（フック由来の承認待ち・作業完了通知）のオン/オフを切り替える。enabled=true で通知する / enabled=false で通知しない / **enabled を省略すると「未設定」に戻り、所属ワークグループの既定値（無ければ true）へフォールバックする**。オフにしてもツール `notify_worktree` による明示通知は常にトレイへ出るため、ユーザーの判断を仰ぐ経路は残る。teamwork-parent のような進行管理セッションが自分自身のノイズを止める用途を想定している。他人のワークツリーを勝手にオフにしないこと")]
+    #[tool(description = "ワークツリーのトレイ通知（フック由来の承認待ち・作業完了通知）のオン/オフを切り替える。enabled=true で通知する / enabled=false で通知しない / **enabled を省略すると「未設定」に戻る（= 通知する。実効値は true）**。ワークグループの設定は新規ワークツリー作成時の初期値でしかなく、フォールバック先にはならない。オフにしてもツール `notify_worktree` による明示通知は常にトレイへ出るため、ユーザーの判断を仰ぐ経路は残る。teamwork-parent のような進行管理セッションが自分自身のノイズを止める用途を想定している。他人のワークツリーを勝手にオフにしないこと")]
     fn oretachi_set_tray_notification(
         &self,
         Parameters(SetTrayNotificationParams { enabled, project_dir, worktree_name, worktree_id }): Parameters<SetTrayNotificationParams>,
@@ -1421,13 +1421,13 @@ impl NotifyService {
         )?;
 
         let previous = wt.tray_notification;
-        let previous_effective = resolve_tray_notification(&settings, wt);
-        // 変更後の実効値は「値をコピーせず毎回解決する」規則を壊さないよう、
-        // 新しい値を載せたエントリを resolve_tray_notification に通して求める。
+        let previous_effective = resolve_tray_notification(wt);
+        // 変更後の実効値は自前で `unwrap_or` せず、新しい値を載せたエントリを
+        // resolve_tray_notification に通して求める（解決規則の二重実装を避ける）。
         let new_effective = {
             let mut probe = wt.clone();
             probe.tray_notification = enabled;
-            resolve_tray_notification(&settings, &probe)
+            resolve_tray_notification(&probe)
         };
 
         // 永続化と UI 反映はフロント（App.vue）に任せる。Rust 側の SettingsManager を
@@ -3382,8 +3382,8 @@ fn resolve_artifact_worktree<'a>(
     }
 }
 
-// ワークグループ解決は settings.rs が正（`resolve_tray_notification` など settings 側の
-// 解決ヘルパーと規則を1本化するため）。既存の呼び出し元（`lib.rs` の
+// ワークグループ解決は settings.rs が正（グループ `system_prompt` の解決など、settings 側の
+// 参照経路と規則を1本化するため）。既存の呼び出し元（`lib.rs` の
 // `mcp_server::resolve_workgroup_by_id` を含む）を壊さないよう再エクスポートしている。
 pub use crate::settings::{resolve_workgroup, resolve_workgroup_by_id};
 
@@ -3585,7 +3585,7 @@ async fn notify_handler(
     // トレイ通知をオフにしたワークツリーで自動承認が止まる。
     let tray = if payload.kind.is_none() && payload.event.is_some() {
         match worktree {
-            Some(w) => resolve_tray_notification(&settings, w),
+            Some(w) => resolve_tray_notification(w),
             None => true,
         }
     } else {
@@ -4985,10 +4985,11 @@ mod tests {
         assert_eq!(v["trayNotification"], serde_json::Value::Bool(false));
     }
 
-    /// 変更後の実効値は「値をコピーせず毎回解決する」規則を守り、
-    /// 新しい値を載せた probe を `resolve_tray_notification` に通して求める。
+    /// 変更後の実効値は新しい値を載せた probe を `resolve_tray_notification` に通して求める。
+    /// `enabled` 省略（= None）は「未設定に戻す」＝ 実効値 `true`。所属ワークグループが
+    /// `trayNotification: false` でも、そこへはフォールバックしない（#171）。
     #[test]
-    fn set_tray_notification_new_effective_falls_back_to_workgroup() {
+    fn set_tray_notification_new_effective_ignores_workgroup_default() {
         let mut settings = AppSettings::default();
         settings.workgroups.push(Workgroup {
             id: "g".into(),
@@ -5012,12 +5013,17 @@ mod tests {
             is_home: false,
             is_repository: false,
         };
-        assert!(resolve_tray_notification(&settings, &wt));
+        assert!(resolve_tray_notification(&wt));
+        assert_eq!(settings.workgroups[0].tray_notification, Some(false));
 
-        // enabled 省略 (= None) で未設定へ戻すと、ワークグループ既定値へ落ちる
+        // enabled 省略 (= None) で未設定へ戻すと、グループ既定値 false ではなく true になる
         let mut probe = wt.clone();
         probe.tray_notification = None;
-        assert!(!resolve_tray_notification(&settings, &probe));
+        assert!(resolve_tray_notification(&probe));
+
+        // 明示 false は当然 false
+        probe.tray_notification = Some(false);
+        assert!(!resolve_tray_notification(&probe));
     }
 
     /// Claude Code は plan モードで `readOnlyHint` が立っていない MCP ツールを
