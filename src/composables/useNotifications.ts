@@ -28,10 +28,6 @@ interface NotificationEntry {
 
 // worktreeId → 未確認の通知エントリ
 const notifications = reactive(new Map<string, NotificationEntry>());
-// worktreeId → 直近の notify-worktree が tray === false だったか。
-// 自動承認 ON のワークツリーは approval/general が shouldHold で保留され、AI 非承認時に
-// useAppAutoApproval が直接通知を出すため、そちらから参照して抑制するのに使う。
-const traySuppression = new Map<string, boolean>();
 let initialized = false;
 let osNotificationEnabled: (() => boolean) | undefined;
 let getSoundSettings: (() => NotificationSoundSettings | undefined) | undefined;
@@ -40,15 +36,6 @@ let storedNotificationTitles: Record<NotificationKind, string> = {
   approval: "Notification",
   completed: "Notification",
 };
-
-/**
- * 直近の notify-worktree が tray === false だったワークツリーか。
- * 自動承認 ON のワークツリーは approval/general が shouldHold で保留され、通知は
- * useAppAutoApproval が AI 非承認判定後に直接発火する。その経路の抑制判定に使う。
- */
-export function isTraySuppressed(worktreeId: string): boolean {
-  return traySuppression.get(worktreeId) === true;
-}
 
 /**
  * 通知音を再生する。OS通知とは独立して動作する。
@@ -101,11 +88,10 @@ export function useNotifications() {
       const { worktree_name: worktreeName, kind } = event.payload;
       // hook はモニタリング目的の MCP ブロードキャスト専用。UI 通知はスキップ
       if (kind === "hook") return;
-      const id = resolveWorktreeId(worktreeName);
-      // 自動承認経路が後から参照するので、抑制するイベントについても先に記録しておく
-      if (id) traySuppression.set(id, event.payload.tray === false);
-      // trayNotification オフのワークツリー由来。自動承認は notify-worktree を別途購読しているのでここだけ止める
+      // trayNotification オフのワークツリー由来。自動承認は notify-worktree を別途購読しており、
+      // そちらは `tray` をイベント単位で持ち回って判定する（#168）ので、ここだけ止める
       if (event.payload.tray === false) return;
+      const id = resolveWorktreeId(worktreeName);
       if (id) {
         if (shouldHold?.(id, kind)) return;
         addNotification(id, kind);
@@ -147,11 +133,6 @@ export function useNotifications() {
     for (const id of notifications.keys()) {
       if (!activeWorktreeIds.has(id)) {
         notifications.delete(id);
-      }
-    }
-    for (const id of traySuppression.keys()) {
-      if (!activeWorktreeIds.has(id)) {
-        traySuppression.delete(id);
       }
     }
   }

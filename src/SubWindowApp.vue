@@ -15,6 +15,12 @@ import { isDirty, clearDirty } from "./composables/usePtyDispatcher";
 import { useWindowFocus } from "./composables/useWindowFocus";
 import { runApprovalLoop } from "./utils/autoApproval";
 import type { TerminalForApproval } from "./utils/autoApproval";
+import {
+  createPendingNotifyStore,
+  queuePendingNotify,
+  takePendingNotify,
+  trayOf,
+} from "./utils/autoApprovalNotify";
 import { useIdeSelect } from "./composables/useIdeSelect";
 import { useArtifactWindow } from "./composables/useArtifactWindow";
 import { extractUrlArtifacts } from "./utils/artifactUrl";
@@ -135,6 +141,8 @@ async function onFocusFromSubscriptions(wid: string) {
 
 // AI判定進行中フラグ
 const aiJudging = ref(false);
+// AI 判定中に届いた sub-try-auto-approve の預かり分（#168）
+const pendingNotify = createPendingNotifyStore();
 
 // ウィンドウのフォーカス状態
 const { isWindowFocused } = useWindowFocus();
@@ -624,19 +632,23 @@ onMounted(async () => {
   ));
 
   // 自動承認チェック（notify-worktree トリガー）
-  collect(await appWindow.listen<{ additionalPrompt?: string }>("sub-try-auto-approve", async (event) => {
+  collect(await appWindow.listen<{ additionalPrompt?: string; tray?: boolean }>("sub-try-auto-approve", async (event) => {
     if (event.payload.additionalPrompt !== undefined) {
       additionalPrompt.value = event.payload.additionalPrompt;
     }
-    logDebug(`[AutoApproval] sub-try-auto-approve received autoApproval=${autoApproval.value}`);
+    // tray はイベント単位の属性。メイン側の通知判定へそのまま返す（#168）
+    const tray = trayOf(event.payload);
+    logDebug(`[AutoApproval] sub-try-auto-approve received autoApproval=${autoApproval.value} tray=${tray}`);
     if (!autoApproval.value) {
-      await emitTo("main", "sub-auto-approve-result", { worktreeId, approved: false });
+      await emitTo("main", "sub-auto-approve-result", { worktreeId, approved: false, tray });
       return;
     }
 
-    // 重複防止: 既にAI判定が進行中ならスキップ
+    // 重複防止: 既にAI判定が進行中ならスキップ。ただしイベントは預かり、
+    // 判定完了後に必ずメインへ返す（ここで捨てると明示通知が消える・#168）
     if (aiJudging.value) {
-      logDebug(`[AutoApproval] already in progress for sub-window ${worktreeId}, skipping`);
+      queuePendingNotify(pendingNotify, worktreeId, tray);
+      logDebug(`[AutoApproval] already in progress for sub-window ${worktreeId}, queued for later (tray=${tray})`);
       return;
     }
 
@@ -655,7 +667,17 @@ onMounted(async () => {
     }
     logDebug(`[AutoApproval] sub result: approved=${loopResult.approved} command=${loopResult.lastCommand ?? "none"}`);
     if (loopResult.lastCommand) lastJudgedCommand.value = loopResult.lastCommand;
-    await emitTo("main", "sub-auto-approve-result", { worktreeId, approved: loopResult.approved, command: loopResult.lastCommand });
+    // 判定中に預かった分は同じ結果イベントに載せて返す。2 回 emit すると通知音と
+    // OS 通知が重なるため、提示の畳み込みはメイン側 1 箇所に任せる（#168）
+    const pending = takePendingNotify(pendingNotify, worktreeId);
+    if (pending) logDebug(`[AutoApproval] flush queued notification for sub-window ${worktreeId}`);
+    await emitTo("main", "sub-auto-approve-result", {
+      worktreeId,
+      approved: loopResult.approved,
+      command: loopResult.lastCommand,
+      tray,
+      pendingTray: pending?.tray,
+    });
   }));
 
   // AI判定キャンセル
