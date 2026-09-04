@@ -3382,8 +3382,8 @@ fn resolve_artifact_worktree<'a>(
     }
 }
 
-// ワークグループ解決は settings.rs が正（`resolve_tray_notification` など settings 側の
-// 解決ヘルパーと規則を1本化するため）。既存の呼び出し元（`lib.rs` の
+// ワークグループ解決は settings.rs が正（グループ `system_prompt` の解決など、settings 側の
+// 参照経路と規則を1本化するため）。既存の呼び出し元（`lib.rs` の
 // `mcp_server::resolve_workgroup_by_id` を含む）を壊さないよう再エクスポートしている。
 pub use crate::settings::{resolve_workgroup, resolve_workgroup_by_id};
 

@@ -121,7 +121,6 @@ pub fn resolve_workgroup_by_id<'a>(
 /// 初期値」であり、作成時に一度だけ `WorktreeEntry.tray_notification` へ焼き込まれる
 /// （`worktreeDefaults.autoApproval` と同じ流儀）。ここでフォールバックすると、
 /// グループ設定の変更が既存ワークツリーへ遡って効いてしまう。
-///
 pub fn resolve_tray_notification(worktree: &WorktreeEntry) -> bool {
     worktree.tray_notification.unwrap_or(true)
 }

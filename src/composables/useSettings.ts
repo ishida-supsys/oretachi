@@ -10,6 +10,7 @@ import type {
   HotkeySettings,
   NotificationHookEntry,
   Workgroup,
+  WorktreeEntry,
 } from "../types/settings";
 import { setLocale } from "../i18n";
 import { setVerboseLogging } from "../utils/log";
@@ -19,6 +20,23 @@ import {
   makeRepositoryWorktreeEntry,
   makeRepositoryWorktreeId,
 } from "../utils/repositoryWorktree";
+import { initialTrayNotification } from "../utils/trayNotification";
+
+/**
+ * 擬似ワークツリー（ホーム / リポジトリ）を新規生成するときの `trayNotification` 初期値を焼き込む。
+ *
+ * これらは `workgroupId` を持たずに作られ、後段の `migrateWorkgroups` が先頭グループへ
+ * 割り当てる。`useWorkgroups.groupOf` の「未設定なら先頭グループ」規則に従うと、
+ * 生成時点で参照すべきグループは先頭グループになるので、その resolver を渡す。
+ *
+ * 通常ワークツリーの作成経路（App.vue / useTaskExecution）と同じく、グループ側が
+ * 未設定なら何も書かない（未設定のまま = 実効値 true）。
+ */
+function bakeTrayNotification(entry: WorktreeEntry, loaded: AppSettings): WorktreeEntry {
+  const initial = initialTrayNotification(entry, () => loaded.workgroups?.[0]);
+  if (initial !== undefined) entry.trayNotification = initial;
+  return entry;
+}
 
 const isMac = platform() === "macos";
 
@@ -122,7 +140,7 @@ export function migrateHomeWorktree(loaded: AppSettings): boolean {
 
   const existing = loaded.worktrees.find(isHomeWorktree);
   if (!existing) {
-    loaded.worktrees.unshift(makeHomeWorktreeEntry(baseDir));
+    loaded.worktrees.unshift(bakeTrayNotification(makeHomeWorktreeEntry(baseDir), loaded));
     return true;
   }
   if (existing.path !== baseDir) {
@@ -196,7 +214,11 @@ export function migrateRepositoryWorktrees(
   const missing = repositories.filter((r) => !existingIds.has(makeRepositoryWorktreeId(r.id)));
   if (missing.length > 0) {
     const insertAt = loaded.worktrees.findIndex(isHomeWorktree) + 1;
-    loaded.worktrees.splice(insertAt, 0, ...missing.map(makeRepositoryWorktreeEntry));
+    loaded.worktrees.splice(
+      insertAt,
+      0,
+      ...missing.map((r) => bakeTrayNotification(makeRepositoryWorktreeEntry(r), loaded)),
+    );
     changed = true;
   }
 

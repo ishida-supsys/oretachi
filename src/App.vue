@@ -1616,15 +1616,16 @@ onMounted(async () => {
         logDebug(`[TrayNotification] worktree not found: ${worktree} (${worktreeId})`);
         return;
       }
-      // null / undefined は「未設定に戻す」= ワークグループ既定値へフォールバック。
-      // キー自体を消して save 時に JSON から落とす（Rust 側の None と一致させる）。
+      // null / undefined は「未設定に戻す」= 実効値 true（ワークグループへは
+      // フォールバックしない / #171）。キー自体を消して save 時に JSON から落とす
+      // （Rust 側の None と一致させる）。
       if (trayNotification === null || trayNotification === undefined) {
         delete entry.trayNotification;
       } else {
         entry.trayNotification = trayNotification;
       }
       scheduleSave();
-      logDebug(`[TrayNotification] set for worktree=${worktree}: ${trayNotification ?? "inherit"}`);
+      logDebug(`[TrayNotification] set for worktree=${worktree}: ${trayNotification ?? "unset (=true)"}`);
     },
   );
 
