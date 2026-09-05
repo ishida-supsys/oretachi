@@ -202,19 +202,24 @@ function App() {
   const hoverKey = dragging || !hover ? null : hover.key;
 
   const doneCount = TASKS.filter(t => t.status === 'done').length;
-  // 「要ユーザー確認」は stopStats から導出する(未クリアの停止条件があるか = hasOpenStop)
+  // 未クリアの停止条件を持つタスク/エッジ(= hasOpenStop)。まだ到達していない pending も含む
+  // 「これから人の判定が必要になる箇所」の一覧なので、フェーズでは絞らない。
   const confirmTasks = TASKS.filter(t => stopStats(t).hasOpenStop);
   const confirmEdges = DEPENDENCIES
     .map((d, i) => ({ dep: d, idx: i }))
     .filter(({ dep }) => stopStats(dep).hasOpenStop);
   const confirmCount = confirmTasks.length + confirmEdges.length;
-  // 着手可能 = blocks 依存元がすべて done、かつその遷移(エッジ)の停止条件がすべてクリア済み。
-  // 親の停止条件が未クリアのまま次タスクを起動してはいけないため、エッジ側も条件に含める。
+  // 着手可能 = (1) blocks 依存元がすべて done、かつ (2) そのタスクへ入るエッジの停止条件が
+  // すべてクリア済み。(2) は kind を問わない — 親の停止条件が未クリアのまま次タスクを
+  // 起動してはいけないため、informs エッジに付いた停止条件も起動を止める。
   const readyTasks = TASKS.filter(t => {
     if (t.status !== 'not_started') return false;
-    return DEPENDENCIES
-      .filter(d => d.to === t.id && d.kind === 'blocks')
-      .every(d => TASK_MAP[d.from] && TASK_MAP[d.from].status === 'done' && !stopStats(d).hasOpenStop);
+    const incoming = DEPENDENCIES.filter(d => d.to === t.id);
+    const blocksDone = incoming
+      .filter(d => d.kind === 'blocks')
+      .every(d => TASK_MAP[d.from] && TASK_MAP[d.from].status === 'done');
+    const stopsCleared = incoming.every(d => !stopStats(d).hasOpenStop);
+    return blocksDone && stopsCleared;
   });
 
   return (
@@ -355,7 +360,7 @@ function App() {
             </PanelBody>
             <PanelBody style={{ minWidth: 220 }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: STOP_PHASE_COLORS.active, fontFamily: FONT }}>
-                要ユーザー確認 ({confirmCount})
+                未クリアの停止条件 ({confirmCount})
               </div>
               {confirmTasks.map(t => (
                 <div key={t.id} style={{ fontSize: 11, color: '#cdd6f4', fontFamily: FONT, marginTop: 3 }}>
@@ -390,7 +395,7 @@ function App() {
         <Chip
           label="状況"
           badge={'▸' + readyTasks.length + ' ⏸' + confirmCount}
-          title={'次に着手可能 / 要ユーザー確認(子' + confirmTasks.length + ' + 親' + confirmEdges.length + ') / 最近のメッセージ'}
+          title={'次に着手可能 / 未クリアの停止条件(子' + confirmTasks.length + ' + 親' + confirmEdges.length + ') / 最近のメッセージ'}
           active={openPanel === 'status'}
           onClick={() => togglePanel('status')}
         />
