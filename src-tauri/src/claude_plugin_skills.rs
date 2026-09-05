@@ -99,6 +99,10 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
         include_str!("../skills/teamwork-parent/templates/components--DependencyEdge.jsx"),
     ),
     (
+        "teamwork-parent/templates/lib--stopConditions.jsx",
+        include_str!("../skills/teamwork-parent/templates/lib--stopConditions.jsx"),
+    ),
+    (
         "teamwork-parent/templates/data--flow.example.jsx",
         include_str!("../skills/teamwork-parent/templates/data--flow.example.jsx"),
     ),
