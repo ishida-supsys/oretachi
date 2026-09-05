@@ -4,6 +4,7 @@ const TASKS = require('./data/flow').default;
 const { DEPENDENCIES, MESSAGES } = require('./data/flow');
 const TaskNode = require('./components/TaskNode').default;
 const { STATUS_COLORS, STATUS_LABELS } = require('./components/TaskNode');
+const { STOP_PHASE_COLORS, getStopConditions, stopStats } = require('./lib/stopConditions');
 const DependencyEdge = require('./components/DependencyEdge').default;
 const { BOX_WIDTH, BOX_HEIGHT } = require('./components/DependencyEdge');
 
@@ -47,6 +48,67 @@ function Chip({ label, badge, active, onClick, title }) {
   );
 }
 
+// ポップアップの最大幅。ビューポートへのクランプ計算にも使う
+const POPUP_MAX_W = 380;
+
+// 停止条件のホバーポップアップ。pan/zoom 変換の外側・最前面に1枚だけ描く。
+// 位置はキャンバス座標(hover.cx / hover.cy)を画面座標へ変換して求めるため、
+// zoom を上げても文字サイズは変わらず、他ノードにクリップされない。
+function StopPopup({ hover, pan, zoom }) {
+  if (!hover) return null;
+  const total = hover.conditions.length;
+  const done = hover.conditions.filter(sc => sc.checked).length;
+  const cleared = done === total;
+  const accent = cleared ? STOP_PHASE_COLORS.cleared : STOP_PHASE_COLORS.active;
+
+  // コンテナは 100vw/100vh かつ overflow:hidden。はみ出すと読めなくなるのでクランプする
+  const vw = typeof window === 'undefined' ? 1280 : window.innerWidth;
+  const vh = typeof window === 'undefined' ? 800 : window.innerHeight;
+  const half = POPUP_MAX_W / 2;
+  const rawLeft = hover.cx * zoom + pan.x;
+  const left = Math.min(Math.max(rawLeft, half + 8), Math.max(half + 8, vw - half - 8));
+  const rawTop = hover.cy * zoom + pan.y;
+  const top = Math.max(rawTop, 8);
+  // 内容の高さを概算し、下端に収まらないなら上向きに出す
+  const flipUp = top + 46 + total * 20 + 16 > vh;
+
+  return (
+    <div style={{
+      ...CARD,
+      position: 'absolute',
+      left, top,
+      transform: flipUp ? 'translate(-50%, calc(-100% - 8px))' : 'translate(-50%, 8px)',
+      zIndex: 60, // dragging オーバーレイ(50)より上
+      pointerEvents: 'none',
+      padding: '8px 12px',
+      minWidth: 220, maxWidth: POPUP_MAX_W,
+      boxShadow: '0 4px 14px rgba(0,0,0,0.6)',
+      borderColor: accent,
+    }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: accent, fontFamily: FONT }}>
+        {cleared ? '☑' : '⏸'} 停止条件 {done}/{total} クリア
+      </div>
+      <div style={{ fontSize: 10, color: '#a6adc8', fontFamily: FONT, marginTop: 2 }}>
+        {hover.title}
+      </div>
+      <div style={{ marginTop: 6, display: 'flex', flexDirection: 'column', gap: 3 }}>
+        {hover.conditions.map(sc => (
+          <div key={sc.id} style={{
+            fontSize: 11, fontFamily: FONT, lineHeight: 1.5,
+            color: sc.checked ? '#6c7086' : '#cdd6f4',
+            textDecoration: sc.checked ? 'line-through' : 'none',
+          }}>
+            {sc.checked ? '☑' : '☐'} {sc.text}
+            {sc.checked && sc.checkedAt && (
+              <span style={{ color: '#585b70', marginLeft: 6 }}>{sc.checkedAt}</span>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 // チップから展開されるカード本体。
 function PanelBody({ children, style }) {
   return (
@@ -63,6 +125,8 @@ function App() {
   const [dragging, setDragging] = useState(false);
   // 開いている欄は常に1つだけ。null = 全部畳んだ状態（既定）
   const [openPanel, setOpenPanel] = useState(null); // null | 'title' | 'help' | 'legend' | 'status'
+  // 停止条件ポップアップのホバー対象(ノード or エッジ)。同時に1つだけ
+  const [hover, setHover] = useState(null);
   const lastPos = useRef(null);
   const dragMoved = useRef(false); // ドラッグ中に移動が発生したか追跡
   const containerRef = useRef(null);
@@ -70,6 +134,9 @@ function App() {
   const togglePanel = useCallback(key => {
     setOpenPanel(p => (p === key ? null : key));
   }, []);
+
+  const handleStopEnter = useCallback(payload => setHover(payload), []);
+  const handleStopLeave = useCallback(() => setHover(null), []);
 
   // data-ui 要素（UI コントロール）上のドラッグは無視、それ以外はどこからでもパン可能
   const handleMouseDown = useCallback(e => {
@@ -86,6 +153,7 @@ function App() {
     if (Math.abs(dx) > 3 || Math.abs(dy) > 3) {
       dragMoved.current = true;
       setDragging(true);
+      setHover(null); // ドラッグ中はポップアップを出さない
     }
     setPan(p => ({ x: p.x + dx, y: p.y + dy }));
     lastPos.current = { x: e.clientX, y: e.clientY };
@@ -130,12 +198,23 @@ function App() {
   };
   const svgViewBox = '0 0 ' + CANVAS_W + ' ' + CANVAS_H;
 
+  // ポップアップが指している対象(ノード or エッジ)。ドラッグ中はポップアップを出さないので null
+  const hoverKey = dragging || !hover ? null : hover.key;
+
   const doneCount = TASKS.filter(t => t.status === 'done').length;
-  const confirmTasks = TASKS.filter(t => t.requiresUserConfirmation);
+  // 「要ユーザー確認」は stopStats から導出する(未クリアの停止条件があるか = hasOpenStop)
+  const confirmTasks = TASKS.filter(t => stopStats(t).hasOpenStop);
+  const confirmEdges = DEPENDENCIES
+    .map((d, i) => ({ dep: d, idx: i }))
+    .filter(({ dep }) => stopStats(dep).hasOpenStop);
+  const confirmCount = confirmTasks.length + confirmEdges.length;
+  // 着手可能 = blocks 依存元がすべて done、かつその遷移(エッジ)の停止条件がすべてクリア済み。
+  // 親の停止条件が未クリアのまま次タスクを起動してはいけないため、エッジ側も条件に含める。
   const readyTasks = TASKS.filter(t => {
     if (t.status !== 'not_started') return false;
-    const blockedBy = DEPENDENCIES.filter(d => d.to === t.id && d.kind === 'blocks').map(d => d.from);
-    return blockedBy.every(id => TASK_MAP[id] && TASK_MAP[id].status === 'done');
+    return DEPENDENCIES
+      .filter(d => d.to === t.id && d.kind === 'blocks')
+      .every(d => TASK_MAP[d.from] && TASK_MAP[d.from].status === 'done' && !stopStats(d).hasOpenStop);
   });
 
   return (
@@ -166,15 +245,22 @@ function App() {
         <svg style={{ ...svgStyle, zIndex: 0 }} viewBox={svgViewBox}>
           {DEPENDENCIES.map((dep, i) => (
             <DependencyEdge key={i} idx={i} dep={dep}
-              fromTask={TASK_MAP[dep.from]} toTask={TASK_MAP[dep.to]} />
+              fromTask={TASK_MAP[dep.from]} toTask={TASK_MAP[dep.to]}
+              hovered={hoverKey === 'edge-' + i}
+              onEnter={handleStopEnter} onLeave={handleStopLeave} />
           ))}
         </svg>
 
         {/* Layer 2: タスクノード */}
         {TASKS.map(task => (
-          <TaskNode key={task.id} task={task} x={task.x} y={task.y} />
+          <TaskNode key={task.id} task={task} x={task.x} y={task.y}
+            hovered={hoverKey === task.id}
+            onEnter={handleStopEnter} onLeave={handleStopLeave} />
         ))}
       </div>
+
+      {/* 停止条件ポップアップ: pan/zoom 変換の外側・最前面に1枚だけ。ドラッグ中は出さない */}
+      <StopPopup hover={dragging ? null : hover} pan={pan} zoom={zoom} />
 
       {/* 左上: 進捗チップ（展開でタイトル表示） */}
       <div style={{
@@ -218,6 +304,7 @@ function App() {
           }}>
             <div>Scroll: zoom | Drag: pan</div>
             <div>Esc / 背景クリック: 欄を閉じる</div>
+            <div>⏸ 付きのノード/線にホバー: 停止条件を表示(対象を白枠で強調)</div>
           </PanelBody>
         )}
       </div>
@@ -237,6 +324,9 @@ function App() {
             ))}
             <div style={{ fontSize: 10, color: '#6c7086', fontFamily: FONT, marginTop: 4, borderTop: '1px solid #313244', paddingTop: 4 }}>
               実線: blocks / 破線: informs
+            </div>
+            <div style={{ fontSize: 10, color: '#6c7086', fontFamily: FONT }}>
+              停止条件 — ⏸灰: 未実行 ／ ⏸橙: 実行中(要判定) ／ ☑緑: 実行済み
             </div>
           </PanelBody>
         )}
@@ -264,15 +354,24 @@ function App() {
               ))}
             </PanelBody>
             <PanelBody style={{ minWidth: 220 }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: '#fab387', fontFamily: FONT }}>
-                要ユーザー確認 ({confirmTasks.length})
+              <div style={{ fontSize: 11, fontWeight: 700, color: STOP_PHASE_COLORS.active, fontFamily: FONT }}>
+                要ユーザー確認 ({confirmCount})
               </div>
               {confirmTasks.map(t => (
                 <div key={t.id} style={{ fontSize: 11, color: '#cdd6f4', fontFamily: FONT, marginTop: 3 }}>
                   #{t.issueNumber} {t.title}
-                  {t.confirmationNote && (
-                    <div style={{ fontSize: 10, color: '#6c7086' }}>{t.confirmationNote}</div>
-                  )}
+                  {getStopConditions(t).filter(sc => !sc.checked).map(sc => (
+                    <div key={sc.id} style={{ fontSize: 10, color: '#6c7086' }}>☐ {sc.text}</div>
+                  ))}
+                </div>
+              ))}
+              {confirmEdges.map(({ dep, idx }) => (
+                <div key={'edge-' + idx} style={{ fontSize: 11, color: '#cdd6f4', fontFamily: FONT, marginTop: 3 }}>
+                  #{(TASK_MAP[dep.from] || {}).issueNumber} → #{(TASK_MAP[dep.to] || {}).issueNumber}
+                  <span style={{ color: '#6c7086' }}> (親の停止条件)</span>
+                  {getStopConditions(dep).filter(sc => !sc.checked).map(sc => (
+                    <div key={sc.id} style={{ fontSize: 10, color: '#6c7086' }}>☐ {sc.text}</div>
+                  ))}
                 </div>
               ))}
             </PanelBody>
@@ -290,8 +389,8 @@ function App() {
         )}
         <Chip
           label="状況"
-          badge={'▸' + readyTasks.length + ' ⏸' + confirmTasks.length}
-          title="次に着手可能 / 要ユーザー確認 / 最近のメッセージ"
+          badge={'▸' + readyTasks.length + ' ⏸' + confirmCount}
+          title={'次に着手可能 / 要ユーザー確認(子' + confirmTasks.length + ' + 親' + confirmEdges.length + ') / 最近のメッセージ'}
           active={openPanel === 'status'}
           onClick={() => togglePanel('status')}
         />

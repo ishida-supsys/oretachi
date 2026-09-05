@@ -1,6 +1,7 @@
 
 // このファイルはそのまま利用（カスタマイズ不要）
-// BOX_WIDTH / BOX_HEIGHT は TaskNode のサイズと一致させること
+// BOX_WIDTH / BOX_HEIGHT はノードのサイズ。TaskNode もここから import する
+const { STOP_PHASE_COLORS, getStopConditions, isEdgeActive, stopPhase } = require('../lib/stopConditions');
 
 const BOX_WIDTH = 220;
 const BOX_HEIGHT = 84;
@@ -28,13 +29,35 @@ function getEdgePoints(fromTask, toTask) {
   return { fx, fy, tx, ty };
 }
 
-// dep: { from, to, kind } — kind: "blocks"(実線) | "informs"(破線)
-function DependencyEdge({ idx, dep, fromTask, toTask }) {
+// dep: { from, to, kind, stopConditions } — kind: "blocks"(実線) | "informs"(破線)
+// stopConditions は親ワークツリーの停止条件(from → to の遷移で親が止まる)。
+// hovered = このエッジの停止条件ポップアップが今出ている(App が hover.key と照合して渡す)。
+function DependencyEdge({ idx, dep, fromTask, toTask, hovered, onEnter, onLeave }) {
   if (!fromTask || !toTask) return null;
   const { fx, fy, tx, ty } = getEdgePoints(fromTask, toTask);
   const markerId = 'dep-arr-' + idx;
   const isInforms = dep.kind === 'informs';
-  const stroke = isInforms ? '#585b70' : '#6c7086';
+  const conditions = getStopConditions(dep);
+  const hasStop = conditions.length > 0;
+  // 遷移元が done になった時点(= 親が次タスクを起動しようとする時点)だけを橙で強調する。
+  // まだ到達していない停止条件は灰、クリア済みは緑の ☑ で示し、線は通常色に戻す。
+  const phase = stopPhase(dep, isEdgeActive(fromTask));
+  const baseStroke = isInforms ? '#585b70' : '#6c7086';
+  const stroke = phase === 'active' ? STOP_PHASE_COLORS.active : baseStroke;
+  const badgeColor = phase ? STOP_PHASE_COLORS[phase] : baseStroke;
+  const mx = (fx + tx) / 2;
+  const my = (fy + ty) / 2;
+
+  const handleEnter = () => {
+    if (!onEnter || !hasStop) return;
+    onEnter({
+      key: 'edge-' + idx,
+      title: '#' + fromTask.issueNumber + ' → #' + toTask.issueNumber + ' の遷移',
+      conditions,
+      cx: mx,
+      cy: my + 10,
+    });
+  };
 
   return (
     <g>
@@ -44,9 +67,24 @@ function DependencyEdge({ idx, dep, fromTask, toTask }) {
         </marker>
       </defs>
       <line x1={fx} y1={fy} x2={tx} y2={ty}
-        stroke={stroke} strokeWidth={isInforms ? 1 : 1.5}
+        stroke={stroke} strokeWidth={(isInforms ? 1 : 1.5) + (hovered ? 2 : 0)}
         strokeDasharray={isInforms ? '6,4' : undefined}
         markerEnd={'url(#' + markerId + ')'} />
+      {hasStop && (
+        <g>
+          {/* ポップアップ表示中はフェーズ色を変えず、外側に明るいリングを足して対象を示す */}
+          {hovered && <circle cx={mx} cy={my} r="12" fill="none" stroke="#cdd6f4" strokeWidth="2" />}
+          <circle cx={mx} cy={my} r="9" fill="#1e1e2e" stroke={badgeColor} strokeWidth="1.5" />
+          <text x={mx} y={my} textAnchor="middle" dominantBaseline="central"
+            fontSize="10" fill={badgeColor}>{phase === 'cleared' ? '☑' : '⏸'}</text>
+        </g>
+      )}
+      {/* 透明の太いヒットライン。SVG層は pointerEvents:'none' のため、ここだけ有効化して
+          エッジをホバー可能にする。data-ui は付けない(ドラッグでのパンを妨げないため)。 */}
+      <line x1={fx} y1={fy} x2={tx} y2={ty}
+        stroke="transparent" strokeWidth={12}
+        pointerEvents={hasStop ? 'stroke' : 'none'}
+        onMouseEnter={handleEnter} onMouseLeave={onLeave} />
     </g>
   );
 }
