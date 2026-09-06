@@ -172,7 +172,7 @@ function onDragEnd() {
         active: g.id === activeWorkgroupId && !repositoryActive,
         notified: notifiedGroupIds.has(g.id),
         droppable: isWorktreeDropTarget(g.id),
-        'drop-hover': dropHoverId === g.id,
+        'drop-hover': dropHoverId === g.id && isWorktreeDropTarget(g.id),
       }"
       :style="{ borderLeftColor: g.color || '#9399b2', ...(g.id === activeWorkgroupId && !repositoryActive && g.color ? { background: g.color + '30', borderColor: g.color } : {}) }"
       draggable="true"
@@ -253,16 +253,6 @@ function onDragEnd() {
   color: #cdd6f4;
 }
 
-/* ドラッグ中はカーソル位置にゴースト画像が重なってチップ本体が隠れるので、
-   チップの外側までリングを広げて縁が見えるようにする */
-.wg-chip.drop-hover {
-  border-style: solid;
-  background: #cba6f733;
-  border-color: #cba6f7;
-  color: #cdd6f4;
-  box-shadow: 0 0 0 3px rgba(203, 166, 247, 0.9), 0 0 12px 4px rgba(203, 166, 247, 0.45);
-}
-
 .wg-chip.notified {
   box-shadow: 0 0 0 2px #f38ba8;
   animation: wg-notification-pulse 2s ease-in-out infinite;
@@ -275,6 +265,18 @@ function onDragEnd() {
   50% {
     box-shadow: 0 0 0 2px rgba(243, 139, 168, 1), 0 0 8px 2px rgba(243, 139, 168, 0.3);
   }
+}
+
+/* ドラッグ中はカーソル位置にゴースト画像が重なってチップ本体が隠れるので、
+   チップの外側までリングを広げて縁が見えるようにする。
+   通知中(.notified)のチップでもドロップ先が分かるよう、パルスより後ろに置いて上書きする */
+.wg-chip.drop-hover {
+  border-style: solid;
+  background: #cba6f733;
+  border-color: #cba6f7;
+  color: #cdd6f4;
+  box-shadow: 0 0 0 3px rgba(203, 166, 247, 0.9), 0 0 12px 4px rgba(203, 166, 247, 0.45);
+  animation: none;
 }
 
 .wg-count {
