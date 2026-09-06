@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+# 同一 PR / ブランチで新しい push があったら古い run はキャンセルする
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # release.yml のビルド対象は windows / macOS のみで Linux ターゲットは存在しない。
+  # src-tauri には CREATE_NO_WINDOW など Windows 前提のコードが含まれるため
+  # ランナーは windows-latest に揃える。
+  type-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      # prepare フックの build-sidecar.mjs は rustc/cargo を要求するが、
+      # もう一方の copy-vendor.mjs が置く public/vendor/ は実行時に URL fetch されるだけで
+      # 型解決には不要。よって --ignore-scripts で Rust のセットアップを省略する。
+      - name: Install frontend dependencies
+        run: pnpm install --ignore-scripts
+
+      - name: Type check
+        run: pnpm run type-check
+
+  cargo-check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      # pnpm install の prepare フックが build-sidecar.mjs (cargo build) を走らせるため、
+      # Rust のセットアップは pnpm install より前に置く必要がある。
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+
+      # tauri.conf.json の externalBin が要求する
+      # src-tauri/binaries/oretachi-notify-<triple>.exe を prepare フックで生成する。
+      # これが無いと tauri_build が build.rs で失敗し cargo check も通らない。
+      - name: Install frontend dependencies (builds sidecar via prepare)
+        run: pnpm install
+
+      # frontendDist (../dist) は cargo check では要求されないので dist の用意は不要。
+      # --all-targets は付けない: テストコードの検査より run 時間を優先する
+      # (cargo test の CI 実行は本件のスコープ外)。
+      - name: Cargo check
+        run: cargo check
+        working-directory: src-tauri
