@@ -106,7 +106,7 @@ const { notifications, initNotificationListener, addNotification, clearNotificat
 useEventToast({ shouldShow: (wid) => mainWindowShowsDelivery(wid, isDetached) });
 const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees, setCurrentTrayWorktreeId, isTrayShowingWorktree, focusTrayWindow } = useTrayPopup();
 const { closeAllCodeReviewWindows } = useCodeReviewWindow();
-const { openArtifactViewer, closeArtifactWindow } = useArtifactWindow();
+const { openArtifactViewer, closeArtifactWindow, closeAllArtifactWindows } = useArtifactWindow();
 const { tryAutoAssignHotkey } = useAutoHotkey();
 const { removeTask } = useTasks();
 
@@ -1962,6 +1962,9 @@ onMounted(async () => {
     // フックによる URL 自動登録は作業の副産物なので autoOpen: false で割り込ませない。
     if (autoOpen === false) return;
     if (command !== "create") return;
+    // シャットダウン中は開かない。手順5の closeAllArtifactWindows() 以降に
+    // 新しいウィンドウが生まれると、最後の1枚が閉じるまでアプリが終了しない。
+    if (isWaitingForShutdown.value) return;
     if (settings.value.worktreeDefaults?.autoOpenArtifact === false) return;
     const wt = worktrees.value.find((w) => w.id === wid);
     if (!wt) return;
@@ -2184,6 +2187,7 @@ onMounted(async () => {
       await Promise.all([
         closeTrayPopup(),
         closeAllCodeReviewWindows(),
+        closeAllArtifactWindows(),
         closeAllSubWindows(),
       ]);
       await Promise.all(
