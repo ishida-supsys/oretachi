@@ -1960,6 +1960,9 @@ onMounted(async () => {
     // フックによる URL 自動登録は作業の副産物なので autoOpen: false で割り込ませない。
     if (autoOpen === false) return;
     if (command !== "create") return;
+    // シャットダウン中は開かない。手順5の closeAllArtifactWindows() 以降に
+    // 新しいウィンドウが生まれると、最後の1枚が閉じるまでアプリが終了しない。
+    if (isWaitingForShutdown.value) return;
     if (settings.value.worktreeDefaults?.autoOpenArtifact === false) return;
     const wt = worktrees.value.find((w) => w.id === wid);
     if (!wt) return;
