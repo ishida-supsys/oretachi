@@ -11,9 +11,11 @@ import SubscriptionTable from "./SubscriptionTable.vue";
 import RepositoryPanel from "./RepositoryPanel.vue";
 import HomeCatTerminal from "./HomeCatTerminal.vue";
 import WorkgroupBar from "./WorkgroupBar.vue";
+import WorkgroupMoveDialog from "./WorkgroupMoveDialog.vue";
 import { useMasonryLayout } from "../composables/useMasonryLayout";
 import { useSettings } from "../composables/useSettings";
 import { useWorkgroups } from "../composables/useWorkgroups";
+import { useWorktreeDrag } from "../composables/useWorktreeDrag";
 import { useHomePanel } from "../composables/useHomePanel";
 import { useTasks } from "../composables/useTasks";
 import { useTaskPersistence } from "../composables/useTaskPersistence";
@@ -41,6 +43,7 @@ const draggingId = ref<string | null>(null);
 let swapCooldown = false;
 let originalOrder: string[] = [];
 let dropped = false;
+const { draggingWorktreeId } = useWorktreeDrag();
 
 // カスタムFLIPアニメーション
 const cardElements = new Map<string, HTMLElement>();
@@ -164,6 +167,8 @@ watch(draggingId, (id) => {
 
 function onCardDragStart(worktreeId: string, event: DragEvent) {
   draggingId.value = worktreeId;
+  // ワークグループタブ側がドロップ可否を判定するための横断状態
+  draggingWorktreeId.value = worktreeId;
   originalOrder = props.worktrees.map((w) => w.id);
   dropped = false;
   event.dataTransfer?.setData("text/plain", worktreeId);
@@ -185,14 +190,18 @@ function onCardDrop(event: DragEvent) {
   event.preventDefault();
   dropped = true;
   draggingId.value = null;
+  draggingWorktreeId.value = null;
   emit("commitReorder");
 }
 
 function onDragEnd() {
   if (!dropped) {
+    // 並べ替え以外の場所（ワークグループタブなど）へ落ちた場合も、
+    // dragover 中に動かした暫定の並びはここで元に戻す
     emit("cancelReorder", originalOrder);
   }
   draggingId.value = null;
+  draggingWorktreeId.value = null;
   dropped = false;
 }
 
@@ -331,8 +340,15 @@ watch(activeWorkgroupId, () => {
   });
 });
 
-function onMoveToWorkgroup(payload: { worktreeId: string; groupId: string }) {
-  moveWorktreeToWorkgroup(payload.worktreeId, payload.groupId);
+// グループ移動ダイアログ（メニューのサブメニュー展開が画面外へはみ出すのを避けるための置き換え）
+const groupMoveTargetId = ref<string | null>(null);
+const groupMoveTarget = computed(() =>
+  props.worktrees.find((w) => w.id === groupMoveTargetId.value),
+);
+
+function onGroupMoveSelect(groupId: string) {
+  if (groupMoveTargetId.value) moveWorktreeToWorkgroup(groupMoveTargetId.value, groupId);
+  groupMoveTargetId.value = null;
 }
 
 // 各ワークツリーカードの自然幅（ターミナルサムネイル幅から計算）をもとに列幅を決定する。
@@ -492,8 +508,7 @@ watch(
               :tooltip="cardTooltips?.get(worktree.id)"
               :description-open="showAllDescriptions || (descriptionOpens?.get(worktree.id) ?? false)"
               :workgroups="workgroups"
-              :current-workgroup-id="resolvedGroupId(worktree.workgroupId)"
-              @move-to-workgroup="onMoveToWorkgroup"
+              @open-group-move="groupMoveTargetId = $event"
               @drag-start="onCardDragStart"
               @drag-end="onDragEnd"
               @select-terminal="emit('selectTerminal', $event)"
@@ -606,6 +621,14 @@ watch(
       </div>
     </template>
     </div><!-- /home-content -->
+
+    <WorkgroupMoveDialog
+      v-if="groupMoveTarget"
+      :worktree-name="groupMoveTarget.name"
+      :current-group-id="resolvedGroupId(groupMoveTarget.workgroupId)"
+      @select="onGroupMoveSelect"
+      @cancel="groupMoveTargetId = null"
+    />
   </div>
 </template>
 

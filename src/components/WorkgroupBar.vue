@@ -2,6 +2,7 @@
 import { computed, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { useWorkgroups } from "../composables/useWorkgroups";
+import { useWorktreeDrag } from "../composables/useWorktreeDrag";
 import { useHomePanel } from "../composables/useHomePanel";
 import { useSettings } from "../composables/useSettings";
 import WorkgroupEditDialog from "./WorkgroupEditDialog.vue";
@@ -39,10 +40,29 @@ const {
   addWorkgroup,
   updateWorkgroup,
   reorderWorkgroup,
+  resolvedGroupId,
+  moveWorktreeToWorkgroup,
 } = useWorkgroups();
+
+const { draggingWorktreeId } = useWorktreeDrag();
 
 const editingId = ref<string | null>(null);
 const draggingId = ref<string | null>(null);
+/** ワークツリーカードのドラッグが今どのチップの上にいるか（ドロップ先ハイライト用） */
+const dropHoverId = ref<string | null>(null);
+
+/** ドラッグ中ワークツリーの現在の所属グループ。自分自身のグループはドロップ先にしない */
+const draggingSourceGroupId = computed(() => {
+  const id = draggingWorktreeId.value;
+  if (!id) return null;
+  const entry = settings.value.worktrees.find((w) => w.id === id);
+  return entry ? resolvedGroupId(entry.workgroupId) : null;
+});
+
+/** そのチップがワークツリーの移動先になりうるか */
+function isWorktreeDropTarget(groupId: string): boolean {
+  return draggingWorktreeId.value !== null && draggingSourceGroupId.value !== groupId;
+}
 
 function select(id: string) {
   activeWorkgroupId.value = id;
@@ -87,11 +107,29 @@ function onDragStart(id: string, event: DragEvent) {
     event.dataTransfer.setData("text/plain", id);
   }
 }
-function onDragOver(event: DragEvent) {
+function onDragOver(id: string, event: DragEvent) {
+  // ワークツリーカードのドラッグ中は「移動先」、それ以外はグループの並べ替えとして受ける
+  if (draggingWorktreeId.value) {
+    if (!isWorktreeDropTarget(id)) return; // preventDefault しない = ドロップ不可カーソル
+    dropHoverId.value = id;
+  }
   event.preventDefault();
   if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
 }
-function onDrop(id: string) {
+function onDragLeave(id: string) {
+  if (dropHoverId.value === id) dropHoverId.value = null;
+}
+function onDrop(id: string, event: DragEvent) {
+  const worktreeId = draggingWorktreeId.value;
+  if (worktreeId) {
+    // カードのドラッグ: グループ移動。カード一覧側の並べ替え確定へ伝播させない
+    event.preventDefault();
+    event.stopPropagation();
+    if (isWorktreeDropTarget(id)) moveWorktreeToWorkgroup(worktreeId, id);
+    draggingWorktreeId.value = null;
+    dropHoverId.value = null;
+    return;
+  }
   if (draggingId.value && draggingId.value !== id) {
     reorderWorkgroup(draggingId.value, id);
   }
@@ -99,6 +137,7 @@ function onDrop(id: string) {
 }
 function onDragEnd() {
   draggingId.value = null;
+  dropHoverId.value = null;
 }
 </script>
 
@@ -129,14 +168,20 @@ function onDragEnd() {
       v-for="g in groups"
       :key="g.id"
       class="wg-chip"
-      :class="{ active: g.id === activeWorkgroupId && !repositoryActive, notified: notifiedGroupIds.has(g.id) }"
+      :class="{
+        active: g.id === activeWorkgroupId && !repositoryActive,
+        notified: notifiedGroupIds.has(g.id),
+        droppable: isWorktreeDropTarget(g.id),
+        'drop-hover': dropHoverId === g.id,
+      }"
       :style="{ borderLeftColor: g.color || '#9399b2', ...(g.id === activeWorkgroupId && !repositoryActive && g.color ? { background: g.color + '30', borderColor: g.color } : {}) }"
       draggable="true"
       :title="t('chipTitle')"
       @click="onChipClick(g.id)"
       @dragstart="onDragStart(g.id, $event)"
-      @dragover="onDragOver($event)"
-      @drop="onDrop(g.id)"
+      @dragover="onDragOver(g.id, $event)"
+      @dragleave="onDragLeave(g.id)"
+      @drop="onDrop(g.id, $event)"
       @dragend="onDragEnd"
     >
       <span class="wg-name">{{ displayName(g) }}</span>
@@ -198,6 +243,22 @@ function onDragEnd() {
   background: #313244;
   color: #cdd6f4;
   border-color: #585b70;
+}
+
+/* ワークツリーカードのドラッグ中: 移動先になりうるチップを控えめに示し、
+   実際にカーソルが乗っているチップだけを強調する */
+.wg-chip.droppable {
+  border-style: dashed;
+  border-color: #cba6f7;
+  color: #cdd6f4;
+}
+
+.wg-chip.drop-hover {
+  border-style: solid;
+  background: #cba6f733;
+  border-color: #cba6f7;
+  color: #cdd6f4;
+  box-shadow: 0 0 0 2px rgba(203, 166, 247, 0.5);
 }
 
 .wg-chip.notified {
