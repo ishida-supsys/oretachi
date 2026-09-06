@@ -8,6 +8,9 @@ on:
     branches:
       - main
 
+# type-check / cargo-check は main ruleset の required status check に登録されている。
+# ジョブ名を変えると ruleset 側の context 名と食い違ってマージがブロックされるので注意。
+
 # 同一 PR / ブランチで新しい push があったら古い run はキャンセルする
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
