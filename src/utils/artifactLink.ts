@@ -15,6 +15,9 @@
  * （utils/externalLink.ts と同じ方針）。
  */
 
+/** `artifact:` スキームかどうかの判定だけが要る呼び出し元向け（解析の成否は問わない） */
+export const ARTIFACT_SCHEME_RE = /^artifact:/i;
+
 export type ArtifactScope = "worktree" | "repository";
 
 export interface ArtifactLinkTarget {
@@ -25,10 +28,30 @@ export interface ArtifactLinkTarget {
   artifactId: string;
 }
 
-/** アーティファクト ID はファイル名にそのまま使われるため、パス区切りと `..` を弾く */
+/**
+ * アーティファクト ID はファイル名にそのまま使われるため、パス区切り・`..`・
+ * NTFS の代替データストリーム（`:`）・制御文字を弾く。
+ *
+ * Rust 側の `validate_path_component` にも同じ検証があるが、こちらは
+ * 「このパーサが返した ID は安全」という前提を単体で成立させておくためのもの。
+ */
+// スラッシュ / コロン / バックスラッシュ。エスケープの取り違えを避けるため
+// 正規表現ではなくコードポイントで持つ
+const FORBIDDEN_ID_CODES = new Set([0x2f, 0x3a, 0x5c]);
+
 function isValidArtifactId(id: string): boolean {
   if (id === "" || id === "." || id === "..") return false;
-  return !/[\\/]/.test(id);
+  for (const ch of id) {
+    const code = ch.codePointAt(0) ?? 0;
+    // 制御文字（NUL・改行など）もファイル名には載せない
+    if (code < 0x20 || code === 0x7f || FORBIDDEN_ID_CODES.has(code)) return false;
+  }
+  return true;
+}
+
+/** ワークツリー ID も同じ制約で扱う（リポジトリ ID は絶対パスなので対象外） */
+function isValidWorktreeId(id: string): boolean {
+  return isValidArtifactId(id);
 }
 
 function safeDecode(value: string): string | null {
@@ -46,7 +69,7 @@ function safeDecode(value: string): string | null {
 export function parseArtifactLink(href: string | null | undefined): ArtifactLinkTarget | null {
   if (typeof href !== "string") return null;
   const trimmed = href.trim();
-  if (!/^artifact:/i.test(trimmed)) return null;
+  if (!ARTIFACT_SCHEME_RE.test(trimmed)) return null;
 
   const rest = trimmed.slice("artifact:".length);
 
@@ -66,13 +89,10 @@ export function parseArtifactLink(href: string | null | undefined): ArtifactLink
   const id = safeDecode(rawId);
   const artifactId = safeDecode(rawArtifactId);
   if (id === null || artifactId === null) return null;
-  if (id === "" || !isValidArtifactId(artifactId)) return null;
+  if (!isValidArtifactId(artifactId)) return null;
+  // ワークツリー ID はウィンドウラベルにも使うので ID 制約を掛ける。
+  // リポジトリ ID は絶対パスなので空でないことだけ見る
+  if (rawScope === "worktree" ? !isValidWorktreeId(id) : id === "") return null;
 
   return { scope: rawScope, id, artifactId };
-}
-
-/** 解析結果を人間が読める形に戻す（トーストのメッセージ用） */
-export function formatArtifactLink(target: ArtifactLinkTarget): string {
-  if (target.scope === null) return `artifact:${target.artifactId}`;
-  return `artifact://${target.scope}/${encodeURIComponent(target.id ?? "")}/${target.artifactId}`;
 }

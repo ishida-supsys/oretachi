@@ -1,38 +1,36 @@
 /**
  * HTML アーティファクト用の srcdoc を生成する。
  *
- * 生の content をそのまま srcdoc に流すと (1) CSP が一切かからず (2) `artifact:` リンクの
- * クリックを拾えない（sandbox に allow-top-navigation が無いので何も起きない）ため、
- * ドキュメントをパースして CSP メタとクリック横取りスクリプトを差し込む。
+ * 生の content をそのまま srcdoc に流すと `artifact:` リンクのクリックを拾えない
+ * （sandbox に allow-top-navigation が無いので何も起きない）ため、ドキュメントを
+ * パースしてクリック横取りスクリプトを差し込む。
  *
- * 文字列連結ではなく DOMParser を使うのは、CSP メタが効くには `<head>` の先頭に置く必要が
- * あり、かつ `<!DOCTYPE html>` より前に何かを足すと quirks モードに落ちるため。
+ * 文字列連結ではなく DOMParser を使うのは、`<!DOCTYPE html>` より前に何かを足すと
+ * quirks モードに落ちるため。パース結果の文書は browsing context を持たないので、
+ * ここでスクリプトが走ったり外部リソースを取りに行ったりはしない。
+ *
+ * なお html view には CSP が無い（親も `"csp": null`）。React 側と揃える案はあるが、
+ * 既存の HTML アーティファクトは CDN 前提で書かれているものが多く、無言で崩れる。
+ * CSP の付与は影響範囲を調べたうえで別途対応する。
  */
 
 import { ARTIFACT_LINK_INTERCEPT_JS } from "./artifactFrameLink";
 
-/**
- * React アーティファクト（utils/reactArtifactSrcdoc.ts）と同じ CSP。
- * connect-src を含む default-src 'none' で外部通信を止め、sandbox="allow-scripts"
- * （allow-same-origin なし）と組み合わせて親ウィンドウから隔離する。
- */
-export const HTML_ARTIFACT_CSP =
-  "default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval'; style-src 'unsafe-inline'; img-src data: blob:;";
-
 export function buildHtmlSrcdoc(content: string): string {
   const doc = new DOMParser().parseFromString(content, "text/html");
-  // DOMParser は content が断片でも必ず head / body を作る
-  const head = doc.head;
-  const body = doc.body;
-
-  const meta = doc.createElement("meta");
-  meta.setAttribute("http-equiv", "Content-Security-Policy");
-  meta.setAttribute("content", HTML_ARTIFACT_CSP);
-  head.insertBefore(meta, head.firstChild);
 
   const script = doc.createElement("script");
   script.textContent = ARTIFACT_LINK_INTERCEPT_JS;
-  body.appendChild(script);
+  // <frameset> 文書では body の代わりに frameset が入っており、その子の <script> は
+  // 再パース時に捨てられる。その場合だけ head の末尾へ逃がす
+  const host =
+    doc.body && doc.body.tagName !== "FRAMESET" ? doc.body : doc.head;
+  host.appendChild(script);
 
-  return `<!DOCTYPE html>\n${doc.documentElement.outerHTML}`;
+  // 元の doctype は尊重する（無い断片だけ標準モードになるよう html を補う）
+  const doctype = doc.doctype
+    ? `<!DOCTYPE ${doc.doctype.name}${doc.doctype.publicId ? ` PUBLIC "${doc.doctype.publicId}"` : ""}${doc.doctype.systemId ? ` "${doc.doctype.systemId}"` : ""}>`
+    : "<!DOCTYPE html>";
+
+  return `${doctype}\n${doc.documentElement.outerHTML}`;
 }

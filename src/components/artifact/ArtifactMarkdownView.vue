@@ -10,7 +10,7 @@ import PanZoomCanvas from "./PanZoomCanvas.vue";
 import { mermaidConfig, sanitizeMermaidSvg } from "../../utils/mermaidTheme";
 import { createPanZoom, type PanZoomController } from "../../utils/panZoom";
 import { resolveExternalLink } from "../../utils/externalLink";
-import { parseArtifactLink } from "../../utils/artifactLink";
+import { ARTIFACT_SCHEME_RE } from "../../utils/artifactLink";
 
 const props = defineProps<{
   content: string;
@@ -181,8 +181,9 @@ function onLinkClick(e: MouseEvent) {
   // ここから先は開く/開かないに関わらず webview を遷移させない
   e.preventDefault();
   e.stopPropagation();
-  // artifact: リンクは外部ブラウザではなくビューア内（または別ビューアウィンドウ）で開く
-  if (href && parseArtifactLink(href)) {
+  // artifact: リンクは外部ブラウザではなくビューア内（または別ビューアウィンドウ）で開く。
+  // 解析できない artifact: リンクも上へ渡す（受け側が書き間違いとして知らせる）
+  if (href && ARTIFACT_SCHEME_RE.test(href.trim())) {
     emit("navigate", href);
     return;
   }

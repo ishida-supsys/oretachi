@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { parseArtifactLink, formatArtifactLink } from "./artifactLink";
+import { parseArtifactLink } from "./artifactLink";
 
 describe("parseArtifactLink", () => {
   it("短縮形はスコープ・ID を持たない", () => {
@@ -60,21 +60,25 @@ describe("parseArtifactLink", () => {
     ["artifact:a/b"],
     ["artifact://worktree/abc/%2E%2E"],
     ["artifact://worktree/abc/%2Fetc%2Fpasswd"],
+    ["artifact:a" + String.fromCharCode(92) + "b"],
+    ["artifact:%5Cwindows%5Csystem32"],
+    ["artifact:stream%3A%24DATA"],
+    ["artifact:a%00b"],
+    ["artifact:a%0Ab"],
   ])("パス脱出を許さない: %s", (href) => {
     expect(parseArtifactLink(href)).toBeNull();
   });
-});
 
-describe("formatArtifactLink", () => {
-  it("短縮形へ戻す", () => {
-    expect(formatArtifactLink({ scope: null, id: null, artifactId: "report" })).toBe(
-      "artifact:report",
-    );
+  it("ハイフンを含む ID は通す", () => {
+    expect(parseArtifactLink("artifact:report-2026-q2")?.artifactId).toBe("report-2026-q2");
   });
 
-  it("repository スコープの ID をエンコードして戻す", () => {
-    expect(
-      formatArtifactLink({ scope: "repository", id: "X:\\devel\\oretachi", artifactId: "report" }),
-    ).toBe("artifact://repository/X%3A%5Cdevel%5Coretachi/report");
+  it("worktree スコープの ID にも同じ制約を掛ける", () => {
+    expect(parseArtifactLink("artifact://worktree/a%2Fb/report")).toBeNull();
+    expect(parseArtifactLink("artifact://worktree//report")).toBeNull();
+  });
+
+  it("repository スコープの ID は絶対パスなので区切り文字を許す", () => {
+    expect(parseArtifactLink("artifact://repository/X%3A%5Cdevel/report")?.id).toBe("X:" + String.fromCharCode(92) + "devel");
   });
 });

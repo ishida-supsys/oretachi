@@ -20,8 +20,14 @@ const artifactWindowMap = new Map<string, WebviewWindow>();
 async function focusExisting(key: string, label: string): Promise<boolean> {
   const cached = artifactWindowMap.get(key);
   if (cached) {
-    await cached.setFocus();
-    return true;
+    try {
+      await cached.setFocus();
+      return true;
+    } catch {
+      // tauri://destroyed を取りこぼした等で死んだ参照が残っている場合。
+      // 残したままだと以降このキーが恒久的に開けなくなるので捨ててやり直す
+      artifactWindowMap.delete(key);
+    }
   }
   try {
     const found = await WebviewWindow.getByLabel(label);
@@ -52,6 +58,13 @@ async function requestNavigate(label: string, artifactId: string): Promise<void>
   }
 }
 
+/**
+ * Tauri のウィンドウラベルに使える文字。ここを外れた ID でウィンドウを作ると
+ * `WebviewWindow` は Promise を reject せず `tauri://error` イベントに流すため、
+ * 呼び出し元は失敗に気づけずクリックが無反応になる。事前に弾いて throw する。
+ */
+const WINDOW_LABEL_RE = /^[a-zA-Z0-9\-/:_]+$/;
+
 /** リポジトリ ID（絶対パス）をウィンドウラベルに使える形へ変換する */
 function encodeRepositoryLabel(repositoryId: string): string {
   // btoa は Latin-1 しか扱えないため、UTF-8 バイト列に落としてからエンコードする
@@ -74,6 +87,9 @@ export function useArtifactWindow() {
     artifactId?: string,
   ): Promise<void> {
     const label = `artifact-${worktreeId}`;
+    if (!WINDOW_LABEL_RE.test(label)) {
+      throw new Error(`ウィンドウラベルに使えないワークツリー ID: ${worktreeId}`);
+    }
     if (await focusExisting(worktreeId, label)) {
       if (artifactId) await requestNavigate(label, artifactId);
       return;

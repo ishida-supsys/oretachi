@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, onMounted, onUnmounted } from "vue";
 import { useI18n } from "vue-i18n";
 import { useToast } from "primevue/usetoast";
 import { invoke } from "@tauri-apps/api/core";
@@ -22,6 +22,7 @@ import {
   ARTIFACT_NAVIGATE_EVENT,
   type ArtifactNavigateEvent,
 } from "./composables/useArtifactWindow";
+import { useArtifactHistory } from "./composables/useArtifactHistory";
 import { URL_ARTIFACT_CONTENT_TYPE } from "./types/artifact";
 import type {
   ArtifactMeta,
@@ -112,31 +113,8 @@ async function loadList() {
   }
 }
 
-// ── 履歴スタック ──
-// 同一ウィンドウ内の遷移だけを積む。ウィンドウを跨ぐ遷移（別ワークツリーのビューアを
-// 開く / 既存ビューアへ artifact-navigate を投げる）は受け側で "replace" 扱いにして
-// スタックを伸ばさない。
-const history = ref<string[]>([]);
-const historyIndex = ref(-1);
-const canGoBack = computed(() => historyIndex.value > 0);
-const canGoForward = computed(() => historyIndex.value < history.value.length - 1);
-
-function pushHistory(id: string) {
-  if (history.value[historyIndex.value] === id) return;
-  history.value = [...history.value.slice(0, historyIndex.value + 1), id];
-  historyIndex.value = history.value.length - 1;
-}
-
-function replaceHistory(id: string) {
-  if (historyIndex.value < 0) {
-    history.value = [id];
-    historyIndex.value = 0;
-    return;
-  }
-  const next = history.value.slice(0, historyIndex.value + 1);
-  next[historyIndex.value] = id;
-  history.value = next;
-}
+const history = useArtifactHistory();
+const { canGoBack, canGoForward } = history;
 
 /** 本文の読み込みのみ。履歴は触らない */
 async function loadArtifact(id: string) {
@@ -155,42 +133,40 @@ async function loadArtifact(id: string) {
 
 async function selectArtifact(id: string, mode: "push" | "replace" = "push") {
   if (selectedId.value === id && selectedArtifact.value) return;
-  if (mode === "push") pushHistory(id);
-  else replaceHistory(id);
+  if (mode === "push") history.push(id);
+  else history.replace(id);
   await loadArtifact(id);
 }
 
-/** 削除されたアーティファクトを履歴から抜き、現在位置を追従させる */
-function pruneHistory(removedId: string) {
-  if (!history.value.includes(removedId)) return;
-  let removedBefore = 0;
-  for (let i = 0; i < historyIndex.value; i++) {
-    if (history.value[i] === removedId) removedBefore += 1;
+/**
+ * 履歴を1つ前/後ろへ動かす。ワークツリーごと削除された場合など、削除イベントで
+ * 拾いきれず履歴に残った死んだエントリは、その場で取り除いて隣を試す
+ * （そうしないと同じエントリで永久に足止めされる）。
+ */
+async function stepHistory(delta: -1 | 1) {
+  let prunedAny = false;
+  while (delta < 0 ? canGoBack.value : canGoForward.value) {
+    const nextIndex = history.index.value + delta;
+    const id = history.entries.value[nextIndex];
+    if (artifacts.value.some((a) => a.id === id)) {
+      history.moveTo(nextIndex);
+      await loadArtifact(id);
+      return;
+    }
+    history.prune(id);
+    prunedAny = true;
   }
-  const wasCurrent = history.value[historyIndex.value] === removedId;
-  history.value = history.value.filter((id) => id !== removedId);
-  // 現在位置が消えた場合は1つ前へ下がる（タブを閉じたときと同じ挙動）
-  const next = historyIndex.value - removedBefore - (wasCurrent ? 1 : 0);
-  historyIndex.value = Math.max(-1, Math.min(next, history.value.length - 1));
-}
-
-async function goToHistory(nextIndex: number) {
-  const id = history.value[nextIndex];
-  // ワークツリーごと削除された場合など、イベントで prune しきれない穴を踏んだとき
-  if (!artifacts.value.some((a) => a.id === id)) {
-    toast.add({ severity: "warn", summary: t("navigate.notFound"), detail: id, life: 4000 });
-    return;
+  if (prunedAny) {
+    toast.add({ severity: "warn", summary: t("navigate.notFound"), life: 4000 });
   }
-  historyIndex.value = nextIndex;
-  await loadArtifact(id);
 }
 
 async function goBack() {
-  if (canGoBack.value) await goToHistory(historyIndex.value - 1);
+  await stepHistory(-1);
 }
 
 async function goForward() {
-  if (canGoForward.value) await goToHistory(historyIndex.value + 1);
+  await stepHistory(1);
 }
 
 // ── artifact: リンクの遷移 ──
@@ -216,7 +192,12 @@ async function navigateWithin(artifactId: string, mode: "push" | "replace") {
 /** ビュー（markdown / html / react）から上がってきた artifact: リンクを処理する */
 async function onNavigate(href: string) {
   const target = parseArtifactLink(href);
-  if (!target) return;
+  if (!target) {
+    // artifact: と書いてあるのに解析できない = リンクの書き間違い。
+    // 黙って無反応にすると書き手が typo に気づけないので知らせる
+    toast.add({ severity: "warn", summary: t("navigate.invalidLink"), detail: href, life: 4000 });
+    return;
+  }
 
   const isSameScope =
     target.scope === null ||
@@ -243,7 +224,7 @@ async function onNavigate(href: string) {
 async function refreshSelected(artifactId: string, command: string) {
   await loadList();
   if (command === "delete") {
-    pruneHistory(artifactId);
+    history.prune(artifactId);
     if (selectedId.value === artifactId) {
       selectedId.value = null;
       selectedArtifact.value = null;
@@ -351,6 +332,14 @@ async function resolveScopeName() {
 }
 
 onMounted(async () => {
+  // 既存ウィンドウ宛の遷移指示。Tauri のイベントにバッファリングは無く、一方で
+  // 送信側の focusExisting は起動途中のウィンドウでも true を返すため、
+  // loadList() などを待つ前に最優先で登録する（待つと取りこぼす）。
+  // ウィンドウを跨ぐ遷移なので履歴は積まない。
+  unlistenNavigate = await listen<ArtifactNavigateEvent>(ARTIFACT_NAVIGATE_EVENT, async (event) => {
+    await navigateWithin(event.payload.artifactId, "replace");
+  });
+
   void resolveScopeName();
   await loadList();
   // リンクから開かれた場合は指定のアーティファクトを、無ければ先頭を選ぶ
@@ -369,11 +358,6 @@ onMounted(async () => {
   if (!selectedId.value && artifacts.value.length > 0) {
     await selectArtifact(artifacts.value[0].id);
   }
-
-  // 既存ウィンドウ宛の遷移指示。ウィンドウを跨ぐ遷移なので履歴は積まない
-  unlistenNavigate = await listen<ArtifactNavigateEvent>(ARTIFACT_NAVIGATE_EVENT, async (event) => {
-    await navigateWithin(event.payload.artifactId, "replace");
-  });
 
   if (isRepositoryScope) {
     unlisten = await listen<RepoArtifactChangedEvent>("repo-artifact-changed", async (event) => {
@@ -423,6 +407,26 @@ onUnmounted(() => {
     </div>
 
     <div class="main-content">
+      <!-- 読み込み失敗で本文が消えても履歴は残るため、分岐の外に出して行き止まりを作らない -->
+      <div class="nav-bar">
+        <button
+          class="btn-nav"
+          :disabled="!canGoBack"
+          :title="t('nav.back')"
+          @click="goBack"
+        >
+          <i class="pi pi-arrow-left" />
+        </button>
+        <button
+          class="btn-nav"
+          :disabled="!canGoForward"
+          :title="t('nav.forward')"
+          @click="goForward"
+        >
+          <i class="pi pi-arrow-right" />
+        </button>
+      </div>
+
       <div v-if="!selectedArtifact && !loading" class="empty-main">
         <span class="pi pi-box empty-icon" />
         <span>{{ t("selectPrompt") }}</span>
@@ -434,24 +438,6 @@ onUnmounted(() => {
 
       <template v-else-if="selectedArtifact">
         <div class="content-header">
-          <div class="nav-buttons">
-            <button
-              class="btn-nav"
-              :disabled="!canGoBack"
-              :title="t('nav.back')"
-              @click="goBack"
-            >
-              <i class="pi pi-arrow-left" />
-            </button>
-            <button
-              class="btn-nav"
-              :disabled="!canGoForward"
-              :title="t('nav.forward')"
-              @click="goForward"
-            >
-              <i class="pi pi-arrow-right" />
-            </button>
-          </div>
           <span :class="`pi ${typeIcon(selectedArtifact.content_type)} type-icon`" />
           <div class="content-title-area">
             <span class="content-title">{{ selectedArtifact.title }}</span>
@@ -680,9 +666,13 @@ onUnmounted(() => {
   font-size: 16px;
 }
 
-.nav-buttons {
+.nav-bar {
   display: flex;
+  align-items: center;
   gap: 2px;
+  padding: 6px 10px;
+  background: #181825;
+  border-bottom: 1px solid #313244;
   flex-shrink: 0;
 }
 
@@ -792,6 +782,7 @@ onUnmounted(() => {
     },
     "navigate": {
       "notFound": "Artifact not found",
+      "invalidLink": "Invalid artifact link",
       "openFailed": "Failed to open the linked artifact"
     },
     "transfer": {
@@ -820,6 +811,7 @@ onUnmounted(() => {
     },
     "navigate": {
       "notFound": "アーティファクトが見つかりません",
+      "invalidLink": "アーティファクトリンクの書式が不正です",
       "openFailed": "リンク先のアーティファクトを開けませんでした"
     },
     "transfer": {
