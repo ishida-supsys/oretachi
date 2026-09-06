@@ -102,6 +102,11 @@ export function useNotifications() {
   ) {
     if (initialized) return;
     initialized = true;
+    // 写しの初期化。同期は「変化したとき」の一方向 push なので、これが無いと
+    // プロセスは生きたまま webview だけリロードされたとき（WebView2 のレンダラ復帰、
+    // dev の full reload）に JS 側は空なのに Rust 側の写しが古い件数を持ち続ける。
+    // 空でも一度送って必ず突き合わせる。
+    syncNotificationsToBackend();
     osNotificationEnabled = isOsNotificationEnabledFn;
     getSoundSettings = getSoundSettingsFn;
     if (notificationTitles) storedNotificationTitles = notificationTitles;

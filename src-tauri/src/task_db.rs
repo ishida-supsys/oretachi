@@ -124,10 +124,10 @@ pub async fn list_filtered(
     limit: i64,
 ) -> Result<TaskListResult, String> {
     let fetch_limit = limit + 1; // has_more 判定用に1件余分に取得
-    let pattern = format!("%{}%", search.to_lowercase());
+    let pattern = format!("%{}%", crate::escape_like(&search.to_lowercase()));
     let rows: Vec<TaskRow> = sqlx::query_as::<_, TaskRow>(
         "SELECT * FROM tasks \
-         WHERE (?1 = '' OR LOWER(prompt) LIKE ?2 OR LOWER(steps) LIKE ?2) \
+         WHERE (?1 = '' OR LOWER(prompt) LIKE ?2 ESCAPE '\\' OR LOWER(steps) LIKE ?2 ESCAPE '\\') \
            AND (?3 = '' OR status = ?3) \
          ORDER BY created_at DESC LIMIT ?4 OFFSET ?5",
     )

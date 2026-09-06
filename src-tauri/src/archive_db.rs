@@ -140,10 +140,12 @@ pub async fn list_wide(
         return list(pool, search, offset, limit).await;
     }
     let fetch_limit = limit + 1; // has_more 判定用に1件余分に取得
-    let pattern = format!("%{}%", search.to_lowercase());
+    let pattern = format!("%{}%", crate::escape_like(&search.to_lowercase()));
     let rows: Vec<ArchiveRow> = sqlx::query_as::<_, ArchiveRow>(
         "SELECT * FROM archives \
-         WHERE LOWER(name) LIKE ?1 OR LOWER(branch_name) LIKE ?1 OR LOWER(IFNULL(description, '')) LIKE ?1 \
+         WHERE LOWER(name) LIKE ?1 ESCAPE '\\' \
+            OR LOWER(branch_name) LIKE ?1 ESCAPE '\\' \
+            OR LOWER(IFNULL(description, '')) LIKE ?1 ESCAPE '\\' \
          ORDER BY archived_at DESC LIMIT ?2 OFFSET ?3",
     )
     .bind(&pattern)

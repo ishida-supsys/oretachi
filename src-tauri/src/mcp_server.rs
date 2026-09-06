@@ -129,6 +129,15 @@ impl NotificationRegistry {
             Err(e) => e.into_inner().clone(),
         }
     }
+
+    /// 1件を取り出して写しから落とす。クリア要求をフロントへ投げる側が、
+    /// フロントからの再同期を待たずに写しを整合させるために使う。
+    pub fn take(&self, worktree_id: &str) -> Option<NotificationSnapshot> {
+        match self.0.lock() {
+            Ok(mut g) => g.remove(worktree_id),
+            Err(e) => e.into_inner().remove(worktree_id),
+        }
+    }
 }
 
 /// フロントから通知バッジの現在値を丸ごと受け取る（差分ではなく全置換）。
@@ -700,6 +709,9 @@ pub struct ListArchivesParams {
     #[schemars(description = "取得件数（省略時 50、上限 200）")]
     pub limit: Option<i64>,
 }
+
+/// `tasks.status` が取りうる値（`src/types/task.ts` の `TaskStatus`）。
+const TASK_STATUSES: [&str; 5] = ["generating", "queued", "executing", "completed", "error"];
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListTasksParams {
@@ -1544,7 +1556,7 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "登録済みワークツリーのステータス一覧を取得する。各エントリはルートパス(path)・1行説明(description)・ブランチ名・所属ワークグループ(workgroupId / workgroupName)・isHome・isRepository を含む。isHome / isRepository が true のものは git ワークツリーではない擬似エントリなので、作業割り当てや削除の候補からは外すこと。query で name / branchName / description の部分一致検索ができる。未確認通知の件数(notificationCount) / 種別(notificationKind) も含む（0 件なら通知なし。oretachi_clear_worktree_notification でリセットできる）。返るのはアクティブなワークツリーのみで、クローズ済みのものは oretachi_list_archives を使う", annotations(read_only_hint = true))]
+    #[tool(description = "登録済みワークツリーのステータス一覧を取得する。各エントリはルートパス(path)・1行説明(description)・ブランチ名・所属ワークグループ(workgroupId / workgroupName)・isHome・isRepository を含む。isHome / isRepository が true のものは git ワークツリーではない擬似エントリなので、作業割り当てや削除の候補からは外すこと。query で name / branchName / description の部分一致検索ができる。未確認通知の件数(notificationCount) / 種別(notificationKind) も含む（0 件なら通知なし。oretachi_clear_worktree_notification でリセットできる）。トレイ通知設定は生値(trayNotification: true/false/null。**null は「無効」ではなく未設定 = 通知する**)と実効値(trayNotificationEffective)の両方を返す。返るのはアクティブなワークツリーのみで、クローズ済みのものは oretachi_list_archives を使う", annotations(read_only_hint = true))]
     fn oretachi_get_worktree_status(
         &self,
         Parameters(GetWorktreeStatusParams { query }): Parameters<GetWorktreeStatusParams>,
@@ -1596,7 +1608,10 @@ impl NotifyService {
                     "isRepository": wt.is_repository,
                     "isDetached": detached.contains(wt.id.as_str()),
                     "autoApproval": wt.auto_approval,
+                    // 生値は三値（null = 未設定）。null を「無効」と読み違えられないよう、
+                    // 実効値も併記する（set_tray_notification の previous / previousEffective と同じ対）。
                     "trayNotification": wt.tray_notification,
+                    "trayNotificationEffective": resolve_tray_notification(wt),
                     "notificationCount": notification.map_or(0, |n| n.count),
                     "notificationKind": notification.map(|n| n.kind.as_str()),
                     "firstNotifiedAt": notification.map(|n| n.first_notified_at),
@@ -1833,7 +1848,21 @@ impl NotifyService {
         }
 
         let search = query.as_deref().map(str::trim).unwrap_or("").to_string();
-        let status = status.as_deref().map(str::trim).unwrap_or("").to_string();
+        // status は DB 上完全一致で引くので、綴り違いや大文字混じりを黙って
+        // 「該当0件」にしない（呼び出し側が「タスクが無い」と誤読する）。
+        let status = match status.as_deref().map(str::trim).unwrap_or("") {
+            "" => String::new(),
+            s => {
+                let lowered = s.to_lowercase();
+                if !TASK_STATUSES.contains(&lowered.as_str()) {
+                    return Err(McpError::invalid_params(
+                        format!("unknown status '{}'. valid: {}", s, TASK_STATUSES.join(" / ")),
+                        None,
+                    ));
+                }
+                lowered
+            }
+        };
         let offset = offset.unwrap_or(0).max(0);
         let limit = limit.unwrap_or(20).clamp(1, 100);
 
@@ -1881,11 +1910,16 @@ impl NotifyService {
 
         // 通知バッジの実体はフロント（App.vue の useNotifications）にしかないので、
         // レジストリの写しから「何件消えるか」を読み、実際のクリアはイベントで依頼する。
+        //
+        // **写しはここで同期的に落とす（write-through）。** フロント経由の
+        // `sync_notification_state` は 100ms 畳み込みの後に来るので、それを待つと
+        // 直後の `oretachi_get_worktree_status` がクリア前の件数を返し、エージェントが
+        // 同じワークツリーを捌き直す。写しの権威はあくまでフロントなので、次の同期が
+        // 来ればどのみち上書きされる。
         let cleared = self
             .app_handle
             .state::<NotificationRegistry>()
-            .snapshot()
-            .get(&wt.id)
+            .take(&wt.id)
             .map(|n| n.count)
             .unwrap_or(0);
 

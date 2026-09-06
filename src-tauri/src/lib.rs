@@ -47,6 +47,21 @@ fn validate_path_component(s: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// SQL の `LIKE` パターンに埋め込む前にワイルドカードを無効化する。
+///
+/// 検索語にはブランチ名（`feature_182` など）が普通に入ってくるので、`_`（任意の1文字）
+/// や `%` をそのまま渡すと過剰ヒットする。呼び出し側は `LIKE ? ESCAPE '\'` と組にすること。
+pub(crate) fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '\\' | '%' | '_') {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 fn artifacts_dir(
     app_handle: &tauri::AppHandle,
     worktree_id: &str,
