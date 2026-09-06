@@ -101,7 +101,7 @@ pub async fn list(
     limit: i64,
 ) -> Result<ArchiveListResult, String> {
     let fetch_limit = limit + 1; // has_more 判定用に1件余分に取得
-    let mut rows: Vec<ArchiveRow> = if search.is_empty() {
+    let rows: Vec<ArchiveRow> = if search.is_empty() {
         sqlx::query_as::<_, ArchiveRow>(
             "SELECT * FROM archives ORDER BY archived_at DESC LIMIT ? OFFSET ?",
         )
@@ -122,11 +122,49 @@ pub async fn list(
     }
     .map_err(|e| e.to_string())?;
 
+    Ok(into_page(rows, limit))
+}
+
+/// `list` の検索対象を name / branch_name / description に広げた版（大文字小文字を無視）。
+///
+/// UI のアーカイブ一覧は name で引ければ十分だが、MCP から過去の作業を辿るときは
+/// ワークツリー名がランダムな接尾辞でしかなく、ブランチ名や description でしか
+/// 当たりを付けられない。UI 側の検索挙動は変えたくないので別関数にしてある。
+pub async fn list_wide(
+    pool: &SqlitePool,
+    search: &str,
+    offset: i64,
+    limit: i64,
+) -> Result<ArchiveListResult, String> {
+    if search.is_empty() {
+        return list(pool, search, offset, limit).await;
+    }
+    let fetch_limit = limit + 1; // has_more 判定用に1件余分に取得
+    let pattern = format!("%{}%", crate::escape_like(&search.to_ascii_lowercase()));
+    let rows: Vec<ArchiveRow> = sqlx::query_as::<_, ArchiveRow>(
+        "SELECT * FROM archives \
+         WHERE LOWER(name) LIKE ?1 ESCAPE '\\' \
+            OR LOWER(branch_name) LIKE ?1 ESCAPE '\\' \
+            OR LOWER(IFNULL(description, '')) LIKE ?1 ESCAPE '\\' \
+         ORDER BY archived_at DESC LIMIT ?2 OFFSET ?3",
+    )
+    .bind(&pattern)
+    .bind(fetch_limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    Ok(into_page(rows, limit))
+}
+
+/// 1件余分に取った行を has_more 付きの1ページに畳む。
+fn into_page(mut rows: Vec<ArchiveRow>, limit: i64) -> ArchiveListResult {
     let has_more = rows.len() as i64 > limit;
     if has_more {
         rows.truncate(limit as usize);
     }
-    Ok(ArchiveListResult { items: rows, has_more })
+    ArchiveListResult { items: rows, has_more }
 }
 
 pub async fn delete(pool: &SqlitePool, id: &str) -> Result<(), String> {

@@ -103,6 +103,63 @@ pub fn unregister_detached_worktree(
     }
 }
 
+/// フロント（App.vue）が保持している未確認通知の写し。
+///
+/// 通知バッジ自体はメインウィンドウの JS 側 (`useNotifications`) にしか存在せず、
+/// Rust からは覗けない。MCP から「どのワークツリーに通知が溜まっているか」を返し、
+/// リセット時に「何件消したか」を答えるために、フロントが変化のたびに同期してくる。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationSnapshot {
+    pub count: u32,
+    /// "approval" / "completed" / "general"
+    pub kind: String,
+    /// 最初に通知が積まれた時刻（epoch ミリ秒）
+    pub first_notified_at: i64,
+}
+
+/// worktree_id → 未確認通知の写し。
+#[derive(Default)]
+pub struct NotificationRegistry(pub Mutex<HashMap<String, NotificationSnapshot>>);
+
+impl NotificationRegistry {
+    pub fn snapshot(&self) -> HashMap<String, NotificationSnapshot> {
+        match self.0.lock() {
+            Ok(g) => g.clone(),
+            Err(e) => e.into_inner().clone(),
+        }
+    }
+
+    /// 1件を取り出して写しから落とす。クリア要求をフロントへ投げる側が、
+    /// フロントからの再同期を待たずに写しを整合させるために使う。
+    pub fn take(&self, worktree_id: &str) -> Option<NotificationSnapshot> {
+        match self.0.lock() {
+            Ok(mut g) => g.remove(worktree_id),
+            Err(e) => e.into_inner().remove(worktree_id),
+        }
+    }
+}
+
+/// フロントから通知バッジの現在値を丸ごと受け取る（差分ではなく全置換）。
+#[tauri::command]
+pub fn sync_notification_state(
+    entries: HashMap<String, NotificationSnapshot>,
+    registry: tauri::State<'_, NotificationRegistry>,
+) {
+    match registry.0.lock() {
+        Ok(mut g) => *g = entries,
+        Err(e) => *e.into_inner() = entries,
+    }
+}
+
+/// 通知リセットをフロント（App.vue）へ伝えるイベント。
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct ClearNotificationEvent {
+    pub worktree: String,
+    pub worktree_id: String,
+}
+
 /// ワークツリークローズの最終結果。フロントエンドの status 文字列に対応する。
 pub enum CloseWorktreeOutcome {
     Closed,
@@ -639,6 +696,49 @@ pub struct InspectWorktreeParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct GetAppOptionsParams {}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetAppInfoParams {}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListArchivesParams {
+    #[schemars(description = "name / branchName / description の部分一致キーワード（大文字小文字は区別しない）。省略時は全件")]
+    pub query: Option<String>,
+    #[schemars(description = "取得開始位置（0 始まり、省略時 0）")]
+    pub offset: Option<i64>,
+    #[schemars(description = "取得件数（省略時 50、上限 200）")]
+    pub limit: Option<i64>,
+}
+
+/// `tasks.status` が取りうる値（`src/types/task.ts` の `TaskStatus`）。
+const TASK_STATUSES: [&str; 5] = ["generating", "queued", "executing", "completed", "error"];
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListTasksParams {
+    #[schemars(description = "タスクID。指定するとその1件だけを返す（他の絞り込みは無視）")]
+    pub task_id: Option<String>,
+    #[schemars(description = "prompt および生成コード（リポジトリ名・ブランチ名を含む）の部分一致キーワード。大文字小文字は区別しない。省略時は全件")]
+    pub query: Option<String>,
+    #[schemars(description = "ステータス絞り込み: \"generating\" / \"queued\" / \"executing\" / \"completed\" / \"error\"。省略時は全ステータス")]
+    pub status: Option<String>,
+    #[schemars(description = "取得開始位置（0 始まり、省略時 0）")]
+    pub offset: Option<i64>,
+    #[schemars(description = "取得件数（省略時 20、上限 100）")]
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListWorktreeNotificationsParams {}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ClearNotificationParams {
+    #[schemars(description = "ワークツリーのルートディレクトリ絶対パス（通常は自分の作業ディレクトリ）。worktree_name/worktree_id 未指定時はこれでワークツリーを特定する")]
+    pub project_dir: Option<String>,
+    #[schemars(description = "対象ワークツリー名（project_dir で特定できない場合に指定）")]
+    pub worktree_name: Option<String>,
+    #[schemars(description = "対象ワークツリーID（同名ワークツリーが複数ある場合に指定）")]
+    pub worktree_id: Option<String>,
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct AddTaskParams {
@@ -1459,7 +1559,7 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "登録済みワークツリーのステータス一覧を取得する。各エントリはルートパス(path)・1行説明(description)・ブランチ名・所属ワークグループ(workgroupId / workgroupName)・isHome・isRepository を含む。isHome / isRepository が true のものは git ワークツリーではない擬似エントリなので、作業割り当てや削除の候補からは外すこと。query で name / branchName / description の部分一致検索ができる", annotations(read_only_hint = true))]
+    #[tool(description = "登録済みワークツリーのステータス一覧を取得する。各エントリはルートパス(path)・1行説明(description)・ブランチ名・所属ワークグループ(workgroupId / workgroupName)・isHome・isRepository を含む。isHome / isRepository が true のものは git ワークツリーではない擬似エントリなので、作業割り当てや削除の候補からは外すこと。query で name / branchName / description の部分一致検索ができる。未確認通知の件数(notificationCount) / 種別(notificationKind) も含む（0 件なら通知なし。oretachi_clear_worktree_notification でリセットできる）。トレイ通知設定は生値(trayNotification: true/false/null。**null は「無効」ではなく未設定 = 通知する**)と実効値(trayNotificationEffective)の両方を返す。返るのはアクティブなワークツリーのみで、クローズ済みのものは oretachi_list_archives を使う", annotations(read_only_hint = true))]
     fn oretachi_get_worktree_status(
         &self,
         Parameters(GetWorktreeStatusParams { query }): Parameters<GetWorktreeStatusParams>,
@@ -1468,6 +1568,9 @@ impl NotifyService {
         let settings = settings_manager.get();
         let detached: std::collections::HashSet<&str> =
             settings.detached_worktree_ids.iter().map(|s| s.as_str()).collect();
+        // 未確認通知の写し（実体はフロントの useNotifications）。同期前や
+        // メインウィンドウ未起動なら空なので、その場合は全件 0 件扱いになる。
+        let notifications = self.app_handle.state::<NotificationRegistry>().snapshot();
 
         // query は name / branchName / description のいずれかに部分一致すれば通す（大文字小文字を無視）
         let needle = query
@@ -1494,6 +1597,7 @@ impl NotifyService {
                 // 所属ワークグループ。未設定なら先頭グループへフォールバックする（UI の表示と同じ解決）。
                 // グループ自体が未定義なら workgroupId / workgroupName ともに null。
                 let group = resolve_workgroup(&settings, wt);
+                let notification = notifications.get(wt.id.as_str());
                 serde_json::json!({
                     "id": wt.id,
                     "name": wt.name,
@@ -1507,6 +1611,13 @@ impl NotifyService {
                     "isRepository": wt.is_repository,
                     "isDetached": detached.contains(wt.id.as_str()),
                     "autoApproval": wt.auto_approval,
+                    // 生値は三値（null = 未設定）。null を「無効」と読み違えられないよう、
+                    // 実効値も併記する（set_tray_notification の previous / previousEffective と同じ対）。
+                    "trayNotification": wt.tray_notification,
+                    "trayNotificationEffective": resolve_tray_notification(wt),
+                    "notificationCount": notification.map_or(0, |n| n.count),
+                    "notificationKind": notification.map(|n| n.kind.as_str()),
+                    "firstNotifiedAt": notification.map(|n| n.first_notified_at),
                 })
             })
             .collect();
@@ -1580,6 +1691,322 @@ impl NotifyService {
             settings.use_oretachi_terminal_for_background
         );
         Ok(CallToolResult::success(vec![Content::text(json)]))
+    }
+
+    #[tool(description = "アプリ本体の稼働情報を返す。バージョン(version)・識別子(identifier)・MCP サーバの稼働状態(mcpServer: running / port / remoteAccess / connectedClients)・データディレクトリ(appDataDir)とログファイル(logFile)のパス・登録数の内訳(counts)を含む。不具合報告時の環境確認や、ログを読みに行く前のパス確認に使う", annotations(read_only_hint = true))]
+    async fn oretachi_get_app_info(
+        &self,
+        Parameters(_params): Parameters<GetAppInfoParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+        let package = self.app_handle.package_info();
+
+        let status = self.app_handle.state::<McpServerManager>().get_status();
+        // 接続中クライアント数。listen 中のピアだけが載っている（切断時に除去される）
+        let connected_clients = self.app_handle.state::<McpPeerRegistry>().0.read().await.len();
+
+        let app_data_dir = self.app_handle.path().app_data_dir().ok();
+        // ログは tauri-plugin-log の LogDir 既定と同じ場所（<app_log_dir>/<name>.log）
+        let log_file = self
+            .app_handle
+            .path()
+            .app_log_dir()
+            .ok()
+            .map(|d| d.join(format!("{}.log", package.name)));
+
+        let terminal_count = self.app_handle.state::<PtyManager>().list_sessions().len();
+        let notified_worktrees = self.app_handle.state::<NotificationRegistry>().snapshot().len();
+
+        let json = serde_json::json!({
+            "name": package.name,
+            "version": package.version.to_string(),
+            "identifier": self.app_handle.config().identifier,
+            "tauriVersion": tauri::VERSION,
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "mcpServer": {
+                "running": status.running,
+                // 実際に bind したポート。settings の mcpPort が 0（自動割り当て）や
+                // env 上書きの場合、configuredPort とは一致しない
+                "port": status.port,
+                "configuredPort": settings.mcp_port,
+                "remoteAccess": settings.mcp_remote_access,
+                "connectedClients": connected_clients,
+            },
+            "appDataDir": app_data_dir.as_ref().map(|d| d.display().to_string()),
+            "logFile": log_file.as_ref().map(|d| d.display().to_string()),
+            "counts": {
+                "worktrees": settings.worktrees.iter().filter(|w| !w.is_home && !w.is_repository).count(),
+                "workgroups": settings.workgroups.len(),
+                "repositories": settings.repositories.len(),
+                "terminals": terminal_count,
+                "notifiedWorktrees": notified_worktrees,
+            },
+        });
+        log::info!(
+            "[mcp] oretachi_get_app_info: version={} running={} port={:?} clients={}",
+            package.version, status.running, status.port, connected_clients
+        );
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+        )]))
+    }
+
+    #[tool(description = "アーカイブ済み（クローズ済み）ワークツリーの一覧を返す。oretachi_get_worktree_status はアクティブなワークツリーしか返さないので、過去に閉じた作業を辿るにはこちらを使う。archivedAt の新しい順で、各エントリは name / branchName / repositoryName / path / description / workgroupId / archivedAt（epoch ミリ秒）を含む。query で name / branchName / description の部分一致検索ができ、offset / limit でページングする（続きがあれば hasMore が true）。path はアーカイブ時点の記録で、git ワークツリー自体は削除済みなので既に存在しないことが多い", annotations(read_only_hint = true))]
+    async fn oretachi_list_archives(
+        &self,
+        Parameters(ListArchivesParams { query, offset, limit }): Parameters<ListArchivesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let pool = self
+            .app_handle
+            .try_state::<crate::archive_db::ArchivePool>()
+            .ok_or_else(|| McpError::internal_error("Archive DB not initialized", None))?;
+
+        let search = query.as_deref().map(str::trim).unwrap_or("").to_string();
+        let offset = offset.unwrap_or(0).max(0);
+        let limit = limit.unwrap_or(50).clamp(1, 200);
+
+        let result = crate::archive_db::list_wide(&pool.0, &search, offset, limit)
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+
+        let items: Vec<serde_json::Value> = result
+            .items
+            .iter()
+            .map(|a| {
+                // アーカイブ時点のワークグループ。resolve_workgroup_by_id は「未設定なら
+                // 先頭グループ」へ落とすが、アーカイブでは記録された ID をそのまま引きたい
+                // （消えたグループを先頭グループの名前で偽装しない）ので自前で find する。
+                let group = a
+                    .workgroup_id
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|id| !id.is_empty())
+                    .and_then(|id| settings.workgroups.iter().find(|g| g.id == id));
+                serde_json::json!({
+                    "id": a.id,
+                    "name": a.name,
+                    "path": a.path,
+                    "description": a.description,
+                    "repositoryName": a.repository_name,
+                    "branchName": a.branch_name,
+                    "workgroupId": a.workgroup_id,
+                    "workgroupName": group.map(|g| workgroup_display_name(&settings, g)),
+                    "archivedAt": a.archived_at,
+                })
+            })
+            .collect();
+
+        log::info!(
+            "[mcp] oretachi_list_archives: query={:?} {} entries (hasMore={})",
+            search, items.len(), result.has_more
+        );
+        let json = serde_json::json!({
+            "items": items,
+            "hasMore": result.has_more,
+            "offset": offset,
+            "limit": limit,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+        )]))
+    }
+
+    #[tool(description = "oretachi_add_task で投入したタスクの一覧と実行結果を返す。add_task は投げっぱなしなので、成功したか失敗したか・何が実行されたかはこのツールでしか追えない。各エントリは status（generating / queued / executing / completed / error）・失敗理由(error)・AI が生成した実行コード(steps)を含む。steps の各要素は code（add_worktree なら repository / branch / sourceBranch、agent_worktree なら repository / branch / prompt / remoteExec）と、そのステップ自身の status / error を持つ。code のブランチが登録済みワークツリーと一致すれば worktreeName / worktreeId も添える。query は prompt に加えて生成コード（リポジトリ名・ブランチ名）にも当たる", annotations(read_only_hint = true))]
+    async fn oretachi_list_tasks(
+        &self,
+        Parameters(ListTasksParams { task_id, query, status, offset, limit }): Parameters<ListTasksParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let pool = self
+            .app_handle
+            .try_state::<crate::task_db::TaskPool>()
+            .ok_or_else(|| McpError::internal_error("Task DB not initialized", None))?;
+
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+
+        // task_id 指定は1件取得。見つからなければ空リストではなくエラー（ID の打ち間違いを黙らせない）
+        if let Some(id) = task_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let row = crate::task_db::get(&pool.0, id)
+                .await
+                .map_err(|e| McpError::internal_error(e, None))?
+                .ok_or_else(|| McpError::invalid_params(format!("task '{}' not found", id), None))?;
+            let json = serde_json::json!({
+                "items": [task_row_to_json(&row, &settings)],
+                "hasMore": false,
+                "offset": 0,
+                "limit": 1,
+            });
+            log::info!("[mcp] oretachi_list_tasks: id={} status={}", row.id, row.status);
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&json)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+            )]));
+        }
+
+        let search = query.as_deref().map(str::trim).unwrap_or("").to_string();
+        // status は DB 上完全一致で引くので、綴り違いや大文字混じりを黙って
+        // 「該当0件」にしない（呼び出し側が「タスクが無い」と誤読する）。
+        let status = match status.as_deref().map(str::trim).unwrap_or("") {
+            "" => String::new(),
+            s => {
+                let lowered = s.to_lowercase();
+                if !TASK_STATUSES.contains(&lowered.as_str()) {
+                    return Err(McpError::invalid_params(
+                        format!("unknown status '{}'. valid: {}", s, TASK_STATUSES.join(" / ")),
+                        None,
+                    ));
+                }
+                lowered
+            }
+        };
+        let offset = offset.unwrap_or(0).max(0);
+        let limit = limit.unwrap_or(20).clamp(1, 100);
+
+        let result = crate::task_db::list_filtered(&pool.0, &search, &status, offset, limit)
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+        let items: Vec<serde_json::Value> = result
+            .items
+            .iter()
+            .map(|t| task_row_to_json(t, &settings))
+            .collect();
+
+        log::info!(
+            "[mcp] oretachi_list_tasks: query={:?} status={:?} {} entries (hasMore={})",
+            search, status, items.len(), result.has_more
+        );
+        let json = serde_json::json!({
+            "items": items,
+            "hasMore": result.has_more,
+            "offset": offset,
+            "limit": limit,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+        )]))
+    }
+
+    #[tool(description = "未確認通知が溜まっているワークツリーだけを、通知が最初に積まれた古い順に返す（トレイポップアップの巡回もこの順。ただし同一ミリ秒に積まれた通知どうしの前後は両者で一致しない）。通知が無いワークツリーは含まない。同じ情報は oretachi_get_worktree_status にも載っているが、あちらは全ワークツリーを返すので、通知を順に捌くループから繰り返し呼ぶならこちらを使う。各エントリは worktreeId / worktreeName / count / kind / firstNotifiedAt（epoch ミリ秒）。捌き終わったものは oretachi_clear_worktree_notification でリセットする", annotations(read_only_hint = true))]
+    fn oretachi_list_worktree_notifications(
+        &self,
+        Parameters(_params): Parameters<ListWorktreeNotificationsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+        let notifications = self.app_handle.state::<NotificationRegistry>().snapshot();
+
+        let mut entries: Vec<(&String, &NotificationSnapshot)> = notifications.iter().collect();
+        // 古い順 = トレイの巡回順（フロントの getNotifiedWorktreeIds と同じ規則）。
+        // firstNotifiedAt が同値なら ID で安定させる（HashMap の反復順は不定なので、
+        // タイブレークが無いと呼ぶたびに順序が入れ替わりうる）。フロント側は Map の
+        // 挿入順が残るため、同一ミリ秒の並びだけは両者で一致しない。
+        // 巡回の再現性を優先してこちらは決定的にしてある。
+        entries.sort_by(|a, b| {
+            a.1.first_notified_at
+                .cmp(&b.1.first_notified_at)
+                .then_with(|| a.0.cmp(b.0))
+        });
+
+        let items: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|(id, n)| {
+                // 削除直後などで settings 側に実体が無ければ name は null。
+                // それでも worktreeId でクリアはできるので落とさず載せる。
+                let wt = settings.worktrees.iter().find(|w| &&w.id == id);
+                serde_json::json!({
+                    "worktreeId": id,
+                    "worktreeName": wt.map(|w| w.name.as_str()),
+                    "count": n.count,
+                    "kind": n.kind,
+                    "firstNotifiedAt": n.first_notified_at,
+                })
+            })
+            .collect();
+
+        let total_count: u32 = entries.iter().map(|(_, n)| n.count).sum();
+        log::info!(
+            "[mcp] oretachi_list_worktree_notifications: {} worktrees / {} notifications",
+            items.len(), total_count
+        );
+        let json = serde_json::json!({
+            "items": items,
+            // 通知が溜まっているワークツリー数と、その合計通知件数（トレイのバッジ数字）
+            "worktreeCount": items.len(),
+            "totalCount": total_count,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+        )]))
+    }
+
+    #[tool(description = "指定ワークツリーに溜まっている未確認通知（トレイバッジ・ホームのカードに出る件数）をリセットする。ワークツリーを開いたときと同じクリア操作を MCP から行うもので、通知の設定（oretachi_set_tray_notification）には影響しない。捌き終わったワークツリーの通知だけ落として残りを巡回したいときに使う。捌く対象は oretachi_list_worktree_notifications で古い順に取れる")]
+    fn oretachi_clear_worktree_notification(
+        &self,
+        Parameters(ClearNotificationParams { project_dir, worktree_name, worktree_id }): Parameters<ClearNotificationParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+
+        let wt = resolve_worktree(
+            &settings,
+            worktree_id.as_deref(),
+            worktree_name.as_deref(),
+            project_dir.as_deref(),
+            "specify one of project_dir / worktree_name / worktree_id",
+        )?;
+
+        // 通知バッジの実体はフロント（App.vue の useNotifications）にしかないので、
+        // 実際のクリアはイベントで依頼する。**依頼を出せてから写しを落とす**
+        // （emit が Err なら写しは触らない。先に落とすと、クリアされていないのに
+        // 一覧から消えたワークツリーが残る）。
+        let event = ClearNotificationEvent {
+            worktree: wt.name.clone(),
+            worktree_id: wt.id.clone(),
+        };
+        self.app_handle
+            .emit("clear-worktree-notification", &event)
+            .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
+
+        // 写しは同期的に落とす（write-through）。フロント経由の `sync_notification_state`
+        // は 100ms 畳み込みの後に来るので、それを待つと直後の
+        // `oretachi_get_worktree_status` / `oretachi_list_worktree_notifications` がクリア前の
+        // 件数を返し、エージェントが同じワークツリーを捌き直す。写しの権威はあくまで
+        // フロントなので、次の同期が来ればどのみち上書きされる。
+        //
+        // 受信側（App.vue）は notify-worktree より前に購読を始める契約なので、
+        // 「通知が積まれているのに clear-worktree-notification のリスナーが未登録」
+        // という窓は無い。
+        let cleared = self
+            .app_handle
+            .state::<NotificationRegistry>()
+            .take(&wt.id)
+            .map(|n| n.count)
+            .unwrap_or(0);
+
+        log::info!(
+            "[mcp] oretachi_clear_worktree_notification: worktree={} cleared={}",
+            wt.name, cleared
+        );
+        let json = serde_json::json!({
+            "ok": true,
+            "worktree": wt.name,
+            "worktreeId": wt.id,
+            "clearedCount": cleared,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string(&json)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+        )]))
     }
 
     #[tool(description = "List all registered repositories with their names and git remote URLs", annotations(read_only_hint = true))]
@@ -1742,7 +2169,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "タスク追加リクエストを送信する。AIがタスクコードを生成し、ワークツリー作成やエージェント実行を非同期で行う。追加先ワークグループは省略時はデフォルトワークグループ (isDefault: true) になる。別のワークグループへ入れたい場合は oretachi_list_workgroups で一覧を取得してから workgroup_id / workgroup_name を渡す")]
+    #[tool(description = "タスク追加リクエストを送信する。AIがタスクコードを生成し、ワークツリー作成やエージェント実行を非同期で行う。追加先ワークグループは省略時はデフォルトワークグループ (isDefault: true) になる。別のワークグループへ入れたい場合は oretachi_list_workgroups で一覧を取得してから workgroup_id / workgroup_name を渡す。実行は非同期でこのツールは結果を返さないので、成否や生成されたコードは oretachi_list_tasks で確認する")]
     fn oretachi_add_task(
         &self,
         Parameters(AddTaskParams { prompt, remote_exec, workgroup_id, workgroup_name }): Parameters<AddTaskParams>,
@@ -2765,6 +3192,54 @@ pub fn resolve_worktree_by_cwd<'a>(
         .iter()
         .filter(|w| cp.starts_with(std::path::Path::new(&w.path)))
         .max_by_key(|w| std::path::Path::new(&w.path).components().count())
+}
+
+/// タスク1件を MCP の返却形へ整える。
+///
+/// `steps` は DB 上 JSON 文字列なので、文字列のまま返さずパースして構造のまま載せる
+/// （中身は `src/types/task.ts` の `TaskStep[]` で既に camelCase）。パースに失敗した
+/// 行は `steps: []` + `stepsRaw` にして握り潰さず生を見せる。
+fn task_row_to_json(task: &crate::task_db::TaskRow, settings: &AppSettings) -> serde_json::Value {
+    let parsed: Option<Vec<serde_json::Value>> =
+        serde_json::from_str::<Vec<serde_json::Value>>(&task.steps).ok();
+
+    let steps: Vec<serde_json::Value> = parsed
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|step| {
+            let mut out = step.clone();
+            // 生成コードの repository + branch が登録済みワークツリーと一致すれば、
+            // タスクと実体を突き合わせられるよう名前と ID を添える。
+            let code = step.get("code").unwrap_or(step);
+            let repo = code.get("repository").and_then(|v| v.as_str());
+            let branch = code.get("branch").and_then(|v| v.as_str());
+            if let (Some(repo), Some(branch), Some(obj)) = (repo, branch, out.as_object_mut()) {
+                let wt = settings
+                    .worktrees
+                    .iter()
+                    .find(|w| w.repository_name == repo && w.branch_name == branch);
+                obj.insert("worktreeName".to_string(), serde_json::json!(wt.map(|w| &w.name)));
+                obj.insert("worktreeId".to_string(), serde_json::json!(wt.map(|w| &w.id)));
+            }
+            out
+        })
+        .collect();
+
+    let mut json = serde_json::json!({
+        "id": task.id,
+        "prompt": task.prompt,
+        "createdAt": task.created_at,
+        "status": task.status,
+        "error": task.error,
+        "steps": steps,
+    });
+    if parsed.is_none() {
+        if let Some(obj) = json.as_object_mut() {
+            obj.insert("stepsRaw".to_string(), serde_json::json!(task.steps));
+        }
+    }
+    json
 }
 
 /// ワークツリーのパスから表示名（末尾ディレクトリ名）を取り出す。

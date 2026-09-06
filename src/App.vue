@@ -1915,6 +1915,19 @@ onMounted(async () => {
     await moveToSubWindow(wt.id, wt.name, subTerminals, autoApprovalMap.get(wt.id) ?? false, true, wt.path, undefined, wt.branchName, autoApprovalPromptMap.get(wt.id), wt.repositoryName);
   }
 
+  // MCP ツール (oretachi_clear_worktree_notification) からの通知クリア。
+  // バッジの実体は useNotifications のメモリなので、Rust 側は消せずイベントで依頼してくる。
+  //
+  // **必ず initNotificationListener より前に登録すること。** Rust 側は写しを
+  // write-through で落としてから emit するので、ここが未登録の間にクリアを受けると
+  // 「写しは空・バッジは残る」に割れる（emit は受信者ゼロでも成功する）。
+  // 通知が積まれ始めるのは initNotificationListener が notify-worktree を購読して
+  // からなので、その前に登録しておけば取りこぼす窓が構造的に無くなる。
+  await listen<{ worktree: string; worktreeId: string }>("clear-worktree-notification", (event) => {
+    clearNotification(event.payload.worktreeId);
+    logDebug(`[Notification] cleared by MCP: ${event.payload.worktree} (${event.payload.worktreeId})`);
+  });
+
   // 通知リスナー初期化 (ワークツリー名 → ID 解決関数と自動承認中は保留するコールバックを渡す)
   await initNotificationListener(
     (name: string) => worktrees.value.find((w) => w.name === name)?.id,
