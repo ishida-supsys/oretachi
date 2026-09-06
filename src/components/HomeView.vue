@@ -207,7 +207,6 @@ const props = defineProps<{
   artifactUrls: Map<string, UrlArtifactEntry[]>;
   loadingWorktrees: Map<string, string>;
   cancellableWorktrees: Set<string>;
-  /** トレイ通知の実効値（worktree > workgroup > true で解決済み） */
   aiJudgingWorktrees: Set<string>;
   cardTooltips?: Map<string, string | undefined>;
   descriptionOpens?: Map<string, boolean>;

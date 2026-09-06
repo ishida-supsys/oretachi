@@ -16,8 +16,6 @@ const props = defineProps<{
   trayNotification: boolean;
   /** 割り当て済みホットキー文字（未割り当てなら undefined） */
   hotkeyChar?: string;
-  /** 自動承認の AI 判定が進行中か（判定中はトグルを触らせない） */
-  aiJudging?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -75,10 +73,11 @@ async function onReapplyPluginConfig() {
       <!-- 自動承認 -->
       <div class="field">
         <label class="checkbox-label">
+          <!-- AI 判定中も触れるようにしておく。OFF 側は onToggleAutoApproval が
+               進行中の判定をキャンセルするところまで面倒を見る -->
           <input
             type="checkbox"
             :checked="autoApproval"
-            :disabled="aiJudging"
             @change="emit('toggleAutoApproval', worktree.id)"
           />
           <span class="entry-text">{{ t('autoApproval.label') }}</span>
@@ -194,11 +193,6 @@ async function onReapplyPluginConfig() {
 .checkbox-label input[type="checkbox"] {
   accent-color: #cba6f7;
   cursor: pointer;
-}
-
-.checkbox-label:has(input:disabled) {
-  opacity: 0.5;
-  cursor: default;
 }
 
 .entry-text {

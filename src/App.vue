@@ -1431,6 +1431,12 @@ const worktreeSettingsTargetId = ref("");
 const worktreeSettingsTarget = computed(
   () => worktrees.value.find((w) => w.id === worktreeSettingsTargetId.value) ?? null,
 );
+// 対象が配列から消えた（削除 / 他ウィンドウ発の settings-changed による再同期）ら id も捨てる。
+// 擬似ワークツリーの ID は決定論的なので、同じパスを再登録したときに
+// 操作していないダイアログが復活するのを防ぐ。
+watch(worktreeSettingsTarget, (target) => {
+  if (!target) worktreeSettingsTargetId.value = "";
+});
 
 function onSetHotkeyChar(worktreeId: string) {
   hotkeyCharTargetId.value = worktreeId;
@@ -2604,7 +2610,6 @@ onMounted(async () => {
       :auto-approval="autoApprovalMap.get(worktreeSettingsTarget.id) ?? false"
       :tray-notification="trayNotificationMap.get(worktreeSettingsTarget.id) ?? true"
       :hotkey-char="hotkeyChars.get(worktreeSettingsTarget.id)"
-      :ai-judging="aiJudgingWorktrees.has(worktreeSettingsTarget.id)"
       @toggle-auto-approval="onToggleAutoApproval"
       @toggle-tray-notification="onToggleTrayNotification"
       @set-hotkey-char="onSetHotkeyChar"

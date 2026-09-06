@@ -48,7 +48,6 @@ const props = defineProps<{
   notifications: Map<string, number>;
   hotkeyChars: Map<string, string>;
   detachedWorktrees: Set<string>;
-  /** トレイ通知の実効値（worktree > workgroup > true で解決済み） */
   aiJudgingWorktrees: Set<string>;
   /** ホームカードの description / タスク一覧（ワークツリー一覧と同じ内容を出す） */
   cardTooltips?: Map<string, string | undefined>;
