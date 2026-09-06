@@ -702,6 +702,20 @@ pub struct ListArchivesParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListTasksParams {
+    #[schemars(description = "タスクID。指定するとその1件だけを返す（他の絞り込みは無視）")]
+    pub task_id: Option<String>,
+    #[schemars(description = "prompt および生成コード（リポジトリ名・ブランチ名を含む）の部分一致キーワード。大文字小文字は区別しない。省略時は全件")]
+    pub query: Option<String>,
+    #[schemars(description = "ステータス絞り込み: \"generating\" / \"queued\" / \"executing\" / \"completed\" / \"error\"。省略時は全ステータス")]
+    pub status: Option<String>,
+    #[schemars(description = "取得開始位置（0 始まり、省略時 0）")]
+    pub offset: Option<i64>,
+    #[schemars(description = "取得件数（省略時 20、上限 100）")]
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ClearNotificationParams {
     #[schemars(description = "ワークツリーのルートディレクトリ絶対パス（通常は自分の作業ディレクトリ）。worktree_name/worktree_id 未指定時はこれでワークツリーを特定する")]
     pub project_dir: Option<String>,
@@ -1786,6 +1800,69 @@ impl NotifyService {
         )]))
     }
 
+    #[tool(description = "oretachi_add_task で投入したタスクの一覧と実行結果を返す。add_task は投げっぱなしなので、成功したか失敗したか・何が実行されたかはこのツールでしか追えない。各エントリは status（generating / queued / executing / completed / error）・失敗理由(error)・AI が生成した実行コード(steps)を含む。steps の各要素は code（add_worktree なら repository / branch / sourceBranch、agent_worktree なら repository / branch / prompt / remoteExec）と、そのステップ自身の status / error を持つ。code のブランチが登録済みワークツリーと一致すれば worktreeName / worktreeId も添える。query は prompt に加えて生成コード（リポジトリ名・ブランチ名）にも当たる", annotations(read_only_hint = true))]
+    async fn oretachi_list_tasks(
+        &self,
+        Parameters(ListTasksParams { task_id, query, status, offset, limit }): Parameters<ListTasksParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let pool = self
+            .app_handle
+            .try_state::<crate::task_db::TaskPool>()
+            .ok_or_else(|| McpError::internal_error("Task DB not initialized", None))?;
+
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+
+        // task_id 指定は1件取得。見つからなければ空リストではなくエラー（ID の打ち間違いを黙らせない）
+        if let Some(id) = task_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let row = crate::task_db::get(&pool.0, id)
+                .await
+                .map_err(|e| McpError::internal_error(e, None))?
+                .ok_or_else(|| McpError::invalid_params(format!("task '{}' not found", id), None))?;
+            let json = serde_json::json!({
+                "items": [task_row_to_json(&row, &settings)],
+                "hasMore": false,
+                "offset": 0,
+                "limit": 1,
+            });
+            log::info!("[mcp] oretachi_list_tasks: id={} status={}", row.id, row.status);
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&json)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+            )]));
+        }
+
+        let search = query.as_deref().map(str::trim).unwrap_or("").to_string();
+        let status = status.as_deref().map(str::trim).unwrap_or("").to_string();
+        let offset = offset.unwrap_or(0).max(0);
+        let limit = limit.unwrap_or(20).clamp(1, 100);
+
+        let result = crate::task_db::list_filtered(&pool.0, &search, &status, offset, limit)
+            .await
+            .map_err(|e| McpError::internal_error(e, None))?;
+
+        let items: Vec<serde_json::Value> = result
+            .items
+            .iter()
+            .map(|t| task_row_to_json(t, &settings))
+            .collect();
+
+        log::info!(
+            "[mcp] oretachi_list_tasks: query={:?} status={:?} {} entries (hasMore={})",
+            search, status, items.len(), result.has_more
+        );
+        let json = serde_json::json!({
+            "items": items,
+            "hasMore": result.has_more,
+            "offset": offset,
+            "limit": limit,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+        )]))
+    }
+
     #[tool(description = "指定ワークツリーに溜まっている未確認通知（トレイバッジ・ホームのカードに出る件数）をリセットする。ワークツリーを開いたときと同じクリア操作を MCP から行うもので、通知の設定（oretachi_set_tray_notification）には影響しない。捌き終わったワークツリーの通知だけ落として残りを巡回したいときに使う。現在の未確認件数は oretachi_get_worktree_status の notificationCount で確認できる")]
     fn oretachi_clear_worktree_notification(
         &self,
@@ -1996,7 +2073,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "タスク追加リクエストを送信する。AIがタスクコードを生成し、ワークツリー作成やエージェント実行を非同期で行う。追加先ワークグループは省略時はデフォルトワークグループ (isDefault: true) になる。別のワークグループへ入れたい場合は oretachi_list_workgroups で一覧を取得してから workgroup_id / workgroup_name を渡す")]
+    #[tool(description = "タスク追加リクエストを送信する。AIがタスクコードを生成し、ワークツリー作成やエージェント実行を非同期で行う。追加先ワークグループは省略時はデフォルトワークグループ (isDefault: true) になる。別のワークグループへ入れたい場合は oretachi_list_workgroups で一覧を取得してから workgroup_id / workgroup_name を渡す。実行は非同期でこのツールは結果を返さないので、成否や生成されたコードは oretachi_list_tasks で確認する")]
     fn oretachi_add_task(
         &self,
         Parameters(AddTaskParams { prompt, remote_exec, workgroup_id, workgroup_name }): Parameters<AddTaskParams>,
@@ -3019,6 +3096,54 @@ pub fn resolve_worktree_by_cwd<'a>(
         .iter()
         .filter(|w| cp.starts_with(std::path::Path::new(&w.path)))
         .max_by_key(|w| std::path::Path::new(&w.path).components().count())
+}
+
+/// タスク1件を MCP の返却形へ整える。
+///
+/// `steps` は DB 上 JSON 文字列なので、文字列のまま返さずパースして構造のまま載せる
+/// （中身は `src/types/task.ts` の `TaskStep[]` で既に camelCase）。パースに失敗した
+/// 行は `steps: []` + `stepsRaw` にして握り潰さず生を見せる。
+fn task_row_to_json(task: &crate::task_db::TaskRow, settings: &AppSettings) -> serde_json::Value {
+    let parsed: Option<Vec<serde_json::Value>> =
+        serde_json::from_str::<Vec<serde_json::Value>>(&task.steps).ok();
+
+    let steps: Vec<serde_json::Value> = parsed
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .map(|step| {
+            let mut out = step.clone();
+            // 生成コードの repository + branch が登録済みワークツリーと一致すれば、
+            // タスクと実体を突き合わせられるよう名前と ID を添える。
+            let code = step.get("code").unwrap_or(step);
+            let repo = code.get("repository").and_then(|v| v.as_str());
+            let branch = code.get("branch").and_then(|v| v.as_str());
+            if let (Some(repo), Some(branch), Some(obj)) = (repo, branch, out.as_object_mut()) {
+                let wt = settings
+                    .worktrees
+                    .iter()
+                    .find(|w| w.repository_name == repo && w.branch_name == branch);
+                obj.insert("worktreeName".to_string(), serde_json::json!(wt.map(|w| &w.name)));
+                obj.insert("worktreeId".to_string(), serde_json::json!(wt.map(|w| &w.id)));
+            }
+            out
+        })
+        .collect();
+
+    let mut json = serde_json::json!({
+        "id": task.id,
+        "prompt": task.prompt,
+        "createdAt": task.created_at,
+        "status": task.status,
+        "error": task.error,
+        "steps": steps,
+    });
+    if parsed.is_none() {
+        if let Some(obj) = json.as_object_mut() {
+            obj.insert("stepsRaw".to_string(), serde_json::json!(task.steps));
+        }
+    }
+    json
 }
 
 /// ワークツリーのパスから表示名（末尾ディレクトリ名）を取り出す。

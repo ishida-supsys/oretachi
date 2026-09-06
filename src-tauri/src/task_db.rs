@@ -110,6 +110,53 @@ pub async fn list(
     Ok(TaskListResult { items: rows, has_more })
 }
 
+/// `list` の検索対象を steps JSON まで広げ、status での絞り込みを足した版。
+///
+/// UI の一覧は prompt で引ければ十分だが、MCP から「あのブランチのタスクはどうなったか」
+/// を追うときは prompt を覚えていないことのほうが多く、リポジトリ名 / ブランチ名で
+/// 引きたい。それらは `steps` JSON の中にしか無いので raw JSON ごと LIKE で舐める。
+/// UI 側の検索挙動は変えたくないので別関数にしてある。
+pub async fn list_filtered(
+    pool: &SqlitePool,
+    search: &str,
+    status: &str,
+    offset: i64,
+    limit: i64,
+) -> Result<TaskListResult, String> {
+    let fetch_limit = limit + 1; // has_more 判定用に1件余分に取得
+    let pattern = format!("%{}%", search.to_lowercase());
+    let rows: Vec<TaskRow> = sqlx::query_as::<_, TaskRow>(
+        "SELECT * FROM tasks \
+         WHERE (?1 = '' OR LOWER(prompt) LIKE ?2 OR LOWER(steps) LIKE ?2) \
+           AND (?3 = '' OR status = ?3) \
+         ORDER BY created_at DESC LIMIT ?4 OFFSET ?5",
+    )
+    .bind(search)
+    .bind(&pattern)
+    .bind(status)
+    .bind(fetch_limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let has_more = rows.len() as i64 > limit;
+    let mut rows = rows;
+    if has_more {
+        rows.truncate(limit as usize);
+    }
+    Ok(TaskListResult { items: rows, has_more })
+}
+
+/// タスクを1件取得する。存在しなければ `None`。
+pub async fn get(pool: &SqlitePool, id: &str) -> Result<Option<TaskRow>, String> {
+    sqlx::query_as::<_, TaskRow>("SELECT * FROM tasks WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 /// 指定ワークツリー（repository + branch）宛のステップを含むタスクのプロンプトを新しい順に返す。
 ///
 /// `tasks` テーブルはワークツリー ID を持たず、`steps` JSON の `code.repository` /
