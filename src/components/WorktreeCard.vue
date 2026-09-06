@@ -3,10 +3,8 @@ import { ref, computed } from "vue";
 import type { Worktree } from "../types/worktree";
 import type { Workgroup } from "../types/settings";
 import { useI18n } from "vue-i18n";
-import { useWorkgroups } from "../composables/useWorkgroups";
 
 const { t } = useI18n();
-const { displayName: workgroupDisplayName } = useWorkgroups();
 import TerminalThumbnail from "./TerminalThumbnail.vue";
 import ArtifactUrlHoverMenu from "./ArtifactUrlHoverMenu.vue";
 import ArtifactIcon from "./ArtifactIcon.vue";
@@ -32,7 +30,6 @@ const props = defineProps<{
   tooltip?: string;
   descriptionOpen?: boolean;
   workgroups?: Workgroup[];
-  currentWorkgroupId?: string;
 }>();
 
 const emit = defineEmits<{
@@ -51,7 +48,7 @@ const emit = defineEmits<{
   openArtifacts: [worktreeId: string];
   duplicateWorktree: [worktreeId: string];
   toggleDescription: [worktreeId: string];
-  moveToWorkgroup: [payload: { worktreeId: string; groupId: string }];
+  openGroupMove: [worktreeId: string];
   openSubscriptions: [worktreeId: string];
 }>();
 
@@ -100,17 +97,15 @@ function onCardClick(event: MouseEvent) {
 }
 
 const menuRef = ref<InstanceType<typeof Popover> | null>(null);
-const showGroupMenu = ref(false);
 
 function openMenu(event: MouseEvent) {
-  showGroupMenu.value = false;
   menuRef.value?.toggle(event);
 }
 
-function onMoveToWorkgroup(groupId: string) {
-  showGroupMenu.value = false;
+// グループが多いとサブメニューがウィンドウ外へはみ出すため、移動先の選択はダイアログに任せる
+function onOpenGroupMove() {
   menuRef.value?.hide();
-  emit("moveToWorkgroup", { worktreeId: props.worktree.id, groupId });
+  emit("openGroupMove", props.worktree.id);
 }
 
 function onMoveWindow() {
@@ -285,27 +280,14 @@ const terminalList = computed(() =>
           {{ t('menu.settings') }}
         </button>
         <button
-          v-if="workgroups && workgroups.length > 0"
+          v-if="!isHome && workgroups && workgroups.length > 0"
           class="popup-item"
           :disabled="loading"
-          @click="showGroupMenu = !showGroupMenu"
+          @click="onOpenGroupMove"
         >
           <span class="pi pi-folder" />
           {{ t('menu.moveToWorkgroup') }}
-          <span :class="showGroupMenu ? 'pi pi-angle-down' : 'pi pi-angle-right'" style="margin-left: auto" />
         </button>
-        <div v-if="showGroupMenu" class="popup-submenu">
-          <button
-            v-for="g in workgroups"
-            :key="g.id"
-            class="popup-item popup-subitem"
-            @click="onMoveToWorkgroup(g.id)"
-          >
-            <span class="group-dot" :style="{ background: g.color || '#9399b2' }" />
-            {{ workgroupDisplayName(g) }}
-            <span v-if="g.id === currentWorkgroupId" class="pi pi-check" style="margin-left: auto; color: var(--p-green-400)" />
-          </button>
-        </div>
         <div v-if="!isHome" class="popup-divider" />
         <button v-if="!isHome" class="popup-item popup-item-danger" :disabled="loading" @click="onDelete">
           <span class="pi pi-trash" />
@@ -594,27 +576,6 @@ const terminalList = computed(() =>
   height: 1px;
   background: var(--p-content-border-color);
   margin: 4px 0;
-}
-
-.popup-submenu {
-  display: flex;
-  flex-direction: column;
-  border-left: 2px solid var(--p-content-border-color);
-  margin-left: 10px;
-  max-height: 200px;
-  overflow-y: auto;
-}
-
-.popup-subitem {
-  font-size: 12px;
-  padding-left: 10px;
-}
-
-.group-dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  flex-shrink: 0;
 }
 
 .loading-overlay {
