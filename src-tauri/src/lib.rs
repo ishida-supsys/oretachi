@@ -720,6 +720,190 @@ async fn delete_artifacts(app_handle: tauri::AppHandle, worktree_id: String) -> 
     Ok(())
 }
 
+/// ワークツリーのアーティファクトを 1 件だけ削除する（`delete_artifacts` はワークツリー丸ごと）。
+/// 状態サイドカーは本体に従属するので一緒に消す。
+#[tauri::command]
+async fn delete_artifact(
+    app_handle: tauri::AppHandle,
+    worktree_id: String,
+    artifact_id: String,
+) -> Result<(), String> {
+    validate_path_component(&artifact_id)?;
+    let dir = artifacts_dir(&app_handle, &worktree_id)?;
+    let artifact_path = dir.join(format!("{}.json", artifact_id));
+    let state_path = artifact_state_path(&dir, &artifact_id);
+    let deleted = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+        if !artifact_path.exists() {
+            return Ok(false);
+        }
+        std::fs::remove_file(&artifact_path).map_err(|e| e.to_string())?;
+        // サイドカーは無くても正常なので、消せなくても本体の削除は成功として扱う
+        let _ = std::fs::remove_file(&state_path);
+        Ok(true)
+    })
+    .await
+    .map_err(|e| format!("task join error: {}", e))??;
+
+    if deleted {
+        let _ = app_handle.emit(
+            "artifact-changed",
+            serde_json::json!({
+                "worktreeId": worktree_id,
+                "artifactId": artifact_id,
+                "command": "delete",
+            }),
+        );
+        if let Some(pool) = app_handle.try_state::<report_db::ReportPool>() {
+            let _ = report_db::insert(&pool.0, "artifact_change:delete", &artifact_id).await;
+        }
+    }
+    Ok(())
+}
+
+// ─── アーティファクト状態サイドカー ───────────────────────────────────────────
+//
+// AI が書く本体 `<id>.json` と、UI / 人が書く可変状態 `<id>.state` を物理的に分離する。
+// MCP の `artifact command=create` は既存ファイルを読まずに本体を丸ごと組み立てて
+// 上書きするため、本体 JSON に UI 側の状態を持たせると同じ ID で作り直したときに消える。
+//
+// 拡張子を `json` にしないのは、list_artifacts / list_repo_artifacts / search_artifact が
+// 拡張子 json のファイルを全部アーティファクトのメタとしてパースするため
+// （サイドカーが「壊れたアーティファクト」として一覧に出てしまう）。
+//
+// 中身はバージョン番号を持たないフラットな JSON オブジェクト。未知キーは読み飛ばし、
+// 欠けたキーは既定値で補うため、後続の機能はキーを足すだけで済む。
+// 既定値だけになったサイドカーはファイルごと削除してゴミを残さない。
+const ARTIFACT_STATE_EXT: &str = "state";
+
+/// サイドカーの read-modify-write を直列化するロック。
+/// ピン止めボタンの連打で `pinned=true` / `pinned=false` が同時に走ると、後勝ちではなく
+/// 「読んだ時点が両方とも空」になって lost update が起きるため、書き込み全体を排他する。
+/// 更新は数十バイトのファイル 1 枚なので、スコープ単位ではなくグローバルで足りる。
+static ARTIFACT_STATE_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// サイドカーの一時ファイル名を一意化する連番。
+/// pid だけだと同一プロセス内の並行更新で同名になり、片方の rename が NotFound で落ちる。
+static ARTIFACT_STATE_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn artifact_state_path(dir: &std::path::Path, artifact_id: &str) -> std::path::PathBuf {
+    dir.join(format!("{}.{}", artifact_id, ARTIFACT_STATE_EXT))
+}
+
+/// scope（"worktree" | "repository"）と ID からアーティファクト格納ディレクトリを解決する
+fn artifact_scope_dir(
+    app_handle: &tauri::AppHandle,
+    scope: &str,
+    scope_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    match scope {
+        "worktree" => artifacts_dir(app_handle, scope_id),
+        "repository" => repo_artifacts_dir(app_handle, scope_id),
+        other => Err(format!("不明なアーティファクトスコープです: {}", other)),
+    }
+}
+
+/// スコープ内の状態サイドカーを `{ artifactId: state }` の形でまとめて返す。
+#[tauri::command]
+async fn list_artifact_states(
+    app_handle: tauri::AppHandle,
+    scope: String,
+    scope_id: String,
+) -> Result<serde_json::Map<String, serde_json::Value>, String> {
+    let dir = artifact_scope_dir(&app_handle, &scope, &scope_id)?;
+    tokio::task::spawn_blocking(move || {
+        let mut states = serde_json::Map::new();
+        if !dir.exists() {
+            return Ok(states);
+        }
+        let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
+        for entry in entries {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some(ARTIFACT_STATE_EXT) {
+                continue;
+            }
+            let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            // サイドカーは補助情報なので、壊れていれば既定値扱いで黙って捨てる
+            let Ok(raw) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            match serde_json::from_str::<serde_json::Value>(&raw) {
+                Ok(val @ serde_json::Value::Object(_)) => {
+                    states.insert(id.to_string(), val);
+                }
+                _ => {
+                    log::warn!("[ArtifactState] 解析できないサイドカーを無視します: {:?}", path);
+                }
+            }
+        }
+        Ok(states)
+    })
+    .await
+    .map_err(|e| format!("task join error: {}", e))?
+}
+
+/// ピン止め状態を書き換える。ピン止めはスコープローカルで、転送では引き継がない。
+#[tauri::command]
+async fn set_artifact_pinned(
+    app_handle: tauri::AppHandle,
+    scope: String,
+    scope_id: String,
+    artifact_id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    validate_path_component(&artifact_id)?;
+    let dir = artifact_scope_dir(&app_handle, &scope, &scope_id)?;
+    let path = artifact_state_path(&dir, &artifact_id);
+    let seq = ARTIFACT_STATE_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    // 拡張子が `state` にも `json` にもならないので、一覧にもサイドカー走査にも拾われない
+    let tmp_name = format!(".{}.state.tmp-{}-{}", artifact_id, std::process::id(), seq);
+    // 読み込み〜rename を丸ごと排他する
+    let _write_guard = ARTIFACT_STATE_WRITE_LOCK.lock().await;
+    tokio::task::spawn_blocking(move || -> Result<(), String> {
+        // 同じサイドカーへ後から別のキーが足される前提なので、既存を読んでマージする
+        let mut obj = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+            .and_then(|val| match val {
+                serde_json::Value::Object(map) => Some(map),
+                _ => None,
+            })
+            .unwrap_or_default();
+
+        if pinned {
+            obj.insert("pinned".to_string(), serde_json::Value::Bool(true));
+        } else {
+            obj.remove("pinned");
+        }
+
+        if obj.is_empty() {
+            return match std::fs::remove_file(&path) {
+                Ok(()) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                Err(e) => Err(e.to_string()),
+            };
+        }
+
+        let json = serde_json::to_string(&serde_json::Value::Object(obj)).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        // 一時ファイルへ書いてから rename し、書き込み途中の壊れたサイドカーを残さない
+        let tmp_path = dir.join(tmp_name);
+        if let Err(e) = std::fs::write(&tmp_path, json) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e.to_string());
+        }
+        if let Err(e) = std::fs::rename(&tmp_path, &path) {
+            let _ = std::fs::remove_file(&tmp_path);
+            return Err(e.to_string());
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| format!("task join error: {}", e))?
+}
+
 // ─── リポジトリ・アーティファクトコマンド ─────────────────────────────────────
 //
 // ワークツリー削除で消える artifacts/<worktreeId>/ とは別に、リポジトリ単位の
@@ -978,13 +1162,16 @@ async fn delete_repo_artifact(
     artifact_id: String,
 ) -> Result<(), String> {
     validate_path_component(&artifact_id)?;
-    let artifact_path =
-        repo_artifacts_dir(&app_handle, &repository_id)?.join(format!("{}.json", artifact_id));
+    let dir = repo_artifacts_dir(&app_handle, &repository_id)?;
+    let artifact_path = dir.join(format!("{}.json", artifact_id));
+    let state_path = artifact_state_path(&dir, &artifact_id);
     let deleted = tokio::task::spawn_blocking(move || -> Result<bool, String> {
         if !artifact_path.exists() {
             return Ok(false);
         }
         std::fs::remove_file(&artifact_path).map_err(|e| e.to_string())?;
+        // サイドカーは無くても正常なので、消せなくても本体の削除は成功として扱う
+        let _ = std::fs::remove_file(&state_path);
         Ok(true)
     })
     .await
@@ -1748,6 +1935,9 @@ pub fn run() {
             list_artifacts,
             read_artifact,
             delete_artifacts,
+            delete_artifact,
+            list_artifact_states,
+            set_artifact_pinned,
             list_repo_artifacts,
             read_repo_artifact,
             copy_artifact_to_repository,
