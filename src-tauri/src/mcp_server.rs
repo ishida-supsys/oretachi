@@ -646,7 +646,7 @@ pub struct AddTaskParams {
     pub prompt: String,
     #[schemars(description = "リモート実行するかどうか (省略時は false)")]
     pub remote_exec: Option<bool>,
-    #[schemars(description = "追加先ワークグループのID (oretachi_list_workgroups の id)。省略時はUIで現在選択中のワークグループに入る (isDefault のグループとは限らない)")]
+    #[schemars(description = "追加先ワークグループのID (oretachi_list_workgroups の id)。省略時はデフォルトワークグループ (isDefault: true) に入る")]
     pub workgroup_id: Option<String>,
     #[schemars(description = "追加先ワークグループの表示名 (oretachi_list_workgroups の name)。workgroup_id 指定時は無視される")]
     pub workgroup_name: Option<String>,
@@ -656,7 +656,8 @@ pub struct AddTaskParams {
 struct AddTaskEvent {
     prompt: String,
     remote_exec: bool,
-    /// 追加先ワークグループID。None ならフロントに委ね、UI で現在選択中の WG に入る。
+    /// 追加先ワークグループID。None ならフロントに委ね、UI で現在選択中の WG に入る
+    /// （ワークグループが1件も定義されていないときだけこの経路に入る）。
     workgroup_id: Option<String>,
 }
 
@@ -1618,7 +1619,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "登録済みワークグループの一覧を返す。各エントリは id・表示名(name)・色(color)・タスク実行エージェント(taskAddAgent)・isDefault を含む。oretachi_add_task で追加先ワークグループを指定する前に、利用可能なワークグループを確認するために使う。isDefault は「ワークグループ未設定のワークツリーが表示上フォールバックする先頭グループ」を意味し、oretachi_add_task で指定を省略したときの追加先ではない (省略時はUIで現在選択中のワークグループに入る)", annotations(read_only_hint = true))]
+    #[tool(description = "登録済みワークグループの一覧を返す。各エントリは id・表示名(name)・色(color)・タスク実行エージェント(taskAddAgent)・isDefault を含む。oretachi_add_task で追加先ワークグループを指定する前に、利用可能なワークグループを確認するために使う。isDefault は「ワークグループ未設定のワークツリーが表示上フォールバックする先頭グループ」を意味し、oretachi_add_task で追加先を省略したときの追加先でもある", annotations(read_only_hint = true))]
     fn oretachi_list_workgroups(
         &self,
         Parameters(_params): Parameters<ListWorkgroupsParams>,
@@ -1741,7 +1742,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "タスク追加リクエストを送信する。AIがタスクコードを生成し、ワークツリー作成やエージェント実行を非同期で行う。追加先ワークグループを指定したい場合は oretachi_list_workgroups で一覧を取得してから workgroup_id / workgroup_name を渡す")]
+    #[tool(description = "タスク追加リクエストを送信する。AIがタスクコードを生成し、ワークツリー作成やエージェント実行を非同期で行う。追加先ワークグループは省略時はデフォルトワークグループ (isDefault: true) になる。別のワークグループへ入れたい場合は oretachi_list_workgroups で一覧を取得してから workgroup_id / workgroup_name を渡す")]
     fn oretachi_add_task(
         &self,
         Parameters(AddTaskParams { prompt, remote_exec, workgroup_id, workgroup_name }): Parameters<AddTaskParams>,
@@ -1753,8 +1754,10 @@ impl NotifyService {
         let resolved_workgroup_id = {
             let settings_manager = self.app_handle.state::<SettingsManager>();
             let settings = settings_manager.get();
-            resolve_workgroup_target(&settings, workgroup_id.as_deref(), workgroup_name.as_deref())
-                .map_err(|e| McpError::invalid_params(e, None))?
+            let explicit =
+                resolve_workgroup_target(&settings, workgroup_id.as_deref(), workgroup_name.as_deref())
+                    .map_err(|e| McpError::invalid_params(e, None))?;
+            explicit.or_else(|| default_workgroup_id(&settings))
         };
         let remote = remote_exec.unwrap_or(false);
         let event = AddTaskEvent {
@@ -1769,7 +1772,7 @@ impl NotifyService {
             "[mcp] oretachi_add_task: prompt={} remote_exec={} workgroup_id={}",
             prompt,
             remote,
-            resolved_workgroup_id.as_deref().unwrap_or("(default)")
+            resolved_workgroup_id.as_deref().unwrap_or("(none)")
         );
         Ok(CallToolResult::success(vec![Content::text(
             "タスク追加リクエストを送信しました。タスクの生成・実行は非同期に行われます。",
@@ -3406,9 +3409,20 @@ pub fn workgroup_display_name(settings: &AppSettings, group: &Workgroup) -> Stri
     }
 }
 
+/// `oretachi_add_task` で追加先ワークグループが未指定だったときの既定値。
+/// `oretachi_list_workgroups` の `isDefault` と同じく先頭グループ（= ワークグループ未設定の
+/// ワークツリーが表示上フォールバックする先、`resolve_workgroup_by_id` の規則）を返す。
+///
+/// MCP 経由の追加は UI の表示状態と無関係に発生するため、そのときたまたま表示していた
+/// ワークグループへ紛れ込ませない（#181）。ワークグループが1件も定義されていない場合だけ
+/// `None` を返し、追加先の決定をフロントに委ねる。
+fn default_workgroup_id(settings: &AppSettings) -> Option<String> {
+    settings.workgroups.first().map(|g| g.id.clone())
+}
+
 /// MCP から指定された workgroup_id / workgroup_name を settings 上のワークグループIDに解決する。
-/// どちらも未指定なら `Ok(None)` を返し、追加先はフロントに委ねる
-/// （UI で現在選択中の WG = useWorkgroups.activeWorkgroupId に入る）。
+/// どちらも未指定なら `Ok(None)` を返す（「指定なし」を表すだけで、既定値の解決は呼び出し側の責務。
+/// `oretachi_add_task` はデフォルト WG へフォールバックする）。
 /// 解決できない・曖昧な場合は先頭 WG へ暗黙にフォールバックせずエラーにする
 /// （意図しないワークグループへタスクが入るのを防ぐため）。
 fn resolve_workgroup_target(
@@ -4758,13 +4772,24 @@ mod tests {
         settings
     }
 
-    /// 未指定なら追加先はフロント既定の WG に委ねる（従来挙動の維持）。
+    /// 未指定は「指定なし」を表す None。既定値の解決は呼び出し側（`default_workgroup_id`）の責務。
     #[test]
     fn resolve_workgroup_target_defaults_to_none() {
         let settings = wg_settings();
         assert_eq!(resolve_workgroup_target(&settings, None, None), Ok(None));
         // 空文字・空白のみは未指定扱い
         assert_eq!(resolve_workgroup_target(&settings, Some(""), Some("  ")), Ok(None));
+    }
+
+    /// 未指定時の既定はデフォルト WG（先頭グループ）。WG 未定義なら None（#181）。
+    #[test]
+    fn default_workgroup_id_is_first_group() {
+        let settings = wg_settings();
+        assert_eq!(default_workgroup_id(&settings), Some("wg-1".to_string()));
+
+        let mut empty = wg_settings();
+        empty.workgroups.clear();
+        assert_eq!(default_workgroup_id(&empty), None);
     }
 
     #[test]
