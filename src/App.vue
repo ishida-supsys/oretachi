@@ -15,6 +15,7 @@ import RemoveWorktreeDialog from "./components/RemoveWorktreeDialog.vue";
 import RemoveWorkgroupDialog from "./components/RemoveWorkgroupDialog.vue";
 import IdeSelectDialog from "./components/IdeSelectDialog.vue";
 import HotkeyCharDialog from "./components/HotkeyCharDialog.vue";
+import WorktreeSettingsDialog from "./components/WorktreeSettingsDialog.vue";
 import SubscriptionFocusDialog from "./components/SubscriptionFocusDialog.vue";
 import AutoApprovalPromptDialog from "./components/AutoApprovalPromptDialog.vue";
 import TrayButton from "./components/TrayButton.vue";
@@ -1424,6 +1425,13 @@ async function onFocusAllSubWindows() {
   }
 }
 
+// ワークツリー設定ダイアログ（カードメニューの「設定」から開く。
+// 自動承認 / トレイ通知 / ホットキー / プラグイン再適用をここに集約している）
+const worktreeSettingsTargetId = ref("");
+const worktreeSettingsTarget = computed(
+  () => worktrees.value.find((w) => w.id === worktreeSettingsTargetId.value) ?? null,
+);
+
 function onSetHotkeyChar(worktreeId: string) {
   hotkeyCharTargetId.value = worktreeId;
   showHotkeyCharDialog.value = true;
@@ -2422,8 +2430,6 @@ onMounted(async () => {
         :artifact-urls="artifactUrls"
         :loading-worktrees="loadingWorktrees"
         :cancellable-worktrees="cancellableWorktrees"
-        :auto-approvals="autoApprovalMap"
-        :tray-notifications="trayNotificationMap"
         :ai-judging-worktrees="aiJudgingWorktrees"
         :card-tooltips="worktreeCardTooltips"
         :description-opens="descriptionOpenMap"
@@ -2438,9 +2444,7 @@ onMounted(async () => {
         @move-to-main-window="onMoveToMainWindow"
         @focus-sub-window="onFocusSubWindow"
         @focus-all-sub-windows="onFocusAllSubWindows"
-        @set-hotkey-char="onSetHotkeyChar"
-        @toggle-auto-approval="onToggleAutoApproval"
-        @toggle-tray-notification="onToggleTrayNotification"
+        @open-worktree-settings="worktreeSettingsTargetId = $event"
         @cancel-ai-judging="onCancelAiJudging"
         @cancel-remove="cancelWorktreeRemove"
         @duplicate-worktree="onDuplicateWorktree"
@@ -2590,6 +2594,21 @@ onMounted(async () => {
       :ides="detectedIdes"
       @select="onIdeSelected"
       @cancel="showIdeDialog = false"
+    />
+
+    <!-- ワークツリー設定ダイアログ。ホットキー割り当ては専用ダイアログを上に重ねるため、
+         DOM 上は HotkeyCharDialog より前に置いて重なり順を固定する -->
+    <WorktreeSettingsDialog
+      v-if="worktreeSettingsTarget"
+      :worktree="worktreeSettingsTarget"
+      :auto-approval="autoApprovalMap.get(worktreeSettingsTarget.id) ?? false"
+      :tray-notification="trayNotificationMap.get(worktreeSettingsTarget.id) ?? true"
+      :hotkey-char="hotkeyChars.get(worktreeSettingsTarget.id)"
+      :ai-judging="aiJudgingWorktrees.has(worktreeSettingsTarget.id)"
+      @toggle-auto-approval="onToggleAutoApproval"
+      @toggle-tray-notification="onToggleTrayNotification"
+      @set-hotkey-char="onSetHotkeyChar"
+      @close="worktreeSettingsTargetId = ''"
     />
 
     <!-- ホットキー文字割り当てダイアログ -->

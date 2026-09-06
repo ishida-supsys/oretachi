@@ -207,9 +207,7 @@ const props = defineProps<{
   artifactUrls: Map<string, UrlArtifactEntry[]>;
   loadingWorktrees: Map<string, string>;
   cancellableWorktrees: Set<string>;
-  autoApprovals: Map<string, boolean>;
   /** トレイ通知の実効値（worktree > workgroup > true で解決済み） */
-  trayNotifications: Map<string, boolean>;
   aiJudgingWorktrees: Set<string>;
   cardTooltips?: Map<string, string | undefined>;
   descriptionOpens?: Map<string, boolean>;
@@ -239,9 +237,7 @@ const emit = defineEmits<{
   moveToMainWindow: [worktreeId: string];
   focusSubWindow: [worktreeId: string];
   focusAllSubWindows: [];
-  setHotkeyChar: [worktreeId: string];
-  toggleAutoApproval: [worktreeId: string];
-  toggleTrayNotification: [worktreeId: string];
+  openWorktreeSettings: [worktreeId: string];
   cancelAiJudging: [worktreeId: string];
   cancelRemove: [worktreeId: string];
   duplicateWorktree: [worktreeId: string];
@@ -493,8 +489,6 @@ watch(
               :loading="loadingWorktrees.has(worktree.id)"
               :loading-text="loadingWorktrees.get(worktree.id)"
               :cancellable="cancellableWorktrees.has(worktree.id)"
-              :auto-approval="autoApprovals.get(worktree.id) ?? false"
-              :tray-notification="trayNotifications.get(worktree.id) ?? true"
               :ai-judging="aiJudgingWorktrees.has(worktree.id)"
               :tooltip="cardTooltips?.get(worktree.id)"
               :description-open="showAllDescriptions || (descriptionOpens?.get(worktree.id) ?? false)"
@@ -512,9 +506,7 @@ watch(
               @move-to-sub-window="emit('moveToSubWindow', $event)"
               @move-to-main-window="emit('moveToMainWindow', $event)"
               @focus-sub-window="emit('focusSubWindow', $event)"
-              @set-hotkey-char="emit('setHotkeyChar', $event)"
-              @toggle-auto-approval="emit('toggleAutoApproval', $event)"
-              @toggle-tray-notification="emit('toggleTrayNotification', $event)"
+              @open-worktree-settings="emit('openWorktreeSettings', $event)"
               @cancel-ai-judging="emit('cancelAiJudging', $event)"
               @cancel-remove="emit('cancelRemove', $event)"
               @duplicate-worktree="emit('duplicateWorktree', $event)"
@@ -536,8 +528,6 @@ watch(
         :notifications="notifications"
         :hotkey-chars="hotkeyChars"
         :detached-worktrees="detachedWorktrees"
-        :auto-approvals="autoApprovals"
-        :tray-notifications="trayNotifications"
         :ai-judging-worktrees="aiJudgingWorktrees"
         :card-tooltips="cardTooltips"
         :description-opens="descriptionOpens"
@@ -552,9 +542,7 @@ watch(
         @move-to-sub-window="emit('moveToSubWindow', $event)"
         @move-to-main-window="emit('moveToMainWindow', $event)"
         @focus-sub-window="emit('focusSubWindow', $event)"
-        @set-hotkey-char="emit('setHotkeyChar', $event)"
-        @toggle-auto-approval="emit('toggleAutoApproval', $event)"
-        @toggle-tray-notification="emit('toggleTrayNotification', $event)"
+        @open-worktree-settings="emit('openWorktreeSettings', $event)"
         @remove-repository="emit('removeRepository', $event)"
       />
     </template>

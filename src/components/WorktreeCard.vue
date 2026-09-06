@@ -3,10 +3,7 @@ import { ref, computed } from "vue";
 import type { Worktree } from "../types/worktree";
 import type { Workgroup } from "../types/settings";
 import { useI18n } from "vue-i18n";
-import { invoke } from "@tauri-apps/api/core";
-import { message } from "@tauri-apps/plugin-dialog";
 import { useWorkgroups } from "../composables/useWorkgroups";
-import { useSettings, applyPluginConfig } from "../composables/useSettings";
 
 const { t } = useI18n();
 const { displayName: workgroupDisplayName } = useWorkgroups();
@@ -31,9 +28,6 @@ const props = defineProps<{
   loading?: boolean;
   loadingText?: string;
   cancellable?: boolean;
-  autoApproval?: boolean;
-  /** トレイ通知の実効値（ワークツリー個別 > ワークグループ既定値 > true で解決済み） */
-  trayNotification?: boolean;
   aiJudging?: boolean;
   tooltip?: string;
   descriptionOpen?: boolean;
@@ -52,9 +46,7 @@ const emit = defineEmits<{
   moveToSubWindow: [worktreeId: string];
   moveToMainWindow: [worktreeId: string];
   focusSubWindow: [worktreeId: string];
-  setHotkeyChar: [worktreeId: string];
-  toggleAutoApproval: [worktreeId: string];
-  toggleTrayNotification: [worktreeId: string];
+  openWorktreeSettings: [worktreeId: string];
   cancelAiJudging: [worktreeId: string];
   openArtifacts: [worktreeId: string];
   duplicateWorktree: [worktreeId: string];
@@ -135,34 +127,11 @@ function onOpenArtifacts() {
   emit("openArtifacts", props.worktree.id);
 }
 
-/**
- * このワークツリーの .claude/settings.local.json に oretachi プラグイン設定を書き直す。
- * 手編集や削除で MCP / 通知が効かなくなったときの復旧口。
- * ホームは同梱スキルのシードも伴うため専用コマンド経由にする。
- * 親へ emit せずここで完結させる（他の状態に影響しない自己完結の操作のため）。
- */
-async function onReapplyPluginConfig() {
+// 設定系（自動承認 / トレイ通知 / ホットキー / プラグイン再適用）は
+// 専用ダイアログに集約したので、ここではメニューを畳んで親へ開くよう頼むだけ。
+function onOpenWorktreeSettings() {
   menuRef.value?.hide();
-  const { settings } = useSettings();
-  try {
-    if (isHome.value) {
-      // overwrite=false: プラグイン設定は毎回マージ書き込みされ、スキルの編集は温存される
-      await invoke("setup_home_claude_dir", {
-        homePath: props.worktree.path,
-        overwrite: false,
-      });
-    } else {
-      const repo = settings.value.repositories.find((r) => r.id === props.worktree.repositoryId);
-      await applyPluginConfig(
-        props.worktree.path,
-        props.worktree.name,
-        repo?.notificationHooks ?? [],
-      );
-    }
-    await message(t("menu.reapplyPluginDone"), { kind: "info" });
-  } catch (e) {
-    await message(t("menu.reapplyPluginFailed", { error: e }), { kind: "error" });
-  }
+  emit("openWorktreeSettings", props.worktree.id);
 }
 
 function onDuplicate() {
@@ -173,11 +142,6 @@ function onDuplicate() {
 function onDelete() {
   menuRef.value?.hide();
   emit("removeWorktree", props.worktree.id);
-}
-
-function onSetHotkeyChar() {
-  menuRef.value?.hide();
-  emit("setHotkeyChar", props.worktree.id);
 }
 
 function onThumbnailClick(terminalId: number) {
@@ -304,28 +268,6 @@ const terminalList = computed(() =>
 
     <Popover ref="menuRef">
       <div class="popup-menu">
-        <button
-          class="popup-item"
-          :style="autoApproval ? 'color: var(--p-green-400)' : ''"
-          :disabled="loading"
-          @click="emit('toggleAutoApproval', worktree.id)"
-        >
-          <span :class="autoApproval ? 'pi pi-check-circle' : 'pi pi-circle'" />
-          {{ t('menu.autoApproval') }}
-        </button>
-        <button
-          class="popup-item"
-          :style="trayNotification !== false ? 'color: var(--p-green-400)' : ''"
-          :disabled="loading"
-          @click="emit('toggleTrayNotification', worktree.id)"
-        >
-          <span :class="trayNotification !== false ? 'pi pi-check-circle' : 'pi pi-circle'" />
-          {{ t('menu.trayNotification') }}
-        </button>
-        <button class="popup-item" :disabled="loading" @click="onSetHotkeyChar">
-          <span class="pi pi-key" />
-          {{ t('menu.setHotkey') }}
-        </button>
         <button class="popup-item" :disabled="loading" @click="onOpenArtifacts">
           <span class="pi pi-box" />
           {{ t('menu.openArtifacts') }}
@@ -334,13 +276,13 @@ const terminalList = computed(() =>
           <span :class="detached ? 'pi pi-window-maximize' : 'pi pi-external-link'" />
           {{ detached ? t('menu.moveToMainWindow') : t('menu.moveToSubWindow') }}
         </button>
-        <button class="popup-item" :disabled="loading" @click="onReapplyPluginConfig">
-          <span class="pi pi-refresh" />
-          {{ t('menu.reapplyPlugin') }}
-        </button>
         <button v-if="!isHome" class="popup-item" :disabled="loading" @click="onDuplicate">
           <span class="pi pi-copy" />
           {{ t('menu.duplicate') }}
+        </button>
+        <button class="popup-item" :disabled="loading" @click="onOpenWorktreeSettings">
+          <span class="pi pi-cog" />
+          {{ t('menu.settings') }}
         </button>
         <button
           v-if="workgroups && workgroups.length > 0"
@@ -728,15 +670,10 @@ const terminalList = computed(() =>
     "deletingText": "Deleting...",
     "cancelRemove": "Cancel",
     "menu": {
-      "autoApproval": "Auto approval",
-      "trayNotification": "Tray notification",
-      "setHotkey": "Assign hotkey",
+      "settings": "Settings",
       "openArtifacts": "Artifacts",
       "moveToSubWindow": "Move to sub window",
       "moveToMainWindow": "Move to main window",
-      "reapplyPlugin": "Re-apply plugin settings",
-      "reapplyPluginDone": "Wrote the oretachi plugin settings into .claude/settings.local.json.",
-      "reapplyPluginFailed": "Failed to re-apply the plugin settings: {error}",
       "duplicate": "Duplicate",
       "moveToWorkgroup": "Move to group",
       "delete": "Delete"
@@ -754,15 +691,10 @@ const terminalList = computed(() =>
     "deletingText": "削除中...",
     "cancelRemove": "キャンセル",
     "menu": {
-      "autoApproval": "自動承認",
-      "trayNotification": "トレイ通知",
-      "setHotkey": "ホットキー割り当て",
+      "settings": "設定",
       "openArtifacts": "アーティファクト",
       "moveToSubWindow": "サブウィンドウに移動",
       "moveToMainWindow": "メインウィンドウに戻す",
-      "reapplyPlugin": "プラグイン設定を再適用",
-      "reapplyPluginDone": ".claude/settings.local.json に oretachi プラグイン設定を書き込みました。",
-      "reapplyPluginFailed": "プラグイン設定の再適用に失敗しました: {error}",
       "duplicate": "複製",
       "moveToWorkgroup": "グループ移動",
       "delete": "削除"

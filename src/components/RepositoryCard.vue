@@ -1,8 +1,6 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
 import { useI18n } from "vue-i18n";
-import { message } from "@tauri-apps/plugin-dialog";
-import { applyPluginConfig } from "../composables/useSettings";
 import type { Repository } from "../types/settings";
 import type { Worktree } from "../types/worktree";
 import TerminalThumbnail from "./TerminalThumbnail.vue";
@@ -27,9 +25,6 @@ const props = defineProps<{
   notificationCount?: number;
   hotkeyChar?: string;
   detached?: boolean;
-  autoApproval?: boolean;
-  /** トレイ通知の実効値（ワークツリー個別 > ワークグループ既定値 > true で解決済み） */
-  trayNotification?: boolean;
   /** 配下にワークツリーがあるか（登録解除の可否） */
   hasWorktrees?: boolean;
 }>();
@@ -42,9 +37,7 @@ const emit = defineEmits<{
   moveToSubWindow: [worktreeId: string];
   moveToMainWindow: [worktreeId: string];
   focusSubWindow: [worktreeId: string];
-  setHotkeyChar: [worktreeId: string];
-  toggleAutoApproval: [worktreeId: string];
-  toggleTrayNotification: [worktreeId: string];
+  openWorktreeSettings: [worktreeId: string];
   configurePostAdd: [repositoryId: string];
   selectExecScript: [repositoryId: string];
   clearExecScript: [repositoryId: string];
@@ -119,19 +112,6 @@ function withMenuHidden<T>(fn: () => T): T {
   return fn();
 }
 
-/**
- * リポジトリ root の .claude/settings.local.json に oretachi プラグイン設定を書き直す。
- * 手編集や削除で MCP / 通知が効かなくなったときの復旧口。
- * 親へ emit せずここで完結させる（他の状態に影響しない自己完結の操作のため）。
- */
-async function reapplyPluginConfig() {
-  try {
-    await applyPluginConfig(props.repo.path, props.repo.name, props.repo.notificationHooks ?? []);
-    await message(t("menu.reapplyPluginDone"), { kind: "info" });
-  } catch (e) {
-    await message(t("menu.reapplyPluginFailed", { error: e }), { kind: "error" });
-  }
-}
 </script>
 
 <template>
@@ -231,7 +211,7 @@ async function reapplyPluginConfig() {
     <Popover ref="menuRef">
       <div class="popup-menu">
         <button class="popup-item" @click="withMenuHidden(() => emit('configurePostAdd', repo.id))">
-          <span class="pi pi-cog" />
+          <span class="pi pi-sliders-h" />
           {{ t('menu.postAddSettings') }}
         </button>
         <button class="popup-item" @click="withMenuHidden(() => emit('selectExecScript', repo.id))">
@@ -250,37 +230,20 @@ async function reapplyPluginConfig() {
           <span class="pi pi-box" />
           {{ t('menu.openArtifacts') }}
         </button>
-        <button class="popup-item" @click="withMenuHidden(reapplyPluginConfig)">
-          <span class="pi pi-refresh" />
-          {{ t('menu.reapplyPlugin') }}
-        </button>
         <template v-if="worktreeId">
-          <button
-            class="popup-item"
-            :style="autoApproval ? 'color: var(--p-green-400)' : ''"
-            @click="withMenuHidden(() => emit('toggleAutoApproval', worktreeId!))"
-          >
-            <span :class="autoApproval ? 'pi pi-check-circle' : 'pi pi-circle'" />
-            {{ t('menu.autoApproval') }}
-          </button>
-          <button
-            class="popup-item"
-            :style="trayNotification !== false ? 'color: var(--p-green-400)' : ''"
-            @click="withMenuHidden(() => emit('toggleTrayNotification', worktreeId!))"
-          >
-            <span :class="trayNotification !== false ? 'pi pi-check-circle' : 'pi pi-circle'" />
-            {{ t('menu.trayNotification') }}
-          </button>
-          <button class="popup-item" @click="withMenuHidden(() => emit('setHotkeyChar', worktreeId!))">
-            <span class="pi pi-key" />
-            {{ t('menu.setHotkey') }}
-          </button>
           <button
             class="popup-item"
             @click="withMenuHidden(() => onMoveWindow(worktreeId!))"
           >
             <span :class="detached ? 'pi pi-window-maximize' : 'pi pi-external-link'" />
             {{ detached ? t('menu.moveToMainWindow') : t('menu.moveToSubWindow') }}
+          </button>
+          <button
+            class="popup-item"
+            @click="withMenuHidden(() => emit('openWorktreeSettings', worktreeId!))"
+          >
+            <span class="pi pi-cog" />
+            {{ t('menu.settings') }}
           </button>
         </template>
         <div class="popup-divider" />
@@ -563,12 +526,7 @@ async function reapplyPluginConfig() {
       "selectExecScript": "Select exec script",
       "clearExecScript": "Clear exec script",
       "openArtifacts": "Artifacts",
-      "reapplyPlugin": "Re-apply plugin settings",
-      "reapplyPluginDone": "Wrote the oretachi plugin settings into .claude/settings.local.json.",
-      "reapplyPluginFailed": "Failed to re-apply the plugin settings: {error}",
-      "autoApproval": "Auto approval",
-      "trayNotification": "Tray notification",
-      "setHotkey": "Assign hotkey",
+      "settings": "Settings",
       "moveToSubWindow": "Move to sub window",
       "moveToMainWindow": "Move to main window",
       "remove": "Unregister repository",
@@ -595,12 +553,7 @@ async function reapplyPluginConfig() {
       "selectExecScript": "実行スクリプトを選択",
       "clearExecScript": "実行スクリプトを解除",
       "openArtifacts": "アーティファクト",
-      "reapplyPlugin": "プラグイン設定を再適用",
-      "reapplyPluginDone": ".claude/settings.local.json に oretachi プラグイン設定を書き込みました。",
-      "reapplyPluginFailed": "プラグイン設定の再適用に失敗しました: {error}",
-      "autoApproval": "自動承認",
-      "trayNotification": "トレイ通知",
-      "setHotkey": "ホットキーを割り当て",
+      "settings": "設定",
       "moveToSubWindow": "サブウィンドウへ移動",
       "moveToMainWindow": "メインウィンドウへ戻す",
       "remove": "リポジトリの登録を解除",

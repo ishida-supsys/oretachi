@@ -48,9 +48,7 @@ const props = defineProps<{
   notifications: Map<string, number>;
   hotkeyChars: Map<string, string>;
   detachedWorktrees: Set<string>;
-  autoApprovals: Map<string, boolean>;
   /** トレイ通知の実効値（worktree > workgroup > true で解決済み） */
-  trayNotifications: Map<string, boolean>;
   aiJudgingWorktrees: Set<string>;
   /** ホームカードの description / タスク一覧（ワークツリー一覧と同じ内容を出す） */
   cardTooltips?: Map<string, string | undefined>;
@@ -67,9 +65,7 @@ const emit = defineEmits<{
   moveToSubWindow: [worktreeId: string];
   moveToMainWindow: [worktreeId: string];
   focusSubWindow: [worktreeId: string];
-  setHotkeyChar: [worktreeId: string];
-  toggleAutoApproval: [worktreeId: string];
-  toggleTrayNotification: [worktreeId: string];
+  openWorktreeSettings: [worktreeId: string];
   toggleDescription: [worktreeId: string];
   cancelAiJudging: [worktreeId: string];
   removeRepository: [repositoryId: string];
@@ -224,8 +220,6 @@ defineExpose({ addRepository });
             :hotkey-char="hotkeyChars.get(item.worktree.id)"
             :artifact-count="artifactCounts.get(item.worktree.id) ?? 0"
             :artifact-urls="artifactUrls.get(item.worktree.id) ?? []"
-            :auto-approval="autoApprovals.get(item.worktree.id) ?? false"
-            :tray-notification="trayNotifications.get(item.worktree.id) ?? true"
             :ai-judging="aiJudgingWorktrees.has(item.worktree.id)"
             :tooltip="cardTooltips?.get(item.worktree.id)"
             :description-open="showAllDescriptions || (descriptionOpens?.get(item.worktree.id) ?? false)"
@@ -239,9 +233,7 @@ defineExpose({ addRepository });
             @move-to-sub-window="emit('moveToSubWindow', $event)"
             @move-to-main-window="emit('moveToMainWindow', $event)"
             @focus-sub-window="emit('focusSubWindow', $event)"
-            @set-hotkey-char="emit('setHotkeyChar', $event)"
-            @toggle-auto-approval="emit('toggleAutoApproval', $event)"
-            @toggle-tray-notification="emit('toggleTrayNotification', $event)"
+            @open-worktree-settings="emit('openWorktreeSettings', $event)"
           />
           <RepositoryCard
             v-else
@@ -253,8 +245,6 @@ defineExpose({ addRepository });
             :notification-count="item.worktree ? notifications.get(item.worktree.id) ?? 0 : 0"
             :hotkey-char="item.worktree ? hotkeyChars.get(item.worktree.id) : undefined"
             :detached="item.worktree ? detachedWorktrees.has(item.worktree.id) : false"
-            :auto-approval="item.worktree ? autoApprovals.get(item.worktree.id) ?? false : false"
-            :tray-notification="item.worktree ? trayNotifications.get(item.worktree.id) ?? true : true"
             :has-worktrees="hasWorktrees(item.repo.id)"
             @select-terminal="emit('selectTerminal', $event)"
             @add-terminal="emit('addTerminal', $event)"
@@ -264,9 +254,7 @@ defineExpose({ addRepository });
             @move-to-sub-window="emit('moveToSubWindow', $event)"
             @move-to-main-window="emit('moveToMainWindow', $event)"
             @focus-sub-window="emit('focusSubWindow', $event)"
-            @set-hotkey-char="emit('setHotkeyChar', $event)"
-            @toggle-auto-approval="emit('toggleAutoApproval', $event)"
-            @toggle-tray-notification="emit('toggleTrayNotification', $event)"
+            @open-worktree-settings="emit('openWorktreeSettings', $event)"
             @configure-post-add="openCopyDialog"
             @select-exec-script="selectExecScript"
             @clear-exec-script="clearExecScript"
