@@ -1554,6 +1554,8 @@ onMounted(async () => {
         event.payload.prompt,
         event.payload.remote_exec,
         event.payload.workgroup_id ?? undefined,
+        // MCP 由来の追加ではホームの表示ワークグループを切り替えない（#181）
+        false,
       );
     },
   );

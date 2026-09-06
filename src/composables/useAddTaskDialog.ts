@@ -134,18 +134,30 @@ export function useAddTaskDialog(executeStep: StepExecutor, autoReturnHome?: Aut
 
   onUnmounted(cancelAutoReturnHome);
 
-  async function onAddTaskConfirm(prompt: string, remoteExec: boolean = false, workgroupId?: string): Promise<void> {
+  /**
+   * @param switchActiveWorkgroup 追加先WGをホームのアクティブWGにするか。
+   *   UI のタスク追加ダイアログからは true（ユーザーが選んだ WG をそのまま見せる）。
+   *   MCP の oretachi_add_task 由来は false（UI の表示状態と無関係に発生する追加なので、
+   *   ユーザーが見ているワークグループを勝手に切り替えない。#181）。
+   */
+  async function onAddTaskConfirm(
+    prompt: string,
+    remoteExec: boolean = false,
+    workgroupId?: string,
+    switchActiveWorkgroup: boolean = true,
+  ): Promise<void> {
     const trimmed = prompt.trim();
     if (!trimmed) return;
     prompt = trimmed;
     showAddTaskDialog.value = false;
     rerunTaskId.value = null;
     // 追加先WGをアクティブにして、作成される worktree が現在のホーム表示に出るようにする
-    if (workgroupId) {
+    // （切り替えは activeWorkgroupId の永続化を伴うため、MCP 由来では行わない）
+    if (workgroupId && switchActiveWorkgroup) {
       activeWorkgroupId.value = workgroupId;
     }
-    // executeAddWorktree は実行開始時の activeWorkgroupId で所属を決めるため、
-    // 自動ホーム復帰の判定に使うグループもこの時点で確定させる
+    // ワークグループ指定がないとき executeAddWorktree は実行開始時の activeWorkgroupId で
+    // 所属を決めるため、自動ホーム復帰の判定に使うグループもこの時点で確定させる
     const autoReturnGroupId = workgroupId ?? activeWorkgroupId.value;
     if (settings.value.aiAgent) {
       settings.value.aiAgent.remoteExec = remoteExec;
