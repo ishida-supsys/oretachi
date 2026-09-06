@@ -51,17 +51,27 @@ const draggingId = ref<string | null>(null);
 /** ワークツリーカードのドラッグが今どのチップの上にいるか（ドロップ先ハイライト用） */
 const dropHoverId = ref<string | null>(null);
 
-/** ドラッグ中ワークツリーの現在の所属グループ。自分自身のグループはドロップ先にしない */
-const draggingSourceGroupId = computed(() => {
+/**
+ * ドラッグ中ワークツリーの移動元グループ。ドラッグしていない/移動できないときは null。
+ *
+ * 判定元をあえて settings 側の配列にしている。作成中のワークツリーは
+ * `addWorktreePlaceholder` がランタイム配列にだけ積み、`commitWorktree` で初めて
+ * settings に載る。その間に移動するとランタイムの workgroupId だけが変わり、後から
+ * push される entry が古い workgroupId を持つため、カウント(settings 基準)と
+ * 一覧表示(ランタイム基準)が再起動まで食い違う。エントリが無いうちは移動させない。
+ */
+const draggingSourceGroupId = computed<string | null>(() => {
   const id = draggingWorktreeId.value;
   if (!id) return null;
   const entry = settings.value.worktrees.find((w) => w.id === id);
-  return entry ? resolvedGroupId(entry.workgroupId) : null;
+  if (!entry) return null;
+  return resolvedGroupId(entry.workgroupId);
 });
 
-/** そのチップがワークツリーの移動先になりうるか */
+/** そのチップがワークツリーの移動先になりうるか（移動元グループ自身は除く） */
 function isWorktreeDropTarget(groupId: string): boolean {
-  return draggingWorktreeId.value !== null && draggingSourceGroupId.value !== groupId;
+  const source = draggingSourceGroupId.value;
+  return source !== null && source !== groupId;
 }
 
 function select(id: string) {
@@ -110,7 +120,11 @@ function onDragStart(id: string, event: DragEvent) {
 function onDragOver(id: string, event: DragEvent) {
   // ワークツリーカードのドラッグ中は「移動先」、それ以外はグループの並べ替えとして受ける
   if (draggingWorktreeId.value) {
-    if (!isWorktreeDropTarget(id)) return; // preventDefault しない = ドロップ不可カーソル
+    if (!isWorktreeDropTarget(id)) {
+      // dragleave を取りこぼしたときにハイライトが残らないよう、ここでも落とす
+      if (dropHoverId.value === id) dropHoverId.value = null;
+      return; // preventDefault しない = ドロップ不可カーソル
+    }
     dropHoverId.value = id;
   }
   event.preventDefault();

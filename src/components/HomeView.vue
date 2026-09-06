@@ -205,6 +205,20 @@ function onDragEnd() {
   dropped = false;
 }
 
+/**
+ * ワークグループタブへのドロップが成立したときの後始末。
+ *
+ * ドロップ先は必ず「今と違うグループ」なので、移動した瞬間にカードが `worktreesRef` の
+ * フィルタから外れ、ドラッグソース(カード名の span)ごと DOM から消える。Chromium は
+ * ドラッグソースが除去されると `dragend` を発火しないため、`onDragEnd` に後始末を
+ * 任せると暫定の並べ替えが確定したまま残り、auto-animate も無効のままになる。
+ * WorkgroupBar 側が共有状態を null にするのを合図にして、ここで一度だけ畳む。
+ */
+watch(draggingWorktreeId, (id) => {
+  // draggingId が残っているのは onDragEnd / onCardDrop をまだ通っていないときだけ
+  if (id === null && draggingId.value) onDragEnd();
+});
+
 const props = defineProps<{
   worktrees: Worktree[];
   thumbnailUrls: Map<number, string>;
