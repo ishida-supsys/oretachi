@@ -115,7 +115,7 @@ async function refreshArtifactCount() {
 }
 
 async function requestOpenArtifacts() {
-  await openArtifactViewer(worktreeId, worktreeName);
+  await openArtifactViewer(worktreeId);
 }
 
 async function onSaveAutoApprovalPrompt(wid: string, prompt: string) {

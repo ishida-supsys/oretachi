@@ -116,7 +116,7 @@ function hasWorktrees(repoId: string): boolean {
 async function openArtifacts(repoId: string) {
   const repo = settings.value.repositories.find((r) => r.id === repoId);
   if (!repo) return;
-  await openRepositoryArtifactViewer(repo.id, repo.name);
+  await openRepositoryArtifactViewer(repo.id);
 }
 
 async function selectExecScript(repoId: string) {

@@ -1,14 +1,5 @@
 import { describe, it, expect } from "vitest";
-import {
-  sortArtifacts,
-  filterArtifacts,
-  pushHistory,
-  pruneHistory,
-  canGoBack,
-  canGoForward,
-  createHistory,
-  type SelectionHistory,
-} from "./artifactList";
+import { sortArtifacts, filterArtifacts } from "./artifactList";
 import type { ArtifactMeta } from "../types/artifact";
 
 function meta(id: string, title: string, updatedAt: number, contentType = "text/markdown"): ArtifactMeta {
@@ -68,87 +59,5 @@ describe("filterArtifacts", () => {
 
   it("一致しなければ空配列", () => {
     expect(filterArtifacts(list, "zzz")).toEqual([]);
-  });
-});
-
-describe("pushHistory", () => {
-  it("空の履歴に積むと index 0 になる", () => {
-    expect(pushHistory(createHistory(), "a")).toEqual({ entries: ["a"], index: 0 });
-  });
-
-  it("現在位置と同じ ID なら履歴を変えない", () => {
-    const h: SelectionHistory = { entries: ["a", "b"], index: 1 };
-    expect(pushHistory(h, "b")).toBe(h);
-  });
-
-  it("戻った状態から積むと進む側が捨てられる", () => {
-    const h: SelectionHistory = { entries: ["a", "b", "c"], index: 0 };
-    expect(pushHistory(h, "d")).toEqual({ entries: ["a", "d"], index: 1 });
-  });
-
-  it("同じ ID でも現在位置でなければ積む（a→b→a を辿れる）", () => {
-    const h: SelectionHistory = { entries: ["a", "b"], index: 1 };
-    expect(pushHistory(h, "a")).toEqual({ entries: ["a", "b", "a"], index: 2 });
-  });
-});
-
-describe("pruneHistory", () => {
-  it("削除済み ID を取り除き、現在位置を詰める", () => {
-    const h: SelectionHistory = { entries: ["a", "b", "c"], index: 2 };
-    expect(pruneHistory(h, ["a", "c"])).toEqual({ entries: ["a", "c"], index: 1 });
-  });
-
-  it("現在位置より前が消えると index が前へ寄る", () => {
-    const h: SelectionHistory = { entries: ["a", "b", "c"], index: 2 };
-    expect(pruneHistory(h, ["b", "c"])).toEqual({ entries: ["b", "c"], index: 1 });
-  });
-
-  it("現在位置そのものが消えると、それ以前で生き残った最後の要素を指す", () => {
-    const h: SelectionHistory = { entries: ["a", "b", "c"], index: 1 };
-    expect(pruneHistory(h, ["a", "c"])).toEqual({ entries: ["a", "c"], index: 0 });
-  });
-
-  it("現在位置以前が全滅すると index は -1 になり、進む側だけが残る", () => {
-    const h: SelectionHistory = { entries: ["a", "b", "c"], index: 1 };
-    const pruned = pruneHistory(h, ["c"]);
-    expect(pruned).toEqual({ entries: ["c"], index: -1 });
-    // 進む先が残っているので「進む」だけ有効
-    expect(canGoBack(pruned)).toBe(false);
-    expect(canGoForward(pruned)).toBe(true);
-  });
-
-  it("間の ID が消えてできた隣接重複を畳み込む（戻るが無反応にならない）", () => {
-    // "a" 表示中に "b" が消える。畳まないと ["a","a"] になり、戻っても表示が変わらない
-    const h: SelectionHistory = { entries: ["a", "b", "a"], index: 2 };
-    expect(pruneHistory(h, ["a"])).toEqual({ entries: ["a"], index: 0 });
-  });
-
-  it("畳み込んでも現在位置は畳んだ後の要素を指す", () => {
-    const h: SelectionHistory = { entries: ["a", "b", "a", "c"], index: 3 };
-    expect(pruneHistory(h, ["a", "c"])).toEqual({ entries: ["a", "c"], index: 1 });
-  });
-
-  it("離れた位置の同一 ID は重複として畳まない", () => {
-    const h: SelectionHistory = { entries: ["a", "b", "a"], index: 2 };
-    expect(pruneHistory(h, ["a", "b"])).toEqual({ entries: ["a", "b", "a"], index: 2 });
-  });
-
-  it("全部消えると空の履歴になる", () => {
-    const h: SelectionHistory = { entries: ["a", "b"], index: 1 };
-    expect(pruneHistory(h, [])).toEqual(createHistory());
-  });
-});
-
-describe("canGoBack / canGoForward", () => {
-  it("空の履歴ではどちらも無効", () => {
-    expect(canGoBack(createHistory())).toBe(false);
-    expect(canGoForward(createHistory())).toBe(false);
-  });
-
-  it("先頭では戻れず、末尾では進めない", () => {
-    expect(canGoBack({ entries: ["a", "b"], index: 0 })).toBe(false);
-    expect(canGoForward({ entries: ["a", "b"], index: 0 })).toBe(true);
-    expect(canGoBack({ entries: ["a", "b"], index: 1 })).toBe(true);
-    expect(canGoForward({ entries: ["a", "b"], index: 1 })).toBe(false);
   });
 });

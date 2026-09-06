@@ -3,6 +3,8 @@
  * Vue SFC の外に置くことで、スクリプトタグ文字列が SFC パーサーと干渉しない。
  */
 
+import { ARTIFACT_LINK_INTERCEPT_JS } from "./artifactFrameLink";
+
 function htmlEscape(str: string): string {
   return str
     .replace(/&/g, "&amp;")
@@ -153,6 +155,8 @@ export function buildReactSrcdoc(vendorHead: string, content: string, modules?: 
     '<textarea id="_source" style="display:none">' + htmlEscape(content) + "</textarea>\n" +
     '<textarea id="_modules" style="display:none">' + modulesJson + "</textarea>\n" +
     openTag(RUNTIME_JS) + "\n" +
+    // React は要素を動的に差し替えるため、document 上の capture リスナーで拾う
+    openTag(ARTIFACT_LINK_INTERCEPT_JS) + "\n" +
     "</body>\n</html>"
   );
 }

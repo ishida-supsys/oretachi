@@ -235,7 +235,7 @@ const { openArtifactViewer } = useArtifactWindow();
 
 async function onOpenArtifacts() {
   if (!currentWorktree.value) return;
-  await openArtifactViewer(currentWorktree.value.worktreeId, currentWorktree.value.worktreeName);
+  await openArtifactViewer(currentWorktree.value.worktreeId);
 }
 
 /** 表示中ワークツリーの URL アーティファクト（アイコン隣のドロップダウン用） */
