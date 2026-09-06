@@ -1,4 +1,12 @@
 import { WebviewWindow } from "@tauri-apps/api/webviewWindow";
+import { emitTo } from "@tauri-apps/api/event";
+
+/** 既に開いているビューアへ「このアーティファクトを選べ」と指示する Tauri イベント */
+export const ARTIFACT_NAVIGATE_EVENT = "artifact-navigate";
+
+export interface ArtifactNavigateEvent {
+  artifactId: string;
+}
 
 // キーは worktreeId、リポジトリスコープは `repo:<repositoryId>` の形で同じマップを共用する
 const artifactWindowMap = new Map<string, WebviewWindow>();
@@ -31,6 +39,19 @@ async function focusExisting(key: string, label: string): Promise<boolean> {
   return false;
 }
 
+/**
+ * 既存ウィンドウへの遷移指示。
+ * 新規ウィンドウ側で同じことをイベントでやると `listen` 登録前に emit してしまい
+ * 取りこぼすため、新規は URL の `artifactId` パラメータで渡すこと。
+ */
+async function requestNavigate(label: string, artifactId: string): Promise<void> {
+  try {
+    await emitTo(label, ARTIFACT_NAVIGATE_EVENT, { artifactId } satisfies ArtifactNavigateEvent);
+  } catch (e) {
+    console.error(`アーティファクト遷移指示の送信に失敗: ${label}`, e);
+  }
+}
+
 /** リポジトリ ID（絶対パス）をウィンドウラベルに使える形へ変換する */
 function encodeRepositoryLabel(repositoryId: string): string {
   // btoa は Latin-1 しか扱えないため、UTF-8 バイト列に落としてからエンコードする
@@ -41,22 +62,32 @@ function encodeRepositoryLabel(repositoryId: string): string {
 }
 
 export function useArtifactWindow() {
+  /**
+   * ワークツリーのアーティファクトビューアを開く。
+   * `artifactId` を渡すとそのアーティファクトを選択した状態で開く（既存ウィンドウなら遷移）。
+   *
+   * URL には ID しか載せない。リンクから他ワークツリーへ遷移する側は遷移先の名前を知らないため、
+   * 名前はビューア起動後に `resolve_artifact_scope` で settings から解決する。
+   */
   async function openArtifactViewer(
     worktreeId: string,
-    worktreeName: string,
-    repositoryName?: string,
+    artifactId?: string,
   ): Promise<void> {
-    if (await focusExisting(worktreeId, `artifact-${worktreeId}`)) return;
+    const label = `artifact-${worktreeId}`;
+    if (await focusExisting(worktreeId, label)) {
+      if (artifactId) await requestNavigate(label, artifactId);
+      return;
+    }
 
     const baseUrl = window.location.origin + window.location.pathname;
     const url =
       `${baseUrl}?mode=artifact&scope=worktree&worktreeId=${encodeURIComponent(worktreeId)}` +
-      `&worktreeName=${encodeURIComponent(worktreeName)}` +
-      (repositoryName ? `&repositoryName=${encodeURIComponent(repositoryName)}` : "");
+      (artifactId ? `&artifactId=${encodeURIComponent(artifactId)}` : "");
 
-    const win = new WebviewWindow(`artifact-${worktreeId}`, {
+    // タイトルはビューア側が名前を解決してから setTitle で差し替える
+    const win = new WebviewWindow(label, {
       url,
-      title: `Artifacts - ${worktreeName}`,
+      title: "Artifacts",
       width: 900,
       height: 700,
       resizable: true,
@@ -65,7 +96,7 @@ export function useArtifactWindow() {
     });
 
     win.once("tauri://error", (e) => {
-      console.error(`アーティファクトウィンドウ作成失敗: artifact-${worktreeId}`, e);
+      console.error(`アーティファクトウィンドウ作成失敗: ${label}`, e);
       artifactWindowMap.delete(worktreeId);
     });
 
@@ -79,20 +110,23 @@ export function useArtifactWindow() {
   /** リポジトリへ転送済み（恒久保存）のアーティファクトビューアを開く */
   async function openRepositoryArtifactViewer(
     repositoryId: string,
-    repositoryName: string,
+    artifactId?: string,
   ): Promise<void> {
     const key = `repo:${repositoryId}`;
     const label = `artifact-repo-${encodeRepositoryLabel(repositoryId)}`;
-    if (await focusExisting(key, label)) return;
+    if (await focusExisting(key, label)) {
+      if (artifactId) await requestNavigate(label, artifactId);
+      return;
+    }
 
     const baseUrl = window.location.origin + window.location.pathname;
     const url =
       `${baseUrl}?mode=artifact&scope=repository&repositoryId=${encodeURIComponent(repositoryId)}` +
-      `&repositoryName=${encodeURIComponent(repositoryName)}`;
+      (artifactId ? `&artifactId=${encodeURIComponent(artifactId)}` : "");
 
     const win = new WebviewWindow(label, {
       url,
-      title: `Artifacts - ${repositoryName}`,
+      title: "Artifacts",
       width: 900,
       height: 700,
       resizable: true,
