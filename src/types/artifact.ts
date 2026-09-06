@@ -24,6 +24,15 @@ export interface ArtifactData extends ArtifactMeta {
   modules?: Record<string, string>;
 }
 
+/**
+ * アーティファクト本体（AI 所有の `<id>.json`）とは別ファイルに置く、UI / 人が所有する可変状態。
+ * 実体は `<id>.state`（Rust 側 `src-tauri/src/lib.rs` の状態サイドカー）。
+ * バージョン番号は持たず、未知のキーは読み飛ばし・欠けたキーは既定値で補う。
+ */
+export interface ArtifactState {
+  pinned?: boolean;
+}
+
 export interface ArtifactChangedEvent {
   worktreeId: string;
   artifactId: string;
