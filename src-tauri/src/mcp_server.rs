@@ -1895,7 +1895,7 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "未確認通知が溜まっているワークツリーだけを、古い順（トレイポップアップが巡回するのと同じ順）に返す。通知が無いワークツリーは含まない。同じ情報は oretachi_get_worktree_status にも載っているが、あちらは全ワークツリーを返すので、通知を順に捌くループから繰り返し呼ぶならこちらを使う。各エントリは worktreeId / worktreeName / count / kind / firstNotifiedAt（epoch ミリ秒）。捌き終わったものは oretachi_clear_worktree_notification でリセットする", annotations(read_only_hint = true))]
+    #[tool(description = "未確認通知が溜まっているワークツリーだけを、通知が最初に積まれた古い順に返す（トレイポップアップの巡回もこの順。ただし同一ミリ秒に積まれた通知どうしの前後は両者で一致しない）。通知が無いワークツリーは含まない。同じ情報は oretachi_get_worktree_status にも載っているが、あちらは全ワークツリーを返すので、通知を順に捌くループから繰り返し呼ぶならこちらを使う。各エントリは worktreeId / worktreeName / count / kind / firstNotifiedAt（epoch ミリ秒）。捌き終わったものは oretachi_clear_worktree_notification でリセットする", annotations(read_only_hint = true))]
     fn oretachi_list_notifications(
         &self,
         Parameters(_params): Parameters<ListNotificationsParams>,
@@ -1906,7 +1906,10 @@ impl NotifyService {
 
         let mut entries: Vec<(&String, &NotificationSnapshot)> = notifications.iter().collect();
         // 古い順 = トレイの巡回順（フロントの getNotifiedWorktreeIds と同じ規則）。
-        // firstNotifiedAt が同値なら ID で安定させる（HashMap の反復順は不定なため）。
+        // firstNotifiedAt が同値なら ID で安定させる（HashMap の反復順は不定なので、
+        // タイブレークが無いと呼ぶたびに順序が入れ替わりうる）。フロント側は Map の
+        // 挿入順が残るため、同一ミリ秒の並びだけは両者で一致しない。
+        // 巡回の再現性を優先してこちらは決定的にしてある。
         entries.sort_by(|a, b| {
             a.1.first_notified_at
                 .cmp(&b.1.first_notified_at)
@@ -1963,20 +1966,9 @@ impl NotifyService {
         )?;
 
         // 通知バッジの実体はフロント（App.vue の useNotifications）にしかないので、
-        // レジストリの写しから「何件消えるか」を読み、実際のクリアはイベントで依頼する。
-        //
-        // **写しはここで同期的に落とす（write-through）。** フロント経由の
-        // `sync_notification_state` は 100ms 畳み込みの後に来るので、それを待つと
-        // 直後の `oretachi_get_worktree_status` がクリア前の件数を返し、エージェントが
-        // 同じワークツリーを捌き直す。写しの権威はあくまでフロントなので、次の同期が
-        // 来ればどのみち上書きされる。
-        let cleared = self
-            .app_handle
-            .state::<NotificationRegistry>()
-            .take(&wt.id)
-            .map(|n| n.count)
-            .unwrap_or(0);
-
+        // 実際のクリアはイベントで依頼する。**依頼を出せてから写しを落とす**
+        // （emit が Err なら写しは触らない。先に落とすと、クリアされていないのに
+        // 一覧から消えたワークツリーが残る）。
         let event = ClearNotificationEvent {
             worktree: wt.name.clone(),
             worktree_id: wt.id.clone(),
@@ -1984,6 +1976,22 @@ impl NotifyService {
         self.app_handle
             .emit("clear-worktree-notification", &event)
             .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
+
+        // 写しは同期的に落とす（write-through）。フロント経由の `sync_notification_state`
+        // は 100ms 畳み込みの後に来るので、それを待つと直後の
+        // `oretachi_get_worktree_status` / `oretachi_list_notifications` がクリア前の
+        // 件数を返し、エージェントが同じワークツリーを捌き直す。写しの権威はあくまで
+        // フロントなので、次の同期が来ればどのみち上書きされる。
+        //
+        // 受信側（App.vue）は notify-worktree より前に購読を始める契約なので、
+        // 「通知が積まれているのに clear-worktree-notification のリスナーが未登録」
+        // という窓は無い。
+        let cleared = self
+            .app_handle
+            .state::<NotificationRegistry>()
+            .take(&wt.id)
+            .map(|n| n.count)
+            .unwrap_or(0);
 
         log::info!(
             "[mcp] oretachi_clear_worktree_notification: worktree={} cleared={}",
