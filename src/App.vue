@@ -2035,6 +2035,13 @@ onMounted(async () => {
     clearNotification(event.payload.worktreeId);
   });
 
+  // MCP ツール (oretachi_clear_worktree_notification) からの通知クリア。
+  // バッジの実体は useNotifications のメモリなので、Rust 側は消せずイベントで依頼してくる。
+  await listen<{ worktree: string; worktreeId: string }>("clear-worktree-notification", (event) => {
+    clearNotification(event.payload.worktreeId);
+    logDebug(`[Notification] cleared by MCP: ${event.payload.worktree} (${event.payload.worktreeId})`);
+  });
+
   // トレイポップアップの「ウィンドウで開く」。
   // トレイの destroy はここで行う契約になっている（トレイ側は deferDestroy で待っている）。
   // フォアグラウンドだったトレイが先に消えるとプロセスがフォアグラウンド権を失い、

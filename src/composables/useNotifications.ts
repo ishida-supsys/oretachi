@@ -1,5 +1,6 @@
 import { reactive } from "vue";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import {
   isPermissionGranted,
   requestPermission,
@@ -36,6 +37,27 @@ let storedNotificationTitles: Record<NotificationKind, string> = {
   approval: "Notification",
   completed: "Notification",
 };
+
+/**
+ * 未確認通知の現在値を Rust 側（NotificationRegistry）へ写す。
+ *
+ * バッジの実体はこのモジュールのメモリにしかなく Rust からは覗けないため、同期して
+ * おかないと MCP の `oretachi_get_worktree_status` が notificationCount を返せず、
+ * `oretachi_clear_worktree_notification` も「何件消したか」を答えられない。
+ * 連続通知でIPCが詰まらないよう次のマイクロバッチまで畳んでから全置換で送る。
+ */
+let syncTimer: ReturnType<typeof setTimeout> | undefined;
+function syncNotificationsToBackend() {
+  if (syncTimer !== undefined) return;
+  syncTimer = setTimeout(() => {
+    syncTimer = undefined;
+    const entries: Record<string, { count: number; kind: NotificationKind; firstNotifiedAt: number }> = {};
+    for (const [id, entry] of notifications) {
+      entries[id] = { count: entry.count, kind: entry.kind, firstNotifiedAt: entry.firstNotifiedAt };
+    }
+    invoke("sync_notification_state", { entries }).catch(() => {});
+  }, 100);
+}
 
 /**
  * 通知音を再生する。OS通知とは独立して動作する。
@@ -121,20 +143,24 @@ export function useNotifications() {
     } else {
       notifications.set(worktreeId, { count: 1, firstNotifiedAt: Date.now(), kind });
     }
+    syncNotificationsToBackend();
   }
 
   /** 特定ワークツリーの通知をクリアする */
   function clearNotification(worktreeId: string) {
-    notifications.delete(worktreeId);
+    if (notifications.delete(worktreeId)) syncNotificationsToBackend();
   }
 
   /** 存在しないワークツリーの stale な通知エントリを削除する */
   function purgeStaleNotifications(activeWorktreeIds: Set<string>) {
+    let purged = false;
     for (const id of notifications.keys()) {
       if (!activeWorktreeIds.has(id)) {
         notifications.delete(id);
+        purged = true;
       }
     }
+    if (purged) syncNotificationsToBackend();
   }
 
   /** firstNotifiedAt の昇順（古い順）でソートした worktreeId 配列を返す */
