@@ -728,7 +728,7 @@ pub struct ListTasksParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct ListNotificationsParams {}
+pub struct ListWorktreeNotificationsParams {}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ClearNotificationParams {
@@ -1896,9 +1896,9 @@ impl NotifyService {
     }
 
     #[tool(description = "未確認通知が溜まっているワークツリーだけを、通知が最初に積まれた古い順に返す（トレイポップアップの巡回もこの順。ただし同一ミリ秒に積まれた通知どうしの前後は両者で一致しない）。通知が無いワークツリーは含まない。同じ情報は oretachi_get_worktree_status にも載っているが、あちらは全ワークツリーを返すので、通知を順に捌くループから繰り返し呼ぶならこちらを使う。各エントリは worktreeId / worktreeName / count / kind / firstNotifiedAt（epoch ミリ秒）。捌き終わったものは oretachi_clear_worktree_notification でリセットする", annotations(read_only_hint = true))]
-    fn oretachi_list_notifications(
+    fn oretachi_list_worktree_notifications(
         &self,
-        Parameters(_params): Parameters<ListNotificationsParams>,
+        Parameters(_params): Parameters<ListWorktreeNotificationsParams>,
     ) -> Result<CallToolResult, McpError> {
         let settings_manager = self.app_handle.state::<SettingsManager>();
         let settings = settings_manager.get();
@@ -1934,7 +1934,7 @@ impl NotifyService {
 
         let total_count: u32 = entries.iter().map(|(_, n)| n.count).sum();
         log::info!(
-            "[mcp] oretachi_list_notifications: {} worktrees / {} notifications",
+            "[mcp] oretachi_list_worktree_notifications: {} worktrees / {} notifications",
             items.len(), total_count
         );
         let json = serde_json::json!({
@@ -1949,7 +1949,7 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "指定ワークツリーに溜まっている未確認通知（トレイバッジ・ホームのカードに出る件数）をリセットする。ワークツリーを開いたときと同じクリア操作を MCP から行うもので、通知の設定（oretachi_set_tray_notification）には影響しない。捌き終わったワークツリーの通知だけ落として残りを巡回したいときに使う。捌く対象は oretachi_list_notifications で古い順に取れる")]
+    #[tool(description = "指定ワークツリーに溜まっている未確認通知（トレイバッジ・ホームのカードに出る件数）をリセットする。ワークツリーを開いたときと同じクリア操作を MCP から行うもので、通知の設定（oretachi_set_tray_notification）には影響しない。捌き終わったワークツリーの通知だけ落として残りを巡回したいときに使う。捌く対象は oretachi_list_worktree_notifications で古い順に取れる")]
     fn oretachi_clear_worktree_notification(
         &self,
         Parameters(ClearNotificationParams { project_dir, worktree_name, worktree_id }): Parameters<ClearNotificationParams>,
@@ -1979,7 +1979,7 @@ impl NotifyService {
 
         // 写しは同期的に落とす（write-through）。フロント経由の `sync_notification_state`
         // は 100ms 畳み込みの後に来るので、それを待つと直後の
-        // `oretachi_get_worktree_status` / `oretachi_list_notifications` がクリア前の
+        // `oretachi_get_worktree_status` / `oretachi_list_worktree_notifications` がクリア前の
         // 件数を返し、エージェントが同じワークツリーを捌き直す。写しの権威はあくまで
         // フロントなので、次の同期が来ればどのみち上書きされる。
         //
