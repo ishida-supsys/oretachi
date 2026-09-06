@@ -728,6 +728,9 @@ pub struct ListTasksParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ListNotificationsParams {}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ClearNotificationParams {
     #[schemars(description = "ワークツリーのルートディレクトリ絶対パス（通常は自分の作業ディレクトリ）。worktree_name/worktree_id 未指定時はこれでワークツリーを特定する")]
     pub project_dir: Option<String>,
@@ -1892,7 +1895,58 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "指定ワークツリーに溜まっている未確認通知（トレイバッジ・ホームのカードに出る件数）をリセットする。ワークツリーを開いたときと同じクリア操作を MCP から行うもので、通知の設定（oretachi_set_tray_notification）には影響しない。捌き終わったワークツリーの通知だけ落として残りを巡回したいときに使う。現在の未確認件数は oretachi_get_worktree_status の notificationCount で確認できる")]
+    #[tool(description = "未確認通知が溜まっているワークツリーだけを、古い順（トレイポップアップが巡回するのと同じ順）に返す。通知が無いワークツリーは含まない。同じ情報は oretachi_get_worktree_status にも載っているが、あちらは全ワークツリーを返すので、通知を順に捌くループから繰り返し呼ぶならこちらを使う。各エントリは worktreeId / worktreeName / count / kind / firstNotifiedAt（epoch ミリ秒）。捌き終わったものは oretachi_clear_worktree_notification でリセットする", annotations(read_only_hint = true))]
+    fn oretachi_list_notifications(
+        &self,
+        Parameters(_params): Parameters<ListNotificationsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+        let notifications = self.app_handle.state::<NotificationRegistry>().snapshot();
+
+        let mut entries: Vec<(&String, &NotificationSnapshot)> = notifications.iter().collect();
+        // 古い順 = トレイの巡回順（フロントの getNotifiedWorktreeIds と同じ規則）。
+        // firstNotifiedAt が同値なら ID で安定させる（HashMap の反復順は不定なため）。
+        entries.sort_by(|a, b| {
+            a.1.first_notified_at
+                .cmp(&b.1.first_notified_at)
+                .then_with(|| a.0.cmp(b.0))
+        });
+
+        let items: Vec<serde_json::Value> = entries
+            .iter()
+            .map(|(id, n)| {
+                // 削除直後などで settings 側に実体が無ければ name は null。
+                // それでも worktreeId でクリアはできるので落とさず載せる。
+                let wt = settings.worktrees.iter().find(|w| &&w.id == id);
+                serde_json::json!({
+                    "worktreeId": id,
+                    "worktreeName": wt.map(|w| w.name.as_str()),
+                    "count": n.count,
+                    "kind": n.kind,
+                    "firstNotifiedAt": n.first_notified_at,
+                })
+            })
+            .collect();
+
+        let total_count: u32 = entries.iter().map(|(_, n)| n.count).sum();
+        log::info!(
+            "[mcp] oretachi_list_notifications: {} worktrees / {} notifications",
+            items.len(), total_count
+        );
+        let json = serde_json::json!({
+            "items": items,
+            // 通知が溜まっているワークツリー数と、その合計通知件数（トレイのバッジ数字）
+            "worktreeCount": items.len(),
+            "totalCount": total_count,
+        });
+        Ok(CallToolResult::success(vec![Content::text(
+            serde_json::to_string_pretty(&json)
+                .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+        )]))
+    }
+
+    #[tool(description = "指定ワークツリーに溜まっている未確認通知（トレイバッジ・ホームのカードに出る件数）をリセットする。ワークツリーを開いたときと同じクリア操作を MCP から行うもので、通知の設定（oretachi_set_tray_notification）には影響しない。捌き終わったワークツリーの通知だけ落として残りを巡回したいときに使う。捌く対象は oretachi_list_notifications で古い順に取れる")]
     fn oretachi_clear_worktree_notification(
         &self,
         Parameters(ClearNotificationParams { project_dir, worktree_name, worktree_id }): Parameters<ClearNotificationParams>,
