@@ -253,12 +253,14 @@ function onDragEnd() {
   color: #cdd6f4;
 }
 
+/* ドラッグ中はカーソル位置にゴースト画像が重なってチップ本体が隠れるので、
+   チップの外側までリングを広げて縁が見えるようにする */
 .wg-chip.drop-hover {
   border-style: solid;
   background: #cba6f733;
   border-color: #cba6f7;
   color: #cdd6f4;
-  box-shadow: 0 0 0 2px rgba(203, 166, 247, 0.5);
+  box-shadow: 0 0 0 3px rgba(203, 166, 247, 0.9), 0 0 12px 4px rgba(203, 166, 247, 0.45);
 }
 
 .wg-chip.notified {
