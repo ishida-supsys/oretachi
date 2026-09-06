@@ -925,6 +925,52 @@ async fn copy_artifact_to_repository(
     })
 }
 
+/// アーティファクトビューアのスコープ表示名。
+///
+/// ビューア URL は ID しか載せない（リンクを書く側は遷移先の名前を知らないため）ので、
+/// 名前はビューア起動後にこのコマンドで settings から解決する。
+#[derive(serde::Serialize)]
+struct ArtifactScopeInfo {
+    /// ヘッダー・ウィンドウタイトルに出す名前（worktree スコープならワークツリー名、
+    /// repository スコープならリポジトリ名）
+    #[serde(rename = "displayName")]
+    display_name: String,
+    /// 「〜へ転送」ボタンのラベルに使う所属リポジトリ名。解決できなければ None
+    #[serde(rename = "repositoryName")]
+    repository_name: Option<String>,
+}
+
+/// ビューア URL に載っている scope + ID から表示名を解決する。
+/// 見つからない場合はエラーにせず ID をそのまま表示名に使わせる（呼び出し側でフォールバック）。
+#[tauri::command]
+fn resolve_artifact_scope(
+    settings_manager: State<SettingsManager>,
+    scope: String,
+    id: String,
+) -> Result<ArtifactScopeInfo, String> {
+    let settings = settings_manager.get();
+    if scope == "repository" {
+        let repo = settings
+            .repositories
+            .iter()
+            .find(|r| r.id == id)
+            .ok_or_else(|| format!("リポジトリが見つかりません: {}", id))?;
+        return Ok(ArtifactScopeInfo {
+            display_name: repo.name.clone(),
+            repository_name: Some(repo.name.clone()),
+        });
+    }
+    let worktree = settings
+        .worktrees
+        .iter()
+        .find(|w| w.id == id)
+        .ok_or_else(|| format!("ワークツリーが見つかりません: {}", id))?;
+    Ok(ArtifactScopeInfo {
+        display_name: worktree.name.clone(),
+        repository_name: Some(worktree.repository_name.clone()),
+    })
+}
+
 #[tauri::command]
 async fn delete_repo_artifact(
     app_handle: tauri::AppHandle,
@@ -1706,6 +1752,7 @@ pub fn run() {
             read_repo_artifact,
             copy_artifact_to_repository,
             delete_repo_artifact,
+            resolve_artifact_scope,
             start_fs_watch,
             stop_fs_watch,
             settings::list_system_sounds,

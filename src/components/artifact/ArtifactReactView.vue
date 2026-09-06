@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, computed, onMounted } from "vue";
+import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import ArtifactCodeView from "./ArtifactCodeView.vue";
 import { buildVendorHead, buildReactSrcdoc } from "../../utils/reactArtifactSrcdoc";
+import { readArtifactNavigateMessage } from "../../utils/artifactFrameLink";
 
 type VendorScripts = { react: string; reactDom: string; babel: string; tailwind: string };
 
@@ -33,6 +34,22 @@ const props = defineProps<{
   content: string;
   modules?: Record<string, string>;
 }>();
+
+const emit = defineEmits<{
+  (e: "navigate", href: string): void;
+}>();
+
+const frame = ref<HTMLIFrameElement | null>(null);
+
+// sandbox の opaque origin では event.origin が "null" になり検証に使えないため、
+// 送信元は contentWindow の同一性で判定する
+function onMessage(event: MessageEvent) {
+  const href = readArtifactNavigateMessage(event, frame.value);
+  if (href) emit("navigate", href);
+}
+
+onMounted(() => window.addEventListener("message", onMessage));
+onBeforeUnmount(() => window.removeEventListener("message", onMessage));
 
 type Mode = "preview" | "code";
 const mode = ref<Mode>("preview");
@@ -115,6 +132,7 @@ const codeContent = computed(() =>
       </div>
       <iframe
         v-else
+        ref="frame"
         :srcdoc="srcdocHtml"
         sandbox="allow-scripts"
         allow="fullscreen"

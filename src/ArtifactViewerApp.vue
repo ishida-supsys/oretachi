@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import { useToast } from "primevue/usetoast";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, message } from "@tauri-apps/plugin-dialog";
 import Toast from "primevue/toast";
 import ArtifactCodeView from "./components/artifact/ArtifactCodeView.vue";
@@ -15,6 +16,13 @@ import ArtifactReactView from "./components/artifact/ArtifactReactView.vue";
 import ArtifactTableView from "./components/artifact/ArtifactTableView.vue";
 import ArtifactUrlView from "./components/artifact/ArtifactUrlView.vue";
 import { isTableContentType } from "./utils/csvArtifact";
+import { parseArtifactLink } from "./utils/artifactLink";
+import {
+  useArtifactWindow,
+  ARTIFACT_NAVIGATE_EVENT,
+  type ArtifactNavigateEvent,
+} from "./composables/useArtifactWindow";
+import { useArtifactHistory } from "./composables/useArtifactHistory";
 import { URL_ARTIFACT_CONTENT_TYPE } from "./types/artifact";
 import type {
   ArtifactMeta,
@@ -31,12 +39,19 @@ const params = new URLSearchParams(window.location.search);
 // scope 未指定は従来どおり worktree スコープとして扱う（古い URL 互換）
 const scope = params.get("scope") === "repository" ? "repository" : "worktree";
 const worktreeId = params.get("worktreeId") ?? "";
-const worktreeName = params.get("worktreeName") ?? "";
 const repositoryId = params.get("repositoryId") ?? "";
-const repositoryName = params.get("repositoryName") ?? "";
+/** 起動時に選択しておくアーティファクト（リンクから新規ウィンドウで開かれたとき） */
+const initialArtifactId = params.get("artifactId") ?? "";
 
 const isRepositoryScope = scope === "repository";
-const headerTitle = isRepositoryScope ? repositoryName : worktreeName;
+const scopeId = isRepositoryScope ? repositoryId : worktreeId;
+
+// URL には ID しか載らない（リンクを書く側は遷移先の名前を知らないため）。
+// 名前は resolve_artifact_scope で settings から解決する。解決前・失敗時は ID を出す。
+const headerTitle = ref(scopeId);
+const repositoryName = ref("");
+
+const { openArtifactViewer, openRepositoryArtifactViewer } = useArtifactWindow();
 
 const artifacts = ref<ArtifactMeta[]>([]);
 const selectedId = ref<string | null>(null);
@@ -45,6 +60,7 @@ const loading = ref(false);
 const transferring = ref(false);
 
 let unlisten: UnlistenFn | null = null;
+let unlistenNavigate: UnlistenFn | null = null;
 
 const typeIcons: Record<string, string> = {
   "application/vnd.ant.code": "pi-code",
@@ -97,8 +113,11 @@ async function loadList() {
   }
 }
 
-async function selectArtifact(id: string) {
-  if (selectedId.value === id && selectedArtifact.value) return;
+const history = useArtifactHistory();
+const { canGoBack, canGoForward } = history;
+
+/** 本文の読み込みのみ。履歴は触らない */
+async function loadArtifact(id: string) {
   selectedId.value = id;
   loading.value = true;
   try {
@@ -112,9 +131,100 @@ async function selectArtifact(id: string) {
   }
 }
 
+async function selectArtifact(id: string, mode: "push" | "replace" = "push") {
+  if (selectedId.value === id && selectedArtifact.value) return;
+  if (mode === "push") history.push(id);
+  else history.replace(id);
+  await loadArtifact(id);
+}
+
+/**
+ * 履歴を1つ前/後ろへ動かす。ワークツリーごと削除された場合など、削除イベントで
+ * 拾いきれず履歴に残った死んだエントリは、その場で取り除いて隣を試す
+ * （そうしないと同じエントリで永久に足止めされる）。
+ */
+async function stepHistory(delta: -1 | 1) {
+  let prunedAny = false;
+  while (delta < 0 ? canGoBack.value : canGoForward.value) {
+    const nextIndex = history.index.value + delta;
+    const id = history.entries.value[nextIndex];
+    if (artifacts.value.some((a) => a.id === id)) {
+      history.moveTo(nextIndex);
+      await loadArtifact(id);
+      return;
+    }
+    history.prune(id);
+    prunedAny = true;
+  }
+  if (prunedAny) {
+    toast.add({ severity: "warn", summary: t("navigate.notFound"), life: 4000 });
+  }
+}
+
+async function goBack() {
+  await stepHistory(-1);
+}
+
+async function goForward() {
+  await stepHistory(1);
+}
+
+// ── artifact: リンクの遷移 ──
+
+/** 同一スコープ内の遷移。存在しなければトーストで知らせ、表示は今のまま維持する */
+async function navigateWithin(artifactId: string, mode: "push" | "replace") {
+  // 一覧が古いだけの可能性があるので、無いときは取り直してから判定する
+  if (!artifacts.value.some((a) => a.id === artifactId)) {
+    await loadList();
+  }
+  if (!artifacts.value.some((a) => a.id === artifactId)) {
+    toast.add({
+      severity: "warn",
+      summary: t("navigate.notFound"),
+      detail: artifactId,
+      life: 4000,
+    });
+    return;
+  }
+  await selectArtifact(artifactId, mode);
+}
+
+/** ビュー（markdown / html / react）から上がってきた artifact: リンクを処理する */
+async function onNavigate(href: string) {
+  const target = parseArtifactLink(href);
+  if (!target) {
+    // artifact: と書いてあるのに解析できない = リンクの書き間違い。
+    // 黙って無反応にすると書き手が typo に気づけないので知らせる
+    toast.add({ severity: "warn", summary: t("navigate.invalidLink"), detail: href, life: 4000 });
+    return;
+  }
+
+  const isSameScope =
+    target.scope === null ||
+    (target.scope === "worktree" && !isRepositoryScope && target.id === worktreeId) ||
+    (target.scope === "repository" && isRepositoryScope && target.id === repositoryId);
+
+  if (isSameScope) {
+    await navigateWithin(target.artifactId, "push");
+    return;
+  }
+
+  try {
+    if (target.scope === "worktree") {
+      await openArtifactViewer(target.id ?? "", target.artifactId);
+    } else {
+      await openRepositoryArtifactViewer(target.id ?? "", target.artifactId);
+    }
+  } catch (e) {
+    console.error("open artifact viewer failed", e);
+    toast.add({ severity: "error", summary: t("navigate.openFailed"), detail: href, life: 4000 });
+  }
+}
+
 async function refreshSelected(artifactId: string, command: string) {
   await loadList();
   if (command === "delete") {
+    history.prune(artifactId);
     if (selectedId.value === artifactId) {
       selectedId.value = null;
       selectedArtifact.value = null;
@@ -201,9 +311,51 @@ async function deleteRepoArtifact() {
   }
 }
 
+/** ヘッダー・ウィンドウタイトルに出す名前を settings から解決する */
+async function resolveScopeName() {
+  try {
+    const info = await invoke<{ displayName: string; repositoryName: string | null }>(
+      "resolve_artifact_scope",
+      { scope, id: scopeId },
+    );
+    headerTitle.value = info.displayName;
+    repositoryName.value = info.repositoryName ?? "";
+  } catch (e) {
+    // 削除済みワークツリーのビューアが残っている場合など。ID 表示のまま続行する
+    console.warn("resolve_artifact_scope failed", e);
+  }
+  try {
+    await getCurrentWindow().setTitle(`Artifacts - ${headerTitle.value}`);
+  } catch (e) {
+    console.warn("setTitle failed", e);
+  }
+}
+
 onMounted(async () => {
+  // 既存ウィンドウ宛の遷移指示。Tauri のイベントにバッファリングは無く、一方で
+  // 送信側の focusExisting は起動途中のウィンドウでも true を返すため、
+  // loadList() などを待つ前に最優先で登録する（待つと取りこぼす）。
+  // ウィンドウを跨ぐ遷移なので履歴は積まない。
+  unlistenNavigate = await listen<ArtifactNavigateEvent>(ARTIFACT_NAVIGATE_EVENT, async (event) => {
+    await navigateWithin(event.payload.artifactId, "replace");
+  });
+
+  void resolveScopeName();
   await loadList();
-  if (artifacts.value.length > 0) {
+  // リンクから開かれた場合は指定のアーティファクトを、無ければ先頭を選ぶ
+  if (initialArtifactId) {
+    if (artifacts.value.some((a) => a.id === initialArtifactId)) {
+      await selectArtifact(initialArtifactId);
+    } else {
+      toast.add({
+        severity: "warn",
+        summary: t("navigate.notFound"),
+        detail: initialArtifactId,
+        life: 4000,
+      });
+    }
+  }
+  if (!selectedId.value && artifacts.value.length > 0) {
     await selectArtifact(artifacts.value[0].id);
   }
 
@@ -222,6 +374,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   unlisten?.();
+  unlistenNavigate?.();
 });
 </script>
 
@@ -254,6 +407,26 @@ onUnmounted(() => {
     </div>
 
     <div class="main-content">
+      <!-- 読み込み失敗で本文が消えても履歴は残るため、分岐の外に出して行き止まりを作らない -->
+      <div class="nav-bar">
+        <button
+          class="btn-nav"
+          :disabled="!canGoBack"
+          :title="t('nav.back')"
+          @click="goBack"
+        >
+          <i class="pi pi-arrow-left" />
+        </button>
+        <button
+          class="btn-nav"
+          :disabled="!canGoForward"
+          :title="t('nav.forward')"
+          @click="goForward"
+        >
+          <i class="pi pi-arrow-right" />
+        </button>
+      </div>
+
       <div v-if="!selectedArtifact && !loading" class="empty-main">
         <span class="pi pi-box empty-icon" />
         <span>{{ t("selectPrompt") }}</span>
@@ -306,10 +479,12 @@ onUnmounted(() => {
           <ArtifactMarkdownView
             v-else-if="selectedArtifact.content_type === 'text/markdown'"
             :content="selectedArtifact.content"
+            @navigate="onNavigate"
           />
           <ArtifactHtmlView
             v-else-if="selectedArtifact.content_type === 'text/html'"
             :content="selectedArtifact.content"
+            @navigate="onNavigate"
           />
           <ArtifactSvgView
             v-else-if="selectedArtifact.content_type === 'image/svg+xml'"
@@ -323,6 +498,7 @@ onUnmounted(() => {
             v-else-if="selectedArtifact.content_type === 'application/vnd.ant.react'"
             :content="selectedArtifact.content"
             :modules="selectedArtifact.modules"
+            @navigate="onNavigate"
           />
           <ArtifactUrlView
             v-else-if="selectedArtifact.content_type === URL_ARTIFACT_CONTENT_TYPE"
@@ -490,6 +666,41 @@ onUnmounted(() => {
   font-size: 16px;
 }
 
+.nav-bar {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 10px;
+  background: #181825;
+  border-bottom: 1px solid #313244;
+  flex-shrink: 0;
+}
+
+.btn-nav {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: #cdd6f4;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.btn-nav:hover:not(:disabled) {
+  background: #313244;
+  border-color: #45475a;
+}
+
+.btn-nav:disabled {
+  color: #45475a;
+  cursor: default;
+}
+
 .content-title-area {
   display: flex;
   flex-direction: column;
@@ -565,6 +776,15 @@ onUnmounted(() => {
     "emptyList": "No artifacts",
     "selectPrompt": "Select an artifact to view",
     "source": "from worktree {worktreeId}",
+    "nav": {
+      "back": "Back",
+      "forward": "Forward"
+    },
+    "navigate": {
+      "notFound": "Artifact not found",
+      "invalidLink": "Invalid artifact link",
+      "openFailed": "Failed to open the linked artifact"
+    },
     "transfer": {
       "label": "Transfer to repository",
       "labelNamed": "Transfer to {repository}",
@@ -585,6 +805,15 @@ onUnmounted(() => {
     "emptyList": "アーティファクトがありません",
     "selectPrompt": "アーティファクトを選択してください",
     "source": "転送元 worktree {worktreeId}",
+    "nav": {
+      "back": "戻る",
+      "forward": "進む"
+    },
+    "navigate": {
+      "notFound": "アーティファクトが見つかりません",
+      "invalidLink": "アーティファクトリンクの書式が不正です",
+      "openFailed": "リンク先のアーティファクトを開けませんでした"
+    },
     "transfer": {
       "label": "リポジトリへ転送",
       "labelNamed": "{repository} へ転送",
