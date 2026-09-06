@@ -2337,7 +2337,32 @@ pub fn run() {
                     log::debug!("[run-event] WindowEvent[{}] CloseRequested", label)
                 }
                 tauri::WindowEvent::Destroyed => {
-                    log::debug!("[run-event] WindowEvent[{}] Destroyed", label)
+                    log::debug!("[run-event] WindowEvent[{}] Destroyed", label);
+                    // メインウィンドウが破棄されたら、残っている付随ウィンドウ
+                    // (artifact-* / codereview-* / sub-* / tray-popup) を道連れで破棄する。
+                    // アーティファクトウィンドウはサブウィンドウ/トレイポップアップからも
+                    // 開けるが、それらのウィンドウマップはウィンドウごとのモジュール状態
+                    // なのでメイン側の JS シャットダウン処理からは閉じられない。1枚でも
+                    // 残るとアプリが終了せず、孤児 WebView2 プロセスも残る。
+                    // 注意: heartbeat の「main を destroy → 再作成」復旧経路 (現在は
+                    // 無効化済み) を再度有効にする場合、その destroy でもここが走って
+                    // 付随ウィンドウを巻き添えにするため、シャットダウン中かどうかの
+                    // フラグで分岐させる必要がある。
+                    if label == "main" {
+                        for (aux_label, aux) in app_handle.webview_windows() {
+                            if aux_label == "main" {
+                                continue;
+                            }
+                            log::info!("[shutdown] destroying leftover window: {}", aux_label);
+                            if let Err(e) = aux.destroy() {
+                                log::warn!(
+                                    "[shutdown] destroy failed for {}: {}",
+                                    aux_label,
+                                    e
+                                );
+                            }
+                        }
+                    }
                 }
                 tauri::WindowEvent::Focused(focused) => {
                     log::debug!("[run-event] WindowEvent[{}] Focused={}", label, focused)

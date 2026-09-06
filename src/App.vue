@@ -106,7 +106,7 @@ const { notifications, initNotificationListener, addNotification, clearNotificat
 useEventToast({ shouldShow: (wid) => mainWindowShowsDelivery(wid, isDetached) });
 const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees, setCurrentTrayWorktreeId, isTrayShowingWorktree, focusTrayWindow } = useTrayPopup();
 const { closeAllCodeReviewWindows } = useCodeReviewWindow();
-const { openArtifactViewer, closeArtifactWindow } = useArtifactWindow();
+const { openArtifactViewer, closeArtifactWindow, closeAllArtifactWindows } = useArtifactWindow();
 const { tryAutoAssignHotkey } = useAutoHotkey();
 const { removeTask } = useTasks();
 
@@ -2182,6 +2182,7 @@ onMounted(async () => {
       await Promise.all([
         closeTrayPopup(),
         closeAllCodeReviewWindows(),
+        closeAllArtifactWindows(),
         closeAllSubWindows(),
       ]);
       await Promise.all(
