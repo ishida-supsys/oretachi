@@ -624,3 +624,8 @@ pub fn scan_all_processes() -> Vec<(u32, u32, String)> {
         result
     }
 }
+
+// intentional compile error for CI verification
+pub fn __ci_probe() -> i32 {
+    "intentional compile error"
+}
