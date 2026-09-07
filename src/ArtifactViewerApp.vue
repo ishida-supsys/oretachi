@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from "vue";
+import { ref, computed, onMounted, onUnmounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useToast } from "primevue/usetoast";
 import { invoke } from "@tauri-apps/api/core";
@@ -31,6 +31,7 @@ import type {
   ArtifactData,
   ArtifactState,
   ArtifactChangedEvent,
+  ArtifactStateChangedEvent,
   RepoArtifactChangedEvent,
   CopyArtifactResult,
 } from "./types/artifact";
@@ -69,6 +70,7 @@ const pinningIds = ref<Set<string>>(new Set());
 
 let unlisten: UnlistenFn | null = null;
 let unlistenNavigate: UnlistenFn | null = null;
+let unlistenState: UnlistenFn | null = null;
 
 const typeIcons: Record<string, string> = {
   "application/vnd.ant.code": "pi-code",
@@ -196,6 +198,9 @@ async function saveArtifactMemory(
  */
 const reactViewSeq = ref(0);
 
+/** 外からのストア更新を iframe へ押し込むために使う（`pushMemory`） */
+const reactViewRef = ref<InstanceType<typeof ArtifactReactView> | null>(null);
+
 const selectedMemory = computed(() =>
   selectedId.value ? states.value[selectedId.value]?.memory : undefined,
 );
@@ -228,6 +233,51 @@ async function resetMemory() {
     console.error("set_artifact_memory failed", e);
     await message(String(e), { title: t("memory.resetFailed"), kind: "error" });
   }
+}
+
+// ─── 表示中ロック ─────────────────────────────────────────────────────────────
+//
+// 「いまこのウィンドウで開いているアーティファクト」を Rust の in-memory レジストリへ
+// 登録し続ける。ロックの成立は本体 JSON の `locked_while_open` との AND なので、
+// フラグの立っていないアーティファクトを登録しても何も止まらない（判定は Rust 側）。
+//
+// 解除の取りこぼしは Rust 側で二重に手当てしてある（ウィンドウ破棄 + ハートビート TTL）
+// ので、ここが送れなくてもロックが永久に残ることはない。
+
+let lockTimer: ReturnType<typeof setInterval> | null = null;
+
+async function touchLock() {
+  const artifactId = selectedId.value;
+  if (!artifactId) return;
+  try {
+    await invoke("artifact_lock_touch", { scope, scopeId, artifactId });
+  } catch (e) {
+    // ロックは付加機能なので、失敗しても閲覧は続行させる
+    console.warn("artifact_lock_touch failed", e);
+  }
+}
+
+async function releaseLock() {
+  try {
+    await invoke("artifact_lock_release");
+  } catch (e) {
+    console.warn("artifact_lock_release failed", e);
+  }
+}
+
+/**
+ * MCP ツール呼び出しの中継。ホワイトリストとスコープの強制は Rust 側が行う。
+ * `artifactId` を渡すのは監査ログのためで、権限判定には使われない
+ * （判定に使うのはこのビューアのスコープ = アーティファクトの置き場所）。
+ */
+function callMcpTool(artifactId: string, tool: string, params: Record<string, unknown>) {
+  return invoke<string>("artifact_call_mcp_tool", {
+    scope,
+    scopeId,
+    artifactId,
+    tool,
+    params,
+  });
 }
 
 const history = useArtifactHistory();
@@ -487,6 +537,12 @@ async function resolveScopeName() {
   }
 }
 
+// 選択が変わったらロックを張り替える。null になったら解除する
+watch(selectedId, (id) => {
+  if (id) void touchLock();
+  else void releaseLock();
+});
+
 onMounted(async () => {
   // 既存ウィンドウ宛の遷移指示。Tauri のイベントにバッファリングは無く、一方で
   // 送信側の focusExisting は起動途中のウィンドウでも true を返すため、
@@ -528,11 +584,30 @@ onMounted(async () => {
       await refreshSelected(event.payload.artifactId, event.payload.command);
     });
   }
+
+  // MCP の artifact_store がストアを書き換えたら、サイドカーのキャッシュを取り直し、
+  // 表示中の iframe にも押し込む。押し込まないと iframe は古いスナップショットを持ち続け、
+  // 次の 1 入力で自分の状態を丸ごと書き戻して MCP 側の書き込みを消してしまう
+  // （MCP 側は成功を返しているので、消えたことに誰も気づけない）
+  unlistenState = await listen<ArtifactStateChangedEvent>("artifact-state-changed", async (event) => {
+    if (event.payload.scope !== scope || event.payload.scopeId !== scopeId) return;
+    await loadStates();
+    if (event.payload.artifactId !== selectedId.value) return;
+    reactViewRef.value?.pushMemory(selectedMemory.value ?? {});
+  });
+
+  // ハートビート。間隔は Rust 側の TTL と対で決まるので Rust から貰う
+  await touchLock();
+  const intervalMs = await invoke<number>("artifact_lock_heartbeat_interval").catch(() => 10000);
+  lockTimer = setInterval(() => void touchLock(), intervalMs);
 });
 
 onUnmounted(() => {
   unlisten?.();
   unlistenNavigate?.();
+  unlistenState?.();
+  if (lockTimer !== null) clearInterval(lockTimer);
+  void releaseLock();
 });
 </script>
 
@@ -628,6 +703,14 @@ onUnmounted(() => {
           <div class="content-title-area">
             <span class="content-title">{{ selectedArtifact.title }}</span>
             <span class="content-type">
+              <!-- リポジトリ保管庫には MCP からの書き込み経路が無く、フラグが効かないので出さない -->
+              <span
+                v-if="!isRepositoryScope && selectedArtifact.locked_while_open"
+                class="locked-badge"
+                :title="t('locked.tooltip')"
+              >
+                <i class="pi pi-lock" />{{ t("locked.label") }}
+              </span>
               {{ selectedArtifact.content_type }}
               <template v-if="isRepositoryScope && selectedArtifact.source_worktree_id">
                 · {{ t("source", { worktreeId: selectedArtifact.source_worktree_id }) }}
@@ -726,11 +809,13 @@ onUnmounted(() => {
           />
           <ArtifactReactView
             v-else-if="selectedArtifact.content_type === 'application/vnd.ant.react'"
+            ref="reactViewRef"
             :key="`${selectedArtifact.id}:${reactViewSeq}`"
             :content="selectedArtifact.content"
             :modules="selectedArtifact.modules"
             :memory="selectedMemory"
             :save-memory="(m: Record<string, unknown>) => saveArtifactMemory(selectedArtifact!.id, m)"
+            :call-tool="(tool: string, p: Record<string, unknown>) => callMcpTool(selectedArtifact!.id, tool, p)"
             @navigate="onNavigate"
             @memory-error="onMemoryError"
           />
@@ -1113,6 +1198,24 @@ onUnmounted(() => {
   font-family: monospace;
 }
 
+/* 表示中ロック。AI から書き込めない理由がユーザーに分かるように出す */
+.locked-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-right: 6px;
+  padding: 0 5px;
+  border-radius: 3px;
+  background: rgba(249, 226, 175, 0.12);
+  color: #f9e2af;
+  /* .content-type が monospace なので、バッジだけ本文用フォントへ戻す */
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+.locked-badge i {
+  font-size: 9px;
+}
+
 .content-body {
   flex: 1;
   overflow: hidden;
@@ -1157,6 +1260,10 @@ onUnmounted(() => {
       "overwriteConfirm": "An artifact with the same ID already exists in {repository}. Overwrite it?",
       "done": "Transferred to {repository}",
       "failed": "Transfer failed"
+    },
+    "locked": {
+      "label": "locked while open",
+      "tooltip": "While this window is open, the AI cannot overwrite this artifact via MCP. Close the window to allow writes."
     },
     "memory": {
       "resetLabel": "Reset memory",
@@ -1209,6 +1316,10 @@ onUnmounted(() => {
       "overwriteConfirm": "{repository} に同じ ID のアーティファクトが既にあります。上書きしますか？",
       "done": "{repository} に転送しました",
       "failed": "転送に失敗しました"
+    },
+    "locked": {
+      "label": "表示中ロック",
+      "tooltip": "このウィンドウを開いている間、AI は MCP からこのアーティファクトを書き換えられません。書き込ませるにはウィンドウを閉じてください。"
     },
     "memory": {
       "resetLabel": "メモリーをリセット",

@@ -3,6 +3,7 @@ mod ai_description;
 mod ai_judge;
 mod ai_provider;
 mod archive_db;
+mod artifact_lock;
 mod artifact_url;
 mod claude_plugin;
 mod codex_session;
@@ -935,7 +936,7 @@ const ARTIFACT_MEMORY_MAX_BYTES: usize = 1024 * 1024;
 
 /// 保存前のメモリーを検証して正規化する。
 /// null / 未指定は「リセット」を意味する `None` へ落とす。
-fn validate_artifact_memory(
+pub(crate) fn validate_artifact_memory(
     memory: Option<serde_json::Value>,
 ) -> Result<Option<serde_json::Value>, String> {
     // キーの追加だけで済むよう、格納形は JSON オブジェクトに限定する
@@ -967,6 +968,97 @@ fn read_state_memory(path: &std::path::Path) -> Option<serde_json::Value> {
             _ => None,
         })
         .filter(|val| val.is_object())
+}
+
+/// アーティファクトのストア（サイドカーの `memory`）と最終更新時刻をまとめて読む。
+/// MCP の `artifact_store command=read` の実体。ファイルが無い / 壊れている場合は
+/// 「まだ何も書かれていない」と同じ扱いで `(None, 0)` を返す。
+pub(crate) fn read_artifact_store(
+    dir: &std::path::Path,
+    artifact_id: &str,
+) -> (Option<serde_json::Value>, u64) {
+    // memory と updated_at は 1 回の読み込みから取り出す。2 回読むと、間に書き込みが
+    // 挟まったときに「data は新しいのに updated_at は古い」ペアを返しうる
+    let path = artifact_state_path(dir, artifact_id);
+    let Some(serde_json::Value::Object(mut map)) = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+    else {
+        return (None, 0);
+    };
+    let updated_at = map
+        .get(ARTIFACT_MEMORY_UPDATED_AT_KEY)
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    let memory = map.remove("memory").filter(|val| val.is_object());
+    (memory, updated_at)
+}
+
+/// サイドカーの `memory` に添える最終更新時刻（epoch ミリ秒）のキー。
+/// `artifact_store` の `expected_updated_at`（任意の楽観ロック）が突き合わせる先で、
+/// キーが無い＝まだ一度も書かれていない状態は `0` とみなす。
+pub(crate) const ARTIFACT_MEMORY_UPDATED_AT_KEY: &str = "memoryUpdatedAt";
+
+/// サイドカーの `memory` を書き換える唯一の経路。
+///
+/// ビューアのブリッジ経由（`set_artifact_memory`）と MCP の `artifact_store` の両方が
+/// ここを通る。両者が同じキーへ書くため、更新時刻の付け替えを 1 か所に寄せている。
+///
+/// `expected_updated_at` を渡すと、現在の `memoryUpdatedAt` と一致しない場合にエラーにする
+/// （黙って踏み潰さないための任意チェック）。比較〜書き込みは
+/// `update_artifact_state` のロック内で行うので、チェックと書き込みの間に割り込まれない。
+///
+/// 戻り値は書き込み後の `memoryUpdatedAt`（削除した場合は 0）。
+pub(crate) async fn write_artifact_memory(
+    dir: std::path::PathBuf,
+    artifact_id: &str,
+    memory: Option<serde_json::Value>,
+    expected_updated_at: Option<u64>,
+) -> Result<u64, String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    // 実際に採番した値をロックの外へ持ち出すための受け皿。
+    // 採番は「既存値より必ず大きく」する必要があり、既存値はロック内でしか読めない
+    let assigned = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let out = assigned.clone();
+    update_artifact_state(dir, artifact_id, move |obj| {
+        let actual = obj
+            .get(ARTIFACT_MEMORY_UPDATED_AT_KEY)
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        if let Some(expected) = expected_updated_at {
+            if actual != expected {
+                return Err(format!(
+                    "ストアが他から更新されています（expected_updated_at={} / 現在={}）。read で読み直してから書き直してください",
+                    expected, actual
+                ));
+            }
+        }
+        match memory {
+            Some(val) => {
+                // 時刻そのままだと、同一ミリ秒に 2 回書かれたとき値が進まない。
+                // すると次の書き込みの expected_updated_at が「変わっていない」と
+                // 誤判定して lost update を見逃すため、必ず既存値より進める
+                let stamp = now.max(actual.saturating_add(1));
+                obj.insert("memory".to_string(), val);
+                obj.insert(
+                    ARTIFACT_MEMORY_UPDATED_AT_KEY.to_string(),
+                    serde_json::Value::from(stamp),
+                );
+                out.store(stamp, std::sync::atomic::Ordering::Relaxed);
+            }
+            None => {
+                obj.remove("memory");
+                obj.remove(ARTIFACT_MEMORY_UPDATED_AT_KEY);
+                out.store(0, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        Ok(())
+    })
+    .await?;
+    Ok(assigned.load(std::sync::atomic::Ordering::Relaxed))
 }
 
 /// メモリーを書き換える。`memory` が null / 未指定ならキーごと削除する（＝リセット）。
@@ -1001,18 +1093,87 @@ async fn set_artifact_memory(
         return Ok(());
     }
 
-    update_artifact_state(dir, &artifact_id, move |obj| {
-        match memory {
-            Some(val) => {
-                obj.insert("memory".to_string(), val);
-            }
-            None => {
-                obj.remove("memory");
-            }
-        }
-        Ok(())
-    })
-    .await
+    // ビューア自身の書き込みは表示中ロックの対象外（ロックが止めるのは MCP 由来だけ）。
+    // 楽観ロックも掛けない: フォーム入力は debounce 済みの最新スナップショットを
+    // まるごと送る後勝ちで良く、直列化は iframe 側の flush が担っている。
+    write_artifact_memory(dir, &artifact_id, memory, None)
+        .await
+        .map(|_| ())
+}
+
+// ─── アーティファクト表示中ロック ─────────────────────────────────────────────
+//
+// 実行時の開閉状態は `artifact_lock::ArtifactOpenRegistry`（in-memory）が持つ。
+// ここはビューアからの登録・解除の入口だけを提供する。
+
+/// ビューアがハートビートを打つ間隔（ミリ秒）。
+///
+/// Chromium は非表示・最小化されたページのタイマーを間引く（長時間隠れると最大で
+/// 1 分に 1 回まで落ちる）。ビューアを最小化しただけでロックが失効しては困るので、
+/// この間隔が間引き後の 1 分へ引き伸ばされても `artifact_lock::LOCK_TTL`（3 分）に
+/// 対して余裕があるよう決めている。
+const ARTIFACT_LOCK_HEARTBEAT_MS: u64 = 30_000;
+
+/// ビューアがハートビート間隔をハードコードせずに済むよう Rust 側の定数を渡す。
+#[tauri::command]
+fn artifact_lock_heartbeat_interval() -> u64 {
+    ARTIFACT_LOCK_HEARTBEAT_MS
+}
+
+/// 「このウィンドウはこのアーティファクトを表示中」を登録・更新する（ハートビート兼用）。
+/// 本体 JSON の `locked_while_open` が立っていないアーティファクトでも登録は通る
+/// （ロックの判定は永続フラグとの AND なので、ここでは中身を読まない）。
+#[tauri::command]
+fn artifact_lock_touch(
+    window: tauri::Window,
+    registry: tauri::State<'_, artifact_lock::ArtifactOpenRegistry>,
+    scope: String,
+    scope_id: String,
+    artifact_id: String,
+) -> Result<(), String> {
+    validate_path_component(&artifact_id)?;
+    registry.touch(window.label(), &scope, &scope_id, &artifact_id);
+    Ok(())
+}
+
+/// 表示をやめたことを登録する（ウィンドウを閉じる前・別のアーティファクトへ移る前）。
+/// 取りこぼしても `WindowEvent::Destroyed` と TTL が後始末する。
+#[tauri::command]
+fn artifact_lock_release(
+    window: tauri::Window,
+    registry: tauri::State<'_, artifact_lock::ArtifactOpenRegistry>,
+) -> Result<(), String> {
+    registry.release_window(window.label());
+    Ok(())
+}
+
+/// React アーティファクトのコードから oretachi の MCP ツールを呼ぶ。
+///
+/// アーティファクトの中身は AI 生成で、しかも他ワークツリーから転送されてくることがある。
+/// 無制限に呼べると `oretachi_write_terminal` が任意コマンド実行と等価になるため、
+/// ホワイトリストとスコープの強制は呼び出し先（`mcp_server::call_tool_for_artifact`）で行う。
+/// ここが渡す `worktree_id` はアーティファクトの置き場所そのもので、
+/// アーティファクト側からは指定できない。
+#[tauri::command]
+async fn artifact_call_mcp_tool(
+    app_handle: tauri::AppHandle,
+    scope: String,
+    scope_id: String,
+    artifact_id: String,
+    tool: String,
+    params: serde_json::Value,
+) -> Result<String, String> {
+    validate_path_component(&artifact_id)?;
+    // リポジトリ保管庫のアーティファクトには紐づくワークツリーが無く、スコープを強制できない。
+    // 転送元（source_worktree_id）を使うと、既に閉じたワークツリーの端末へ書き込む経路にも
+    // なりかねないので許可しない。
+    if scope != "worktree" {
+        return Err(format!(
+            "MCP ツール呼び出しはワークツリーのアーティファクトからのみ使えます（現在のスコープ: {}）",
+            scope
+        ));
+    }
+    mcp_server::call_tool_for_artifact(&app_handle, &scope_id, &artifact_id, &tool, params).await
 }
 
 // ─── リポジトリ・アーティファクトコマンド ─────────────────────────────────────
@@ -1207,20 +1368,11 @@ async fn copy_artifact_to_repository(
         .await
         .map_err(|e| format!("task join error: {}", e))?;
 
-    // 本体を上書きしたので、転送先のメモリーも転送元に揃える（転送元に無ければ消す）
+    // 本体を上書きしたので、転送先のメモリーも転送元に揃える（転送元に無ければ消す）。
+    // `write_artifact_memory` を通すのは `memoryUpdatedAt` も一緒に付け替えるため
+    // （直接 update_artifact_state すると「memory はあるのに stamp が無い / 古い」になる）
     let dest_state_dir = repo_artifacts_dir(&app_handle, &repository_id)?;
-    if let Err(e) = update_artifact_state(dest_state_dir, &artifact_id, move |obj| {
-        match source_memory {
-            Some(val) => {
-                obj.insert("memory".to_string(), val);
-            }
-            None => {
-                obj.remove("memory");
-            }
-        }
-        Ok(())
-    })
-    .await
+    if let Err(e) = write_artifact_memory(dest_state_dir, &artifact_id, source_memory, None).await
     {
         // サイドカーは補助情報。本体の転送は成功しているので、ここでは失敗させない
         log::warn!("[Artifact] 転送先へのメモリー引き継ぎに失敗しました: {}", e);
@@ -1996,6 +2148,7 @@ pub fn run() {
         .manage(mcp_server::McpServerManager::new())
         .manage(mcp_server::McpPeerRegistry(std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()))))
         .manage(mcp_server::DetachedWorktreeRegistry::default())
+        .manage(artifact_lock::ArtifactOpenRegistry::new())
         .manage(mcp_server::NotificationRegistry::default())
         .manage(mcp_server::CloseWorktreeAckRegistry::default())
         .manage(mcp_server::ImportWorktreeAckRegistry::default())
@@ -2083,6 +2236,10 @@ pub fn run() {
             copy_artifact_to_repository,
             delete_repo_artifact,
             resolve_artifact_scope,
+            artifact_lock_heartbeat_interval,
+            artifact_lock_touch,
+            artifact_lock_release,
+            artifact_call_mcp_tool,
             start_fs_watch,
             stop_fs_watch,
             settings::list_system_sounds,
@@ -2732,6 +2889,11 @@ pub fn run() {
                 }
                 tauri::WindowEvent::Destroyed => {
                     log::debug!("[run-event] WindowEvent[{}] Destroyed", label);
+                    // 表示中ロックを解除する。ビューア側の JS からも release を送っているが、
+                    // webview がハングしていると送れないためネイティブ側でも必ず落とす。
+                    app_handle
+                        .state::<artifact_lock::ArtifactOpenRegistry>()
+                        .release_window(label);
                     // メインウィンドウが破棄されたら、残っている付随ウィンドウ
                     // (artifact-* / codereview-* / sub-* / tray-popup) を道連れで破棄する。
                     // アーティファクトウィンドウはサブウィンドウ/トレイポップアップからも
@@ -2827,18 +2989,7 @@ mod artifact_state_tests {
 
     fn set_memory(dir: &std::path::Path, id: &str, memory: Option<serde_json::Value>) {
         let memory = validate_artifact_memory(memory).expect("valid memory");
-        block_on(update_artifact_state(dir.to_path_buf(), id, move |obj| {
-            match memory {
-                Some(val) => {
-                    obj.insert("memory".to_string(), val);
-                }
-                None => {
-                    obj.remove("memory");
-                }
-            }
-            Ok(())
-        }))
-        .expect("update");
+        block_on(write_artifact_memory(dir.to_path_buf(), id, memory, None)).expect("update");
     }
 
     fn set_pinned(dir: &std::path::Path, id: &str, pinned: bool) {
@@ -2912,6 +3063,96 @@ mod artifact_state_tests {
 
         let ok = "x".repeat(1024);
         assert!(validate_artifact_memory(Some(serde_json::json!({ "k": ok }))).is_ok());
+    }
+
+    /// `expected_updated_at` を渡さない書き込みは後勝ちで通る（ビューア経由の保存と同じ扱い）
+    #[test]
+    fn store_write_without_expected_updated_at_overwrites() {
+        let dir = test_dir("store-blind");
+        set_memory(&dir, "a", Some(serde_json::json!({ "k": 1 })));
+        set_memory(&dir, "a", Some(serde_json::json!({ "k": 2 })));
+        assert_eq!(
+            read_artifact_store(&dir, "a").0,
+            Some(serde_json::json!({ "k": 2 }))
+        );
+    }
+
+    /// `expected_updated_at` が現在値と食い違えばエラーになり、既存の内容は残る
+    #[test]
+    fn store_write_with_stale_expected_updated_at_is_rejected() {
+        let dir = test_dir("store-conflict");
+        let first = block_on(write_artifact_memory(
+            dir.clone(),
+            "a",
+            Some(serde_json::json!({ "k": 1 })),
+            None,
+        ))
+        .expect("first write");
+        assert!(first > 0);
+        assert_eq!(read_artifact_store(&dir, "a").1, first);
+
+        // 現在値を渡せば通る
+        let second = block_on(write_artifact_memory(
+            dir.clone(),
+            "a",
+            Some(serde_json::json!({ "k": 2 })),
+            Some(first),
+        ))
+        .expect("second write");
+
+        // 採番は必ず前進する（同一ミリ秒に 2 回書いても値が同じにならない）
+        assert!(second > first, "second={} first={}", second, first);
+
+        // 古い値を渡すと弾かれ、内容は second のまま
+        let err = block_on(write_artifact_memory(
+            dir.clone(),
+            "a",
+            Some(serde_json::json!({ "k": 3 })),
+            Some(first),
+        ))
+        .expect_err("stale expected_updated_at");
+        assert!(err.contains("他から更新されています"), "{}", err);
+        let (store, updated_at) = read_artifact_store(&dir, "a");
+        assert_eq!(store, Some(serde_json::json!({ "k": 2 })));
+        assert_eq!(updated_at, second);
+    }
+
+    /// 同一ミリ秒に連続で書いても `memoryUpdatedAt` は必ず進む。
+    /// 進まないと、その間に割り込まれた更新を `expected_updated_at` が検知できない
+    #[test]
+    fn store_updated_at_is_strictly_increasing() {
+        let dir = test_dir("store-monotonic");
+        let mut prev = 0;
+        for i in 0..50 {
+            let stamp = block_on(write_artifact_memory(
+                dir.clone(),
+                "a",
+                Some(serde_json::json!({ "k": i })),
+                None,
+            ))
+            .expect("write");
+            assert!(stamp > prev, "stamp={} prev={}", stamp, prev);
+            prev = stamp;
+        }
+    }
+
+    /// まだ一度も書かれていないストアは `(None, 0)`。`expected_updated_at = 0` で初回書き込みできる
+    #[test]
+    fn store_read_defaults_to_empty_and_zero() {
+        let dir = test_dir("store-empty");
+        assert_eq!(read_artifact_store(&dir, "a"), (None, 0));
+        block_on(write_artifact_memory(
+            dir.clone(),
+            "a",
+            Some(serde_json::json!({ "k": 1 })),
+            Some(0),
+        ))
+        .expect("first write with expected 0");
+
+        // ピン止めだけのサイドカーも「ストアは未作成」扱い
+        let dir2 = test_dir("store-pinned-only");
+        set_pinned(&dir2, "a", true);
+        assert_eq!(read_artifact_store(&dir2, "a"), (None, 0));
     }
 
     /// 転送で引き継ぐのはメモリーだけ。ピン止めは転送先スコープのローカルな並び順なので拾わない

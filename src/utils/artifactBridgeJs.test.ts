@@ -12,12 +12,15 @@ import {
   ARTIFACT_BRIDGE_REQUEST_MARKER,
   ARTIFACT_BRIDGE_RESULT_MARKER,
   ARTIFACT_BRIDGE_METHOD_MEMORY_SET,
+  ARTIFACT_BRIDGE_METHOD_MCP_CALL,
+  ARTIFACT_BRIDGE_PUSH_MARKER,
+  ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED,
 } from "./artifactMemory";
 
 interface PostedRequest {
   requestId: string;
   method: string;
-  params: { memory?: Record<string, unknown> };
+  params: { memory?: Record<string, unknown>; tool?: string; params?: Record<string, unknown> };
 }
 
 interface Bridge {
@@ -27,6 +30,8 @@ interface Bridge {
   setMemoryKey(key: string, value: unknown): Promise<void>;
   clearMemory(): Promise<void>;
   call(method: string, params?: unknown): Promise<unknown>;
+  callTool(tool: unknown, params?: unknown): Promise<unknown>;
+  subscribeMemory(fn: (memory: Record<string, unknown>) => void): () => void;
 }
 
 function setupBridge(initialMemory: Record<string, unknown>) {
@@ -70,7 +75,13 @@ function setupBridge(initialMemory: Record<string, unknown>) {
     } as { data: unknown });
   };
 
-  return { bridge: fakeWindow.__oretachi as Bridge, posted, reply };
+  /** 親からの一方向通知（MCP の artifact_store がストアを書き換えた場合） */
+  const push = (data: Record<string, unknown>, source: unknown = fakeParent) => {
+    if (!onMessage) throw new Error("bridge did not register a message listener");
+    onMessage({ source, data } as { data: unknown });
+  };
+
+  return { bridge: fakeWindow.__oretachi as Bridge, posted, reply, push };
 }
 
 describe("ARTIFACT_BRIDGE_JS", () => {
@@ -174,6 +185,117 @@ describe("ARTIFACT_BRIDGE_JS", () => {
     reply(posted[0].requestId, { ok: true }, { notParent: true });
     reply(posted[0].requestId, { ok: true });
     await expect(p).resolves.toBeUndefined();
+  });
+
+  it("callTool は mcp.call を送り、JSON の応答をパースして返す", async () => {
+    const { bridge, posted, reply } = setupBridge({});
+    const p = bridge.callTool("oretachi_write_terminal", { session_id: 12, text: "echo hi" });
+    expect(posted).toHaveLength(1);
+    expect(posted[0].method).toBe(ARTIFACT_BRIDGE_METHOD_MCP_CALL);
+    expect(posted[0].params.tool).toBe("oretachi_write_terminal");
+    expect(posted[0].params.params).toEqual({ session_id: 12, text: "echo hi" });
+
+    reply(posted[0].requestId, { ok: true, result: JSON.stringify({ cursor: 3 }) });
+    await expect(p).resolves.toEqual({ cursor: 3 });
+  });
+
+  it("callTool の応答が JSON でなければ文字列のまま返す", async () => {
+    const { bridge, posted, reply } = setupBridge({});
+    const p = bridge.callTool("oretachi_write_terminal", { session_id: 12, text: "x" });
+    reply(posted[0].requestId, { ok: true, result: "written" });
+    await expect(p).resolves.toBe("written");
+  });
+
+  it("callTool は params 省略でも空オブジェクトを送る", async () => {
+    const { bridge, posted, reply } = setupBridge({});
+    const p = bridge.callTool("oretachi_list_worktree_notifications");
+    expect(posted[0].params.params).toEqual({});
+    reply(posted[0].requestId, { ok: true, result: "[]" });
+    await expect(p).resolves.toEqual([]);
+  });
+
+  it("callTool のツール名が不正なら往復させずに reject する", async () => {
+    const { bridge, posted } = setupBridge({});
+    await expect(bridge.callTool("")).rejects.toThrow("callTool expects a tool name");
+    await expect(bridge.callTool(undefined)).rejects.toThrow("callTool expects a tool name");
+    expect(posted).toHaveLength(0);
+  });
+
+  it("ホワイトリスト外などのエラーは callTool の Promise へ伝わる", async () => {
+    const { bridge, posted, reply } = setupBridge({});
+    const p = bridge.callTool("oretachi_kill_terminal", {});
+    reply(posted[0].requestId, { ok: false, error: "ツール 'oretachi_kill_terminal' は..." });
+    await expect(p).rejects.toThrow("oretachi_kill_terminal");
+  });
+
+  it("外からのストア更新を取り込んで subscribeMemory を再通知する", () => {
+    const { bridge, push } = setupBridge({ answered: false });
+    const seen: Record<string, unknown>[] = [];
+    bridge.subscribeMemory((m) => seen.push(m));
+
+    push({
+      [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+      event: ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED,
+      memory: { answered: true },
+    });
+
+    expect(bridge.getMemory()).toEqual({ answered: true });
+    expect(seen).toEqual([{ answered: true }]);
+  });
+
+  it("外からのストア更新を取り込んだ後の保存は、取り込んだ内容を土台にする", async () => {
+    const { bridge, posted, push } = setupBridge({ a: 1 });
+    push({
+      [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+      event: ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED,
+      memory: { a: 1, answered: true },
+    });
+
+    // 押し込まれた値を土台にするので、次の 1 入力で外からの書き込みが消えない
+    void bridge.setMemoryKey("b", 2);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(posted[0].params.memory).toEqual({ a: 1, answered: true, b: 2 });
+  });
+
+  it("親以外からの / 壊れた一方向通知は無視する", () => {
+    const { bridge, push } = setupBridge({ a: 1 });
+    const other = {};
+    push(
+      {
+        [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+        event: ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED,
+        memory: { a: 2 },
+      },
+      other,
+    );
+    expect(bridge.getMemory()).toEqual({ a: 1 });
+
+    // オブジェクト以外のペイロードは捨てる（state を壊さない）
+    for (const memory of [null, "x", [1, 2], undefined]) {
+      push({
+        [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+        event: ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED,
+        memory,
+      });
+      expect(bridge.getMemory()).toEqual({ a: 1 });
+    }
+
+    // 未知の event 種別も無視する
+    push({ [ARTIFACT_BRIDGE_PUSH_MARKER]: true, event: "unknown", memory: { a: 3 } });
+    expect(bridge.getMemory()).toEqual({ a: 1 });
+  });
+
+  it("一方向通知は pending の応答として消費されない", async () => {
+    const { bridge, posted, push, reply } = setupBridge({});
+    const p = bridge.callTool("oretachi_write_terminal", { session_id: 1, text: "x" });
+    push({
+      [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+      event: ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED,
+      memory: { a: 1 },
+      requestId: posted[0].requestId,
+    });
+    reply(posted[0].requestId, { ok: true, result: "written" });
+    await expect(p).resolves.toBe("written");
   });
 
   it("上限超過は IPC を往復させず iframe 側で reject する", async () => {

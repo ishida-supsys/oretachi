@@ -30,9 +30,28 @@
 export const ARTIFACT_BRIDGE_REQUEST_MARKER = "__oretachiArtifactBridge";
 /** 親 → iframe の応答マーカー */
 export const ARTIFACT_BRIDGE_RESULT_MARKER = "__oretachiArtifactBridgeResult";
+/**
+ * 親 → iframe の一方向通知マーカー（リクエストへの応答ではないもの）。
+ *
+ * MCP の `artifact_store` が外からストアを書き換えたときに使う。押し込まないと、
+ * iframe は起動時のスナップショットを持ち続け、次の 1 入力で自分の状態を丸ごと
+ * 書き戻して外からの書き込みを消してしまう（MCP 側は成功を返しているので気づけない）。
+ */
+export const ARTIFACT_BRIDGE_PUSH_MARKER = "__oretachiArtifactBridgePush";
+/** `ARTIFACT_BRIDGE_PUSH_MARKER` の通知種別: ストアが外から差し替わった */
+export const ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED = "memory.changed";
 
 /** メモリー全体を保存する。params は `{ memory: object }` */
 export const ARTIFACT_BRIDGE_METHOD_MEMORY_SET = "memory.set";
+
+/**
+ * oretachi の MCP ツールを呼ぶ。params は `{ tool: string, params: object }`。
+ *
+ * ホワイトリストとスコープの強制は Rust 側（`mcp_server::call_tool_for_artifact`）で行う。
+ * ここで弾かないのは、許可ツールの一覧を srcdoc へ埋め込むと
+ * 「フロントの一覧が真の権限」だと誤解される作りになるため（唯一の関門は Rust）。
+ */
+export const ARTIFACT_BRIDGE_METHOD_MCP_CALL = "mcp.call";
 
 /** 応答が返らないまま Promise が残り続けないようにするタイムアウト（iframe 側） */
 const BRIDGE_TIMEOUT_MS = 10000;
@@ -105,6 +124,30 @@ export function postArtifactBridgeResult(
 }
 
 /**
+ * 外からストアが書き換わったことを iframe へ知らせる。
+ * iframe 側は `state` を差し替えて `subscribeMemory` / `useMemory` を再通知する。
+ */
+export function postArtifactBridgeMemoryChanged(
+  frame: HTMLIFrameElement | null,
+  memory: Record<string, unknown>,
+): void {
+  const target = frame?.contentWindow;
+  if (!target) return;
+  try {
+    target.postMessage(
+      {
+        [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+        event: ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED,
+        memory,
+      },
+      "*",
+    );
+  } catch {
+    // iframe が既に差し替わっている場合など
+  }
+}
+
+/**
  * iframe 内に注入するブリッジ本体。`window.__oretachi` を定義し、
  * `reactArtifactSrcdoc.ts` の makeRequire が `require('oretachi')` として返す。
  *
@@ -122,7 +165,14 @@ export const ARTIFACT_BRIDGE_JS =
   // （requestId は連番なので、同一ウィンドウ内の別 iframe に成功を偽装され得る）
   "    if(e.source!==parent)return;" +
   "    var d=e.data;" +
-  "    if(!d||typeof d!=='object'||d[" + JSON.stringify(ARTIFACT_BRIDGE_RESULT_MARKER) + "]!==true)return;" +
+  "    if(!d||typeof d!=='object')return;" +
+  // 一方向通知（ストアの外部更新）。pending は触らない
+  "    if(d[" + JSON.stringify(ARTIFACT_BRIDGE_PUSH_MARKER) + "]===true){" +
+  "      if(d.event===" + JSON.stringify(ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED) + ")" +
+  "        applyExternalMemory(d.memory);" +
+  "      return;" +
+  "    }" +
+  "    if(d[" + JSON.stringify(ARTIFACT_BRIDGE_RESULT_MARKER) + "]!==true)return;" +
   "    var p=pending[d.requestId];" +
   "    if(!p)return;" +
   "    delete pending[d.requestId];" +
@@ -200,6 +250,14 @@ export const ARTIFACT_BRIDGE_JS =
   "      flushTimer=setTimeout(flush," + MEMORY_FLUSH_DEBOUNCE_MS + ");" +
   "    });" +
   "  }" +
+  // 外から差し替わったストアを取り込む。全置換（ストアの意味論が全置換なので）。
+  // ユーザーが入力中のキーも上書きされうるが、それを避けたいアーティファクトは
+  // `locked_while_open` を宣言して MCP からの書き込みそのものを止める
+  "  function applyExternalMemory(next){" +
+  "    if(!next||typeof next!=='object'||Array.isArray(next))return;" +
+  "    state=next;" +
+  "    notify();" +
+  "  }" +
   "  function getMemory(){return state;}" +
   "  function replace(next){" +
   "    if(!next||typeof next!=='object'||Array.isArray(next))" +
@@ -247,6 +305,18 @@ export const ARTIFACT_BRIDGE_JS =
   "    },[key]);" +
   "    return [value,update];" +
   "  }" +
+  // ── MCP ツール呼び出し ──
+  // 応答は Rust 側ツールの戻り値テキスト。JSON を返すツールが多いので、
+  // パースできたらオブジェクトで返し、できなければ文字列のまま返す
+  "  function callTool(tool,params){" +
+  "    if(typeof tool!=='string'||tool==='')" +
+  "      return Promise.reject(new Error('callTool expects a tool name'));" +
+  "    return call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_MCP_CALL) + "," +
+  "      {tool:tool,params:params||{}}).then(function(text){" +
+  "      if(typeof text!=='string')return text;" +
+  "      try{return JSON.parse(text);}catch(err){return text;}" +
+  "    });" +
+  "  }" +
   "  window.__oretachi={" +
   "    getMemory:getMemory," +
   "    setMemory:setMemory," +
@@ -254,6 +324,7 @@ export const ARTIFACT_BRIDGE_JS =
   "    clearMemory:clearMemory," +
   "    useMemory:useMemory," +
   "    subscribeMemory:subscribe," +
+  "    callTool:callTool," +
   "    call:call" +
   "  };" +
   // `state` は setMemory ごとに別オブジェクトへ差し替わるので、スナップショットを

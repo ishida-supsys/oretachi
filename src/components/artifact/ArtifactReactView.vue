@@ -5,8 +5,10 @@ import { buildVendorHead, buildReactSrcdoc } from "../../utils/reactArtifactSrcd
 import { readArtifactNavigateMessage } from "../../utils/artifactFrameLink";
 import {
   ARTIFACT_BRIDGE_METHOD_MEMORY_SET,
+  ARTIFACT_BRIDGE_METHOD_MCP_CALL,
   readArtifactBridgeRequest,
   postArtifactBridgeResult,
+  postArtifactBridgeMemoryChanged,
   type ArtifactBridgeRequest,
 } from "../../utils/artifactMemory";
 
@@ -43,6 +45,11 @@ const props = defineProps<{
   memory?: Record<string, unknown>;
   /** メモリーの保存。解決/棄却がそのまま iframe 内の setMemory の Promise になる */
   saveMemory?: (memory: Record<string, unknown>) => Promise<void>;
+  /**
+   * MCP ツール呼び出し。解決値がそのまま iframe 内の `callTool` の戻り値になる。
+   * ホワイトリストとスコープの強制は Rust 側が行うので、ここは素通しでよい。
+   */
+  callTool?: (tool: string, params: Record<string, unknown>) => Promise<string>;
 }>();
 
 const emit = defineEmits<{
@@ -74,8 +81,65 @@ watch(
   },
 );
 
+/**
+ * 外からストアが書き換わったことを iframe へ知らせる（MCP の `artifact_store` 由来）。
+ *
+ * 押し込まないと、iframe は起動時のスナップショットを持ち続け、次の 1 入力で
+ * 自分の状態を丸ごと書き戻して外からの書き込みを消してしまう。
+ * srcdoc を作り直す手も使えない（作り直すと入力中のフォームが飛ぶ）。
+ */
+function pushMemory(memory: Record<string, unknown>) {
+  postArtifactBridgeMemoryChanged(frame.value, memory);
+}
+
+defineExpose({ pushMemory });
+
+/**
+ * iframe からの MCP ツール呼び出し。
+ *
+ * 許可されているツールとスコープの強制は Rust 側（`call_tool_for_artifact`）が唯一の関門。
+ * ここで一覧を持たないのは、フロントの一覧を「権限」と誤解させないため。
+ * 失敗はメモリー保存と違って親へ emit しない（アーティファクト側が Promise を
+ * 受け取る前提の API なので、握り潰されたら iframe の unhandledrejection で表に出る）。
+ */
+async function handleMcpCall(request: ArtifactBridgeRequest) {
+  const tool = request.params.tool;
+  if (typeof tool !== "string" || tool === "") {
+    postArtifactBridgeResult(frame.value, request.requestId, {
+      ok: false,
+      error: "callTool には tool 名が必要です",
+    });
+    return;
+  }
+  if (!props.callTool) {
+    postArtifactBridgeResult(frame.value, request.requestId, {
+      ok: false,
+      error: "MCP ツール呼び出しはこのアーティファクトでは使えません",
+    });
+    return;
+  }
+  const toolParams = request.params.params;
+  try {
+    const result = await props.callTool(
+      tool,
+      toolParams && typeof toolParams === "object" && !Array.isArray(toolParams)
+        ? (toolParams as Record<string, unknown>)
+        : {},
+    );
+    postArtifactBridgeResult(frame.value, request.requestId, { ok: true, result });
+  } catch (e) {
+    const error = e instanceof Error ? e.message : String(e);
+    console.error(`MCP ツール呼び出しに失敗: ${tool}`, e);
+    postArtifactBridgeResult(frame.value, request.requestId, { ok: false, error });
+  }
+}
+
 /** iframe からのブリッジ要求を処理して応答を返す */
 async function handleBridgeRequest(request: ArtifactBridgeRequest) {
+  if (request.method === ARTIFACT_BRIDGE_METHOD_MCP_CALL) {
+    await handleMcpCall(request);
+    return;
+  }
   if (request.method !== ARTIFACT_BRIDGE_METHOD_MEMORY_SET) {
     postArtifactBridgeResult(frame.value, request.requestId, {
       ok: false,
