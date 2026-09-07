@@ -844,25 +844,30 @@ async fn list_artifact_states(
     .map_err(|e| format!("task join error: {}", e))?
 }
 
-/// ピン止め状態を書き換える。ピン止めはスコープローカルで、転送では引き継がない。
-#[tauri::command]
-async fn set_artifact_pinned(
-    app_handle: tauri::AppHandle,
-    scope: String,
-    scope_id: String,
-    artifact_id: String,
-    pinned: bool,
-) -> Result<(), String> {
-    validate_path_component(&artifact_id)?;
-    let dir = artifact_scope_dir(&app_handle, &scope, &scope_id)?;
-    let path = artifact_state_path(&dir, &artifact_id);
+/// サイドカーの read-modify-write を 1 か所へ集約する。
+///
+/// `mutate` は既存のサイドカー（無ければ空オブジェクト）を受け取り、書き込みたい姿へ
+/// 書き換える。マージするのは、同じファイルへ `pinned` / `memory` と別々のキーが
+/// 独立に書かれるため（丸ごと上書きすると他方が消える）。
+/// 変更後が空になったらファイルごと削除して、既定値だけのゴミを残さない。
+async fn update_artifact_state<F>(
+    dir: std::path::PathBuf,
+    artifact_id: &str,
+    mutate: F,
+) -> Result<(), String>
+where
+    F: FnOnce(&mut serde_json::Map<String, serde_json::Value>) -> Result<(), String>
+        + Send
+        + 'static,
+{
+    let path = artifact_state_path(&dir, artifact_id);
     let seq = ARTIFACT_STATE_TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     // 拡張子が `state` にも `json` にもならないので、一覧にもサイドカー走査にも拾われない
     let tmp_name = format!(".{}.state.tmp-{}-{}", artifact_id, std::process::id(), seq);
     // 読み込み〜rename を丸ごと排他する
     let _write_guard = ARTIFACT_STATE_WRITE_LOCK.lock().await;
     tokio::task::spawn_blocking(move || -> Result<(), String> {
-        // 同じサイドカーへ後から別のキーが足される前提なので、既存を読んでマージする
+        // 壊れていたサイドカーは既定値（空）扱いで作り直す
         let mut obj = std::fs::read_to_string(&path)
             .ok()
             .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
@@ -872,11 +877,7 @@ async fn set_artifact_pinned(
             })
             .unwrap_or_default();
 
-        if pinned {
-            obj.insert("pinned".to_string(), serde_json::Value::Bool(true));
-        } else {
-            obj.remove("pinned");
-        }
+        mutate(&mut obj)?;
 
         if obj.is_empty() {
             return match std::fs::remove_file(&path) {
@@ -886,7 +887,8 @@ async fn set_artifact_pinned(
             };
         }
 
-        let json = serde_json::to_string(&serde_json::Value::Object(obj)).map_err(|e| e.to_string())?;
+        let json =
+            serde_json::to_string(&serde_json::Value::Object(obj)).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         // 一時ファイルへ書いてから rename し、書き込み途中の壊れたサイドカーを残さない
         let tmp_path = dir.join(tmp_name);
@@ -902,6 +904,97 @@ async fn set_artifact_pinned(
     })
     .await
     .map_err(|e| format!("task join error: {}", e))?
+}
+
+/// ピン止め状態を書き換える。ピン止めはスコープローカルで、転送では引き継がない。
+#[tauri::command]
+async fn set_artifact_pinned(
+    app_handle: tauri::AppHandle,
+    scope: String,
+    scope_id: String,
+    artifact_id: String,
+    pinned: bool,
+) -> Result<(), String> {
+    validate_path_component(&artifact_id)?;
+    let dir = artifact_scope_dir(&app_handle, &scope, &scope_id)?;
+    update_artifact_state(dir, &artifact_id, move |obj| {
+        if pinned {
+            obj.insert("pinned".to_string(), serde_json::Value::Bool(true));
+        } else {
+            obj.remove("pinned");
+        }
+        Ok(())
+    })
+    .await
+}
+
+/// React アーティファクトのメモリー（フォーム入力などの復元用 JSON ストア）の上限。
+/// 無制限だとフォームへ貼った巨大テキストがそのままサイドカーに載って肥大化する。
+/// サイドカーは毎回全体を read-modify-write するため、書き込みコストの上限にもなる。
+const ARTIFACT_MEMORY_MAX_BYTES: usize = 1024 * 1024;
+
+/// 保存前のメモリーを検証して正規化する。
+/// null / 未指定は「リセット」を意味する `None` へ落とす。
+fn validate_artifact_memory(
+    memory: Option<serde_json::Value>,
+) -> Result<Option<serde_json::Value>, String> {
+    // キーの追加だけで済むよう、格納形は JSON オブジェクトに限定する
+    let memory = match memory {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(val @ serde_json::Value::Object(_)) => val,
+        Some(_) => return Err("メモリーは JSON オブジェクトである必要があります".to_string()),
+    };
+
+    let size = serde_json::to_string(&memory)
+        .map_err(|e| e.to_string())?
+        .len();
+    if size > ARTIFACT_MEMORY_MAX_BYTES {
+        return Err(format!(
+            "メモリーが上限を超えています: {} バイト（上限 {} バイト）",
+            size, ARTIFACT_MEMORY_MAX_BYTES
+        ));
+    }
+    Ok(Some(memory))
+}
+
+/// サイドカーから `memory` だけを取り出す。読めない / 壊れている / オブジェクトでない場合は None。
+fn read_state_memory(path: &std::path::Path) -> Option<serde_json::Value> {
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+        .and_then(|val| match val {
+            serde_json::Value::Object(mut map) => map.remove("memory"),
+            _ => None,
+        })
+        .filter(|val| val.is_object())
+}
+
+/// メモリーを書き換える。`memory` が null / 未指定ならキーごと削除する（＝リセット）。
+/// ピン止めと違い、メモリーはアーティファクトの中身に属する状態なので転送では引き継ぐ。
+#[tauri::command]
+async fn set_artifact_memory(
+    app_handle: tauri::AppHandle,
+    scope: String,
+    scope_id: String,
+    artifact_id: String,
+    memory: Option<serde_json::Value>,
+) -> Result<(), String> {
+    validate_path_component(&artifact_id)?;
+    let dir = artifact_scope_dir(&app_handle, &scope, &scope_id)?;
+    let memory = validate_artifact_memory(memory)?;
+
+    update_artifact_state(dir, &artifact_id, move |obj| {
+        match memory {
+            Some(val) => {
+                obj.insert("memory".to_string(), val);
+            }
+            None => {
+                obj.remove("memory");
+            }
+        }
+        Ok(())
+    })
+    .await
 }
 
 // ─── リポジトリ・アーティファクトコマンド ─────────────────────────────────────
@@ -1085,6 +1178,34 @@ async fn copy_artifact_to_repository(
             repository_id,
             repository_name,
         });
+    }
+
+    // メモリー（フォーム入力などの復元用ストア）はアーティファクトの中身に属する状態なので
+    // 転送でも引き継ぐ。一方ピン止めは転送先スコープのローカルな並び順なので引き継がず、
+    // 転送先に既にある値をそのまま残す。
+    let source_state_path =
+        artifact_state_path(&artifacts_dir(&app_handle, &worktree_id)?, &artifact_id);
+    let source_memory = tokio::task::spawn_blocking(move || read_state_memory(&source_state_path))
+        .await
+        .map_err(|e| format!("task join error: {}", e))?;
+
+    // 本体を上書きしたので、転送先のメモリーも転送元に揃える（転送元に無ければ消す）
+    let dest_state_dir = repo_artifacts_dir(&app_handle, &repository_id)?;
+    if let Err(e) = update_artifact_state(dest_state_dir, &artifact_id, move |obj| {
+        match source_memory {
+            Some(val) => {
+                obj.insert("memory".to_string(), val);
+            }
+            None => {
+                obj.remove("memory");
+            }
+        }
+        Ok(())
+    })
+    .await
+    {
+        // サイドカーは補助情報。本体の転送は成功しているので、ここでは失敗させない
+        log::warn!("[Artifact] 転送先へのメモリー引き継ぎに失敗しました: {}", e);
     }
 
     let _ = app_handle.emit(
@@ -1938,6 +2059,7 @@ pub fn run() {
             delete_artifact,
             list_artifact_states,
             set_artifact_pinned,
+            set_artifact_memory,
             list_repo_artifacts,
             read_repo_artifact,
             copy_artifact_to_repository,
@@ -2656,4 +2778,138 @@ pub fn run() {
             fs_watcher.stop_all();
         }
     });
+}
+
+#[cfg(test)]
+mod artifact_state_tests {
+    use super::*;
+
+    /// `tokio` に `macros` / `rt` feature が無く `#[tokio::test]` が使えないので、
+    /// 同期テストの中から `tauri::async_runtime::block_on` で回す（event_db と同じ）。
+    fn block_on<F: std::future::Future<Output = T>, T>(f: F) -> T {
+        tauri::async_runtime::block_on(f)
+    }
+
+    fn test_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "oretachi-artifact-state-{}-{}",
+            std::process::id(),
+            name
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create test dir");
+        dir
+    }
+
+    fn read_state(dir: &std::path::Path, id: &str) -> Option<serde_json::Value> {
+        std::fs::read_to_string(artifact_state_path(dir, id))
+            .ok()
+            .map(|raw| serde_json::from_str(&raw).expect("valid json"))
+    }
+
+    fn set_memory(dir: &std::path::Path, id: &str, memory: Option<serde_json::Value>) {
+        let memory = validate_artifact_memory(memory).expect("valid memory");
+        block_on(update_artifact_state(dir.to_path_buf(), id, move |obj| {
+            match memory {
+                Some(val) => {
+                    obj.insert("memory".to_string(), val);
+                }
+                None => {
+                    obj.remove("memory");
+                }
+            }
+            Ok(())
+        }))
+        .expect("update");
+    }
+
+    fn set_pinned(dir: &std::path::Path, id: &str, pinned: bool) {
+        block_on(update_artifact_state(dir.to_path_buf(), id, move |obj| {
+            if pinned {
+                obj.insert("pinned".to_string(), serde_json::Value::Bool(true));
+            } else {
+                obj.remove("pinned");
+            }
+            Ok(())
+        }))
+        .expect("update");
+    }
+
+    /// メモリーとピン止めは同じサイドカーの別キーなので、片方の更新で他方が消えてはいけない
+    #[test]
+    fn memory_and_pinned_coexist_in_one_sidecar() {
+        let dir = test_dir("coexist");
+        set_pinned(&dir, "a", true);
+        set_memory(&dir, "a", Some(serde_json::json!({ "name": "taro" })));
+
+        let state = read_state(&dir, "a").expect("sidecar exists");
+        assert_eq!(state["pinned"], serde_json::json!(true));
+        assert_eq!(state["memory"], serde_json::json!({ "name": "taro" }));
+
+        // メモリーのリセットでピン止めは残る
+        set_memory(&dir, "a", None);
+        let state = read_state(&dir, "a").expect("sidecar exists");
+        assert_eq!(state["pinned"], serde_json::json!(true));
+        assert!(state.get("memory").is_none());
+    }
+
+    /// 既定値だけになったサイドカーはファイルごと消える（ゴミを残さない）
+    #[test]
+    fn sidecar_is_removed_when_all_keys_are_default() {
+        let dir = test_dir("cleanup");
+        set_memory(&dir, "a", Some(serde_json::json!({ "k": 1 })));
+        assert!(artifact_state_path(&dir, "a").exists());
+
+        set_memory(&dir, "a", None);
+        assert!(!artifact_state_path(&dir, "a").exists());
+    }
+
+    /// 壊れたサイドカーは既定値扱いで作り直す（読めないだけで保存を失敗させない）
+    #[test]
+    fn broken_sidecar_is_rebuilt() {
+        let dir = test_dir("broken");
+        std::fs::write(artifact_state_path(&dir, "a"), "not json").expect("write");
+        set_memory(&dir, "a", Some(serde_json::json!({ "k": 1 })));
+        assert_eq!(
+            read_state(&dir, "a").expect("sidecar exists")["memory"],
+            serde_json::json!({ "k": 1 })
+        );
+    }
+
+    #[test]
+    fn memory_must_be_an_object() {
+        assert!(validate_artifact_memory(Some(serde_json::json!("x"))).is_err());
+        assert!(validate_artifact_memory(Some(serde_json::json!([1, 2]))).is_err());
+        assert_eq!(
+            validate_artifact_memory(Some(serde_json::Value::Null)).expect("null is reset"),
+            None
+        );
+        assert_eq!(validate_artifact_memory(None).expect("none is reset"), None);
+    }
+
+    #[test]
+    fn memory_over_the_size_limit_is_rejected() {
+        let big = "x".repeat(ARTIFACT_MEMORY_MAX_BYTES);
+        assert!(validate_artifact_memory(Some(serde_json::json!({ "k": big }))).is_err());
+
+        let ok = "x".repeat(1024);
+        assert!(validate_artifact_memory(Some(serde_json::json!({ "k": ok }))).is_ok());
+    }
+
+    /// 転送で引き継ぐのはメモリーだけ。ピン止めは転送先スコープのローカルな並び順なので拾わない
+    #[test]
+    fn read_state_memory_picks_only_memory() {
+        let dir = test_dir("read-memory");
+        set_pinned(&dir, "a", true);
+        set_memory(&dir, "a", Some(serde_json::json!({ "name": "taro" })));
+        assert_eq!(
+            read_state_memory(&artifact_state_path(&dir, "a")),
+            Some(serde_json::json!({ "name": "taro" }))
+        );
+
+        // ピン止めだけのサイドカー / 存在しないサイドカーは None
+        set_memory(&dir, "a", None);
+        assert_eq!(read_state_memory(&artifact_state_path(&dir, "a")), None);
+        assert_eq!(read_state_memory(&artifact_state_path(&dir, "missing")), None);
+    }
 }

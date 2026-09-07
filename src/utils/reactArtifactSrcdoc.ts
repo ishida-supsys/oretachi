@@ -4,6 +4,7 @@
  */
 
 import { ARTIFACT_LINK_INTERCEPT_JS } from "./artifactFrameLink";
+import { ARTIFACT_BRIDGE_JS } from "./artifactMemory";
 
 function htmlEscape(str: string): string {
   return str
@@ -69,6 +70,8 @@ const RUNTIME_JS =
   "  }" +
   "  function makeRequire(currentKey){" +
   "    var libs={'react':React,'react-dom':ReactDOM,'react-dom/client':ReactDOM,'react/jsx-runtime':React};" +
+  // メモリー / ブリッジ API。ARTIFACT_BRIDGE_JS がこのスクリプトより前に走っている
+  "    if(window.__oretachi)libs['oretachi']=window.__oretachi;" +
   "    return function req(name){" +
   "      if(libs[name]!==undefined)return libs[name];" +
   "      var resolved=(name.startsWith('./')||name.startsWith('../'))?resolvePath(currentKey,name):name;" +
@@ -142,10 +145,20 @@ export function buildVendorHead(react: string, reactDom: string, babel: string, 
  * vendorHead（buildVendorHead の結果）と content を組み合わせて完全な srcdoc を生成する。
  * content が変わるたびに呼ばれるが、ベンダー部分は含まない。
  * modules が指定された場合、各モジュールは require() で解決可能になる。
+ * memory はメモリー機能の初期値で、`require('oretachi')` から同期で読める。
  */
-export function buildReactSrcdoc(vendorHead: string, content: string, modules?: Record<string, string>): string {
+export function buildReactSrcdoc(
+  vendorHead: string,
+  content: string,
+  modules?: Record<string, string>,
+  memory?: Record<string, unknown>,
+): string {
   const modulesJson = modules && Object.keys(modules).length > 0
     ? htmlEscape(JSON.stringify(modules))
+    : "{}";
+  // 初回レンダリングでフォームを復元できるよう、メモリーも同期で読める形で埋め込む
+  const memoryJson = memory && Object.keys(memory).length > 0
+    ? htmlEscape(JSON.stringify(memory))
     : "{}";
   return (
     vendorHead +
@@ -154,6 +167,9 @@ export function buildReactSrcdoc(vendorHead: string, content: string, modules?: 
     '<div id="error-display" class="error-overlay" style="display:none"></div>\n' +
     '<textarea id="_source" style="display:none">' + htmlEscape(content) + "</textarea>\n" +
     '<textarea id="_modules" style="display:none">' + modulesJson + "</textarea>\n" +
+    '<textarea id="_memory" style="display:none">' + memoryJson + "</textarea>\n" +
+    // require('oretachi') が解決できるよう、RUNTIME_JS より先に window.__oretachi を作る
+    openTag(ARTIFACT_BRIDGE_JS) + "\n" +
     openTag(RUNTIME_JS) + "\n" +
     // React は要素を動的に差し替えるため、document 上の capture リスナーで拾う
     openTag(ARTIFACT_LINK_INTERCEPT_JS) + "\n" +

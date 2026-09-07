@@ -31,6 +31,11 @@ export interface ArtifactData extends ArtifactMeta {
  */
 export interface ArtifactState {
   pinned?: boolean;
+  /**
+   * React アーティファクトのメモリー（フォーム入力などの復元用 JSON ストア）。
+   * ピン止めと違い転送でも引き継ぐ（アーティファクトの中身に属する状態のため）。
+   */
+  memory?: Record<string, unknown>;
 }
 
 export interface ArtifactChangedEvent {
