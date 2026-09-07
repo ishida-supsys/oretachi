@@ -1,8 +1,14 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import ArtifactCodeView from "./ArtifactCodeView.vue";
 import { buildVendorHead, buildReactSrcdoc } from "../../utils/reactArtifactSrcdoc";
 import { readArtifactNavigateMessage } from "../../utils/artifactFrameLink";
+import {
+  ARTIFACT_BRIDGE_METHOD_MEMORY_SET,
+  readArtifactBridgeRequest,
+  postArtifactBridgeResult,
+  type ArtifactBridgeRequest,
+} from "../../utils/artifactMemory";
 
 type VendorScripts = { react: string; reactDom: string; babel: string; tailwind: string };
 
@@ -33,26 +39,95 @@ function loadVendors(): Promise<VendorScripts> {
 const props = defineProps<{
   content: string;
   modules?: Record<string, string>;
+  /** メモリーの初期値（サイドカーの `memory`）。初回レンダリングの復元にだけ使う */
+  memory?: Record<string, unknown>;
+  /** メモリーの保存。解決/棄却がそのまま iframe 内の setMemory の Promise になる */
+  saveMemory?: (memory: Record<string, unknown>) => Promise<void>;
 }>();
 
 const emit = defineEmits<{
   (e: "navigate", href: string): void;
+  /** メモリーの保存が失敗したとき。アーティファクト側は入力を受け付け続けるので UI で知らせる */
+  (e: "memory-error", message: string): void;
 }>();
 
 const frame = ref<HTMLIFrameElement | null>(null);
+
+type Mode = "preview" | "code";
+const mode = ref<Mode>("preview");
+
+/**
+ * メモリーは iframe の初期値としてしか使わない。
+ * 保存のたびに srcdoc を作り直すと iframe がリロードされて入力中のフォームが飛ぶため、
+ * 取り込み直すのは iframe がどうせ作り直されるときだけにする。
+ *
+ * 作り直されるのは content が変わったときだけ（mode 切替では iframe を v-show で残す。
+ * 破棄すると Preview へ戻った iframe がマウント時点の古いメモリーで起動し、
+ * 次の setMemory がそれを丸ごと書き戻して保存済みの入力を消してしまう）。
+ * アーティファクトの切り替えとリセットは、親が `:key` を進めて作り直す。
+ */
+const initialMemory = ref<Record<string, unknown>>({ ...(props.memory ?? {}) });
+watch(
+  () => props.content,
+  () => {
+    initialMemory.value = { ...(props.memory ?? {}) };
+  },
+);
+
+/** iframe からのブリッジ要求を処理して応答を返す */
+async function handleBridgeRequest(request: ArtifactBridgeRequest) {
+  if (request.method !== ARTIFACT_BRIDGE_METHOD_MEMORY_SET) {
+    postArtifactBridgeResult(frame.value, request.requestId, {
+      ok: false,
+      error: `unsupported method: ${request.method}`,
+    });
+    return;
+  }
+
+  const memory = request.params.memory;
+  if (!memory || typeof memory !== "object" || Array.isArray(memory)) {
+    postArtifactBridgeResult(frame.value, request.requestId, {
+      ok: false,
+      error: "memory must be a plain object",
+    });
+    return;
+  }
+  if (!props.saveMemory) {
+    postArtifactBridgeResult(frame.value, request.requestId, {
+      ok: false,
+      error: "memory is not available for this artifact",
+    });
+    return;
+  }
+
+  try {
+    await props.saveMemory(memory as Record<string, unknown>);
+    postArtifactBridgeResult(frame.value, request.requestId, { ok: true });
+  } catch (e) {
+    // 上限超過などで保存が落ちても iframe は楽観更新した値を表示し続ける。
+    // アーティファクト側が Promise を捨てていると誰も気づけないので親にも上げる
+    const error = e instanceof Error ? e.message : String(e);
+    console.error("set_artifact_memory failed", e);
+    emit("memory-error", error);
+    postArtifactBridgeResult(frame.value, request.requestId, { ok: false, error });
+  }
+}
 
 // sandbox の opaque origin では event.origin が "null" になり検証に使えないため、
 // 送信元は contentWindow の同一性で判定する
 function onMessage(event: MessageEvent) {
   const href = readArtifactNavigateMessage(event, frame.value);
-  if (href) emit("navigate", href);
+  if (href) {
+    emit("navigate", href);
+    return;
+  }
+  const request = readArtifactBridgeRequest(event, frame.value);
+  if (request) void handleBridgeRequest(request);
 }
 
 onMounted(() => window.addEventListener("message", onMessage));
 onBeforeUnmount(() => window.removeEventListener("message", onMessage));
 
-type Mode = "preview" | "code";
-const mode = ref<Mode>("preview");
 // コードビューで選択中のファイル: "" = エントリポイント、それ以外はモジュール名
 const selectedFile = ref<string>("");
 
@@ -80,7 +155,7 @@ const vendorHead = computed(() => {
 // content が変わっても vendorHead は再計算されない
 const srcdocHtml = computed(() => {
   if (!vendorHead.value) return "";
-  return buildReactSrcdoc(vendorHead.value, props.content, props.modules);
+  return buildReactSrcdoc(vendorHead.value, props.content, props.modules, initialMemory.value);
 });
 
 const moduleNames = computed(() => Object.keys(props.modules ?? {}));
@@ -122,7 +197,9 @@ const codeContent = computed(() =>
       </button>
     </div>
 
-    <div v-if="mode === 'preview'" class="preview-area">
+    <!-- v-show で残すのは、iframe を作り直すとアーティファクト内の React state と
+         debounce 中のメモリー保存が飛ぶため。Code タブは重いので必要になってから作る -->
+    <div v-show="mode === 'preview'" class="preview-area">
       <div v-if="vendorLoading" class="vendor-loading">
         <span class="pi pi-spin pi-spinner" />
       </div>
@@ -141,7 +218,7 @@ const codeContent = computed(() =>
       />
     </div>
 
-    <div v-else class="code-area">
+    <div v-if="mode === 'code'" class="code-area">
       <div v-if="moduleNames.length > 0" class="module-tabs">
         <button
           :class="{ active: selectedFile === '' }"

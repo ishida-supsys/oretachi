@@ -174,6 +174,62 @@ async function togglePin(artifactId: string) {
   }
 }
 
+/**
+ * React アーティファクトのメモリー（フォーム入力などの復元用 JSON ストア）を保存する。
+ * `memory` が null ならリセット（サイドカーからキーごと削除）。
+ * 反映は成功後にだけ行い、保存に失敗した値が次回の初期値にならないようにする。
+ */
+async function saveArtifactMemory(
+  artifactId: string,
+  memory: Record<string, unknown> | null,
+): Promise<void> {
+  await invoke("set_artifact_memory", { scope, scopeId, artifactId, memory });
+  const next = { ...(states.value[artifactId] ?? {}) };
+  if (memory) next.memory = memory;
+  else delete next.memory;
+  states.value = { ...states.value, [artifactId]: next };
+}
+
+/**
+ * メモリーのリセット。iframe は初期値を srcdoc から同期で読むため、
+ * 消しただけでは表示中のフォームが変わらない。キーを進めて作り直させる。
+ */
+const reactViewSeq = ref(0);
+
+const selectedMemory = computed(() =>
+  selectedId.value ? states.value[selectedId.value]?.memory : undefined,
+);
+
+const hasSelectedMemory = computed(() => {
+  const memory = selectedMemory.value;
+  return !!memory && Object.keys(memory).length > 0;
+});
+
+/** メモリーの保存失敗。アーティファクト側は入力を受け付け続けるので必ず見せる */
+function onMemoryError(msg: string) {
+  toast.add({ severity: "error", summary: t("memory.saveFailed"), detail: msg, life: 6000 });
+}
+
+async function resetMemory() {
+  const artifactId = selectedId.value;
+  if (!artifactId) return;
+
+  const confirmed = await ask(t("memory.resetConfirm"), {
+    title: t("memory.resetTitle"),
+    kind: "warning",
+  });
+  if (!confirmed) return;
+
+  try {
+    await saveArtifactMemory(artifactId, null);
+    reactViewSeq.value += 1;
+    toast.add({ severity: "success", summary: t("memory.resetDone"), life: 3000 });
+  } catch (e) {
+    console.error("set_artifact_memory failed", e);
+    await message(String(e), { title: t("memory.resetFailed"), kind: "error" });
+  }
+}
+
 const history = useArtifactHistory();
 const { canGoBack, canGoForward } = history;
 
@@ -284,9 +340,11 @@ async function onNavigate(href: string) {
 
 async function refreshSelected(artifactId: string, command: string) {
   await loadList();
+  // サイドカーは削除で消えるだけでなく、転送（同じ ID への上書き = command "create"）で
+  // メモリーが差し替わる。据え置くと古い memory を初期値にした iframe が
+  // 次の保存でディスク上の新しい値を潰すため、どの command でも読み直す
+  await loadStates();
   if (command === "delete") {
-    // 本体と一緒にサイドカーも消えるので、ピン止め状態を読み直す
-    await loadStates();
     history.prune(artifactId);
     if (selectedId.value === artifactId) {
       selectedId.value = null;
@@ -577,6 +635,18 @@ onUnmounted(() => {
             </span>
           </div>
           <div class="header-actions">
+            <!-- リポジトリスコープにはメニューが無いので、リセットはヘッダーに直接出す
+                 （転送でメモリーを引き継ぐため、転送先でもリセットは必要） -->
+            <button
+              v-if="isRepositoryScope && selectedArtifact.content_type === 'application/vnd.ant.react'"
+              class="btn-header"
+              :disabled="!hasSelectedMemory"
+              :title="t('memory.resetTooltip')"
+              @click="resetMemory"
+            >
+              <i class="pi pi-eraser" />
+              <span>{{ t("memory.resetLabel") }}</span>
+            </button>
             <button
               v-if="!isRepositoryScope"
               class="btn-header"
@@ -608,6 +678,16 @@ onUnmounted(() => {
             >
               <span class="pi pi-upload" />
               {{ repositoryName ? t("transfer.labelNamed", { repository: repositoryName }) : t("transfer.label") }}
+            </button>
+            <button
+              v-if="selectedArtifact.content_type === 'application/vnd.ant.react'"
+              class="popup-item"
+              :disabled="!hasSelectedMemory"
+              :title="t('memory.resetTooltip')"
+              @click="withMenuHidden(resetMemory)"
+            >
+              <span class="pi pi-eraser" />
+              {{ t("memory.resetLabel") }}
             </button>
             <div class="popup-divider" />
             <button
@@ -646,9 +726,13 @@ onUnmounted(() => {
           />
           <ArtifactReactView
             v-else-if="selectedArtifact.content_type === 'application/vnd.ant.react'"
+            :key="`${selectedArtifact.id}:${reactViewSeq}`"
             :content="selectedArtifact.content"
             :modules="selectedArtifact.modules"
+            :memory="selectedMemory"
+            :save-memory="(m: Record<string, unknown>) => saveArtifactMemory(selectedArtifact!.id, m)"
             @navigate="onNavigate"
+            @memory-error="onMemoryError"
           />
           <ArtifactUrlView
             v-else-if="selectedArtifact.content_type === URL_ARTIFACT_CONTENT_TYPE"
@@ -1074,6 +1158,15 @@ onUnmounted(() => {
       "done": "Transferred to {repository}",
       "failed": "Transfer failed"
     },
+    "memory": {
+      "resetLabel": "Reset memory",
+      "resetTooltip": "Clear the saved form state of this React artifact",
+      "resetTitle": "Reset memory",
+      "resetConfirm": "Clear the saved form state of this artifact?",
+      "resetDone": "Memory reset",
+      "resetFailed": "Failed to reset memory",
+      "saveFailed": "Failed to save memory"
+    },
     "delete": {
       "label": "Delete",
       "title": "Delete artifact",
@@ -1116,6 +1209,15 @@ onUnmounted(() => {
       "overwriteConfirm": "{repository} に同じ ID のアーティファクトが既にあります。上書きしますか？",
       "done": "{repository} に転送しました",
       "failed": "転送に失敗しました"
+    },
+    "memory": {
+      "resetLabel": "メモリーをリセット",
+      "resetTooltip": "この React アーティファクトに保存されたフォーム入力を消します",
+      "resetTitle": "メモリーのリセット",
+      "resetConfirm": "このアーティファクトに保存されたフォーム入力を消しますか？",
+      "resetDone": "メモリーをリセットしました",
+      "resetFailed": "メモリーのリセットに失敗しました",
+      "saveFailed": "メモリーの保存に失敗しました"
     },
     "delete": {
       "label": "削除",
