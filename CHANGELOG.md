@@ -6,6 +6,42 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.31.0] - 2026-09-08
+
+### Added
+- React アーティファクトのメモリー機能と postMessage ブリッジを追加 (#202)
+- React アーティファクトからの MCP ツール呼び出しと表示中ロックを追加 (#203)
+- アーティファクトからのクロスワークツリー送信を購読前提で許可 (#211)
+- アーティファクト間のリンク遷移を追加 (#201)
+- アーティファクトウィンドウに検索・ピン止め・単体削除・履歴ナビを追加 (#200)
+- html アーティファクトに CSP を付与 (#205)
+- タスクの一覧・実行結果を参照する `oretachi_list_tasks` を追加 (#182)
+- 通知が溜まっているワークツリーを列挙する `oretachi_list_worktree_notifications` を追加 (#182)
+- アーカイブ・アプリ情報の参照と通知リセットの MCP ツールを追加 (#182)
+- 通知レポートスキルを追加 (#204)
+- teamwork の計画フローに停止条件(人の判定必須項目)を導入 (#174)
+- PR で type-check と cargo check を実行する CI を追加 (#193)
+
+### Fixed
+- PTY へ本文と Enter を別の write に分けて送信するよう修正 (#204)
+- 通知クリアの取りこぼし窓を塞ぎ、検索の大小畳み込みを列側と揃えた (#182)
+- 通知写しの整合性と LIKE のワイルドカードを修正 (#182)
+- `add_task` の追加先をデフォルトワークグループにするよう修正 (#181)
+- `add_task` 由来のタスク追加でホームの表示ワークグループを切り替えないよう修正 (#181)
+- シャットダウン中のアーティファクト自動オープンを抑止 (#186)
+- メインウィンドウ終了時に残るアーティファクトウィンドウを道連れで閉じるよう修正 (#186)
+- bug-review の指摘を反映 (#183, #184, #201, #202, #203, #204, #211)
+
+### Changed
+- `oretachi_list_notifications` を `oretachi_list_worktree_notifications` へ改名 (#182)
+- ワークツリーのグループ移動をタブ D&D ＋ダイアログにした (#184)
+- グループタブのドロップ先ハイライトを外側まで広げた (#184)
+- ワークツリーメニューの設定項目を専用ダイアログに集約した (#183)
+- teamwork-child で対応開始前の `set_description` を必須にした (#185)
+- teamwork-parent のトレイ通知オフを計画承認後へ遅らせた (#187)
+- 表示中ロックが守るのは表示中の1件だけであることをドキュメントに明記 (#203)
+- CI のジョブ名が required status check の context であることを明記 (#199)
+
 ## [0.30.0] - 2026-09-04
 
 ### Added
@@ -669,7 +705,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.30.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.31.0...HEAD
+[0.31.0]: https://github.com/ishida-supsys/oretachi/compare/0.30.0...0.31.0
 [0.30.0]: https://github.com/ishida-supsys/oretachi/compare/0.29.2...0.30.0
 [0.29.2]: https://github.com/ishida-supsys/oretachi/compare/0.29.1...0.29.2
 [0.29.1]: https://github.com/ishida-supsys/oretachi/compare/0.29.0...0.29.1
