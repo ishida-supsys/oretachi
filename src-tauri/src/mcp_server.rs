@@ -623,7 +623,7 @@ pub struct ArtifactParams {
     pub content_type: Option<String>,
     #[schemars(description = "アーティファクトのタイトル (create時必須)")]
     pub title: Option<String>,
-    #[schemars(description = "アーティファクトの中身 (create/rewrite時必須)。markdown / html / react では `artifact:` リンクで他のアーティファクトへ遷移できる: 同一ワークツリー内は `artifact:<アーティファクトID>`、他ワークツリー宛は `artifact://worktree/<worktreeId>/<アーティファクトID>`、リポジトリ保管庫宛は `artifact://repository/<encodeURIComponent(リポジトリの絶対パス)>/<アーティファクトID>`。react ではメモリー（アーティファクトごとに永続化される JSON ストア）が使える: `import { useMemory } from 'oretachi'` して `const [value, setValue] = useMemory('key', 初期値)`。書き込みはデバウンスされ、ウィンドウを閉じて開き直しても・リポジトリへ転送しても復元される（合計 1MB まで。他に getMemory / setMemory / clearMemory / subscribeMemory がある）。さらに `import { callTool } from 'oretachi'` で oretachi の MCP ツールを呼べる: `await callTool('oretachi_write_terminal', { session_id: 12, text: 'echo hi' })`。呼べるのは oretachi_write_terminal / oretachi_add_task / notify_worktree / oretachi_poll_inbox / oretachi_ack_message / oretachi_read_terminal / oretachi_list_worktree_notifications だけで、terminal_id / project_dir / notify_worktree の宛先 / add_task の追加先ワークグループはアーティファクトの置き場所のワークツリーへ強制される(session_id も同じワークツリーの稼働中端末に限る)。戻り値はツールの結果を JSON.parse したもの(パースできなければ文字列)。**制約**: アーティファクトからは oretachi_list_terminals が呼べないため、read/write_terminal に渡す session_id は生成時にコードへ埋め込むこと(アプリ再起動やタブ再作成で無効になる)。oretachi_poll_inbox / oretachi_ack_message / notify_worktree(event_kind 付き) はそのワークツリーで AI エージェント端末がちょうど1つ走行中でないとエラーになるので、AI セッション終了後も動かしたいボタンには使わないこと")]
+    #[schemars(description = "アーティファクトの中身 (create/rewrite時必須)。markdown / html / react では `artifact:` リンクで他のアーティファクトへ遷移できる: 同一ワークツリー内は `artifact:<アーティファクトID>`、他ワークツリー宛は `artifact://worktree/<worktreeId>/<アーティファクトID>`、リポジトリ保管庫宛は `artifact://repository/<encodeURIComponent(リポジトリの絶対パス)>/<アーティファクトID>`。react ではメモリー（アーティファクトごとに永続化される JSON ストア）が使える: `import { useMemory } from 'oretachi'` して `const [value, setValue] = useMemory('key', 初期値)`。書き込みはデバウンスされ、ウィンドウを閉じて開き直しても・リポジトリへ転送しても復元される（合計 1MB まで。他に getMemory / setMemory / clearMemory / subscribeMemory がある）。さらに `import { callTool } from 'oretachi'` で oretachi の MCP ツールを呼べる: `await callTool('oretachi_write_terminal', { session_id: 12, text: 'echo hi' })`。呼べるのは oretachi_write_terminal / oretachi_add_task / notify_worktree / oretachi_poll_inbox / oretachi_ack_message / oretachi_read_terminal / oretachi_list_worktree_notifications だけで、terminal_id / project_dir / notify_worktree の宛先 / add_task の追加先ワークグループはアーティファクトの置き場所のワークツリーへ強制される(session_id は同じワークツリーの稼働中端末、または**アーティファクトの置き場所ワークツリーが oretachi_subscribe_worktree で購読しているワークツリー**の稼働中端末に限る)。戻り値はツールの結果を JSON.parse したもの(パースできなければ文字列)。**制約**: アーティファクトからは oretachi_list_terminals が呼べないため、read/write_terminal に渡す session_id は生成時にコードへ埋め込むこと(アプリ再起動やタブ再作成で無効になる)。oretachi_poll_inbox / oretachi_ack_message / notify_worktree(event_kind 付き) はそのワークツリーで AI エージェント端末がちょうど1つ走行中でないとエラーになるので、AI セッション終了後も動かしたいボタンには使わないこと。他ワークツリーの端末へ read/write_terminal したい場合は、アーティファクトの置き場所ワークツリー側から宛先を購読しておくこと(逆向き＝宛先側が置き場所を購読しているだけでは通らない)")]
     pub content: Option<String>,
     #[schemars(description = "コード言語 (type=application/vnd.ant.code の時のみ)")]
     pub language: Option<String>,
@@ -3936,11 +3936,20 @@ struct SubscriberIdentity {
 ///   `oretachi_read_terminal` / `oretachi_write_terminal` に渡す `session_id` は
 ///   **アーティファクトを生成した AI がコードへ埋め込む**しかない。session_id は PTY
 ///   セッションごとの採番でアプリ再起動やタブ再作成で変わるため、埋め込んだ値は
-///   いずれ無効になる（スコープ検査でエラーになるだけで、他人の端末には届かない）。
+///   いずれ無効になる（スコープ検査でエラーになるだけで、無関係な端末には届かない）。
 /// - **`oretachi_write_terminal` は AI 端末に限定していない。** 素のシェルタブへも書ける
 ///   ＝アーティファクトの JS から任意コマンドを実行できる。これは
 ///   「アーティファクトからターミナルを操作する」という機能そのものの性質で、
 ///   ホワイトリスト＋ワークツリースコープが唯一の防波堤という前提を取っている。
+/// - **ワークツリースコープは「自ワークツリー固定」ではなく「自ワークツリー + 購読先」（#211）。**
+///   `oretachi_read_terminal` / `oretachi_write_terminal` は、**アーティファクトの置き場所
+///   ワークツリーが宛先ワークツリーを購読しているとき**に限り別ワークツリーの端末へも通る
+///   （`find_cross_worktree_grant`）。購読は人またはそのワークツリーのエージェントが
+///   `oretachi_subscribe_worktree` で明示的に張った関係なので、「関わると宣言した相手にだけ
+///   書ける」形に範囲が限定される。**向きは購読者側が呼び出し元。** 宛先側が呼び出し元を
+///   購読しているだけでは通らない（通すと相手が一方的に自分へ書き込み権を渡せてしまう）。
+///   なお `*` 購読を張っているワークツリーのアーティファクトは全ワークツリーの端末へ
+///   書けることになる（#211 でユーザーと合意済み）。
 /// - **`oretachi_poll_inbox` / `oretachi_ack_message` /
 ///   `notify_worktree`（`event_kind` 付き）は AI セッション稼働中しか使えない。**
 ///   `terminal_id` を受け取らない（本人性が検証できないため）ので
@@ -4067,6 +4076,118 @@ pub(crate) fn normalize_artifact_tool_params(
     Ok(obj)
 }
 
+/// クロスワークツリー送信を許可した根拠（#211）。監査ログに残すために持ち回す。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CrossWorktreeGrant {
+    /// 根拠になった購読の ID
+    pub subscription_id: String,
+    /// その購読の `target`。ワイルドカードなら `*` / `workgroup:<id>` / `repo:<name>` のまま
+    pub target: String,
+}
+
+/// `target` の具体性。同じ宛先へ複数の購読が当たったとき、監査ログには
+/// **一番具体的な購読**を残したい（`*` を根拠に出されると何が効いたのか分からない）。
+fn target_specificity(target: &str, dest_worktree_id: &str) -> u8 {
+    if target == dest_worktree_id {
+        0
+    } else if target.starts_with(crate::event_db::TARGET_WORKGROUP_PREFIX) {
+        1
+    } else if target.starts_with(crate::event_db::TARGET_REPO_PREFIX) {
+        2
+    } else {
+        3 // `*`
+    }
+}
+
+/// 呼び出し元ワークツリーが宛先ワークツリーを購読しているかを判定する（#211）。
+///
+/// **向きが要点。** 見るのは「呼び出し元ワークツリーが購読者側(`subscriber_worktree_id`)で、
+/// その購読の `target` が宛先ワークツリーを指している」ケースだけ。宛先側が呼び出し元を
+/// 購読しているだけでは通さない。取り違えると防波堤が反転し、「自分を購読してきた相手の
+/// 端末へ書ける」= 相手が一方的に自分へ書き込み権を渡してしまう形になる。
+///
+/// `dest_targets` は宛先ワークツリーにマッチしうる `target` の全集合
+/// （`event_db::matching_targets` の戻り値。ワイルドカードは解決済みの形で渡される）。
+/// ワイルドカード購読（`*` / `workgroup:` / `repo:`）も許可対象に含める（#211 でユーザー確認済み）。
+/// `event_kinds` は問わない: 購読の存在自体を「関わると宣言した関係」とみなす判断。
+///
+/// `state` / `expires_at` の条件は `event_db::fanout` と同一に揃えている。SQL 側でも
+/// 同じ条件で絞っているが、ここでも再確認して純粋関数単体で判定が閉じるようにしている。
+pub(crate) fn find_cross_worktree_grant(
+    subs: &[crate::event_db::SubscriptionRow],
+    caller_worktree_id: &str,
+    dest_worktree_id: &str,
+    dest_targets: &[String],
+    now: i64,
+) -> Option<CrossWorktreeGrant> {
+    subs.iter()
+        .filter(|sub| {
+            sub.subscriber_worktree_id.as_deref() == Some(caller_worktree_id)
+                && (sub.state == crate::event_db::STATE_ACTIVE
+                    || sub.state == crate::event_db::STATE_ORPHANED)
+                && sub.expires_at.map(|e| e > now).unwrap_or(true)
+                && dest_targets.contains(&sub.target)
+        })
+        .min_by_key(|sub| target_specificity(&sub.target, dest_worktree_id))
+        .map(|sub| CrossWorktreeGrant {
+            subscription_id: sub.id.clone(),
+            target: sub.target.clone(),
+        })
+}
+
+/// 別ワークツリーの端末への `read/write_terminal` を、購読関係があるときだけ許可する（#211）。
+///
+/// 許可できない場合のエラー文言には**「購読が必要」と解除条件を必ず書く**。
+/// 書かないとアーティファクトを叩いているエージェントが原因を推測できず無限にリトライする。
+async fn authorize_cross_worktree_session(
+    app_handle: &AppHandle,
+    settings: &crate::settings::AppSettings,
+    caller_worktree_id: &str,
+    caller_worktree_name: &str,
+    dest_worktree_id: &str,
+) -> Result<CrossWorktreeGrant, String> {
+    let pool = app_handle
+        .try_state::<crate::event_db::EventPool>()
+        .map(|p| p.0.clone())
+        .ok_or_else(|| {
+            "イベント DB が初期化されていないため、他ワークツリーの端末への送信を許可できません（oretachi のログを確認してください）".to_string()
+        })?;
+
+    let dest = settings.worktrees.iter().find(|w| w.id == dest_worktree_id);
+    let dest_name = dest.map(|w| w.name.clone()).unwrap_or_else(|| dest_worktree_id.to_string());
+    // ワイルドカード購読の照合に必要な所属情報。ワークグループ未設定時に先頭グループへ
+    // 倒すのは `resolve_event_scope`（イベント発火側）と同じ規則。揃えないと
+    // 「`workgroup:` 購読には配送されるのに返答は書けない」というズレになる
+    let repo = dest.map(|w| w.repository_name.clone());
+    let group = resolve_workgroup_by_id(settings, dest.and_then(|w| w.workgroup_id.as_deref()))
+        .map(|g| g.id.clone());
+    let dest_targets =
+        crate::event_db::matching_targets(dest_worktree_id, group.as_deref(), repo.as_deref());
+
+    let now = crate::event_db::now_ms();
+    let subs = crate::event_db::list_subscriptions_by_subscriber_worktree(
+        &pool,
+        caller_worktree_id,
+        now,
+    )
+    .await?;
+
+    find_cross_worktree_grant(&subs, caller_worktree_id, dest_worktree_id, &dest_targets, now)
+        .ok_or_else(|| {
+            format!(
+                "このアーティファクトはワークツリー '{}' に置かれており、別ワークツリー '{}' の端末を操作しようとしています。他ワークツリーの端末へ送るには、**'{}' 側が '{}' を購読している**必要があります（oretachi_subscribe_worktree(target: \"{}\") を '{}' の AI 端末から実行する。'{}' 側が '{}' を購読しているだけでは通りません）。購読が張られるまでこの呼び出しは何度試しても失敗します",
+                caller_worktree_name,
+                dest_name,
+                caller_worktree_name,
+                dest_name,
+                dest_name,
+                caller_worktree_name,
+                dest_name,
+                caller_worktree_name,
+            )
+        })
+}
+
 /// ホワイトリスト済みツールを、アーティファクトの置き場所のワークツリーへスコープを固定して呼ぶ。
 ///
 /// スコープの強制:
@@ -4074,7 +4195,9 @@ pub(crate) fn normalize_artifact_tool_params(
 ///   terminal_id の本人性は検証できないため、自由指定を許すと他タブの inbox を
 ///   読み・ack できてしまう。代わりに `project_dir` を呼び出し元ワークツリーで上書きし、
 ///   「そのワークツリーで走っている AI 端末」へ解決させる。
-/// - `session_id` を取るツールは、そのセッションが呼び出し元ワークツリーの端末か検証する。
+/// - `session_id` を取るツールは、そのセッションが**生きている**端末であることと、
+///   呼び出し元ワークツリーの端末か、そうでなければ呼び出し元ワークツリーが宛先ワークツリーを
+///   購読していること（#211）を検証する。
 /// - `notify_worktree` の宛先と `oretachi_add_task` の追加先ワークグループは自分のものへ固定する。
 ///
 /// パラメータの書き換えは `normalize_artifact_tool_params`（純粋関数）に寄せている。
@@ -4103,41 +4226,66 @@ pub(crate) async fn call_tool_for_artifact(
         workgroup_id.as_deref(),
     )?;
 
-    // session_id を取るツールは、対象が自分のワークツリーの**生きている**端末かを確かめる。
-    // 終了済みセッションへ書いても無意味なので、そちらもここで弾く
+    // session_id を取るツールは、対象が**生きている**端末かを確かめる。
+    // 終了済みセッションへ書いても無意味なので、そちらもここで弾く。
+    // 自ワークツリー宛は無条件、別ワークツリー宛は購読関係があるときだけ通す（#211）
+    let mut cross: Option<(String, CrossWorktreeGrant)> = None;
     if matches!(tool, "oretachi_read_terminal" | "oretachi_write_terminal") {
         let session_id: u32 = obj
             .get("session_id")
             .and_then(|v| v.as_u64())
             .and_then(|v| u32::try_from(v).ok())
             .ok_or_else(|| format!("{} には session_id (数値) が必須です", tool))?;
-        let pty = app_handle.state::<crate::pty_manager::PtyManager>();
-        let belongs = pty.list_sessions().into_iter().any(|s| {
-            s.session_id == session_id
-                && s.exit_code.is_none()
-                && s.cwd
-                    .as_deref()
-                    .and_then(|c| resolve_worktree_by_cwd(&settings, c))
-                    .map(|w| w.id == worktree_id)
-                    .unwrap_or(false)
-        });
-        if !belongs {
+        // State は await を挟む前に手放す（他の DB 経路と同じ流儀）
+        let dest_worktree_id = {
+            let pty = app_handle.state::<crate::pty_manager::PtyManager>();
+            pty.list_sessions()
+                .into_iter()
+                .find(|s| s.session_id == session_id && s.exit_code.is_none())
+                .and_then(|s| s.cwd)
+                .and_then(|c| resolve_worktree_by_cwd(&settings, &c).map(|w| w.id.clone()))
+        };
+        let Some(dest_worktree_id) = dest_worktree_id else {
             return Err(format!(
-                "session_id '{}' はワークツリー '{}' の稼働中ターミナルではありません。アーティファクトから操作できるのは自分のワークツリーのターミナルだけです",
-                session_id, worktree_name
+                "session_id '{}' は稼働中のターミナルとして見つかりません（終了済み、またはワークツリーへ紐付かない端末です）。session_id はアプリ再起動やタブ再作成で変わるため、コードへ埋め込んだ値は無効になっていることがあります",
+                session_id
             ));
+        };
+        if dest_worktree_id != worktree_id {
+            let grant = authorize_cross_worktree_session(
+                app_handle,
+                &settings,
+                worktree_id,
+                &worktree_name,
+                &dest_worktree_id,
+            )
+            .await?;
+            cross = Some((dest_worktree_id, grant));
         }
     }
 
     let args = serde_json::Value::Object(obj);
-    // 監査ログ。既存の `[mcp] ...` と同じ粒度で、どのアーティファクトが何を呼んだか残す
-    log::info!(
-        "[mcp] artifact_call_tool tool={} artifact_id={} worktree_id={} params={}",
-        tool,
-        artifact_id,
-        worktree_id,
-        args
-    );
+    // 監査ログ。既存の `[mcp] ...` と同じ粒度で、どのアーティファクトが何を呼んだか残す。
+    // クロスワークツリー送信のときは宛先と根拠になった購読も残す（#211）
+    match &cross {
+        Some((dest, grant)) => log::info!(
+            "[mcp] artifact_call_tool tool={} artifact_id={} worktree_id={} cross_worktree_dest={} via_subscription={} target={} params={}",
+            tool,
+            artifact_id,
+            worktree_id,
+            dest,
+            grant.subscription_id,
+            grant.target,
+            args
+        ),
+        None => log::info!(
+            "[mcp] artifact_call_tool tool={} artifact_id={} worktree_id={} params={}",
+            tool,
+            artifact_id,
+            worktree_id,
+            args
+        ),
+    }
 
     let peer_registry = app_handle.state::<McpPeerRegistry>().0.clone();
     let service = NotifyService::for_direct_call(app_handle.clone(), peer_registry);
@@ -6225,6 +6373,123 @@ mod tests {
         assert!(normalize("oretachi_poll_inbox", serde_json::json!([1])).is_err());
         // null は「パラメータ無し」として通す
         assert!(normalize("oretachi_list_worktree_notifications", serde_json::Value::Null).is_ok());
+    }
+
+    // ─── #211: 購読前提のクロスワークツリー送信 ──────────────────────────────
+
+    /// `subscriber_worktree_id` が `caller` で `target` を購読している行。
+    /// 既定は active / 無期限。個別の条件はテスト側で上書きする。
+    fn sub(id: &str, subscriber_worktree_id: &str, target: &str) -> crate::event_db::SubscriptionRow {
+        crate::event_db::SubscriptionRow {
+            id: id.into(),
+            subscriber_terminal_id: format!("term-{}", id),
+            subscriber_worktree_id: Some(subscriber_worktree_id.into()),
+            subscriber_agent_session: None,
+            target: target.into(),
+            event_kinds: r#"["worktree.closed"]"#.into(),
+            delivery: crate::event_db::DELIVERY_TURN_END.into(),
+            spawn_if_closed: 0,
+            created_at: 0,
+            expires_at: None,
+            state: crate::event_db::STATE_ACTIVE.into(),
+            orphaned_at: None,
+        }
+    }
+
+    /// 宛先 `dest`（ワークグループ `wg-1` / リポジトリ `oretachi`）にマッチしうる target 全集合。
+    fn dest_targets() -> Vec<String> {
+        crate::event_db::matching_targets("dest", Some("wg-1"), Some("oretachi"))
+    }
+
+    fn grant(subs: &[crate::event_db::SubscriptionRow]) -> Option<CrossWorktreeGrant> {
+        find_cross_worktree_grant(subs, "caller", "dest", &dest_targets(), 1_000)
+    }
+
+    #[test]
+    fn cross_worktree_grant_accepts_exact_target() {
+        let g = grant(&[sub("s1", "caller", "dest")]).expect("購読済みなら許可される");
+        assert_eq!(g.subscription_id, "s1");
+        assert_eq!(g.target, "dest");
+    }
+
+    /// `*` / `workgroup:` / `repo:` のワイルドカード購読も許可対象（#211 でユーザー確認済み）
+    #[test]
+    fn cross_worktree_grant_accepts_wildcard_targets() {
+        for target in ["*", "workgroup:wg-1", "repo:oretachi"] {
+            assert!(
+                grant(&[sub("s1", "caller", target)]).is_some(),
+                "{} は許可されるべき",
+                target
+            );
+        }
+    }
+
+    /// 別のワークグループ / 別リポジトリのワイルドカードは宛先にマッチしない
+    #[test]
+    fn cross_worktree_grant_rejects_wildcards_for_other_scopes() {
+        for target in ["workgroup:wg-other", "repo:other", "other-worktree"] {
+            assert!(
+                grant(&[sub("s1", "caller", target)]).is_none(),
+                "{} は拒否されるべき",
+                target
+            );
+        }
+    }
+
+    /// **向きを取り違えると防波堤が反転する。** 宛先側が呼び出し元を購読しているだけでは通さない
+    #[test]
+    fn cross_worktree_grant_rejects_reverse_subscription() {
+        assert!(grant(&[sub("s1", "dest", "caller")]).is_none());
+        // 宛先側が `*` を張っていても（＝呼び出し元も購読対象に含んでいても）通さない
+        assert!(grant(&[sub("s1", "dest", "*")]).is_none());
+    }
+
+    /// `event_kinds` は問わない（購読の存在自体を「関わると宣言した関係」とみなす）
+    #[test]
+    fn cross_worktree_grant_ignores_event_kinds() {
+        let mut s = sub("s1", "caller", "dest");
+        s.event_kinds = r#"[]"#.into();
+        assert!(grant(&[s]).is_some());
+    }
+
+    /// `state` / `expires_at` の条件は `fanout` と同一。orphaned は許可、期限切れは除外
+    #[test]
+    fn cross_worktree_grant_matches_fanout_state_and_expiry() {
+        let mut orphaned = sub("s1", "caller", "dest");
+        orphaned.state = crate::event_db::STATE_ORPHANED.into();
+        assert!(grant(&[orphaned]).is_some(), "orphaned は許可");
+
+        let mut expired = sub("s2", "caller", "dest");
+        expired.expires_at = Some(999); // now = 1_000
+        assert!(grant(&[expired]).is_none(), "期限切れは拒否");
+
+        let mut alive = sub("s3", "caller", "dest");
+        alive.expires_at = Some(1_001);
+        assert!(grant(&[alive]).is_some(), "期限内は許可");
+    }
+
+    /// `subscriber_worktree_id` が逆引き不能（None）な購読は根拠にできない
+    #[test]
+    fn cross_worktree_grant_rejects_subscription_without_subscriber_worktree() {
+        let mut s = sub("s1", "caller", "dest");
+        s.subscriber_worktree_id = None;
+        assert!(grant(&[s]).is_none());
+    }
+
+    /// 複数当たったときは**一番具体的な購読**を根拠として返す（監査ログに `*` だけ残ると
+    /// 何が効いたのか分からなくなる）
+    #[test]
+    fn cross_worktree_grant_prefers_the_most_specific_subscription() {
+        let subs = vec![
+            sub("wild", "caller", "*"),
+            sub("repo", "caller", "repo:oretachi"),
+            sub("group", "caller", "workgroup:wg-1"),
+            sub("exact", "caller", "dest"),
+        ];
+        assert_eq!(grant(&subs).unwrap().subscription_id, "exact");
+        assert_eq!(grant(&subs[..3]).unwrap().subscription_id, "group");
+        assert_eq!(grant(&subs[..2]).unwrap().subscription_id, "repo");
+        assert_eq!(grant(&subs[..1]).unwrap().subscription_id, "wild");
     }
 
     /// Windows の `Path::join` はドライブ相対パス (`C:evil`) で結合元を丸ごと置換するため、

@@ -1446,6 +1446,31 @@ pub async fn list_all_subscriptions(
     .map_err(|e| e.to_string())
 }
 
+/// あるワークツリーが**購読者側として**張っている購読を返す（#211）。
+///
+/// `fanout` は「イベントの発火元 → 購読」の向きで引くが、こちらは逆向きに
+/// 「購読者ワークツリー → その購読が向いている先」を引く。アーティファクトからの
+/// クロスワークツリー送信の許可判定（`call_tool_for_artifact`）に使う。
+///
+/// 絞り込み条件は `fanout` の WHERE 句と同一に揃えている（`active` + `orphaned` を拾い、
+/// `expires_at` 切れは除外）。**揃えていないと「配送はされるのに返答は書けない」/
+/// その逆の非対称が生まれる。** `target` の突合と最終判定は
+/// `mcp_server::find_cross_worktree_grant`（純粋関数）で行う。
+pub async fn list_subscriptions_by_subscriber_worktree(
+    pool: &SqlitePool,
+    subscriber_worktree_id: &str,
+    now: i64,
+) -> Result<Vec<SubscriptionRow>, String> {
+    sqlx::query_as::<_, SubscriptionRow>(
+        "SELECT * FROM subscriptions WHERE subscriber_worktree_id = ? AND state IN ('active', 'orphaned') AND (expires_at IS NULL OR expires_at > ?) ORDER BY created_at DESC",
+    )
+    .bind(subscriber_worktree_id)
+    .bind(now)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())
+}
+
 /// タブごとの (未 ack 件数, うち未配送件数)。タブの未読バッジに使う。
 pub async fn count_unacked_by_terminal(pool: &SqlitePool) -> Result<Vec<(String, i64, i64)>, String> {
     sqlx::query_as(

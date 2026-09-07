@@ -1154,6 +1154,9 @@ fn artifact_lock_release(
 /// ホワイトリストとスコープの強制は呼び出し先（`mcp_server::call_tool_for_artifact`）で行う。
 /// ここが渡す `worktree_id` はアーティファクトの置き場所そのもので、
 /// アーティファクト側からは指定できない。
+///
+/// 端末操作だけは「置き場所ワークツリーが宛先を購読している」場合に別ワークツリーへも通る
+/// （#211）。判定も呼び出し先に閉じている。
 #[tauri::command]
 async fn artifact_call_mcp_tool(
     app_handle: tauri::AppHandle,
