@@ -45,6 +45,8 @@ const RUNTIME_JS =
   "  errEl.textContent=(e instanceof Error)?(e.message+(e.stack?'\\n\\n'+e.stack:'')):String(e);" +
   "}" +
   "window.onerror=function(msg,src,line,col,err){showError(err||new Error(msg));return true;};" +
+  // メモリー保存の失敗など、Promise の reject を捨てているコードでも気づけるようにする
+  "window.addEventListener('unhandledrejection',function(e){showError(e.reason);});" +
   "try{" +
   "  var moduleSources=JSON.parse(document.getElementById('_modules').value||'{}');" +
   "  var moduleCache={};" +

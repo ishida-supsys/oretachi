@@ -190,13 +190,6 @@ async function saveArtifactMemory(
   states.value = { ...states.value, [artifactId]: next };
 }
 
-/** iframe 内の setMemory から呼ばれる。呼び出し時点の選択に紐づける */
-async function saveSelectedMemory(memory: Record<string, unknown>): Promise<void> {
-  const artifactId = selectedId.value;
-  if (!artifactId) throw new Error("no artifact selected");
-  await saveArtifactMemory(artifactId, memory);
-}
-
 /**
  * メモリーのリセット。iframe は初期値を srcdoc から同期で読むため、
  * 消しただけでは表示中のフォームが変わらない。キーを進めて作り直させる。
@@ -211,6 +204,11 @@ const hasSelectedMemory = computed(() => {
   const memory = selectedMemory.value;
   return !!memory && Object.keys(memory).length > 0;
 });
+
+/** メモリーの保存失敗。アーティファクト側は入力を受け付け続けるので必ず見せる */
+function onMemoryError(msg: string) {
+  toast.add({ severity: "error", summary: t("memory.saveFailed"), detail: msg, life: 6000 });
+}
 
 async function resetMemory() {
   const artifactId = selectedId.value;
@@ -342,9 +340,11 @@ async function onNavigate(href: string) {
 
 async function refreshSelected(artifactId: string, command: string) {
   await loadList();
+  // サイドカーは削除で消えるだけでなく、転送（同じ ID への上書き = command "create"）で
+  // メモリーが差し替わる。据え置くと古い memory を初期値にした iframe が
+  // 次の保存でディスク上の新しい値を潰すため、どの command でも読み直す
+  await loadStates();
   if (command === "delete") {
-    // 本体と一緒にサイドカーも消えるので、ピン止め状態を読み直す
-    await loadStates();
     history.prune(artifactId);
     if (selectedId.value === artifactId) {
       selectedId.value = null;
@@ -730,8 +730,9 @@ onUnmounted(() => {
             :content="selectedArtifact.content"
             :modules="selectedArtifact.modules"
             :memory="selectedMemory"
-            :save-memory="saveSelectedMemory"
+            :save-memory="(m: Record<string, unknown>) => saveArtifactMemory(selectedArtifact!.id, m)"
             @navigate="onNavigate"
+            @memory-error="onMemoryError"
           />
           <ArtifactUrlView
             v-else-if="selectedArtifact.content_type === URL_ARTIFACT_CONTENT_TYPE"
@@ -1163,7 +1164,8 @@ onUnmounted(() => {
       "resetTitle": "Reset memory",
       "resetConfirm": "Clear the saved form state of this artifact?",
       "resetDone": "Memory reset",
-      "resetFailed": "Failed to reset memory"
+      "resetFailed": "Failed to reset memory",
+      "saveFailed": "Failed to save memory"
     },
     "delete": {
       "label": "Delete",
@@ -1214,7 +1216,8 @@ onUnmounted(() => {
       "resetTitle": "メモリーのリセット",
       "resetConfirm": "このアーティファクトに保存されたフォーム入力を消しますか？",
       "resetDone": "メモリーをリセットしました",
-      "resetFailed": "メモリーのリセットに失敗しました"
+      "resetFailed": "メモリーのリセットに失敗しました",
+      "saveFailed": "メモリーの保存に失敗しました"
     },
     "delete": {
       "label": "削除",

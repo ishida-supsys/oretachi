@@ -983,6 +983,24 @@ async fn set_artifact_memory(
     let dir = artifact_scope_dir(&app_handle, &scope, &scope_id)?;
     let memory = validate_artifact_memory(memory)?;
 
+    // 本体が削除された後に debounce 済みの保存が着弾しても、孤児サイドカーを作らない。
+    // 一覧走査（list_artifact_states）に本体の無い ID が現れると、以後どこからも
+    // 消せないゴミになる。削除との間に TOCTOU は残るが、後始末が 1 回遅れるだけ。
+    let orphan_dir = dir.clone();
+    let orphan_id = artifact_id.clone();
+    let orphaned = tokio::task::spawn_blocking(move || {
+        if orphan_dir.join(format!("{}.json", orphan_id)).exists() {
+            return false;
+        }
+        let _ = std::fs::remove_file(artifact_state_path(&orphan_dir, &orphan_id));
+        true
+    })
+    .await
+    .map_err(|e| format!("task join error: {}", e))?;
+    if orphaned {
+        return Ok(());
+    }
+
     update_artifact_state(dir, &artifact_id, move |obj| {
         match memory {
             Some(val) => {

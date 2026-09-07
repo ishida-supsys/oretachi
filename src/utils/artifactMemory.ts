@@ -36,8 +36,22 @@ export const ARTIFACT_BRIDGE_METHOD_MEMORY_SET = "memory.set";
 
 /** 応答が返らないまま Promise が残り続けないようにするタイムアウト（iframe 側） */
 const BRIDGE_TIMEOUT_MS = 10000;
-/** 1 文字入力ごとに保存が飛ばないようにする debounce（iframe 側） */
+/**
+ * 1 文字入力ごとに保存が飛ばないようにする debounce（iframe 側）。
+ *
+ * この間に iframe が消えると直前の入力は落ちる。`pagehide` で送り切ることはできない
+ * （親は iframe の消滅で `frame.contentWindow` との同一性判定に失敗し、
+ * 消えかけのフレームからのメッセージを受け取れない）。そのため iframe を壊さない側で
+ * 手当てしている: Preview / Code の切替では iframe を v-show で残し、
+ * アーティファクトの切り替えでのみ作り直す（落ちるのは最後の 400ms 以内の入力だけ）。
+ */
 const MEMORY_FLUSH_DEBOUNCE_MS = 400;
+/**
+ * メモリーのサイズ上限。判定の本体は Rust 側（`ARTIFACT_MEMORY_MAX_BYTES`）で、
+ * ここは無駄な IPC 往復を省くための早期判定。JS は UTF-16 コードユニット数を数えるので
+ * マルチバイト文字ではここを通っても Rust 側で落ちる（Rust が最終判断）。
+ */
+export const ARTIFACT_MEMORY_MAX_BYTES = 1024 * 1024;
 
 export interface ArtifactBridgeRequest {
   requestId: string;
@@ -104,6 +118,9 @@ export const ARTIFACT_BRIDGE_JS =
   "  var pending={};" +
   "  var seq=0;" +
   "  window.addEventListener('message',function(e){" +
+  // 親が送信元を検証しているのと対称に、応答は親からのものだけ受理する
+  // （requestId は連番なので、同一ウィンドウ内の別 iframe に成功を偽装され得る）
+  "    if(e.source!==parent)return;" +
   "    var d=e.data;" +
   "    if(!d||typeof d!=='object'||d[" + JSON.stringify(ARTIFACT_BRIDGE_RESULT_MARKER) + "]!==true)return;" +
   "    var p=pending[d.requestId];" +
@@ -146,17 +163,34 @@ export const ARTIFACT_BRIDGE_JS =
   "  function notify(){" +
   "    listeners.slice().forEach(function(fn){try{fn(state);}catch(err){}});" +
   "  }" +
-  // debounce 中の setMemory はまとめて 1 回の保存にし、その 1 回の結果を全員へ返す
+  // debounce 中の setMemory はまとめて 1 回の保存にし、その 1 回の結果を全員へ返す。
+  // さらに保存は必ず 1 本ずつにする（IPC の往復が debounce より長引いたときに
+  // 2 本並走させると、古いスナップショットが後着して lost update になる）
   "  var flushTimer=null;" +
   "  var waiters=[];" +
+  "  var inflight=false;" +
   "  function flush(){" +
   "    flushTimer=null;" +
+  "    if(inflight||waiters.length===0)return;" +
   "    var batch=waiters;" +
   "    waiters=[];" +
+  // 上限超過は往復させずここで落とす（Rust 側でも同じ判定をしている）
+  "    var json=JSON.stringify(state);" +
+  "    if(json.length>" + ARTIFACT_MEMORY_MAX_BYTES + "){" +
+  "      var tooLarge=new Error('oretachi memory too large: '+json.length+' > '+" +
+  ARTIFACT_MEMORY_MAX_BYTES + ");" +
+  "      batch.forEach(function(w){w.reject(tooLarge);});" +
+  "      return;" +
+  "    }" +
+  "    inflight=true;" +
+  // 前の保存が返ってから、その間に積まれた分をまとめて送り直す
+  "    var done=function(){inflight=false;if(waiters.length>0)flush();};" +
   "    call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_MEMORY_SET) + ",{memory:state}).then(function(){" +
   "      batch.forEach(function(w){w.resolve();});" +
+  "      done();" +
   "    },function(err){" +
   "      batch.forEach(function(w){w.reject(err);});" +
+  "      done();" +
   "    });" +
   "  }" +
   "  function schedule(){" +
@@ -194,11 +228,14 @@ export const ARTIFACT_BRIDGE_JS =
   "    var pair=R.useState(read);" +
   "    var value=pair[0],setValue=pair[1];" +
   "    var initialRef=R.useRef(initialValue);" +
-  "    initialRef.current=initialValue;" +
+  // レンダー中に書き換えないこと（副作用になる）。初期値が変わるのは稀なので effect で追う
+  "    R.useEffect(function(){initialRef.current=initialValue;});" +
   "    R.useEffect(function(){" +
   "      setValue(read());" +
   "      return subscribe(function(next){" +
-  "        var v=next[key]!==undefined?next[key]:initialRef.current;" +
+  // キーが消えた（clearMemory / setMemory での差し替え）ときは初期値へ戻す
+  "        var has=Object.prototype.hasOwnProperty.call(next,key)&&next[key]!==undefined;" +
+  "        var v=has?next[key]:initialRef.current;" +
   "        setValue(function(prev){return prev===v?prev:v;});" +
   "      });" +
   "    },[key]);" +
