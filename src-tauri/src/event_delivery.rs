@@ -45,9 +45,15 @@ const MIN_PUSH_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30
 /// 1 回取りこぼしても配送は止まらないが、ポーリングが死んでいれば押し込みも止まる。
 const STATUS_MAX_AGE_MS: i64 = 20_000;
 
-/// ブラケットペーストを流してから Enter を送るまでの猶予。
-/// Claude Code はペースト終端と同じ読み取りチャンクに来た CR を送信として扱わない。
-const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
+/// 本文を流してから Enter を送るまでの猶予。
+///
+/// Claude Code は**同じ読み取りチャンクに来た CR を送信として扱わない**（本文の一部として
+/// 取り込み、入力欄に残したままターンを始めない）。ブラケットペーストの終端に限らず、
+/// 素のテキストでも本文と CR が 1 回の write で届くと同じことが起きる。
+///
+/// `mcp_server::oretachi_write_terminal` の `submit` もこの定数を使う（同じ現象なので
+/// 猶予の値を 1 か所に置く）。
+pub(crate) const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_millis(150);
 
 /// spawn 要求を出してからフロントの応答を待つ上限。過ぎたら単一フライトを解放する。
 const SPAWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);

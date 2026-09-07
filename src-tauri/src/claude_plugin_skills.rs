@@ -111,4 +111,27 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
         "teamwork-child/SKILL.md",
         include_str!("../skills/teamwork-child/SKILL.md"),
     ),
+    // --- notification-report ---
+    (
+        "notification-report/SKILL.md",
+        include_str!("../skills/notification-report/SKILL.md"),
+    ),
+    (
+        "notification-report/templates/entry-point.jsx",
+        include_str!("../skills/notification-report/templates/entry-point.jsx"),
+    ),
+    (
+        "notification-report/templates/components--NotificationCard.jsx",
+        include_str!(
+            "../skills/notification-report/templates/components--NotificationCard.jsx"
+        ),
+    ),
+    (
+        "notification-report/templates/lib--send.jsx",
+        include_str!("../skills/notification-report/templates/lib--send.jsx"),
+    ),
+    (
+        "notification-report/templates/data--report.example.jsx",
+        include_str!("../skills/notification-report/templates/data--report.example.jsx"),
+    ),
 ];
