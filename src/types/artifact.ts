@@ -17,6 +17,12 @@ export interface ArtifactMeta {
   updated_at: number;
   /** リポジトリへ転送されたアーティファクトのみ持つ、転送元ワークツリーの ID */
   source_worktree_id?: string;
+  /**
+   * 表示中ロックの永続フラグ。true のアーティファクトは、ビューアで開かれている間
+   * MCP 由来の書き込み（update / rewrite / artifact_module / artifact_store）を拒否する。
+   * 判定は Rust 側（`artifact_lock::ArtifactOpenRegistry` との AND）で行う。
+   */
+  locked_while_open?: boolean;
 }
 
 export interface ArtifactData extends ArtifactMeta {
@@ -36,6 +42,18 @@ export interface ArtifactState {
    * ピン止めと違い転送でも引き継ぐ（アーティファクトの中身に属する状態のため）。
    */
   memory?: Record<string, unknown>;
+  /**
+   * `memory` の最終更新時刻（epoch ミリ秒）。MCP の `artifact_store` が
+   * `expected_updated_at`（楽観ロック）で突き合わせる値。
+   */
+  memoryUpdatedAt?: number;
+}
+
+/** MCP の `artifact_store` がストアを書き換えたときに飛ぶイベント */
+export interface ArtifactStateChangedEvent {
+  scope: "worktree" | "repository";
+  scopeId: string;
+  artifactId: string;
 }
 
 export interface ArtifactChangedEvent {
