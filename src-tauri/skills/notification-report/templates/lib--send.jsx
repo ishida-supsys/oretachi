@@ -68,8 +68,34 @@ function blockedReason(n) {
   return null;
 }
 
+const errText = e => String((e && e.message) || e);
+
+/** Enter だけを送る。本文が既に宛先の入力欄にある状態からの復旧に使う */
+async function sendEnter(n) {
+  try {
+    await callTool('oretachi_write_terminal', {
+      session_id: n.sessionId,
+      text: '\r',
+      submit: false,
+    });
+    return { status: 'sent' };
+  } catch (e) {
+    return { status: 'pastedOnly', error: errText(e) };
+  }
+}
+
 /**
- * 1 件送る。成功なら `{ status: 'sent' }`、失敗なら `{ status: 'failed', error }`。
+ * 1 件送る。返り値の `status` は 3 種類:
+ *
+ * - `sent`       — 本文と Enter の両方が通った
+ * - `failed`     — 本文が届いていない。同じ内容をそのまま再送してよい
+ * - `pastedOnly` — **本文は届いたが Enter が失敗した。** 本文は宛先の入力欄に
+ *                  残っているので、**同じ内容を再送してはいけない**（二重になった
+ *                  テキストが 1 回のプロンプトとして飛ぶ）。復旧は `sendEnter` で
+ *                  Enter だけ送り直す
+ *
+ * この 3 分岐は Rust 側の `event_delivery::PushWrite`（`Sent` / `PastedOnly` /
+ * `Failed`）と対応している。2 回の書き込みに分ける以上、間で失敗しうるため。
  *
  * **本文と Enter は別の呼び出しに分け、間に猶予を入れる。** Claude Code は同じ
  * 読み取りチャンクに来た CR を送信として扱わず、本文の一部として入力欄に残すため、
@@ -83,22 +109,19 @@ function blockedReason(n) {
 async function sendOne(meta, n, answer) {
   const blocked = blockedReason(n);
   if (blocked) return { status: 'failed', error: blocked };
+  // 本文の write と Enter の write は別々に捕まえる。まとめて包むと
+  // 「本文は届いたが Enter だけ落ちた」を failed と区別できず、再送で二重になる
   try {
     await callTool('oretachi_write_terminal', {
       session_id: n.sessionId,
       text: buildReplyText(meta, n, answer),
       submit: false,
     });
-    await new Promise(resolve => setTimeout(resolve, SUBMIT_DELAY_MS));
-    await callTool('oretachi_write_terminal', {
-      session_id: n.sessionId,
-      text: '\r',
-      submit: false,
-    });
-    return { status: 'sent' };
   } catch (e) {
-    return { status: 'failed', error: String((e && e.message) || e) };
+    return { status: 'failed', error: errText(e) };
   }
+  await new Promise(resolve => setTimeout(resolve, SUBMIT_DELAY_MS));
+  return sendEnter(n);
 }
 
 /**
@@ -120,10 +143,30 @@ async function ackInbox(inboxIds) {
   }
 }
 
+/**
+ * この通知へ「いま」返答を送れるか（下書きの妥当性まで含めた判定）。
+ *
+ * 一括送信の対象選別と、カードの再送ボタンの活性判定の**両方**がこれを使う。
+ * 片方だけに置くと、再送ボタンから候補未選択のまま送れてしまい、中身の無い
+ * プロンプト（前置きと元通知だけ）が宛先のエージェントへ飛ぶ。
+ */
+function canSend(n, answer, draft) {
+  if (answer && answer.status === 'sent') return false;
+  if (blockedReason(n)) return false;
+  // 本文は届いているので、再送するのは Enter だけ。下書きの内容は問わない
+  if (answer && answer.status === 'pastedOnly') return true;
+  const d = draft || {};
+  if (!d.choice) return false;
+  if (d.choice === OTHER && !(d.note || '').trim()) return false;
+  return true;
+}
+
 exports.OTHER = OTHER;
 exports.SUBMIT_DELAY_MS = SUBMIT_DELAY_MS;
 exports.flatten = flatten;
 exports.buildReplyText = buildReplyText;
 exports.blockedReason = blockedReason;
+exports.canSend = canSend;
 exports.sendOne = sendOne;
+exports.sendEnter = sendEnter;
 exports.ackInbox = ackInbox;

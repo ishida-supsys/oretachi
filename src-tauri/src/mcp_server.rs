@@ -3378,19 +3378,49 @@ impl NotifyService {
         // **末尾の CR は必ず別の write にする。** 本文と CR を 1 回で書くと、宛先が
         // Claude Code の場合は同じ読み取りチャンクに来た CR が本文の一部として扱われ、
         // 入力欄に残ったままターンが始まらない（`event_delivery::write_push` と同じ現象）。
+        //
+        // # 既知の制約: この 2 回の write はアトミックではない
+        //
+        // 本文と CR の間に、`event_delivery` の押し込み（`write_push`）や別の
+        // `oretachi_write_terminal` が同じセッションへ割り込むと、間に別テキストが
+        // 挟まって壊れたプロンプトが送信される。押し込み同士は配送ワーカーが単一タスク
+        // なので直列だが、**MCP ハンドラはそのキューを通らない**。
+        //
+        // 2 回に分ける以上は避けられない（`write_push` は元から 2 回書き込みで、
+        // 旧実装の 1 回書き込みが割り込めば同じことが起きた）。根治するならセッション
+        // 単位の書き込みロック、または PTY 書き込みの配送ワーカーへの集約が要る。
+        // 実効リスクは押し込みが「宛先が idle かつ `MIN_PUSH_INTERVAL` 経過後」に
+        // 限られることで抑えられている。
         let body = submit_body(&text);
         let bytes_len = body.len() + 1;
-        if !body.is_empty() {
+        let wrote_body = !body.is_empty();
+        if wrote_body {
             self.app_handle
                 .state::<PtyManager>()
                 .write(session_id, body.as_bytes().to_vec())
                 .map_err(|e| McpError::internal_error(e, None))?;
             tokio::time::sleep(crate::event_delivery::SUBMIT_DELAY).await;
         }
+        // CR だけ失敗したときは**本文が宛先の入力欄に残っている**。同じ text で
+        // リトライすると二重になったテキストが 1 回のプロンプトとして飛ぶので、
+        // 呼び出し元がそれを判別できるようエラー文へ明記する
+        // （`event_delivery` が `PushWrite::PastedOnly` で区別しているのと同じ事情）。
         self.app_handle
             .state::<PtyManager>()
             .write(session_id, b"\r".to_vec())
-            .map_err(|e| McpError::internal_error(e, None))?;
+            .map_err(|e| {
+                if wrote_body {
+                    McpError::internal_error(
+                        format!(
+                            "本文は送信済みですが Enter (CR) の送信に失敗しました: {}。本文は宛先の入力欄に残っているので、**同じ text で再送しないでください**（テキストが二重になります）。復旧は submit=false で \"\\r\" だけを送り直してください",
+                            e
+                        ),
+                        None,
+                    )
+                } else {
+                    McpError::internal_error(e, None)
+                }
+            })?;
         log::info!(
             "[mcp] oretachi_write_terminal: session_id={} bytes={} submit=true (本文と CR を分割)",
             session_id,

@@ -5,7 +5,7 @@ const { useMemory } = require('oretachi');
 const { META, NOTIFICATIONS } = require('./data/report');
 const NotificationCard = require('./components/NotificationCard').default;
 const { Badge } = require('./components/NotificationCard');
-const { OTHER, blockedReason, sendOne, ackInbox } = require('./lib/send');
+const { blockedReason, canSend, sendOne, sendEnter, ackInbox } = require('./lib/send');
 
 const FONT = 'system-ui, sans-serif';
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -35,17 +35,9 @@ function App() {
       .catch(() => {});
   }, [setDrafts]);
 
-  // 送信対象の判定: 未送信または送信失敗で、候補が選ばれていて、
-  // 「その他」なら補足が入っていて、購読と端末の条件も満たしているもの
-  const sendable = NOTIFICATIONS.filter(n => {
-    const rec = answers[n.id];
-    if (rec && rec.status === 'sent') return false;
-    if (blockedReason(n)) return false;
-    const d = drafts[n.id] || {};
-    if (!d.choice) return false;
-    if (d.choice === OTHER && !(d.note || '').trim()) return false;
-    return true;
-  });
+  // 送信対象の判定は `lib/send` の canSend に寄せてある。一括送信の選別・
+  // 再送ボタンの活性・送信ループのガードが同じ判定を使うようにするため
+  const sendable = NOTIFICATIONS.filter(n => canSend(n, answers[n.id], drafts[n.id]));
 
   const pending = NOTIFICATIONS.filter(n => {
     const rec = answers[n.id];
@@ -61,35 +53,50 @@ function App() {
     const acked = [];
     try {
       for (const n of targets) {
-        setInflightId(n.id);
+        const prev = answers[n.id];
         const d = drafts[n.id] || {};
-        const result = await sendOne(META, n, d);
-        const rec = {
-          choice: d.choice,
-          note: (d.note || '').trim(),
-          status: result.status,
-          at: nowLabel(),
-        };
+        // 一括送信のボタンは sendable で絞ってあるが、カードの再送ボタンは
+        // 1 件を直接渡してくる。ここで弾かないと、候補を解除したまま再送して
+        // 中身の無いプロンプトを送れてしまう
+        if (!canSend(n, prev, d)) continue;
+        setInflightId(n.id);
+        // 本文だけ届いている状態からの復旧は Enter の送り直し。同じ本文を
+        // もう一度書くと二重になったテキストが 1 回のプロンプトとして飛ぶ
+        const resume = prev && prev.status === 'pastedOnly';
+        const result = resume ? await sendEnter(n) : await sendOne(META, n, d);
+        const rec = resume
+          ? { ...prev, status: result.status, at: nowLabel() }
+          : { choice: d.choice, note: (d.note || '').trim(), status: result.status, at: nowLabel() };
         if (result.error) rec.error = result.error;
+        else delete rec.error;
+        // **1 件ごとに待って保存する。** サイドカーの保存は 400ms の debounce +
+        // IPC 往復なので、N 件送ると N×(400ms + 往復) が上乗せされる。それでも
+        // 待つのは、ここで落ちても「どこまで届いたか」を残すため。特に
+        // `pastedOnly` は記録が無いまま閉じると、次に開いた人が同じ本文を送って
+        // テキストを二重にしてしまう。速度より取り違えの防止を採る
         try {
-          await setAnswers(prev => ({ ...prev, [n.id]: rec }));
+          await setAnswers(p => ({ ...p, [n.id]: rec }));
         } catch (e) {
           // サイドカーへ書けなくても送信自体は済んでいる。表示だけが古くなる
           console.warn('返答状態の保存に失敗しました', e);
         }
         if (result.status === 'sent') acked.push(...(n.inboxIds || []));
       }
-      const outcome = await ackInbox(acked);
-      try {
-        await setAck({ ...outcome, at: nowLabel() });
-      } catch (e) {
-        console.warn('ack 結果の保存に失敗しました', e);
+      // 1 件も送れていないときは ack を触らない。触ると直前の
+      // 「N 件既読化しました」/「ack 不可」の表示が skipped で消える
+      if (acked.length > 0) {
+        const outcome = await ackInbox(acked);
+        try {
+          await setAck({ ...outcome, at: nowLabel() });
+        } catch (e) {
+          console.warn('ack 結果の保存に失敗しました', e);
+        }
       }
     } finally {
       setInflightId(null);
       setBusy(false);
     }
-  }, [busy, drafts, setAnswers, setAck]);
+  }, [busy, answers, drafts, setAnswers, setAck]);
 
   const sentCount = NOTIFICATIONS.filter(n => (answers[n.id] || {}).status === 'sent').length;
   const failedCount = NOTIFICATIONS.filter(n => (answers[n.id] || {}).status === 'failed').length;
@@ -157,6 +164,7 @@ function App() {
             blocked={blockedReason(n)}
             inflight={inflightId === n.id}
             busy={busy}
+            canSend={canSend(n, answers[n.id], drafts[n.id])}
             onPick={c => setDraft(n.id, { choice: c })}
             onNote={v => setDraft(n.id, { note: v })}
             onRetry={() => send([n])}

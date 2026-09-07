@@ -2,10 +2,17 @@
 // 通知 1 件のカード。カスタマイズ不要（そのまま利用）。
 const { OTHER } = require('../lib/send');
 
-// 返答状態ごとのアクセント色（Catppuccin Mocha）
-const ACCENT = { pending: '#f9e2af', sent: '#a6e3a1', failed: '#f38ba8' };
-const MARK = { pending: '●', sent: '✓', failed: '⚠' };
-const STATUS_LABEL = { pending: '未返答', sent: '返答済み', failed: '送信失敗' };
+// 返答状態ごとのアクセント色（Catppuccin Mocha）。
+// `pastedOnly` は「本文は届いたが Enter だけ失敗」— 失敗と同じ扱いにすると
+// 人が同じ内容を送り直してしまうので、専用の色と文言で区別する
+const ACCENT = { pending: '#f9e2af', sent: '#a6e3a1', failed: '#f38ba8', pastedOnly: '#fab387' };
+const MARK = { pending: '●', sent: '✓', failed: '⚠', pastedOnly: '⏸' };
+const STATUS_LABEL = {
+  pending: '未返答',
+  sent: '返答済み',
+  failed: '送信失敗',
+  pastedOnly: 'Enter 未送信',
+};
 
 // 通知種別（notify_worktree の kind）
 const KIND_COLOR = {
@@ -100,19 +107,23 @@ function WorktreeIdentity({ n }) {
  *   answer   送信済みの記録（サイドカー）。未送信なら null
  *   draft    { choice, note } — 入力中の下書き（サイドカー）
  *   blocked  送信できない理由（文字列）。null なら送れる
+ *   canSend  いま送れる状態か（`lib/send` の canSend の結果。再送ボタンの活性に使う）
  *   inflight この 1 件を送信中か
  *   busy     一括送信の実行中か（入力を止める）
  *   onPick / onNote / onRetry
  */
-function NotificationCard({ n, answer, draft, blocked, inflight, busy, onPick, onNote, onRetry }) {
+function NotificationCard({ n, answer, draft, blocked, canSend, inflight, busy, onPick, onNote, onRetry }) {
   const d = draft || {};
   const status = answer ? answer.status : 'pending';
   const accent = ACCENT[status] || ACCENT.pending;
   const kindColor = KIND_COLOR[n.kind] || KIND_COLOR.general;
   // 「その他」を選んだのに補足が空 → 送信対象にできない
   const otherNeedsNote = d.choice === OTHER && !(d.note || '').trim();
-  // 送信済み（成功）は読み取り専用にする。失敗は選び直して再送できる
-  const readOnly = status === 'sent';
+  // 送信済み（成功）は読み取り専用にする。失敗は選び直して再送できる。
+  // pastedOnly は本文が宛先に残っているので、内容を変えられては困る（Enter を
+  // 送り直すだけの状態）。入力も読み取り専用にする
+  const resumeEnter = status === 'pastedOnly';
+  const readOnly = status === 'sent' || resumeEnter;
   const locked = readOnly || busy || !!blocked;
 
   return (
@@ -180,14 +191,43 @@ function NotificationCard({ n, answer, draft, blocked, inflight, busy, onPick, o
         }}>{answer.error}</div>
       )}
 
+      {/* 本文だけ届いた状態。同じ内容を送り直すと二重になるので Enter だけ送る */}
+      {resumeEnter && (
+        <div style={{
+          fontSize: 12, fontFamily: FONT, color: '#fab387',
+          background: '#fab38714', border: '1px solid #fab38744', borderRadius: 6,
+          padding: '8px 12px', lineHeight: 1.7,
+        }}>
+          <b>本文は宛先の入力欄に届いています。</b>Enter の送信だけが失敗しました。
+          「Enter を再送」で送信し直してください（同じ内容をもう一度送るとテキストが二重になります）。
+          {answer.error && (
+            <div style={{ marginTop: 4, color: '#9399b2', fontFamily: MONO, fontSize: 11, whiteSpace: 'pre-wrap' }}>
+              {answer.error}
+            </div>
+          )}
+        </div>
+      )}
+
       <div style={{ borderTop: '1px solid #262637' }} />
 
       {readOnly ? (
-        /* 返答済み: 送信内容だけを残す（ボタン・入力欄は出さない） */
-        <div style={{ fontSize: 12, fontFamily: FONT, color: '#bac2de', lineHeight: 1.8 }}>
-          <span style={{ color: '#6c7086' }}>送信内容: </span>
-          <b>{answer.choice === OTHER ? '（補足で直接指示）' : answer.choice}</b>
-          {answer.note ? <span style={{ color: '#9399b2' }}> / {answer.note}</span> : null}
+        /* 返答済み / Enter 未送信: 送信内容だけを残す（候補・入力欄は出さない） */
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+          <div style={{ fontSize: 12, fontFamily: FONT, color: '#bac2de', lineHeight: 1.8 }}>
+            <span style={{ color: '#6c7086' }}>送信内容: </span>
+            <b>{answer.choice === OTHER ? '（補足で直接指示）' : answer.choice}</b>
+            {answer.note ? <span style={{ color: '#9399b2' }}> / {answer.note}</span> : null}
+          </div>
+          {resumeEnter && (
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button type="button" disabled={busy || !canSend} onClick={onRetry} style={{
+                border: '1px solid #fab387', borderRadius: 6, padding: '7px 14px',
+                background: 'transparent', color: (busy || !canSend) ? '#45475a' : '#fab387',
+                fontSize: 12, fontWeight: 600, fontFamily: FONT,
+                cursor: (busy || !canSend) ? 'default' : 'pointer',
+              }}>Enter を再送</button>
+            </div>
+          )}
         </div>
       ) : (
         <React.Fragment>
@@ -227,14 +267,21 @@ function NotificationCard({ n, answer, draft, blocked, inflight, busy, onPick, o
             </div>
           )}
 
+          {/* 再送は canSend でも塞ぐ。候補を解除したまま押せると、前置きと元通知
+              だけの中身が無いプロンプトが宛先のエージェントへ飛ぶ */}
           {status === 'failed' && !blocked && (
-            <div style={{ display: 'flex', gap: 8 }}>
-              <button type="button" disabled={busy} onClick={onRetry} style={{
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <button type="button" disabled={busy || !canSend} onClick={onRetry} style={{
                 border: '1px solid #45475a', borderRadius: 6, padding: '7px 14px',
-                background: 'transparent', color: busy ? '#45475a' : '#cdd6f4',
+                background: 'transparent', color: (busy || !canSend) ? '#45475a' : '#cdd6f4',
                 fontSize: 12, fontWeight: 600, fontFamily: FONT,
-                cursor: busy ? 'default' : 'pointer',
+                cursor: (busy || !canSend) ? 'default' : 'pointer',
               }}>この 1 件を再送</button>
+              {!canSend && !busy && (
+                <span style={{ fontSize: 11, color: '#6c7086', fontFamily: FONT }}>
+                  候補を選ぶと再送できます
+                </span>
+              )}
             </div>
           )}
         </React.Fragment>
