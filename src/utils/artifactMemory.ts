@@ -126,6 +126,11 @@ export function postArtifactBridgeResult(
 /**
  * 外からストアが書き換わったことを iframe へ知らせる。
  * iframe 側は `state` を差し替えて `subscribeMemory` / `useMemory` を再通知する。
+ *
+ * **JSON を1往復させてから送る。** 呼び出し側が渡してくるのは Vue の `states` ref
+ * 由来の値で、reactive Proxy を `postMessage` に渡すと構造化複製が
+ * `DataCloneError` で落ちる（Proxy は複製できない）。ストアの中身は Rust 側の JSON
+ * サイドカーと往復する契約なので、ここで素の JSON へ落として構わない。
  */
 export function postArtifactBridgeMemoryChanged(
   frame: HTMLIFrameElement | null,
@@ -133,17 +138,28 @@ export function postArtifactBridgeMemoryChanged(
 ): void {
   const target = frame?.contentWindow;
   if (!target) return;
+  let plain: Record<string, unknown>;
+  try {
+    plain = JSON.parse(JSON.stringify(memory ?? {}));
+  } catch (e) {
+    // 循環参照など。押し込めないと iframe が古い値を書き戻して外の更新を消すので、
+    // 黙って捨てずに残す
+    console.warn("artifact store の push をシリアライズできませんでした", e);
+    return;
+  }
   try {
     target.postMessage(
       {
         [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
         event: ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED,
-        memory,
+        memory: plain,
       },
       "*",
     );
-  } catch {
-    // iframe が既に差し替わっている場合など
+  } catch (e) {
+    // iframe が既に差し替わっている場合など。押し込みは「届かないと外の更新が消える」
+    // 経路なので、応答（postArtifactBridgeResult）と違って痕跡を残す
+    console.warn("artifact store の push を送れませんでした", e);
   }
 }
 
@@ -256,6 +272,16 @@ export const ARTIFACT_BRIDGE_JS =
   "  function applyExternalMemory(next){" +
   "    if(!next||typeof next!=='object'||Array.isArray(next))return;" +
   "    state=next;" +
+  // debounce 待ちだった入力は押し流された。そのまま flush すると押し込まれた値を
+  // 送って「保存できた」と resolve してしまう（呼び出し側の値はどこにも残らない）。
+  // 保存されなかったことを reject で伝える
+  "    if(flushTimer!==null){clearTimeout(flushTimer);flushTimer=null;}" +
+  "    var dropped=waiters;" +
+  "    waiters=[];" +
+  "    if(dropped.length>0){" +
+  "      var err=new Error('oretachi memory was replaced from outside before the pending save');" +
+  "      dropped.forEach(function(w){w.reject(err);});" +
+  "    }" +
   "    notify();" +
   "  }" +
   "  function getMemory(){return state;}" +

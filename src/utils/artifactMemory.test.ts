@@ -1,10 +1,14 @@
 import { describe, it, expect, vi } from "vitest";
+import { reactive, ref } from "vue";
 import {
   ARTIFACT_BRIDGE_REQUEST_MARKER,
   ARTIFACT_BRIDGE_RESULT_MARKER,
   ARTIFACT_BRIDGE_METHOD_MEMORY_SET,
+  ARTIFACT_BRIDGE_PUSH_MARKER,
+  ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED,
   readArtifactBridgeRequest,
   postArtifactBridgeResult,
+  postArtifactBridgeMemoryChanged,
 } from "./artifactMemory";
 import { buildReactSrcdoc } from "./reactArtifactSrcdoc";
 
@@ -98,6 +102,75 @@ describe("postArtifactBridgeResult", () => {
     expect(() =>
       postArtifactBridgeResult(makeFrame(null), "r3", { ok: true }),
     ).not.toThrow();
+  });
+});
+
+describe("postArtifactBridgeMemoryChanged", () => {
+  it("ストアの差し替えを一方向通知として送る", () => {
+    const postMessage = vi.fn();
+    postArtifactBridgeMemoryChanged(makeFrame({ postMessage }), { answered: true });
+    expect(postMessage).toHaveBeenCalledWith(
+      {
+        [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+        event: ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED,
+        memory: { answered: true },
+      },
+      "*",
+    );
+  });
+
+  /**
+   * 呼び出し側が渡してくるのは Vue の `states` ref 由来の値で、reactive Proxy を
+   * そのまま postMessage に渡すと構造化複製が DataCloneError で落ちる。
+   * 落ちると外からの更新が iframe に届かず、次の 1 入力で消える（しかも MCP 側は
+   * 成功を返している）ので、素の JSON へ落としてから送ること。
+   */
+  it("reactive Proxy を素のオブジェクトへ落としてから送る（構造化複製できる形）", () => {
+    const postMessage = vi.fn();
+    const states = ref<Record<string, { memory?: Record<string, unknown> }>>({
+      "report-1": { memory: { answered: true, rows: [{ id: 1 }] } },
+    });
+    const memory = states.value["report-1"].memory as Record<string, unknown>;
+    // 前提の確認: Proxy をそのまま渡すと構造化複製できない
+    expect(() => structuredClone(memory)).toThrow();
+
+    postArtifactBridgeMemoryChanged(makeFrame({ postMessage }), memory);
+
+    const [payload] = postMessage.mock.calls[0];
+    expect(() => structuredClone(payload)).not.toThrow();
+    expect(payload.memory).toEqual({ answered: true, rows: [{ id: 1 }] });
+
+    // reactive() 由来でも同じ
+    postMessage.mockClear();
+    postArtifactBridgeMemoryChanged(makeFrame({ postMessage }), reactive({ a: 1 }));
+    expect(() => structuredClone(postMessage.mock.calls[0][0])).not.toThrow();
+  });
+
+  it("iframe が消えていても例外を投げない", () => {
+    expect(() => postArtifactBridgeMemoryChanged(null, { a: 1 })).not.toThrow();
+    expect(() => postArtifactBridgeMemoryChanged(makeFrame(null), { a: 1 })).not.toThrow();
+  });
+
+  it("送れなかった場合は黙って捨てずに警告を残す", () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const postMessage = vi.fn(() => {
+        throw new Error("DataCloneError");
+      });
+      postArtifactBridgeMemoryChanged(makeFrame({ postMessage }), { a: 1 });
+      expect(warn).toHaveBeenCalled();
+
+      // シリアライズできない値も同様（循環参照）
+      warn.mockClear();
+      const circular: Record<string, unknown> = {};
+      circular.self = circular;
+      const ok = vi.fn();
+      postArtifactBridgeMemoryChanged(makeFrame({ postMessage: ok }), circular);
+      expect(warn).toHaveBeenCalled();
+      expect(ok).not.toHaveBeenCalled();
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
 

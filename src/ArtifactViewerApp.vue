@@ -246,6 +246,15 @@ async function resetMemory() {
 
 let lockTimer: ReturnType<typeof setInterval> | null = null;
 
+/**
+ * ハートビート間隔が Rust から取れなかった場合の保険。
+ * 本来の値は Rust 側の `ARTIFACT_LOCK_HEARTBEAT_MS`（TTL と対で決まる）。
+ */
+const ARTIFACT_LOCK_HEARTBEAT_FALLBACK_MS = 10000;
+
+/** `artifact-state-changed` の処理世代。後着ハンドラが先着を追い越した場合に捨てる */
+let stateGeneration = 0;
+
 async function touchLock() {
   const artifactId = selectedId.value;
   if (!artifactId) return;
@@ -552,6 +561,14 @@ onMounted(async () => {
     await navigateWithin(event.payload.artifactId, "replace");
   });
 
+  // ロックのハートビート。後続の await（listen / loadList）が失敗しても
+  // 「ウィンドウは開いたままロックだけ TTL で失効する」を避けるため、ここで先に張る。
+  // ロック対象の登録自体は watch(selectedId) が行う
+  const intervalMs = await invoke<number>("artifact_lock_heartbeat_interval").catch(
+    () => ARTIFACT_LOCK_HEARTBEAT_FALLBACK_MS,
+  );
+  lockTimer = setInterval(() => void touchLock(), intervalMs);
+
   void resolveScopeName();
   await loadList();
   // ピン止めはソート順に効くので、先頭を選ぶ前に読む
@@ -591,15 +608,15 @@ onMounted(async () => {
   // （MCP 側は成功を返しているので、消えたことに誰も気づけない）
   unlistenState = await listen<ArtifactStateChangedEvent>("artifact-state-changed", async (event) => {
     if (event.payload.scope !== scope || event.payload.scopeId !== scopeId) return;
+    // loadStates() の await を挟むので、短時間に複数回届くとハンドラの完了順が
+    // 入れ替わり、古いスナップショットを iframe へ押し込みうる。世代で捨てる
+    const generation = ++stateGeneration;
     await loadStates();
+    if (generation !== stateGeneration) return;
     if (event.payload.artifactId !== selectedId.value) return;
     reactViewRef.value?.pushMemory(selectedMemory.value ?? {});
   });
 
-  // ハートビート。間隔は Rust 側の TTL と対で決まるので Rust から貰う
-  await touchLock();
-  const intervalMs = await invoke<number>("artifact_lock_heartbeat_interval").catch(() => 10000);
-  lockTimer = setInterval(() => void touchLock(), intervalMs);
 });
 
 onUnmounted(() => {

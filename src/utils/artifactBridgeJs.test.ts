@@ -257,6 +257,23 @@ describe("ARTIFACT_BRIDGE_JS", () => {
     expect(posted[0].params.memory).toEqual({ a: 1, answered: true, b: 2 });
   });
 
+  it("保存待ちの入力が外からの更新に押し流されたら reject する", async () => {
+    const { bridge, posted, push } = setupBridge({ a: 1 });
+    // debounce 待ちの間に外から差し替えられる
+    const p = bridge.setMemoryKey("b", 2);
+    push({
+      [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+      event: ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED,
+      memory: { a: 1, answered: true },
+    });
+
+    // 押し込まれた値を送って resolve すると「保存できた」の誤報になる
+    await expect(p).rejects.toThrow("replaced from outside");
+    await vi.advanceTimersByTimeAsync(400);
+    expect(posted).toHaveLength(0);
+    expect(bridge.getMemory()).toEqual({ a: 1, answered: true });
+  });
+
   it("親以外からの / 壊れた一方向通知は無視する", () => {
     const { bridge, push } = setupBridge({ a: 1 });
     const other = {};
