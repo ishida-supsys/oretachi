@@ -950,13 +950,29 @@ pub struct ReadTerminalParams {
     pub from_cursor: Option<u64>,
 }
 
+/// `submit: true` のときに PTY へ書く「本文」を組み立てる（末尾 CR は含めない）。
+///
+/// 改行は `\r` へ正規化する（PowerShell / conpty 互換）。**末尾の CR は 1 個だけ剥がす。**
+/// 呼び出し側がそれを独立した write として遅らせて送ることで、宛先が Claude Code でも
+/// 送信として扱われる。1 個だけにするのは、意図的に Enter を 2 回送る呼び出し
+/// （末尾が `"\n\n"`）の回数を保つため。
+///
+/// スコープ強制やロック判定と同じく、テストできるよう純粋関数に切り出している。
+pub(crate) fn submit_body(text: &str) -> String {
+    let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
+    match normalized.strip_suffix('\r') {
+        Some(body) => body.to_string(),
+        None => normalized,
+    }
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct WriteTerminalParams {
     #[schemars(description = "PTY セッションID（oretachi_list_terminals で取得）")]
     pub session_id: u32,
     #[schemars(description = "送信するテキスト")]
     pub text: String,
-    #[schemars(description = "true なら改行を \\r 正規化＋末尾 \\r 保証してから送信（デフォルト true）。vitest の単一キー入力など改行不要時は false")]
+    #[schemars(description = "true なら改行を \\r 正規化＋末尾 \\r 保証してから送信（デフォルト true）。末尾 CR は本文と別 write で送るので Claude Code 宛でも確実にターンが始まる。vitest の単一キー入力など改行不要時は false")]
     pub submit: Option<bool>,
 }
 
@@ -3331,36 +3347,54 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "指定 PTY セッションへテキストを送信する。submit=true（デフォルト）なら改行を PowerShell/conpty 互換の \\r へ正規化し末尾にも保証して、コマンド送信扱いにする。submit=false なら raw のまま送る（vitest の単一キー入力など）")]
-    fn oretachi_write_terminal(
+    #[tool(description = "指定 PTY セッションへテキストを送信する。submit=true（デフォルト）なら改行を PowerShell/conpty 互換の \\r へ正規化し末尾にも保証して、コマンド送信扱いにする。このとき末尾の CR は本文とは別の write で少し遅らせて送る（宛先が Claude Code の場合、本文と同じ読み取りチャンクに来た CR は送信として扱われず入力欄に残る）。submit=false なら raw のまま送る（vitest の単一キー入力など）。**宛先が AI エージェントの TUI の場合、text は 1 行に畳むこと**（改行はすべて \\r になるので、複数行だと行ごとに送信されてプロンプトが分割して飛ぶ）")]
+    async fn oretachi_write_terminal(
         &self,
         Parameters(WriteTerminalParams { session_id, text, submit }): Parameters<WriteTerminalParams>,
     ) -> Result<CallToolResult, McpError> {
-        let pty = self.app_handle.state::<PtyManager>();
-        if !pty.list_sessions().iter().any(|s| s.session_id == session_id) {
-            return Err(McpError::invalid_params(
-                format!("session_id {} not found", session_id),
-                None,
-            ));
-        }
-        let payload = if submit.unwrap_or(true) {
-            let normalized = text.replace("\r\n", "\r").replace('\n', "\r");
-            if normalized.ends_with('\r') {
-                normalized
-            } else {
-                normalized + "\r"
+        {
+            let pty = self.app_handle.state::<PtyManager>();
+            if !pty.list_sessions().iter().any(|s| s.session_id == session_id) {
+                return Err(McpError::invalid_params(
+                    format!("session_id {} not found", session_id),
+                    None,
+                ));
             }
-        } else {
-            text
-        };
-        let bytes_len = payload.len();
-        pty.write(session_id, payload.into_bytes())
+        }
+        if !submit.unwrap_or(true) {
+            let bytes_len = text.len();
+            self.app_handle
+                .state::<PtyManager>()
+                .write(session_id, text.into_bytes())
+                .map_err(|e| McpError::internal_error(e, None))?;
+            log::info!(
+                "[mcp] oretachi_write_terminal: session_id={} bytes={} submit=false",
+                session_id,
+                bytes_len
+            );
+            return Ok(CallToolResult::success(vec![Content::text("written")]));
+        }
+
+        // **末尾の CR は必ず別の write にする。** 本文と CR を 1 回で書くと、宛先が
+        // Claude Code の場合は同じ読み取りチャンクに来た CR が本文の一部として扱われ、
+        // 入力欄に残ったままターンが始まらない（`event_delivery::write_push` と同じ現象）。
+        let body = submit_body(&text);
+        let bytes_len = body.len() + 1;
+        if !body.is_empty() {
+            self.app_handle
+                .state::<PtyManager>()
+                .write(session_id, body.as_bytes().to_vec())
+                .map_err(|e| McpError::internal_error(e, None))?;
+            tokio::time::sleep(crate::event_delivery::SUBMIT_DELAY).await;
+        }
+        self.app_handle
+            .state::<PtyManager>()
+            .write(session_id, b"\r".to_vec())
             .map_err(|e| McpError::internal_error(e, None))?;
         log::info!(
-            "[mcp] oretachi_write_terminal: session_id={} bytes={} submit={:?}",
+            "[mcp] oretachi_write_terminal: session_id={} bytes={} submit=true (本文と CR を分割)",
             session_id,
-            bytes_len,
-            submit
+            bytes_len
         );
         Ok(CallToolResult::success(vec![Content::text("written")]))
     }
@@ -4342,7 +4376,9 @@ pub(crate) async fn call_tool_for_artifact(
     }
 
     let result = match tool {
-        "oretachi_write_terminal" => service.oretachi_write_terminal(Parameters(parse(tool, args)?)),
+        "oretachi_write_terminal" => {
+            service.oretachi_write_terminal(Parameters(parse(tool, args)?)).await
+        }
         "oretachi_read_terminal" => service.oretachi_read_terminal(Parameters(parse(tool, args)?)),
         "oretachi_add_task" => service.oretachi_add_task(Parameters(parse(tool, args)?)),
         "notify_worktree" => service.notify_worktree(Parameters(parse(tool, args)?)).await,
@@ -6324,6 +6360,28 @@ mod tests {
             "X:/wt/oretachi-yo92",
             Some("wg-1"),
         )
+    }
+
+    /// `submit: true` の本文組み立て。**末尾 CR を 1 個だけ剥がす**のが要点で、
+    /// 呼び出し側がそれを別 write で送ることで Claude Code でもターンが始まる。
+    #[test]
+    fn submit_body_peels_exactly_one_trailing_cr() {
+        // 末尾に改行が無ければそのまま（呼び出し側が CR を足す）
+        assert_eq!(submit_body("abc"), "abc");
+        // 末尾の改行は形を問わず剥がす
+        assert_eq!(submit_body("abc\n"), "abc");
+        assert_eq!(submit_body("abc\r"), "abc");
+        assert_eq!(submit_body("abc\r\n"), "abc");
+        // 途中の改行は \r へ正規化して残す（行ごとの送信という既存の挙動を変えない）
+        assert_eq!(submit_body("a\nb"), "a\rb");
+        assert_eq!(submit_body("a\r\nb\n"), "a\rb");
+        // Enter だけを送る呼び出し。本文は空になり、CR は呼び出し側が送る
+        assert_eq!(submit_body(""), "");
+        assert_eq!(submit_body("\r"), "");
+        assert_eq!(submit_body("\n"), "");
+        // 意図的な二重 Enter は回数を保つ（本文の \r 1 個 + 呼び出し側の CR）
+        assert_eq!(submit_body("\n\n"), "\r");
+        assert_eq!(submit_body("a\n\n"), "a\r");
     }
 
     /// ホワイトリスト外は名前だけで弾く（パラメータを見る前に落とす）

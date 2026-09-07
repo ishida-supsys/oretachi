@@ -176,13 +176,29 @@ notify_worktree(worktree_name: <自分のワークツリー名>, kind: "general"
 実装は `lib/send` と `entry-point` にある。読む人向けの要約:
 
 1. ユーザーが候補ボタン + 補足を選び、「選択した N 件へ送信」を押す
-2. **通知 1 件ごとに** `oretachi_write_terminal(session_id: <その宛先>, text: <1 行の返答>)` を呼ぶ。宛先の端末が別々なので 1 本にまとめられない
+2. **通知 1 件ごとに** その宛先へ `oretachi_write_terminal` を 2 回呼ぶ（本文 → 150ms → CR）。宛先の端末が別々なので 1 本にまとめられない
 3. 1 件ごとにサイドカーへ結果を書く（途中で閉じても「どこまで届いたか」が残る）
 4. 全件終わったら成功分の inbox ID をまとめて `oretachi_ack_message`。**失敗は許容**して「ack 不可」を表示する
 
+### 本文と Enter は別の呼び出しに分ける
+
+**Claude Code は同じ読み取りチャンクに来た CR を送信として扱わない。** 本文の一部として入力欄に取り込むだけなので、`text + CR` を 1 回で書くと「テキストは届くのにターンが始まらない」状態になる（実機で確認済み。`event_delivery::write_push` に同じ現象の記録がある）。
+
+`lib/send` の `sendOne` はこう分けている:
+
+```js
+await callTool('oretachi_write_terminal', { session_id, text, submit: false });
+await new Promise(r => setTimeout(r, 150));
+await callTool('oretachi_write_terminal', { session_id, text: '\r', submit: false });
+```
+
+`oretachi_write_terminal(submit: true)` 側も同じ分割をするよう直してあるが、**`submit: false` で自分で分けておけば古い oretachi でも正しく送信でき、ツールの submit 実装に依存しない。**
+
 ### 送信テキストは必ず 1 行
 
-`oretachi_write_terminal` は `submit` 省略時（既定 `true`）に `\n` を `\r` へ正規化する。**複数行を渡すと行ごとに送信され、宛先の AI エージェントへプロンプトがばらばらに飛ぶ。** `lib/send` の `flatten()` がこれを潰しているので、テキスト生成を書き換えるときも 1 行を維持すること。
+`submit: true` は `\n` を `\r` へ正規化するため、**複数行を渡すと行ごとに送信され、宛先の AI エージェントへプロンプトがばらばらに飛ぶ。** `lib/send` の `flatten()` が改行を `" / "` へ畳んでいるので、テキスト生成を書き換えるときも 1 行を維持すること。
+
+`flatten()` は **ESC を含む C0 制御文字も空白へ置換する。** 本文は通知の中身、補足はユーザー入力で、ブラケットペーストで囲んでいないため、ESC がそのまま届くと宛先の TUI へ任意のエスケープシーケンスを流せてしまう。ここを外さないこと。
 
 ### 出自の断り書きは自前で入れる
 
@@ -203,4 +219,6 @@ notify_worktree(worktree_name: <自分のワークツリー名>, kind: "general"
 - **通知本文を要約してカードに載せない。** 人の判断材料なので全文を入れる。長い場合はカード側で折りたたむ。
 - **`その他（補足で指示）` を `choices` に入れない。** コード側が足すので二重になる。
 - **送信テキストに改行を入れない。** 行ごとに送信されて宛先のエージェントへプロンプトが分割して飛ぶ。
+- **本文と Enter を 1 回の `write_terminal` でまとめない。** テキストは届くのにターンが始まらない。
+- **`flatten()` の制御文字除去を外さない。** 宛先の TUI へエスケープシーケンスを注入できてしまう。
 - **レポートを作った時点で通知をクリアしない。** ユーザーが返答し終えてから `oretachi_clear_worktree_notification` を呼ぶ。

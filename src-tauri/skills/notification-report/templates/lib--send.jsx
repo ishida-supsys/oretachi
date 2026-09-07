@@ -9,16 +9,25 @@ const { callTool } = require('oretachi');
 // 候補で言い表せないときの選択肢。選ぶと補足プロンプトが必須になる
 const OTHER = 'その他（補足で指示）';
 
+/** 本文を送ってから Enter を送るまでの猶予（ミリ秒）。`sendOne` のコメント参照 */
+const SUBMIT_DELAY_MS = 150;
+
 /**
- * 改行を潰して 1 行に畳む。
+ * 改行と制御文字を潰して 1 行に畳む。
  *
- * **これは必須。** `oretachi_write_terminal` は `submit` 省略時（既定 true）に
+ * **改行を残さないのは必須。** `oretachi_write_terminal` は `submit` が true のとき
  * `\n` を `\r` へ正規化するため、複数行のテキストを渡すと行ごとに送信され、
- * 宛先の AI エージェントへ複数のプロンプトがばらばらに飛ぶ。
+ * 宛先の AI エージェントへプロンプトがばらばらに飛ぶ。
+ *
+ * ESC を含む C0 制御文字も落とす。本文は通知の中身、補足はユーザー入力なので、
+ * ESC がそのまま届くと宛先の TUI へ任意のエスケープシーケンスを流せてしまう
+ * （ブラケットペーストで囲んでいないため、囲みからの脱出ではなく直接注入になる）。
  */
 function flatten(s) {
   return String(s == null ? '' : s)
     .replace(/\r?\n/g, ' / ')
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x1f\x7f]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -59,7 +68,18 @@ function blockedReason(n) {
   return null;
 }
 
-/** 1 件送る。成功なら { status: 'sent' }、失敗なら { status: 'failed', error } */
+/**
+ * 1 件送る。成功なら `{ status: 'sent' }`、失敗なら `{ status: 'failed', error }`。
+ *
+ * **本文と Enter は別の呼び出しに分け、間に猶予を入れる。** Claude Code は同じ
+ * 読み取りチャンクに来た CR を送信として扱わず、本文の一部として入力欄に残すため、
+ * 1 回で `text + CR` を書くとテキストは届くのにターンが始まらない
+ * （`event_delivery::write_push` に同じ現象の記録がある）。
+ *
+ * `submit: false` で本文だけを書き、独立した呼び出しで CR だけを送る形にしている。
+ * `submit: true` 側も同じ分割をするよう直したが、こちらで分けておけば古い oretachi
+ * でも正しく送信でき、ツールの submit 実装に依存しない。
+ */
 async function sendOne(meta, n, answer) {
   const blocked = blockedReason(n);
   if (blocked) return { status: 'failed', error: blocked };
@@ -67,6 +87,13 @@ async function sendOne(meta, n, answer) {
     await callTool('oretachi_write_terminal', {
       session_id: n.sessionId,
       text: buildReplyText(meta, n, answer),
+      submit: false,
+    });
+    await new Promise(resolve => setTimeout(resolve, SUBMIT_DELAY_MS));
+    await callTool('oretachi_write_terminal', {
+      session_id: n.sessionId,
+      text: '\r',
+      submit: false,
     });
     return { status: 'sent' };
   } catch (e) {
@@ -79,7 +106,7 @@ async function sendOne(meta, n, answer) {
  *
  * `oretachi_ack_message` は `terminal_id` を取らないので、レポートを置いた
  * ワークツリーで**走行中の AI 端末がちょうど 1 つ**でないと失敗する。
- * AI セッション終了後にユーザーがレポートを触る場合は常に失敗するので、
+ * AI セッション終了後にユーザーがレポートを触る場合は失敗するので、
  * 失敗は許容して表示だけ出す（返答自体は届いている）。
  */
 async function ackInbox(inboxIds) {
@@ -94,6 +121,7 @@ async function ackInbox(inboxIds) {
 }
 
 exports.OTHER = OTHER;
+exports.SUBMIT_DELAY_MS = SUBMIT_DELAY_MS;
 exports.flatten = flatten;
 exports.buildReplyText = buildReplyText;
 exports.blockedReason = blockedReason;

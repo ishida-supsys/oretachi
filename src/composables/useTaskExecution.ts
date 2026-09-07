@@ -12,6 +12,15 @@ import { decodePtyOutput } from "../utils/decodePtyOutput";
 import { useWorkgroups } from "./useWorkgroups";
 import { initialTrayNotification } from "../utils/trayNotification";
 
+/**
+ * 本文を流してから Enter を送るまでの猶予。
+ *
+ * Claude Code は同じ読み取りチャンクに来た CR を送信として扱わないので、本文と
+ * Enter は別の write に分けて間を空ける。Rust 側の `event_delivery::SUBMIT_DELAY`
+ * と同じ値（あちらが本家。変えるときは両方揃える）。
+ */
+const SUBMIT_DELAY_MS = 150;
+
 /** Claude Code モード → permission-mode フラグ */
 function claudeModeFlag(mode?: ClaudeCodeMode): string {
   switch (mode) {
@@ -223,12 +232,18 @@ export function useTaskExecution(deps: {
     terminalId: number,
     prompt: string,
   ): Promise<void> {
-    // ブラケット付きペーストモードで囲み、改行を含むテキストを一括入力として送信
-    const data = `\x1b[200~${prompt}\x1b[201~\r`;
-    if (isDetached(worktreeId)) {
-      const bytes = Array.from(new TextEncoder().encode(data));
-      await invoke("pty_write", { sessionId, data: bytes });
-    } else {
+    // ブラケット付きペーストモードで囲み、改行を含むテキストを一括入力として送信。
+    //
+    // **ペーストと Enter は別の write に分ける。** `ESC[200~…ESC[201~\r` を1回で書くと
+    // Claude Code はペースト終端と同じ読み取りチャンクに来た CR をペーストの一部として
+    // 扱い、本文が入力欄に残ったままターンが始まらない。Rust 側の
+    // `event_delivery::write_push` / `mcp_server::oretachi_write_terminal` と同じ手当て。
+    const write = async (data: string) => {
+      if (isDetached(worktreeId)) {
+        const bytes = Array.from(new TextEncoder().encode(data));
+        await invoke("pty_write", { sessionId, data: bytes });
+        return;
+      }
       const termRef = getTerminalRef(terminalId);
       if (termRef) {
         await termRef.write(data);
@@ -236,7 +251,10 @@ export function useTaskExecution(deps: {
         const bytes = Array.from(new TextEncoder().encode(data));
         await invoke("pty_write", { sessionId, data: bytes });
       }
-    }
+    };
+    await write(`\x1b[200~${prompt}\x1b[201~`);
+    await new Promise((resolve) => setTimeout(resolve, SUBMIT_DELAY_MS));
+    await write("\r");
   }
 
   async function executeAddWorktree(code: AddWorktreeTaskCode): Promise<string> {
