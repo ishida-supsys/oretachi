@@ -596,7 +596,7 @@ pub struct ArtifactParams {
     pub repository: Option<String>,
     #[schemars(description = "ブランチ名。project_dir を渡す場合は不要。指定する場合は repository と両方セットで")]
     pub branch: Option<String>,
-    #[schemars(description = "コンテンツの種類 (create時必須): application/vnd.ant.code, text/markdown, text/html, image/svg+xml, application/vnd.ant.mermaid, application/vnd.ant.react (Tailwind CSSユーティリティクラス利用可), text/csv, text/tab-separated-values (1行目をヘッダとするテーブルビューアで表示), text/uri-list (content に URL を1行だけ書く。ビューアには「ブラウザで開く」ボタンだけが出る)")]
+    #[schemars(description = "コンテンツの種類 (create時必須): application/vnd.ant.code, text/markdown, text/html (CSP により外部リソースは https: の画像だけが読める。CDN スクリプト・外部 CSS・Web フォント・fetch/WebSocket・iframe 埋め込み(YouTube等)・video/audio・Web Worker は全て遮断される。CSS/JS はインラインで書くこと), image/svg+xml, application/vnd.ant.mermaid, application/vnd.ant.react (Tailwind CSSユーティリティクラス利用可。CSP は text/html より厳しく外部リソースは一切読めない。画像も data: / blob: のみ), text/csv, text/tab-separated-values (1行目をヘッダとするテーブルビューアで表示), text/uri-list (content に URL を1行だけ書く。ビューアには「ブラウザで開く」ボタンだけが出る)")]
     #[serde(rename = "type")]
     pub content_type: Option<String>,
     #[schemars(description = "アーティファクトのタイトル (create時必須)")]

@@ -9,14 +9,28 @@
  * quirks モードに落ちるため。パース結果の文書は browsing context を持たないので、
  * ここでスクリプトが走ったり外部リソースを取りに行ったりはしない。
  *
- * なお html view には CSP が無い（親も `"csp": null`）。React 側と揃える案はあるが、
- * 既存の HTML アーティファクトは CDN 前提で書かれているものが多く、無言で崩れる。
- * CSP の付与は影響範囲を調べたうえで別途対応する。
+ * srcdoc iframe は親の CSP を継承するが親は `"csp": null` なので、CSP は
+ * `<head>` 先頭の meta で自前に張る（`HTML_ARTIFACT_CSP`）。違反は画面に何も出ず
+ * 「急に崩れた」としか見えないため、収集スクリプトも合わせて注入し、親側で
+ * バナーに出す。srcdoc を差し替えても iframe の contentWindow は同一のままで、
+ * 前の文書が仕掛けた遅延メッセージが差し替え後に届きうるため、呼び出しごとに
+ * nonce を発行して返し、親側で突き合わせられるようにする。
  */
 
 import { ARTIFACT_LINK_INTERCEPT_JS } from "./artifactFrameLink";
+import {
+  buildCspViolationReportJs,
+  createCspNonce,
+  HTML_ARTIFACT_CSP,
+} from "./artifactCspViolation";
 
-export function buildHtmlSrcdoc(content: string): string {
+export interface HtmlArtifactSrcdoc {
+  srcdoc: string;
+  /** この srcdoc の違反通知だけを受け入れるための使い捨て識別子 */
+  nonce: string;
+}
+
+export function buildHtmlSrcdoc(content: string): HtmlArtifactSrcdoc {
   const doc = new DOMParser().parseFromString(content, "text/html");
 
   const script = doc.createElement("script");
@@ -27,10 +41,22 @@ export function buildHtmlSrcdoc(content: string): string {
     doc.body && doc.body.tagName !== "FRAMESET" ? doc.body : doc.head;
   host.appendChild(script);
 
+  // 違反収集は meta より後・他のどのリソースより前でなければ取りこぼす。
+  // meta → 収集スクリプトの順になるよう、逆順に head の先頭へ差し込む
+  const nonce = createCspNonce();
+  const reporter = doc.createElement("script");
+  reporter.textContent = buildCspViolationReportJs(nonce);
+  doc.head.insertBefore(reporter, doc.head.firstChild);
+
+  const meta = doc.createElement("meta");
+  meta.setAttribute("http-equiv", "Content-Security-Policy");
+  meta.setAttribute("content", HTML_ARTIFACT_CSP);
+  doc.head.insertBefore(meta, doc.head.firstChild);
+
   // 元の doctype は尊重する（無い断片だけ標準モードになるよう html を補う）
   const doctype = doc.doctype
     ? `<!DOCTYPE ${doc.doctype.name}${doc.doctype.publicId ? ` PUBLIC "${doc.doctype.publicId}"` : ""}${doc.doctype.systemId ? ` "${doc.doctype.systemId}"` : ""}>`
     : "<!DOCTYPE html>";
 
-  return `${doctype}\n${doc.documentElement.outerHTML}`;
+  return { srcdoc: `${doctype}\n${doc.documentElement.outerHTML}`, nonce };
 }
