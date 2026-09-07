@@ -3949,7 +3949,9 @@ struct SubscriberIdentity {
 ///   書ける」形に範囲が限定される。**向きは購読者側が呼び出し元。** 宛先側が呼び出し元を
 ///   購読しているだけでは通らない（通すと相手が一方的に自分へ書き込み権を渡せてしまう）。
 ///   なお `*` 購読を張っているワークツリーのアーティファクトは全ワークツリーの端末へ
-///   書けることになる（#211 でユーザーと合意済み）。
+///   書けることになる（#211 でユーザーと合意済み）。**ホーム / リポジトリ擬似ワークツリーも
+///   宛先になる**ので、`*` / `repo:` 購読はメインのクローンで走っている端末への書き込みも
+///   含む（擬似ワークツリーは厳密一致では購読できないため、ワイルドカードしか経路が無い）。
 /// - **`oretachi_poll_inbox` / `oretachi_ack_message` /
 ///   `notify_worktree`（`event_kind` 付き）は AI セッション稼働中しか使えない。**
 ///   `terminal_id` を受け取らない（本人性が検証できないため）ので
@@ -4113,6 +4115,20 @@ fn target_specificity(target: &str, dest_worktree_id: &str) -> u8 {
 ///
 /// `state` / `expires_at` の条件は `event_db::fanout` と同一に揃えている。SQL 側でも
 /// 同じ条件で絞っているが、ここでも再確認して純粋関数単体で判定が閉じるようにしている。
+///
+/// # ワイルドカード購読は擬似ワークツリーの端末にも当たる（#211 でユーザーと合意済み）
+///
+/// `resolve_subscription_target` はホーム / リポジトリ擬似ワークツリーを**厳密一致の
+/// target としては拒否する**（クローズされないので `worktree.closed` が永久に発火しない）。
+/// つまり擬似ワークツリー宛は `*` / `workgroup:` / `repo:` からしか許可が出ない
+/// ＝**人が宛先単位で許可を判断する経路が無い**。それでも許すのは、ホームタブ（cwd が
+/// ワークツリー追加先ディレクトリ）やメインのクローンで走っているタブからの通知に
+/// レポートから返答する用途（全通知の一括レポート）が成立しなくなるため。
+///
+/// リポジトリ擬似ワークツリーの `path` は**メインのクローン**なので、`*` / `repo:` 購読を
+/// 張っているワークツリーのアーティファクトはメインのクローンで走っているエージェント端末へも
+/// 書ける。ワイルドカード購読を張る＝そのリポジトリ／全ワークツリーぶんの端末操作を
+/// 許すことだと理解して張る必要がある。
 pub(crate) fn find_cross_worktree_grant(
     subs: &[crate::event_db::SubscriptionRow],
     caller_worktree_id: &str,
@@ -4135,6 +4151,26 @@ pub(crate) fn find_cross_worktree_grant(
         })
 }
 
+/// 宛先ワークツリーにマッチしうる購読 `target` の全集合を組み立てる（#211）。
+///
+/// ワークグループ未設定時に先頭グループへ倒すのは `lib.rs` の `resolve_event_scope`
+/// （イベント発火側）と同じ規則。**揃えないと「`workgroup:` 購読には配送されるのに
+/// 返答は書けない」という非対称が生まれる。**
+///
+/// 宛先が settings に無い場合はワークツリー ID 厳密一致と `*` だけを返す。
+pub(crate) fn cross_worktree_dest_targets(
+    settings: &crate::settings::AppSettings,
+    dest_worktree_id: &str,
+) -> Vec<String> {
+    let dest = settings.worktrees.iter().find(|w| w.id == dest_worktree_id);
+    // ホーム擬似ワークツリーは `repository_name` が空なので `repo:` には当たらない
+    // （`matching_targets` が空文字を落とす）。リポジトリ擬似ワークツリーは当たる
+    let repo = dest.map(|w| w.repository_name.clone());
+    let group = resolve_workgroup_by_id(settings, dest.and_then(|w| w.workgroup_id.as_deref()))
+        .map(|g| g.id.clone());
+    crate::event_db::matching_targets(dest_worktree_id, group.as_deref(), repo.as_deref())
+}
+
 /// 別ワークツリーの端末への `read/write_terminal` を、購読関係があるときだけ許可する（#211）。
 ///
 /// 許可できない場合のエラー文言には**「購読が必要」と解除条件を必ず書く**。
@@ -4155,14 +4191,10 @@ async fn authorize_cross_worktree_session(
 
     let dest = settings.worktrees.iter().find(|w| w.id == dest_worktree_id);
     let dest_name = dest.map(|w| w.name.clone()).unwrap_or_else(|| dest_worktree_id.to_string());
-    // ワイルドカード購読の照合に必要な所属情報。ワークグループ未設定時に先頭グループへ
-    // 倒すのは `resolve_event_scope`（イベント発火側）と同じ規則。揃えないと
-    // 「`workgroup:` 購読には配送されるのに返答は書けない」というズレになる
-    let repo = dest.map(|w| w.repository_name.clone());
-    let group = resolve_workgroup_by_id(settings, dest.and_then(|w| w.workgroup_id.as_deref()))
-        .map(|g| g.id.clone());
-    let dest_targets =
-        crate::event_db::matching_targets(dest_worktree_id, group.as_deref(), repo.as_deref());
+    // 擬似ワークツリーは厳密一致では購読できない。エラー文言で「その名前で購読しろ」と
+    // 案内すると必ず失敗する呼び出しを勧めることになるので、案内をワイルドカードへ振る
+    let dest_is_pseudo = dest.map(|w| w.is_home || w.is_repository).unwrap_or(false);
+    let dest_targets = cross_worktree_dest_targets(settings, dest_worktree_id);
 
     let now = crate::event_db::now_ms();
     let subs = crate::event_db::list_subscriptions_by_subscriber_worktree(
@@ -4174,14 +4206,26 @@ async fn authorize_cross_worktree_session(
 
     find_cross_worktree_grant(&subs, caller_worktree_id, dest_worktree_id, &dest_targets, now)
         .ok_or_else(|| {
+            // 擬似ワークツリーは `resolve_subscription_target` が厳密一致 target として
+            // 拒否するので、名前で購読しろと案内すると必ず失敗する呼び出しを勧めてしまう
+            let how = if dest_is_pseudo {
+                format!(
+                    "'{}' はホーム / リポジトリ擬似ワークツリーで名前指定の購読ができないため、ワイルドカード購読が必要です（oretachi_subscribe_worktree(target: \"*\") を '{}' の AI 端末から実行する）",
+                    dest_name, caller_worktree_name
+                )
+            } else {
+                format!(
+                    "oretachi_subscribe_worktree(target: \"{}\") を '{}' の AI 端末から実行してください",
+                    dest_name, caller_worktree_name
+                )
+            };
             format!(
-                "このアーティファクトはワークツリー '{}' に置かれており、別ワークツリー '{}' の端末を操作しようとしています。他ワークツリーの端末へ送るには、**'{}' 側が '{}' を購読している**必要があります（oretachi_subscribe_worktree(target: \"{}\") を '{}' の AI 端末から実行する。'{}' 側が '{}' を購読しているだけでは通りません）。購読が張られるまでこの呼び出しは何度試しても失敗します",
+                "このアーティファクトはワークツリー '{}' に置かれており、別ワークツリー '{}' の端末を操作しようとしています。他ワークツリーの端末へ送るには、**'{}' 側が '{}' を購読している**必要があります。{}。'{}' 側が '{}' を購読しているだけでは通りません。購読が張られるまでこの呼び出しは何度試しても失敗するので、現在の購読は oretachi_list_subscriptions で確認してください",
                 caller_worktree_name,
                 dest_name,
                 caller_worktree_name,
                 dest_name,
-                dest_name,
-                caller_worktree_name,
+                how,
                 dest_name,
                 caller_worktree_name,
             )
@@ -6474,6 +6518,92 @@ mod tests {
         let mut s = sub("s1", "caller", "dest");
         s.subscriber_worktree_id = None;
         assert!(grant(&[s]).is_none());
+    }
+
+    /// `cross_worktree_dest_targets` 用の settings。`workgroupId` 未設定のワークツリーと
+    /// 擬似ワークツリー（ホーム / リポジトリ）を混ぜてある。
+    fn dest_settings() -> AppSettings {
+        let mut settings = target_settings(); // wt-1 / OreTachi / wg-2
+        let base = settings.worktrees[0].clone();
+        settings.worktrees.push(WorktreeEntry {
+            id: "wt-nogroup".into(),
+            name: "oretachi-nogroup".into(),
+            workgroup_id: None,
+            ..base.clone()
+        });
+        settings.worktrees.push(WorktreeEntry {
+            id: "wt-home".into(),
+            name: "HOME".into(),
+            // ホームはリポジトリに属さないので repository_name が空
+            repository_name: String::new(),
+            path: "X:/wt".into(),
+            is_home: true,
+            ..base.clone()
+        });
+        settings.worktrees.push(WorktreeEntry {
+            id: "wt-repo".into(),
+            name: "OreTachi (repo)".into(),
+            // リポジトリ擬似ワークツリーの path はメインのクローン
+            path: "D:/git/oretachi".into(),
+            is_repository: true,
+            ..base
+        });
+        settings
+    }
+
+    #[test]
+    fn dest_targets_include_worktree_group_and_repo() {
+        let t = cross_worktree_dest_targets(&dest_settings(), "wt-1");
+        assert_eq!(t, vec!["wt-1", "*", "workgroup:wg-2", "repo:oretachi"]);
+    }
+
+    /// ワークグループ未設定の宛先は先頭グループへ倒す（`resolve_event_scope` と同じ規則）。
+    /// 揃っていないと「`workgroup:` 購読には配送されるのに返答は書けない」非対称になる
+    #[test]
+    fn dest_targets_fall_back_to_the_first_workgroup() {
+        let t = cross_worktree_dest_targets(&dest_settings(), "wt-nogroup");
+        assert!(t.contains(&"workgroup:wg-1".to_string()), "{:?}", t);
+    }
+
+    /// 擬似ワークツリー宛はワイルドカードからしか許可が出ない（#211 でユーザーと合意済み）。
+    /// ホームは `repository_name` が空なので `repo:` には当たらない
+    #[test]
+    fn dest_targets_for_pseudo_worktrees_only_match_wildcards() {
+        let settings = dest_settings();
+        let home = cross_worktree_dest_targets(&settings, "wt-home");
+        assert_eq!(home, vec!["wt-home", "*", "workgroup:wg-2"]);
+
+        let repo = cross_worktree_dest_targets(&settings, "wt-repo");
+        assert!(repo.contains(&"repo:oretachi".to_string()), "{:?}", repo);
+
+        // 厳密一致 target は `resolve_subscription_target` が擬似ワークツリーを拒否するので
+        // 購読として登録できず、ここに並んでいても実際には根拠になりえない
+        for id in ["wt-home", "wt-repo"] {
+            let name = &settings.worktrees.iter().find(|w| w.id == id).unwrap().name;
+            assert!(
+                resolve_subscription_target(&settings, name).is_err(),
+                "{} は厳密一致では購読できないはず",
+                name
+            );
+        }
+        // ワイルドカード購読ならメインのクローンの端末へも許可が出る
+        assert!(find_cross_worktree_grant(
+            &[sub("s1", "caller", "*")],
+            "caller",
+            "wt-repo",
+            &cross_worktree_dest_targets(&settings, "wt-repo"),
+            1_000,
+        )
+        .is_some());
+    }
+
+    /// settings に無い宛先でも `*` は当たる（購読の逆引き自体は成立させる）
+    #[test]
+    fn dest_targets_for_unknown_worktree_keep_exact_and_all() {
+        let mut settings = dest_settings();
+        settings.workgroups.clear();
+        let t = cross_worktree_dest_targets(&settings, "gone");
+        assert_eq!(t, vec!["gone", "*"]);
     }
 
     /// 複数当たったときは**一番具体的な購読**を根拠として返す（監査ログに `*` だけ残ると
