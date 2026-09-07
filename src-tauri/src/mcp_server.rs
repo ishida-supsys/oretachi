@@ -635,7 +635,7 @@ pub struct ArtifactParams {
     pub offset: Option<u32>,
     #[schemars(description = "get時: 取得する行数 (省略時は全行)")]
     pub limit: Option<u32>,
-    #[schemars(description = "true にすると、このアーティファクトが oretachi のビューアで開かれている間 MCP 由来の書き込み (update / rewrite / artifact_module / artifact_store command=write,delete) を拒否する。ユーザーが操作中のアーティファクトを裏から書き換えないためのフラグで、読み取りは常に許可される。create / update / rewrite のいずれでも設定でき、省略時は既存アーティファクトの設定を引き継ぐ (明示的に false を渡すと解除)。ロック中は解除もできないので、外したい場合はユーザーにウィンドウを閉じてもらう")]
+    #[schemars(description = "true にすると、このアーティファクトが oretachi のビューアで開かれている間 MCP 由来の書き込み (update / rewrite / artifact_module / artifact_store command=write,delete) を拒否する。ユーザーが操作中のアーティファクトを裏から書き換えないためのフラグで、読み取りは常に許可される。create / update / rewrite のいずれでも設定でき、省略時は既存アーティファクトの設定を引き継ぐ (明示的に false を渡すと解除)。ロック中は解除もできないので、外したい場合はユーザーにウィンドウを閉じてもらう。**守られるのはビューアが「いま表示している」1件だけ**で、ウィンドウが開いたままでもユーザーが別のアーティファクトへ切り替えている間は書き込める点に注意 (裏で入力を消したくないレポートは、ユーザーがそのページに留まっている前提になる)")]
     pub locked_while_open: Option<bool>,
 }
 
