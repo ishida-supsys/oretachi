@@ -12,14 +12,49 @@ pub enum AiAgentKind {
     ClineCli,
 }
 
+/// エージェントごとの既定モデル。空文字は「`--model` を渡さず CLI 側の既定に任せる」を意味する。
+///
+/// ここで使うのは判定・生成という短い構造化出力の用途なので、各エージェントの
+/// **軽量・高速な**モデルを指名する。CLI の既定に委ねてはいけない（#223）:
+/// codex は `~/.codex/config.toml` の `model` / `model_reasoning_effort` を拾うため、
+/// ユーザーが重い設定（例: `gpt-5.5` + `xhigh`）にしているとタスク生成がそのぶん
+/// 遅くなり、`aiTimeoutSecs`（既定 120 秒）を踏み抜きやすくなる。
+///
+/// Codex CLI は `gpt-5.6-luna`（#223）。`codex debug models` の catalog で
+/// "Fast and affordable agentic coding model" とされる現行世代の軽量ティアで、
+/// 短い構造化出力というここの用途に合う。
+///
+/// 選定の経緯（codex-cli 0.147.0 / ChatGPT アカウントで実測）:
+/// - 旧既定値 `gpt-5.4-mini` は `400 invalid_request_error`
+///   (`The '<model>' model is not supported when using Codex with a ChatGPT account.`)
+///   になり、タスク生成がまるごと失敗していた。`gpt-5.4` / `gpt-5.1` / `gpt-5.5-codex` /
+///   `gpt-5.4-codex` / `gpt-5.5-mini` / `gpt-5-mini` / `codex-mini-latest` も同じ 400
+///   （mini 系は API キー専用）。
+/// - 通るのは `gpt-5.5` と `gpt-5.6-{sol,terra,luna}`。`gpt-5.5` は catalog 上
+///   "Proven previous-generation model" かつ表示順は最下位なので選ばない。
+/// - 所要はタスク生成相当のプロンプトで luna 8 秒 / `gpt-5.5` 9 秒（各3回、いずれも
+///   スキーマどおりの JSON）。
+///
+/// **モデルが retire すると同じ 400 が `default_model` の呼び出し元4経路
+/// （ai_judge / ai_commit_message / ai_description / task_executor）で同時に再発する。**
+/// 今は設定からの上書き手段が無いのでここを直す必要がある。
 pub fn default_model(kind: &AiAgentKind) -> &'static str {
     match kind {
         AiAgentKind::ClaudeCode => "claude-haiku-4-5",
         AiAgentKind::GeminiCli => "gemini-2.5-flash",
-        AiAgentKind::CodexCli => "gpt-5.4-mini",
+        AiAgentKind::CodexCli => "gpt-5.6-luna",
         AiAgentKind::ClineCli => "",
     }
 }
+
+/// Codex CLI へ渡す推論強度。`~/.codex/config.toml` の `model_reasoning_effort` を上書きする。
+///
+/// モデルを指名するだけでは足りない（#223）。推論強度はモデルとは別のキーで、
+/// ユーザーの `config.toml` がそのまま効くうえ、**モデル自身の既定も重いことがある**
+/// （catalog 上 `gpt-5.5` の `default_reasoning_level` は `xhigh`）。実測（タスク生成
+/// 相当のプロンプト、codex-cli 0.147.0 / gpt-5.5）で `xhigh` は 18 秒、`low` は 9 秒。判定・生成は
+/// スキーマ付きの短い出力なので `low` でも結果は変わらず、タイムアウト余裕だけが増える。
+const CODEX_REASONING_EFFORT: &str = "low";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -150,6 +185,17 @@ fn json_schema_prompt_suffix(json_schema: &str) -> String {
     )
 }
 
+/// `--model` フラグを組み立てる。`model` が空なら**フラグ自体を落とす**（#223）。
+/// 空文字をそのまま渡すと CLI 側が「モデル名 ""」として扱って失敗するため、
+/// 「CLI の既定に任せる」は引数を出さないことで表現する。
+fn model_args(model: &str) -> Vec<String> {
+    if model.trim().is_empty() {
+        vec![]
+    } else {
+        vec!["--model".to_string(), model.to_string()]
+    }
+}
+
 pub fn build_execution_plan(
     kind: &AiAgentKind,
     prompt: &str,
@@ -161,9 +207,8 @@ pub fn build_execution_plan(
     match kind {
         AiAgentKind::ClaudeCode => {
             let (program, mut args) = make_platform_cmd(&resolved);
+            args.extend(model_args(model));
             args.extend([
-                "--model".to_string(),
-                model.to_string(),
                 "-p".to_string(),
                 "--output-format".to_string(),
                 "json".to_string(),
@@ -177,7 +222,7 @@ pub fn build_execution_plan(
         }
         AiAgentKind::GeminiCli => {
             let (program, mut args) = make_platform_cmd(&resolved);
-            args.extend(["--model".to_string(), model.to_string()]);
+            args.extend(model_args(model));
             AiExecutionPlan {
                 program,
                 args,
@@ -186,7 +231,13 @@ pub fn build_execution_plan(
         }
         AiAgentKind::CodexCli => {
             let (program, mut args) = make_platform_cmd(&resolved);
-            args.extend(["exec".to_string(), "--skip-git-repo-check".to_string(), "--model".to_string(), model.to_string()]);
+            args.extend(["exec".to_string(), "--skip-git-repo-check".to_string()]);
+            args.extend(model_args(model));
+            // ユーザー config の `model_reasoning_effort` を上書きする（#223）
+            args.extend([
+                "-c".to_string(),
+                format!("model_reasoning_effort={}", CODEX_REASONING_EFFORT),
+            ]);
             AiExecutionPlan {
                 program,
                 args,
@@ -419,6 +470,66 @@ mod tests {
         assert!(plan.args.contains(&"--skip-git-repo-check".to_string()));
         assert!(!plan.args.contains(&"-q".to_string()));
         assert!(plan.stdin_content.contains("my prompt"));
+    }
+
+    /// #223: codex の既定モデルは ChatGPT アカウントで通る現行世代の値を指名する。旧値
+    /// `gpt-5.4-mini` は 400 で弾かれ、CLI の既定に委ねるとユーザー config の
+    /// 重い設定を拾ってタイムアウトしやすくなる。
+    #[test]
+    fn test_default_model_codex_is_pinned() {
+        assert_eq!(default_model(&AiAgentKind::CodexCli), "gpt-5.6-luna");
+        assert_eq!(default_model(&AiAgentKind::ClineCli), "");
+        assert!(!default_model(&AiAgentKind::ClaudeCode).is_empty());
+        assert!(!default_model(&AiAgentKind::GeminiCli).is_empty());
+    }
+
+    /// 既定モデルは `--model` として実際に渡り、推論強度も固定されること（#223）。
+    /// どちらか片方だけではユーザー config の `model_reasoning_effort` が効いてしまう。
+    #[test]
+    fn test_build_execution_plan_codex_pins_model_and_effort() {
+        let plan = build_execution_plan(
+            &AiAgentKind::CodexCli,
+            "my prompt",
+            "{}",
+            default_model(&AiAgentKind::CodexCli),
+            false,
+        );
+        assert!(plan.args.contains(&"--model".to_string()));
+        assert!(plan.args.contains(&"gpt-5.6-luna".to_string()));
+        assert!(plan.args.contains(&"-c".to_string()));
+        assert!(plan
+            .args
+            .contains(&format!("model_reasoning_effort={}", CODEX_REASONING_EFFORT)));
+    }
+
+    /// 空モデルではフラグ自体が落ちること。空文字を渡すと CLI 側が
+    /// 「モデル名 ""」として解釈して失敗するため、素通ししてはいけない。
+    #[test]
+    fn test_build_execution_plan_omits_model_when_empty() {
+        for kind in [
+            AiAgentKind::ClaudeCode,
+            AiAgentKind::GeminiCli,
+            AiAgentKind::CodexCli,
+        ] {
+            let plan = build_execution_plan(&kind, "my prompt", "{}", "", false);
+            assert!(
+                !plan.args.contains(&"--model".to_string()),
+                "{:?} should omit --model for empty model",
+                kind
+            );
+            assert!(
+                !plan.args.iter().any(|a| a.is_empty()),
+                "{:?} should not pass an empty argument",
+                kind
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_execution_plan_codex_keeps_explicit_model() {
+        let plan = build_execution_plan(&AiAgentKind::CodexCli, "my prompt", "{}", "model-x", false);
+        assert!(plan.args.contains(&"--model".to_string()));
+        assert!(plan.args.contains(&"model-x".to_string()));
     }
 
     #[test]

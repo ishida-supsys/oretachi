@@ -6,11 +6,27 @@ import type { ToastMessageOptions } from "primevue/toast";
 import { useTasks } from "./useTasks";
 import { useSettings } from "./useSettings";
 import { useWorkgroups } from "./useWorkgroups";
+import { useWorktrees } from "./useWorktrees";
 import { useAutoReturnHome } from "./useAutoReturnHome";
+import { useNotifications, playSoundForKind, sendOsNotification } from "./useNotifications";
+import { resolveKindSetting } from "../utils/notificationKinds";
+import { buildTrayNotificationMap } from "../utils/trayNotification";
+import { HOME_WORKTREE_ID, isHomeWorktree } from "../utils/homeWorktree";
 import type { TaskCode, TaskProcessCode } from "../types/task";
 
 /** add_worktree ステップでは生成された worktree ID を返す */
 type StepExecutor = (code: TaskCode) => Promise<string | void>;
+
+/** OS 通知の本文に載せる失敗理由の上限。AI CLI の stderr 全文が来ることがある（#223） */
+const NOTIFICATION_DETAIL_MAX_LEN = 200;
+
+/** OS 通知向けに失敗理由を刈る。全文はトーストとタスク一覧（`error`）に残る。 */
+function truncateForNotification(detail: string): string {
+  const oneLine = detail.replace(/\s+/g, " ").trim();
+  return oneLine.length > NOTIFICATION_DETAIL_MAX_LEN
+    ? `${oneLine.slice(0, NOTIFICATION_DETAIL_MAX_LEN)}…`
+    : oneLine;
+}
 
 interface AutoReturnHomeOptions {
   /** メインウィンドウのフォーカス状態 */
@@ -34,6 +50,8 @@ export function useAddTaskDialog(executeStep: StepExecutor, autoReturnHome?: Aut
     ? useAutoReturnHome({ settings, resolvedGroupId, ...autoReturnHome })
     : null;
   const { sortedTasks, addTask, setTaskSteps, updateStepStatus, updateTaskStatus } = useTasks();
+  const { addNotification } = useNotifications();
+  const { worktrees } = useWorktrees();
 
   const showAddTaskDialog = ref(false);
   const rerunTaskId = ref<string | null>(null);
@@ -44,15 +62,21 @@ export function useAddTaskDialog(executeStep: StepExecutor, autoReturnHome?: Aut
   });
 
   let activeTaskToast: ToastMessageOptions | null = null;
+  /** 失敗トーストの枠。進捗トーストとは別に持つ理由は showTaskToast のコメント参照。 */
+  let activeErrorToast: ToastMessageOptions | null = null;
 
   function showTaskToast(options: ToastMessageOptions): void {
-    if (activeTaskToast) {
-      toast.remove(activeTaskToast);
-      activeTaskToast = null;
-    }
-    if (options.life === undefined) {
-      activeTaskToast = options;
-    }
+    // 進捗トーストは常に1枚へ畳む。失敗トーストだけは**別枠**で保持し、後続タスクの
+    // 進捗トーストでは消さない（#223）。同じ枠に入れると、次のタスクを投げた時点で
+    // 失敗の痕跡がトーストから消え、席を外している人には何も残らない。
+    // 失敗トースト同士は最新1枚に畳む（連続失敗で積み上がると閉じるのが手間）。
+    const isError = options.severity === "error";
+    const slot = isError ? activeErrorToast : activeTaskToast;
+    if (slot) toast.remove(slot);
+    // life 付き（自動で消える）トーストは追跡しない。remove する前に消えている
+    const tracked = options.life === undefined ? options : null;
+    if (isError) activeErrorToast = tracked;
+    else activeTaskToast = tracked;
     toast.add(options);
   }
 
@@ -208,12 +232,83 @@ export function useAddTaskDialog(executeStep: StepExecutor, autoReturnHome?: Aut
       // エラー時は scheduleAutoReturnHome を通らないので予約は張られない。
       // ここで cancelAutoReturnHome() すると別タスクの正当な予約まで消すのでしない。
 
+      // 自動で消さない。5 秒で消えると席を外している間の失敗が痕跡ごと消える（#223）
       showTaskToast({
         severity: "error",
         summary: t("taskFailedSummary"),
         detail: msg,
-        life: 5000,
       });
+      await notifyTaskFailure(task.id, msg);
+    }
+  }
+
+  /**
+   * 失敗したタスクの通知先ワークツリーを決める（#223）。
+   *
+   * タスクが必ずしもワークツリーを持たないわけではない。`add_worktree` が成功した後に
+   * `agent_worktree` で落ちる場合や、既存ワークツリーへの `agent_worktree` だけの
+   * タスクでは対象が実在するので、そちらへバッジを積んだほうが人が辿りやすい。
+   * ステップの repository / branch とワークツリーの突き合わせ規則は
+   * `useTaskExecution` の `agent_worktree` 実行時と同じ。
+   *
+   * 突き合わせ先は**ランタイムの `worktrees`**（`settings.value.worktrees` ではない）。
+   * 両者は乖離しうる: `add_worktree` 失敗時の `rollbackWorktree` はランタイムからしか
+   * 削除しないので、settings 側で引くと「カードに出ていないワークツリー」へバッジを
+   * 積んでしまう（`purgeStaleNotifications` もランタイム基準なので後で消える）。
+   *
+   * 生成そのものが失敗した場合は steps が空なのでホームへ落ちる。
+   */
+  function resolveFailureWorktreeId(taskId: string): string {
+    const { tasks } = useTasks();
+    const steps = tasks.value.find((tk) => tk.id === taskId)?.steps ?? [];
+    // 落ちたステップを優先して見る（複数ワークツリーに跨るタスクでも当事者へ届く）
+    const ordered = [...steps].sort((a, b) => Number(b.status === "error") - Number(a.status === "error"));
+    for (const step of ordered) {
+      const wt = worktrees.value.find(
+        (w) => w.repositoryName === step.code.repository && w.branchName === step.code.branch,
+      );
+      if (wt) return wt.id;
+    }
+    return HOME_WORKTREE_ID;
+  }
+
+  /**
+   * タスクの生成・実行が失敗したことを人に届ける（#223）。
+   *
+   * トーストだけでは足りない。MCP の `oretachi_add_task` 由来のタスクは投げっぱなしで
+   * 実行されるので、メインウィンドウを見ていない間に失敗すると誰も気付かず、
+   * `oretachi_list_tasks` を明示的に叩くまで分からなかった。
+   *
+   * `notify-worktree` へ相乗りさせないこと。あれは全 MCP ピアへブロードキャストされ、
+   * 自動承認の AI 判定まで走らせてしまう。
+   *
+   * **この関数は投げない。** 呼び出し元は fire-and-forget な
+   * `mcp-add-task` リスナー（App.vue）でもあり、ここで reject すると
+   * unhandled rejection になる。通知が出せなくても task status とトーストは
+   * 既に確定しているので、黙って諦めるのが正しい。
+   */
+  async function notifyTaskFailure(taskId: string, detail: string): Promise<void> {
+    try {
+      // 種別ごとの ON/OFF と、通知先ワークツリーの trayNotification を尊重する
+      if (!resolveKindSetting(settings.value.notificationSound, "general").enabled) return;
+      const worktreeId = resolveFailureWorktreeId(taskId);
+      if (!(buildTrayNotificationMap(settings.value).get(worktreeId) ?? true)) return;
+      addNotification(worktreeId, "general");
+      playSoundForKind("general");
+      // クリック時のフォーカス先は**名前**で解決されるので名前を渡し、本文だけ理由に差し替える。
+      // 理由は task_executor が AI CLI の stderr 全文を載せてくることがあり、
+      // OS 通知（Windows ではアクションセンターに残る）へ丸ごと流すと読めないので刈る。
+      const target =
+        worktrees.value.find((w) => w.id === worktreeId) ??
+        worktrees.value.find(isHomeWorktree);
+      await sendOsNotification(
+        target?.name ?? "home",
+        t("notification.titleTaskFailed"),
+        "general",
+        truncateForNotification(detail),
+      );
+    } catch {
+      // 通知経路の失敗は握りつぶす（上のコメント参照）
     }
   }
 

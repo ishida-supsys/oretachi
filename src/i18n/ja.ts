@@ -26,6 +26,7 @@ export default {
     title: 'Worktree通知',
     titleApproval: '承認が必要です',
     titleCompleted: 'タスク完了',
+    titleTaskFailed: 'タスクの生成・実行に失敗しました',
     // #140: kind の統合で購読イベント種別も同じ `kind` になったため、
     // すべての種別に OS 通知のタイトルが要る。
     titleHook: 'ライフサイクルフック',

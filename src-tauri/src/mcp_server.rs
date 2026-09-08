@@ -2465,7 +2465,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "登録済みワークグループの一覧を返す。各エントリは id・表示名(name)・色(color)・タスク実行エージェント(taskAddAgent)・isDefault を含む。oretachi_add_task で追加先ワークグループを指定する前に、利用可能なワークグループを確認するために使う。isDefault は「ワークグループ未設定のワークツリーが表示上フォールバックする先頭グループ」を意味し、oretachi_add_task で追加先を省略したときの追加先でもある", annotations(read_only_hint = true))]
+    #[tool(description = "登録済みワークグループの一覧を返す。各エントリは id・表示名(name)・色(color)・ワークツリーで起動するエージェント(taskAddAgent)・isDefault を含む。**taskAddAgent はタスクコードを生成するエージェントではない**(生成側は設定「自動承認・コミットメッセージ・タスク生成」= aiAgent.approvalAgent で、ワークグループ単位では変えられない)。taskAddAgent は、タスクで作成されたワークツリーの端末で起動するエージェントを指す。oretachi_add_task で追加先ワークグループを指定する前に、利用可能なワークグループを確認するために使う。isDefault は「ワークグループ未設定のワークツリーが表示上フォールバックする先頭グループ」を意味し、oretachi_add_task で追加先を省略したときの追加先でもある", annotations(read_only_hint = true))]
     fn oretachi_list_workgroups(
         &self,
         Parameters(_params): Parameters<ListWorkgroupsParams>,
@@ -2588,7 +2588,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "タスク追加リクエストを送信する。AIがタスクコードを生成し、ワークツリー作成やエージェント実行を非同期で行う。追加先ワークグループは省略時はデフォルトワークグループ (isDefault: true) になる。別のワークグループへ入れたい場合は oretachi_list_workgroups で一覧を取得してから workgroup_id / workgroup_name を渡す。実行は非同期でこのツールは結果を返さないので、成否や生成されたコードは oretachi_list_tasks で確認する")]
+    #[tool(description = "タスク追加リクエストを送信する。AIがタスクコードを生成し、ワークツリー作成やエージェント実行を非同期で行う。追加先ワークグループは省略時はデフォルトワークグループ (isDefault: true) になる。別のワークグループへ入れたい場合は oretachi_list_workgroups で一覧を取得してから workgroup_id / workgroup_name を渡す。実行は非同期でこのツールは結果を返さないので、成否や生成されたコードは oretachi_list_tasks で確認する。失敗した場合はホームワークツリーへ通知(バッジ / OS 通知)が出るので人も気付けるが、投げた側が結果を知るには oretachi_list_tasks を叩くしかない")]
     fn oretachi_add_task(
         &self,
         Parameters(AddTaskParams { prompt, remote_exec, workgroup_id, workgroup_name }): Parameters<AddTaskParams>,
