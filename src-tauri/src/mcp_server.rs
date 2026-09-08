@@ -512,6 +512,10 @@ pub struct SessionContextPayload {
     /// 発火元 PTY タブの `terminal_id`（env `ORETACHI_TERMINAL_ID` 由来）。
     #[serde(default, rename = "terminalId")]
     pub terminal_id: Option<String>,
+    /// サイドカーが `/digest-ack` を撃ち返せるか（#221）。旧サイドカーは送ってこないので
+    /// 既定 false = 従来どおり即打刻（`DeliveryMsg::CollectDigest` の `can_ack` 参照）。
+    #[serde(default, rename = "ackDigest")]
+    pub ack_digest: bool,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -535,6 +539,20 @@ pub struct TurnContextPayload {
     /// Stop フックの stdin JSON（生文字列）。`prompt_id` / `stop_hook_active` をここから読む。
     #[serde(default, rename = "hookJson")]
     pub hook_json: Option<String>,
+    /// サイドカーが `/digest-ack` を撃ち返せるか（#221）。旧サイドカーは送ってこないので
+    /// 既定 false = 従来どおり即打刻（`DeliveryMsg::CollectDigest` の `can_ack` 参照）。
+    #[serde(default, rename = "ackDigest")]
+    pub ack_digest: bool,
+}
+
+/// hook 経路の受領確認 (`/digest-ack`) が送るペイロード（#221）。
+///
+/// サイドカーが `additionalContext` を stdout へ出し切ったあとに撃つ。これが来て初めて
+/// `delivered_at` / `notified_at` が打たれる（`event_delivery::Digest` の doc 参照）。
+#[derive(Debug, Deserialize)]
+pub struct DigestAckPayload {
+    #[serde(default, rename = "digestId")]
+    pub digest_id: String,
 }
 
 /// UserPromptSubmit フック (--prompt-context) が送るペイロード
@@ -545,6 +563,10 @@ pub struct PromptContextPayload {
     /// 発火元 PTY タブの `terminal_id`（env `ORETACHI_TERMINAL_ID` 由来）。
     #[serde(default, rename = "terminalId")]
     pub terminal_id: Option<String>,
+    /// サイドカーが `/digest-ack` を撃ち返せるか（#221）。旧サイドカーは送ってこないので
+    /// 既定 false = 従来どおり即打刻（`DeliveryMsg::CollectDigest` の `can_ack` 参照）。
+    #[serde(default, rename = "ackDigest")]
+    pub ack_digest: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -5782,6 +5804,7 @@ async fn session_context_handler(
             &app_handle,
             payload.terminal_id.as_deref(),
             crate::event_delivery::DigestReason::SessionStart,
+            payload.ack_digest,
         ),
     )
     .await
@@ -5801,9 +5824,24 @@ async fn session_context_handler(
         payload.project_dir,
         payload.terminal_id,
         prompt.as_ref().map(|p| p.len()),
-        inbox.as_ref().map(|s| s.len())
+        inbox.as_ref().map(|d| d.text.len())
     );
-    Json(serde_json::json!({ "prompt": prompt, "inbox": inbox }))
+    let (inbox, digest_id) = split_digest(inbox);
+    Json(serde_json::json!({ "prompt": prompt, "inbox": inbox, "digestId": digest_id }))
+}
+
+/// `Digest` を hook レスポンスの 2 フィールドへ割る（#221）。
+///
+/// `digestId` はサイドカーが `additionalContext` を出力し切ったあと `/digest-ack` へ
+/// 撃ち返す鍵。返すだけでは打刻されないので、**サイドカー側で ack を送らないと未読が
+/// 毎ターン再提示される**。
+fn split_digest(
+    digest: Option<crate::event_delivery::Digest>,
+) -> (Option<String>, Option<String>) {
+    match digest {
+        Some(d) => (Some(d.text), Some(d.id)),
+        None => (None, None),
+    }
 }
 
 /// 指定タブ宛の inbox を hook 注入用テキストにまとめ、本文を出した分に `delivered_at` を打つ。
@@ -5819,12 +5857,13 @@ async fn collect_inbox_digest(
     app_handle: &AppHandle,
     terminal_id: Option<&str>,
     reason: crate::event_delivery::DigestReason,
-) -> Option<String> {
+    can_ack: bool,
+) -> Option<crate::event_delivery::Digest> {
     let terminal_id = terminal_id.map(str::trim).filter(|s| !s.is_empty())?;
     // DB 未初期化なら `DeliveryHandle` も manage されていないので、ここで弾かなくても
     // no-op になる。早期 return は無駄なチャネル往復を避けるためだけのもの。
     app_handle.try_state::<crate::event_db::EventPool>()?;
-    crate::event_delivery::collect_digest_and_wait(app_handle, terminal_id, reason).await
+    crate::event_delivery::collect_digest_and_wait(app_handle, terminal_id, reason, can_ack).await
 }
 
 // ─── Simple REST endpoint (/turn-context) ────────────────────────────────────
@@ -5886,6 +5925,7 @@ async fn turn_context_handler(
             crate::event_delivery::DigestReason::TurnEnd {
                 prompt_id: prompt_id.clone(),
             },
+            payload.ack_digest,
         ),
     )
     .await
@@ -5900,6 +5940,7 @@ async fn turn_context_handler(
             None
         }
     };
+    let (inbox, digest_id) = split_digest(inbox);
     match &inbox {
         Some(_) => log::info!(
             "[turn-context] ターン境界で未読を注入する terminal={:?} prompt_id={:?}",
@@ -5914,7 +5955,26 @@ async fn turn_context_handler(
             prompt_id
         ),
     }
-    Json(serde_json::json!({ "inbox": inbox }))
+    Json(serde_json::json!({ "inbox": inbox, "digestId": digest_id }))
+}
+
+// ─── Simple REST endpoint (/digest-ack) ──────────────────────────────────────
+
+/// サイドカーからの受領確認（#221）。
+///
+/// hook 経路の未読は、サイドカーが `additionalContext` を stdout へ出し切ってから
+/// ここへ ack が来た時点で配送済みになる。ack が来なければ打刻されず、次の hook 経路で
+/// 再提示される。詳細は `event_delivery::Digest` の doc 参照。
+async fn digest_ack_handler(
+    State(app_handle): State<AppHandle>,
+    Json(payload): Json<DigestAckPayload>,
+) -> StatusCode {
+    let id = payload.digest_id.trim();
+    if id.is_empty() {
+        return StatusCode::BAD_REQUEST;
+    }
+    crate::event_delivery::ack_digest(&app_handle, id.to_string());
+    StatusCode::OK
 }
 
 // ─── Simple REST endpoint (/prompt-context) ──────────────────────────────────
@@ -5941,6 +6001,7 @@ async fn prompt_context_handler(
             &app_handle,
             payload.terminal_id.as_deref(),
             crate::event_delivery::DigestReason::PromptSubmit,
+            payload.ack_digest,
         ),
     )
     .await
@@ -5955,6 +6016,7 @@ async fn prompt_context_handler(
             None
         }
     };
+    let (inbox, digest_id) = split_digest(inbox);
 
     let settings = app_handle.state::<SettingsManager>().get();
     let Some(wt) = payload
@@ -5966,7 +6028,7 @@ async fn prompt_context_handler(
             "[prompt-context] could not resolve worktree (projectDir={:?}); skipping description",
             payload.project_dir
         );
-        return Json(serde_json::json!({ "skip": true, "inbox": inbox }));
+        return Json(serde_json::json!({ "skip": true, "inbox": inbox, "digestId": digest_id }));
     };
 
     let manager = app_handle.state::<McpServerManager>();
@@ -5978,7 +6040,9 @@ async fn prompt_context_handler(
             .unwrap_or_else(|e| e.into_inner());
         if let Some(prev) = map.get(&wt.id) {
             if now.duration_since(*prev).as_secs() < PROMPT_CONTEXT_THROTTLE_SECS {
-                return Json(serde_json::json!({ "skip": true, "inbox": inbox }));
+                return Json(
+                    serde_json::json!({ "skip": true, "inbox": inbox, "digestId": digest_id }),
+                );
             }
         }
         map.insert(wt.id.clone(), now);
@@ -5995,6 +6059,7 @@ async fn prompt_context_handler(
         "worktreeName": wt.name,
         "description": wt.description,
         "inbox": inbox,
+        "digestId": digest_id,
     }))
 }
 
@@ -6442,6 +6507,7 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
             .route("/session-context", post(session_context_handler))
             .route("/prompt-context", post(prompt_context_handler))
             .route("/turn-context", post(turn_context_handler))
+            .route("/digest-ack", post(digest_ack_handler))
             .with_state(app_handle.clone())
             .layer(middleware::from_fn(move |mut req: Request, next: Next| {
                 let key = api_key_state.clone();
