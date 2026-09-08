@@ -60,6 +60,8 @@ export interface WorktreeEntry {
    * 既定値は**作成時に一度だけ焼き込まれる**ので、実効値を決めるのはここだけ。
    * false でもイベント自体は流れるため自動承認は動き、
    * MCP notify_worktree による明示的な通知も常にトレイへ出る。
+   * さらに `approval`（PermissionRequest 由来 = ツール許可 / プラン承認 /
+   * AskUserQuestion）は false でも提示する（#225。`passesTrayOff` を参照）。
    */
   trayNotification?: boolean;
   description?: string; // 作業全体の目的を表す1行説明（ExitPlanMode hookのAI要約、または MCP oretachi_set_description で直接セット）
@@ -88,7 +90,7 @@ export interface Workgroup {
   name?: string;                    // 未指定時は表示時に「グループ(番号)」を生成
   color?: string;                   // プリセット色。未指定 = 無色
   autoAssignHotkey?: boolean;       // ホットキー自動割り当て（グループ単位）
-  autoReturnHomeAfterTask?: boolean; // タスク完了5秒後にホームタブへ自動復帰（グループ単位、既定 OFF）
+  autoReturnHomeAfterTask?: boolean; // タスク完了後、メインウィンドウが非フォーカスのまま5秒経過したらホームタブへ自動復帰（グループ単位、既定 OFF）
   taskAddAgent?: AiAgentKind;       // タスク実行エージェント（グループ単位）
   claudeCodeMode?: ClaudeCodeMode;  // Claude Code モード（既定: plan）
   execPrompt?: string;              // 実行プロンプトテンプレート（置換タグ {{PROMPT}}）

@@ -52,6 +52,20 @@ export function showsBadge(kind: NotifyKind): boolean {
   return !kind.startsWith("worktree.");
 }
 
+/** トレイ通知オフ（`tray: false`）のワークツリーでも提示する種別か（#225）。
+ *
+ *  `tray: false` が載るのは「フック由来 かつ `resolveTrayNotification === false`」のときだけ
+ *  （`mcp_server.rs` の `/notify`）。これを kind を問わず落としていたため、
+ *  `PermissionRequest` 由来の `approval`（ツール許可 / プラン承認 / AskUserQuestion）も
+ *  消えてしまい、**人の入力を待って止まったことが誰にも伝わらなかった**。
+ *
+ *  通すのは `approval` だけに絞る。teamwork-parent がトレイ通知をオフにする狙いは
+ *  `Stop` → `completed` や高頻度な `hook` のノイズを止めることなので、そこは従来どおり
+ *  抑制したまま「人待ちだけは通す」形にする。 */
+export function passesTrayOff(kind: NotifyKind): boolean {
+  return kind === "approval";
+}
+
 /** その種別の設定を解決する（未設定なら既定値）。 */
 export function resolveKindSetting(
   settings: NotificationSoundSettings | undefined,
