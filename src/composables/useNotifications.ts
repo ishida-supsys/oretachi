@@ -8,23 +8,38 @@ import {
   onAction,
 } from "@tauri-apps/plugin-notification";
 import { playNotificationSound } from "../utils/notificationSound";
-import type { NotificationSoundSettings } from "../types/settings";
-
-export type NotificationKind = "approval" | "completed" | "general";
+import {
+  isNotifyKind,
+  resolveKindSetting,
+  shouldPlaySound,
+  shouldSendOsNotification,
+  showsBadge,
+} from "../utils/notificationKinds";
+import type { NotifyKind, NotificationSoundSettings } from "../types/settings";
 
 export interface NotifyWorktreeEvent {
   worktree_name: string;
-  kind: NotificationKind | "hook";
+  kind: NotifyKind;
   body?: string;
   agent?: string;
   /** false のとき通知系（トレイバッジ / ポップアップ / 通知音 / OS通知）を一括で抑制する */
   tray?: boolean;
 }
 
+/** `worktree.*` の発火を発火元ワークツリーへ伝えるイベント（#140）。
+ *
+ *  受信側にはトーストもバッジも出さない（#137）が、発火元では音 / OS 通知を鳴らせる
+ *  ようにしたいので `notify-worktree` とは別の経路にしている。相乗りさせると
+ *  (a) 全 MCP ピアへ broadcast され、(b) 自動承認リスナーが AI 判定を走らせてしまう。 */
+interface WorktreeEventFiredPayload {
+  worktreeName: string;
+  kind: string;
+}
+
 interface NotificationEntry {
   count: number;
   firstNotifiedAt: number; // Date.now()
-  kind: NotificationKind;
+  kind: NotifyKind;
 }
 
 // worktreeId → 未確認の通知エントリ
@@ -32,11 +47,7 @@ const notifications = reactive(new Map<string, NotificationEntry>());
 let initialized = false;
 let osNotificationEnabled: (() => boolean) | undefined;
 let getSoundSettings: (() => NotificationSoundSettings | undefined) | undefined;
-let storedNotificationTitles: Record<NotificationKind, string> = {
-  general: "Notification",
-  approval: "Notification",
-  completed: "Notification",
-};
+let storedNotificationTitles: Partial<Record<NotifyKind, string>> = {};
 
 /**
  * 未確認通知の現在値を Rust 側（NotificationRegistry）へ写す。
@@ -51,7 +62,7 @@ function syncNotificationsToBackend() {
   if (syncTimer !== undefined) return;
   syncTimer = setTimeout(() => {
     syncTimer = undefined;
-    const entries: Record<string, { count: number; kind: NotificationKind; firstNotifiedAt: number }> = {};
+    const entries: Record<string, { count: number; kind: NotifyKind; firstNotifiedAt: number }> = {};
     for (const [id, entry] of notifications) {
       entries[id] = { count: entry.count, kind: entry.kind, firstNotifiedAt: entry.firstNotifiedAt };
     }
@@ -61,11 +72,14 @@ function syncNotificationsToBackend() {
 
 /**
  * 通知音を再生する。OS通知とは独立して動作する。
+ *
+ * 種別ごとの ON/OFF（#140）はここで効く。`enabled` が false なら音の設定に
+ * 関わらず鳴らさない。
  */
-export function playSoundForKind(kind: NotificationKind) {
+export function playSoundForKind(kind: NotifyKind) {
   const ss = getSoundSettings?.();
   if (!ss) return;
-  const sound = ss[kind];
+  const sound = shouldPlaySound(ss, kind);
   if (sound) {
     playNotificationSound(sound, ss.volume ?? 80).catch(() => {});
   }
@@ -74,15 +88,22 @@ export function playSoundForKind(kind: NotificationKind) {
 /**
  * OS通知を送信する。App.vue の自動承認不承認ハンドラからも呼ばれる。
  */
-export async function sendOsNotification(worktreeName: string, title?: string, kind?: NotificationKind) {
+export async function sendOsNotification(worktreeName: string, title?: string, kind?: NotifyKind) {
   if (!osNotificationEnabled?.()) return;
+  // 種別ごとの ON/OFF（#140）。`title` 直指定の経路（自動承認の否決など）は
+  // 呼び出し元が出すと決めているので、kind が無ければ従来どおり素通しする。
+  if (kind && !shouldSendOsNotification(getSoundSettings?.(), kind)) return;
   let permitted = await isPermissionGranted();
   if (!permitted) {
     const permission = await requestPermission();
     permitted = permission === "granted";
   }
   if (permitted) {
-    const resolvedTitle = title ?? (kind ? storedNotificationTitles[kind] : storedNotificationTitles.general);
+    const resolvedTitle =
+      title ??
+      (kind ? storedNotificationTitles[kind] : undefined) ??
+      storedNotificationTitles.general ??
+      "Notification";
     sendNotification({ title: resolvedTitle, body: worktreeName, extra: { worktreeName } });
   }
 }
@@ -94,10 +115,10 @@ export function useNotifications() {
    */
   async function initNotificationListener(
     resolveWorktreeId: (name: string) => string | undefined,
-    shouldHold?: (worktreeId: string, kind: NotificationKind) => boolean,
+    shouldHold?: (worktreeId: string, kind: NotifyKind) => boolean,
     isOsNotificationEnabledFn?: () => boolean,
     focusWorktree?: (worktreeId: string) => void,
-    notificationTitles?: Record<NotificationKind, string>,
+    notificationTitles?: Partial<Record<NotifyKind, string>>,
     getSoundSettingsFn?: () => NotificationSoundSettings | undefined,
   ) {
     if (initialized) return;
@@ -113,18 +134,31 @@ export function useNotifications() {
 
     await listen<NotifyWorktreeEvent>("notify-worktree", async (event) => {
       const { worktree_name: worktreeName, kind } = event.payload;
-      // hook はモニタリング目的の MCP ブロードキャスト専用。UI 通知はスキップ
-      if (kind === "hook") return;
+      // Rust 側で固定7値に検証済みだが、未知の値を設定キーとして引かせないよう念のため弾く。
+      if (!isNotifyKind(kind)) return;
+      // 種別ごとの ON/OFF（#140）。`hook` は既定 OFF だが、明示的に ON にすれば
+      // 他の種別と同様に通知される（統合前は無条件でスキップしていた）。
+      if (!resolveKindSetting(getSoundSettings?.(), kind).enabled) return;
       // trayNotification オフのワークツリー由来。自動承認は notify-worktree を別途購読しており、
       // そちらは `tray` をイベント単位で持ち回って判定する（#168）ので、ここだけ止める
       if (event.payload.tray === false) return;
       const id = resolveWorktreeId(worktreeName);
       if (id) {
         if (shouldHold?.(id, kind)) return;
-        addNotification(id, kind);
+        if (showsBadge(kind)) addNotification(id, kind);
         playSoundForKind(kind);
         await sendOsNotification(worktreeName, undefined, kind);
       }
+    });
+
+    // `worktree.*` の発火を発火元で鳴らす（#140）。受信側の画面は動かさないので
+    // バッジは積まず、音と OS 通知だけを出す。`worktree.closed` は発火時点で
+    // ワークツリーが消えており ID を引けないため、名前だけで完結させる。
+    await listen<WorktreeEventFiredPayload>("worktree-event-fired", async (event) => {
+      const { worktreeName, kind } = event.payload;
+      if (!isNotifyKind(kind)) return;
+      playSoundForKind(kind);
+      await sendOsNotification(worktreeName, undefined, kind);
     });
 
     try {
@@ -140,7 +174,7 @@ export function useNotifications() {
     }
   }
 
-  function addNotification(worktreeId: string, kind: NotificationKind = "general") {
+  function addNotification(worktreeId: string, kind: NotifyKind = "general") {
     const existing = notifications.get(worktreeId);
     if (existing) {
       existing.count += 1;

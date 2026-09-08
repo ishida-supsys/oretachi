@@ -2301,6 +2301,28 @@ mod tests {
         assert!(!SPAWN_INITIAL_PROMPT.contains('\n'));
     }
 
+    /// #140 で購読できる種別が7値へ増えたが、**押し込み許可リストは増やしていない**。
+    /// `hook` / `approval` / `completed` / `general` の本文は Claude Code が書いており、
+    /// 自動承認が有効な宛先へ押し込むと `ai_judge` の安全ゲートを素通りしうる。
+    #[test]
+    fn test_auto_approval_denies_new_notify_kinds() {
+        let on = worktree(Some(true));
+        for kind in [
+            event_db::KIND_HOOK,
+            event_db::KIND_APPROVAL,
+            event_db::KIND_COMPLETED,
+            event_db::KIND_GENERAL,
+        ] {
+            assert!(
+                !auto_approval_allows(Some(&on), kind),
+                "{} を押し込み許可リストへ足してはいけない",
+                kind
+            );
+            // 本文を運ばない側にいることも同時に固定する（判断軸が2つあるため）
+            assert!(event_db::is_free_text_kind(kind), "{} は本文を運ばない", kind);
+        }
+    }
+
     #[test]
     fn test_auto_approval_allows_canned_kinds_only() {
         let on = worktree(Some(true));

@@ -15,7 +15,8 @@ import { setLocale } from "../i18n";
 import { useToast } from "primevue/usetoast";
 import { playNotificationSound } from "../utils/notificationSound";
 import { applyUiZoom } from "../composables/useUiZoom";
-import type { NotificationKind } from "../composables/useNotifications";
+import { NOTIFY_KINDS, type NotifyKind, type NotificationKindSetting } from "../types/settings";
+import { DEFAULT_NOTIFICATION_KIND_SETTINGS, showsBadge } from "../utils/notificationKinds";
 import SettingsHotkeySection from "./settings/SettingsHotkeySection.vue";
 
 const { t } = useI18n();
@@ -193,18 +194,51 @@ onMounted(async () => {
   }
 });
 
+// #140: 通知種別が7値へ増え、`worktree.message` のようにドットを含むキーがあるので
+// 設定は `kinds` マップに持つ（フラットなフィールド名では表現できない）。
+const notifyKinds = NOTIFY_KINDS;
+
 function ensureNotificationSound() {
   if (!settings.value.notificationSound) {
-    settings.value.notificationSound = { volume: 80 };
+    settings.value.notificationSound = { volume: 80, kinds: {} };
+  }
+  if (!settings.value.notificationSound.kinds) {
+    settings.value.notificationSound.kinds = {};
   }
 }
 
-function getSoundForKind(kind: NotificationKind): string {
-  return settings.value.notificationSound?.[kind] ?? "";
+function kindSetting(kind: NotifyKind): NotificationKindSetting {
+  return (
+    settings.value.notificationSound?.kinds?.[kind] ?? DEFAULT_NOTIFICATION_KIND_SETTINGS[kind]
+  );
 }
 
-async function setSoundForKind(kind: NotificationKind, value: string) {
+function mutateKind(kind: NotifyKind, patch: Partial<NotificationKindSetting>) {
   ensureNotificationSound();
+  const kinds = settings.value.notificationSound!.kinds!;
+  kinds[kind] = { ...DEFAULT_NOTIFICATION_KIND_SETTINGS[kind], ...kinds[kind], ...patch };
+  scheduleSave();
+}
+
+function isKindEnabled(kind: NotifyKind): boolean {
+  return kindSetting(kind).enabled;
+}
+
+function setKindEnabled(kind: NotifyKind, enabled: boolean) {
+  mutateKind(kind, { enabled });
+}
+
+/** `worktree.*` はトースト / バッジを出さない（#137 / #140）ので、トグルの意味は
+ *  「音と OS 通知を出すか」に狭まる。UI ではヒントで区別する。 */
+function isSoundOnlyKind(kind: NotifyKind): boolean {
+  return !showsBadge(kind);
+}
+
+function getSoundForKind(kind: NotifyKind): string {
+  return kindSetting(kind).sound ?? "";
+}
+
+async function setSoundForKind(kind: NotifyKind, value: string) {
   if (value === "__pick_custom__") {
     const selected = await open({
       multiple: false,
@@ -216,15 +250,13 @@ async function setSoundForKind(kind: NotificationKind, value: string) {
     }
     try {
       const filename = await invoke<string>("copy_custom_sound", { sourcePath: selected });
-      settings.value.notificationSound![kind] = `custom:${filename}`;
+      mutateKind(kind, { sound: `custom:${filename}` });
     } catch (e) {
       console.error("copy_custom_sound failed:", e);
-      return;
     }
-  } else {
-    settings.value.notificationSound![kind] = value || null;
+    return;
   }
-  scheduleSave();
+  mutateKind(kind, { sound: value || null });
 }
 
 function getVolumeForSound(): number {
@@ -237,7 +269,7 @@ function setVolume(value: number) {
   scheduleSave();
 }
 
-async function previewSound(kind: NotificationKind) {
+async function previewSound(kind: NotifyKind) {
   const sound = getSoundForKind(kind);
   if (!sound) return;
   const volume = getVolumeForSound();
@@ -390,11 +422,19 @@ function getSoundLabel(sound: string | null | undefined): string {
         />
         <span class="volume-label">{{ getVolumeForSound() }}</span>
       </div>
-      <div v-for="kind in (['approval', 'completed', 'general'] as const)" :key="kind" class="row-input mt-8 sound-row">
+      <div v-for="kind in notifyKinds" :key="kind" class="row-input mt-8 sound-row">
+        <input
+          type="checkbox"
+          class="sound-enabled-toggle"
+          :checked="isKindEnabled(kind)"
+          :title="isSoundOnlyKind(kind) ? t('notificationSound.enabledSoundOnlyHint') : t('notificationSound.enabledHint')"
+          @change="(e) => setKindEnabled(kind, (e.target as HTMLInputElement).checked)"
+        />
         <span class="inline-label sound-kind-label">{{ t(`notificationSound.kind.${kind}`) }}</span>
         <select
           class="text-input select-input sound-select"
           :value="getSoundForKind(kind)"
+          :disabled="!isKindEnabled(kind)"
           @change="(e) => setSoundForKind(kind, (e.target as HTMLSelectElement).value)"
         >
           <option value="">{{ t('notificationSound.none') }}</option>
@@ -413,7 +453,7 @@ function getSoundLabel(sound: string | null | undefined): string {
         </select>
         <button
           class="preview-btn"
-          :disabled="!getSoundForKind(kind)"
+          :disabled="!getSoundForKind(kind) || !isKindEnabled(kind)"
           @click="previewSound(kind)"
           :title="t('notificationSound.preview')"
         >▶</button>
@@ -1080,6 +1120,11 @@ function getSoundLabel(sound: string | null | undefined): string {
   gap: 6px;
 }
 
+.sound-enabled-toggle {
+  flex: 0 0 auto;
+  margin-right: 2px;
+}
+
 .sound-kind-label {
   min-width: 90px;
   flex-shrink: 0;
@@ -1217,10 +1262,16 @@ function getSoundLabel(sound: string | null | undefined): string {
       "systemSounds": "System Sounds",
       "pickCustom": "Choose custom file...",
       "preview": "Preview",
+      "enabledHint": "Show notification for this kind",
+      "enabledSoundOnlyHint": "Play sound / OS notification for this kind (no toast; subscription badges show the state)",
       "kind": {
         "approval": "Approval",
         "completed": "Completed",
-        "general": "General"
+        "general": "General",
+        "hook": "Lifecycle hook",
+        "worktree.message": "Worktree message",
+        "worktree.created": "Worktree created",
+        "worktree.closed": "Worktree closed"
       }
     },
     "homeCat": {
@@ -1322,10 +1373,16 @@ function getSoundLabel(sound: string | null | undefined): string {
       "systemSounds": "システムサウンド",
       "pickCustom": "カスタムファイルを選択...",
       "preview": "プレビュー",
+      "enabledHint": "この種別の通知を出す",
+      "enabledSoundOnlyHint": "この種別で音 / OS 通知を出す（トーストは出しません。状態は購読バッジで確認できます）",
       "kind": {
         "approval": "承認待ち",
         "completed": "作業完了",
-        "general": "汎用"
+        "general": "汎用",
+        "hook": "ライフサイクルフック",
+        "worktree.message": "ワークツリーからのメッセージ",
+        "worktree.created": "ワークツリー作成",
+        "worktree.closed": "ワークツリークローズ"
       }
     },
     "homeCat": {

@@ -1,4 +1,5 @@
 use crate::ai_provider::AiAgentKind;
+use crate::event_db::NotifyKind;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::Mutex;
@@ -7,7 +8,47 @@ use tauri::{AppHandle, Manager};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NotificationHookEntry {
     pub event: String, // "Stop", "Notification", "SubagentStop", "PreToolUse", "PostToolUse", "PermissionRequest"
-    pub kind: String,  // "completed", "approval", "general", "hook"
+    /// このフックが名乗る通知種別（#140 で固定型化）。
+    ///
+    /// **書けるのは `hook` / `approval` / `completed` / `general` の4値だけ**
+    /// （`NotifyKind::allowed_as_hook_entry`）。7値をそのまま受けると、設定1行で
+    /// Claude Code のフック JSON が `worktree.message` として他ワークツリーへ
+    /// 自由文配送されてしまう。
+    #[serde(default = "default_hook_kind", deserialize_with = "de_hook_kind_lenient")]
+    pub kind: NotifyKind,
+}
+
+fn default_hook_kind() -> NotifyKind {
+    // `default_kind_for_event` のフォールスルーと同じ既定値に揃える。
+    NotifyKind::Hook
+}
+
+/// `notificationHooks[].kind` を寛容に読む（#140）。
+///
+/// **エラーで落とさない。** `settings.json` はユーザーデータで、1リポジトリの1エントリの
+/// 綴りミスやスキーマ変更で**全ワークツリー設定が読めなくなる**のは受け入れられない。
+/// 文字列以外・未知の値・4値の範囲外はすべて `hook` へ倒し、警告だけ残す。
+fn de_hook_kind_lenient<'de, D>(deserializer: D) -> Result<NotifyKind, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    // `String` ではなく `Value` で受ける。数値や null が入っていても
+    // ここで型エラーにせず既定値へ倒すため。
+    // JSON が壊れているときだけ失敗する（その場合は外側の parse も落ちる）ので、
+    // ここは握り潰さず伝播させてよい。握り潰すべきなのは「読めたが値が想定外」の方。
+    let raw = serde_json::Value::deserialize(deserializer)?;
+    let resolved = raw
+        .as_str()
+        .and_then(NotifyKind::parse)
+        .filter(|k| k.allowed_as_hook_entry());
+    Ok(resolved.unwrap_or_else(|| {
+        log::warn!(
+            "[settings] notificationHooks.kind が不正です（{}）。'{}' として扱います",
+            raw,
+            default_hook_kind()
+        );
+        default_hook_kind()
+    }))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -336,16 +377,59 @@ fn default_move_to_sub_window_on_mcp_spawn() -> bool { false }
 
 fn default_notification_volume() -> u32 { 80 }
 
+impl Default for NotificationKindSetting {
+    fn default() -> Self {
+        NotificationKindSetting {
+            enabled: default_notification_kind_enabled(),
+            sound: None,
+            os: None,
+        }
+    }
+}
+
+fn default_notification_kind_enabled() -> bool { true }
+
+/// 通知種別ごとの通知設定（#140）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NotificationKindSetting {
+    /// false ならこの種別の通知（音 / OS 通知 / バッジ）を一切出さない。
+    ///
+    /// **既定は `true`。** `#[serde(default)]`（＝false）にすると、手で
+    /// `{"kinds":{"approval":{"sound":"x"}}}` と書いただけでその種別の通知が
+    /// 黙って全消えする（フロントの移行は既存エントリの欠落フィールドを補わない）。
+    /// 「キーがある＝設定した」であって「無効にした」ではない。
+    #[serde(default = "default_notification_kind_enabled")]
+    pub enabled: bool,
+    /// None / "" = 音なし, "system:<filename>", "custom:<filename>"
+    #[serde(default)]
+    pub sound: Option<String>,
+    /// OS 通知を出すか。未指定なら `enabled` に従う。
+    #[serde(default)]
+    pub os: Option<bool>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationSoundSettings {
     #[serde(default = "default_notification_volume")]
     pub volume: u32, // 0-100
+    /// 種別 → 設定（#140）。キーは `NotifyKind::as_str()` の7値。
+    ///
+    /// **`worktree.message` のようにドットを含む種別があるので、フラットな構造体の
+    /// フィールド名にはできない**（旧形式の `approval` / `completed` / `general` は
+    /// フロントの `migrateNotificationSound` がここへ畳んで消す）。
+    ///
+    /// この値は Rust 側では読まないが、設定は `get_settings` / `save_settings` で
+    /// Rust を往復するため、**ここにフィールドが無いと serde が黙って捨てる**。
     #[serde(default)]
-    pub approval: Option<String>, // None=音なし, "system:<filename>", "custom:<filename>"
-    #[serde(default)]
+    pub kinds: Option<std::collections::HashMap<String, NotificationKindSetting>>,
+    /// 旧フラット形式（#140 以前）。移行が済むまで読み書きできるよう残す。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub general: Option<String>,
 }
 
@@ -353,6 +437,7 @@ impl Default for NotificationSoundSettings {
     fn default() -> Self {
         NotificationSoundSettings {
             volume: default_notification_volume(),
+            kinds: None,
             approval: None,
             completed: None,
             general: None,
@@ -787,6 +872,79 @@ pub async fn read_audio_file(app_handle: tauri::AppHandle, sound: String) -> Res
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ─── #140: notificationHooks[].kind の寛容デシリアライズ ──────────────────
+
+    fn parse_repo_hook_kind(kind_json: &str) -> Option<NotifyKind> {
+        let json = format!(
+            r#"{{"id":"r1","name":"repo","path":"/tmp","notificationHooks":[{{"event":"Stop","kind":{}}}]}}"#,
+            kind_json
+        );
+        let repo: Repository = serde_json::from_str(&json).expect("settings 全体が落ちてはいけない");
+        repo.notification_hooks.and_then(|h| h.first().map(|e| e.kind))
+    }
+
+    #[test]
+    fn test_notification_hook_entry_accepts_four_kinds() {
+        for k in ["hook", "approval", "completed", "general"] {
+            assert_eq!(
+                parse_repo_hook_kind(&format!(r#""{}""#, k)),
+                NotifyKind::parse(k),
+                "{} が読めない",
+                k
+            );
+        }
+    }
+
+    /// **未知の値で settings 全体を落とさない。** 1リポジトリの1エントリの綴りミスで
+    /// 全ワークツリー設定が読めなくなるのは受け入れられない。
+    #[test]
+    fn test_notification_hook_entry_unknown_kind_falls_back_to_hook() {
+        assert_eq!(parse_repo_hook_kind(r#""bogus""#), Some(NotifyKind::Hook));
+    }
+
+    /// 文字列ですらない値（数値 / null / オブジェクト）でも落ちない。
+    #[test]
+    fn test_notification_hook_entry_non_string_kind_does_not_fail_load() {
+        for raw in ["123", "null", "{}", "[]", "true"] {
+            assert_eq!(
+                parse_repo_hook_kind(raw),
+                Some(NotifyKind::Hook),
+                "kind={} で落ちた",
+                raw
+            );
+        }
+    }
+
+    /// **フック設定から自由文経路への昇格を塞ぐ。** ここが緩むと、設定1行で
+    /// Claude Code のフック JSON が `worktree.message` として他ワークツリーへ流れる。
+    #[test]
+    fn test_notification_hook_entry_narrows_non_hook_kinds() {
+        for k in ["worktree.message", "worktree.created", "worktree.closed"] {
+            assert_eq!(
+                parse_repo_hook_kind(&format!(r#""{}""#, k)),
+                Some(NotifyKind::Hook),
+                "{} がフック設定として通ってしまった",
+                k
+            );
+        }
+    }
+
+    /// 新しい `kinds` マップがフロントとの往復で消えないこと（Rust 側は値を読まないが、
+    /// 設定は `get_settings` / `save_settings` で必ずここを通る）。
+    #[test]
+    fn test_notification_sound_kinds_map_round_trips() {
+        let json = r#"{"volume":50,"kinds":{"worktree.message":{"enabled":true,"sound":"system:a.wav","os":false}}}"#;
+        let parsed: NotificationSoundSettings = serde_json::from_str(json).unwrap();
+        let back = serde_json::to_string(&parsed).unwrap();
+        assert!(back.contains("worktree.message"), "{}", back);
+        assert!(back.contains("system:a.wav"), "{}", back);
+        // 旧フラット形式も引き続き読める（移行はフロントが行う）
+        let legacy: NotificationSoundSettings =
+            serde_json::from_str(r#"{"volume":80,"approval":"system:b.wav"}"#).unwrap();
+        assert_eq!(legacy.approval.as_deref(), Some("system:b.wav"));
+        assert!(legacy.kinds.is_none());
+    }
 
     #[test]
     fn test_app_settings_default_round_trip() {

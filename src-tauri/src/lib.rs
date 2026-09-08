@@ -1610,6 +1610,10 @@ fn fire_worktree_closed(
 ) {
     let (repository_name, workgroup_id) =
         resolve_event_scope(app_handle, &id, repository_name, workgroup_id);
+    // 発火元で音 / OS 通知を鳴らすための経路（#140）。受信側にはトーストを出さないので
+    // `notify-worktree` ではなく専用イベントに載せる。event_db の初期化状態とは
+    // 無関係に鳴らしてよいので、購読配送より前に出す。
+    mcp_server::emit_worktree_event_fired(app_handle, &name, event_db::NotifyKind::WorktreeClosed);
     let handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
         let Some(pool) = handle.try_state::<event_db::EventPool>() else {
@@ -1721,6 +1725,8 @@ fn fire_worktree_created(
 ) {
     let (repository_name, workgroup_id) =
         resolve_event_scope(app_handle, &id, repository_name, workgroup_id);
+    // 発火元で音 / OS 通知を鳴らす（#140）。`worktree.closed` と同じ理由で専用イベント。
+    mcp_server::emit_worktree_event_fired(app_handle, &name, event_db::NotifyKind::WorktreeCreated);
     let handle = app_handle.clone();
     tauri::async_runtime::spawn(async move {
         let Some(pool) = handle.try_state::<event_db::EventPool>() else {
@@ -2410,6 +2416,18 @@ pub fn run() {
                                 Ok(_) => {}
                                 Err(e) => log::warn!("[EventDB] purge_expired failed: {}", e),
                             }
+                            // 購読 kind のメモリインデックス（#140）。誰も購読していない
+                            // 種別の発火で events.db を触らないための索引で、`EventPool` と
+                            // **同じアーム**で manage する。DB 初期化に失敗すれば索引も
+                            // 登録されず、全経路が「索引なし＝毎回 DB へ」に倒れる。
+                            let subscribed_kinds = event_db::SubscribedKinds::new();
+                            if let Err(e) =
+                                event_db::rebuild_subscribed_kinds(&pool, &subscribed_kinds, now).await
+                            {
+                                // 構築できなくても未構築のまま進めてよい（毎回 DB へ行くだけ）。
+                                log::warn!("[EventDB] 購読 kind インデックスの構築に失敗: {}", e);
+                            }
+                            handle.manage(subscribed_kinds);
                             // 配送ワーカー。`EventPool` と同じアームで manage するので、
                             // DB 初期化に失敗すればハンドルも登録されず全経路が no-op になる。
                             handle.manage(event_delivery::start(handle.clone(), pool.clone()));

@@ -1,6 +1,34 @@
+/** 通知種別 兼 購読イベント種別の固定7値（issue #140）。
+ *
+ *  Rust 側の `event_db::NotifyKind::ALL` と**同じ並び・同じ文字列**であること。
+ *  両側に pin テスト（`notificationKinds.test.ts` / `test_notify_kind_all_seven_values_pinned`）
+ *  があるので、片方だけ変えると必ずどちらかが落ちる。
+ *
+ *  接頭辞ありとなしが混在しているのは、`kind` の値が settings.json と各ワークツリーの
+ *  `.claude/settings.local.json` および events.db に既に焼き付いているため。揃えるには
+ *  全面的な移行処理が要るので、混在を許容して移行ゼロを選んでいる。 */
+export const NOTIFY_KINDS = [
+  'hook',
+  'approval',
+  'completed',
+  'general',
+  'worktree.message',
+  'worktree.created',
+  'worktree.closed',
+] as const;
+export type NotifyKind = (typeof NOTIFY_KINDS)[number];
+
+/** Claude Code のライフサイクルフックが名乗れる種別。
+ *
+ *  **7値のうち4値だけ。** ここを広げると、設定1行でフックの JSON が
+ *  `worktree.message` として他ワークツリーへ自由文配送される
+ *  （Rust 側 `NotifyKind::allowed_as_hook_entry` と対応）。 */
+export const HOOK_NOTIFY_KINDS = ['hook', 'approval', 'completed', 'general'] as const;
+export type HookNotifyKind = (typeof HOOK_NOTIFY_KINDS)[number];
+
 export interface NotificationHookEntry {
   event: 'Stop' | 'Notification' | 'SubagentStop' | 'PreToolUse' | 'PostToolUse' | 'PermissionRequest';
-  kind: 'completed' | 'approval' | 'general' | 'hook';
+  kind: HookNotifyKind;
 }
 
 export interface Repository {
@@ -128,10 +156,28 @@ export interface AppearanceSettings {
   uiScale?: 'normal' | 'large' | 'xlarge'; // デフォルト: 'normal'
 }
 
+/** 通知種別ごとの通知設定（#140）。 */
+export interface NotificationKindSetting {
+  /** false ならこの種別の通知（バッジ / 音 / OS 通知）を一切出さない */
+  enabled: boolean;
+  /** null/"" = 音なし, "system:<filename>", "custom:<filename>" */
+  sound?: string | null;
+  /** OS 通知を出すか。未指定なら enabled に従う */
+  os?: boolean;
+}
+
 export interface NotificationSoundSettings {
   volume: number;            // 0-100 (デフォルト: 80)
-  approval?: string | null;  // null/"" = 音なし, "system:<filename>", "custom:<filename>"
+  /** 種別 → 設定。キーは NOTIFY_KINDS の7値。
+   *
+   *  `worktree.message` のようにドットを含む種別があるので、フラットなキーには
+   *  できない（旧形式は下の deprecated フィールドから migrateNotificationSound が畳む）。 */
+  kinds?: Partial<Record<NotifyKind, NotificationKindSetting>>;
+  /** @deprecated #140 以前のフラット形式。`migrateNotificationSound` が `kinds` へ畳んで消す */
+  approval?: string | null;
+  /** @deprecated #140 以前のフラット形式 */
   completed?: string | null;
+  /** @deprecated #140 以前のフラット形式 */
   general?: string | null;
 }
 

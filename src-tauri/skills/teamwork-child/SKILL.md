@@ -27,10 +27,10 @@ oretachi_set_description(project_dir: <このワークツリーのルート絶�
 
 - issueへコメントした場合: 本文は省略し、コメントのURLのみをbodyに入れる。
   ```
-  notify_worktree(worktree_name: <自分のワークツリー名>, kind: "general",
-    event_kind: "worktree.message", body: "<コメントURL>")
+  notify_worktree(worktree_name: <自分のワークツリー名>, kind: "worktree.message",
+    body: "<コメントURL>")
   ```
-  - `event_kind: "worktree.message"`を指定することで、親issueワークツリーが購読している場合に配送される(宛先は購読側=親issueワークツリーが決めるため、`worktree_name`は表示トースト用であり配送先には無関係)。
+  - `kind: "worktree.message"`を指定することで、親issueワークツリーが購読している場合に配送される(宛先は購読側=親issueワークツリーが決めるため、`worktree_name`は表示用であり配送先には無関係)。
   - 自分のワークツリー名が分からない場合は`oretachi_get_worktree_status(query: <git branch --show-current の結果>)`で確認する。
 - ユーザーが購読機能を認識しており、issueコメントを介さず直接ワークツリーへの報告を指示された場合に限り、`notify_worktree`の通知のみでよい(issueコメント投稿は不要)。
 
@@ -45,8 +45,8 @@ issue本文に`## 停止条件`セクションがある場合、そこに書か�
    ```
 2. 確認が取れたら、**どの停止条件をクリアしたかを親へ報告する**(親が計画フロー図のチェックを付けるため)。**書式は固定**で、issue本文のHTMLコメントにあるid(`<!-- sc-142-1 -->`)を`[]`に入れる:
    ```
-   notify_worktree(worktree_name: <自分のワークツリー名>, kind: "general",
-     event_kind: "worktree.message", body: "停止条件クリア: [sc-142-1]「<停止条件のテキスト>」→ <ユーザーの判断内容>")
+   notify_worktree(worktree_name: <自分のワークツリー名>, kind: "worktree.message",
+     body: "停止条件クリア: [sc-142-1]「<停止条件のテキスト>」→ <ユーザーの判断内容>")
    ```
    idが本文に書かれていない場合は`[]`を省略し、テキストだけで報告する。
 3. issue本文のチェックボックスも `- [x]` に更新する(親が`worktree.closed`時にここを突き合わせる)。
@@ -60,7 +60,7 @@ issue本文に`## 停止条件`セクションがある場合、そこに書か�
 ## 禁止事項
 
 - **descriptionを未設定のまま実装へ入らない。** plan modeを経由しない場合(auto modeなど)も例外ではない。
-- 親issueへの報告で`event_kind: "worktree.message"`を省略しない(親へ配送されなくなる)。
+- 親issueへの報告で`kind: "worktree.message"`以外を使わない(親へ配送されなくなる)。
 - 子の停止条件を親の停止として扱わない(ユーザーへの確認は必ず自ワークツリーで行う)。
 - 停止条件をユーザーに聞かずにAIの判断だけでクリア扱いにしない。
 

@@ -29,12 +29,12 @@ import { useI18n } from "vue-i18n";
 import { useSubWindows, requestSubWindowLayout } from "./composables/useSubWindows";
 import { useCodeReviewWindow } from "./composables/useCodeReviewWindow";
 import { useArtifactWindow } from "./composables/useArtifactWindow";
-import { useNotifications, sendOsNotification, playSoundForKind, type NotificationKind } from "./composables/useNotifications";
+import { useNotifications, sendOsNotification, playSoundForKind } from "./composables/useNotifications";
 import { useTrayPopup } from "./composables/useTrayPopup";
 import { useWindowFocus } from "./composables/useWindowFocus";
 import { useTasks } from "./composables/useTasks";
 import type { TrayWorktreeData, TrayTerminalData } from "./composables/useTrayPopup";
-import type { WorktreeEntry } from "./types/settings";
+import type { NotifyKind, WorktreeEntry } from "./types/settings";
 import type { SavedTerminal } from "./types/worktree";
 import type { UrlArtifactEntry } from "./types/artifact";
 import { extractUrlArtifacts } from "./utils/artifactUrl";
@@ -1931,8 +1931,12 @@ onMounted(async () => {
   // 通知リスナー初期化 (ワークツリー名 → ID 解決関数と自動承認中は保留するコールバックを渡す)
   await initNotificationListener(
     (name: string) => worktrees.value.find((w) => w.name === name)?.id,
-    (id: string, kind: NotificationKind) => {
-      if (kind === "completed") return isWorktreeFocused(id);
+    (id: string, kind: NotifyKind) => {
+      // 自動承認中の保留は「AI 判定の結果が出るまで提示を遅らせる」ためのもの。
+      // 判定対象にならない種別を保留すると、自動承認リスナー側も拾わないので
+      // 通知がどこにも出ないまま消える。判定対象は approval / general だけ
+      // （`useAppAutoApproval` の許可リスト）なので、それ以外はフォーカス判定だけにする。
+      if (kind !== "approval" && kind !== "general") return isWorktreeFocused(id);
       return autoApprovalMap.get(id) === true || isWorktreeFocused(id);
     },
     () => settings.value.enableOsNotification === true,
@@ -1951,6 +1955,10 @@ onMounted(async () => {
       general: t("notification.title"),
       approval: t("notification.titleApproval"),
       completed: t("notification.titleCompleted"),
+      hook: t("notification.titleHook"),
+      "worktree.message": t("notification.titleWorktreeMessage"),
+      "worktree.created": t("notification.titleWorktreeCreated"),
+      "worktree.closed": t("notification.titleWorktreeClosed"),
     },
     () => settings.value.notificationSound,
   );
