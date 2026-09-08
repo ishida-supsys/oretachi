@@ -18,6 +18,7 @@ mod job_object;
 mod main_thread_watch;
 pub mod mcp_server;
 mod process_utils;
+mod prompt_parser;
 mod pty_manager;
 mod report_db;
 mod settings;
@@ -128,6 +129,23 @@ async fn pty_spawn(
 #[tauri::command]
 fn pty_write(state: State<PtyManager>, session_id: u32, data: Vec<u8>) -> Result<(), String> {
     let _bc = main_thread_watch::enter(main_thread_watch::Activity::PtyWrite);
+    state.write(session_id, data)
+}
+
+/// 自動承認の Enter だけが通る、セッション書き込みロック付きの write（#215）。
+///
+/// `pty_write` は**同期のまま**にしておく必要がある（上のコメント参照。async 化すると
+/// 並列実行でキー入力の順序が壊れる）。一方 `oretachi_answer_prompt` は
+/// 「画面の fingerprint を照合 → 矢印を送る → CR で確定」を不可分に行う前提で、
+/// その区間に別の CR が割り込むと**移動途中の `❯` が指す選択肢**（許可ダイアログなら
+/// `2. Yes, and don't ask again` = 以後の無条件承認）を確定させてしまう。
+///
+/// 人のキー入力は塞ぎたくないので `pty_write` は触らず、**自動承認の Enter だけ**を
+/// この経路へ寄せる。単発キーなので順序の保証は不要で、待たされても体感に影響しない。
+#[tauri::command]
+async fn pty_write_locked(state: State<'_, PtyManager>, session_id: u32, data: Vec<u8>) -> Result<(), String> {
+    let lock = crate::mcp_server::session_write_lock(session_id);
+    let _guard = lock.lock().await;
     state.write(session_id, data)
 }
 
@@ -2171,6 +2189,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             pty_spawn,
             pty_write,
+            pty_write_locked,
             pty_resize,
             pty_kill,
             pty_set_ai_agent,

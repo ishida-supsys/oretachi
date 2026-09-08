@@ -112,6 +112,20 @@ describe('detectOretachiToolPrompt', () => {
     }
   })
 
+  // #215: answer_prompt は矢印 + CR で他ワークツリーの許可ダイアログの `1. Yes` を
+  // 確定できる。無条件承認すると「承認ダイアログを自動承認するツールが自動承認される」
+  // という穴になり、write_terminal と同じく任意コード実行と等価になる
+  it('returns null for oretachi_answer_prompt', () => {
+    expect(detectOretachiToolPrompt(ccPrompt('plugin:oretachi:oretachi - oretachi_answer_prompt')))
+      .toBeNull()
+  })
+
+  // 解析するだけの read-only ツールは read_terminal と同じ扱いで自動承認する
+  it('detects read-only inspect_prompt', () => {
+    expect(detectOretachiToolPrompt(ccPrompt('plugin:oretachi:oretachi - oretachi_inspect_prompt')))
+      .toBe('oretachi_inspect_prompt')
+  })
+
   it('does not match a worktree path that ends with a tool name', () => {
     // 選択肢2行目の cwd は必ずウィンドウ内に入る。
     // ワークツリー名が oretachi-artifact だと任意コマンドが自動承認されうる

@@ -632,7 +632,7 @@ pub struct ArtifactParams {
     pub content_type: Option<String>,
     #[schemars(description = "アーティファクトのタイトル (create時必須)")]
     pub title: Option<String>,
-    #[schemars(description = "アーティファクトの中身 (create/rewrite時必須)。markdown / html / react では `artifact:` リンクで他のアーティファクトへ遷移できる: 同一ワークツリー内は `artifact:<アーティファクトID>`、他ワークツリー宛は `artifact://worktree/<worktreeId>/<アーティファクトID>`、リポジトリ保管庫宛は `artifact://repository/<encodeURIComponent(リポジトリの絶対パス)>/<アーティファクトID>`。react ではメモリー（アーティファクトごとに永続化される JSON ストア）が使える: `import { useMemory } from 'oretachi'` して `const [value, setValue] = useMemory('key', 初期値)`。書き込みはデバウンスされ、ウィンドウを閉じて開き直しても・リポジトリへ転送しても復元される（合計 1MB まで。他に getMemory / setMemory / clearMemory / subscribeMemory がある）。さらに `import { callTool } from 'oretachi'` で oretachi の MCP ツールを呼べる: `await callTool('oretachi_write_terminal', { session_id: 12, text: 'echo hi' })`。呼べるのは oretachi_write_terminal / oretachi_add_task / notify_worktree / oretachi_poll_inbox / oretachi_ack_message / oretachi_read_terminal / oretachi_list_worktree_notifications だけで、terminal_id / project_dir / notify_worktree の宛先 / add_task の追加先ワークグループはアーティファクトの置き場所のワークツリーへ強制される(session_id は同じワークツリーの稼働中端末、または**アーティファクトの置き場所ワークツリーが oretachi_subscribe_worktree で購読しているワークツリー**の稼働中端末に限る)。戻り値はツールの結果を JSON.parse したもの(パースできなければ文字列)。**制約**: アーティファクトからは oretachi_list_terminals が呼べないため、read/write_terminal に渡す session_id は生成時にコードへ埋め込むこと(アプリ再起動やタブ再作成で無効になる)。oretachi_poll_inbox / oretachi_ack_message / notify_worktree(kind: \"worktree.message\") はそのワークツリーで AI エージェント端末がちょうど1つ走行中でないとエラーになるので、AI セッション終了後も動かしたいボタンには使わないこと。他ワークツリーの端末へ read/write_terminal したい場合は、アーティファクトの置き場所ワークツリー側から宛先を購読しておくこと(逆向き＝宛先側が置き場所を購読しているだけでは通らない)")]
+    #[schemars(description = "アーティファクトの中身 (create/rewrite時必須)。markdown / html / react では `artifact:` リンクで他のアーティファクトへ遷移できる: 同一ワークツリー内は `artifact:<アーティファクトID>`、他ワークツリー宛は `artifact://worktree/<worktreeId>/<アーティファクトID>`、リポジトリ保管庫宛は `artifact://repository/<encodeURIComponent(リポジトリの絶対パス)>/<アーティファクトID>`。react ではメモリー（アーティファクトごとに永続化される JSON ストア）が使える: `import { useMemory } from 'oretachi'` して `const [value, setValue] = useMemory('key', 初期値)`。書き込みはデバウンスされ、ウィンドウを閉じて開き直しても・リポジトリへ転送しても復元される（合計 1MB まで。他に getMemory / setMemory / clearMemory / subscribeMemory がある）。さらに `import { callTool } from 'oretachi'` で oretachi の MCP ツールを呼べる: `await callTool('oretachi_write_terminal', { session_id: 12, text: 'echo hi' })`。呼べるのは oretachi_write_terminal / oretachi_add_task / notify_worktree / oretachi_poll_inbox / oretachi_ack_message / oretachi_read_terminal / oretachi_list_worktree_notifications / oretachi_inspect_prompt / oretachi_answer_prompt だけで、terminal_id / project_dir / notify_worktree の宛先 / add_task の追加先ワークグループはアーティファクトの置き場所のワークツリーへ強制される(session_id は同じワークツリーの稼働中端末、または**アーティファクトの置き場所ワークツリーが oretachi_subscribe_worktree で購読しているワークツリー**の稼働中端末に限る)。戻り値はツールの結果を JSON.parse したもの(パースできなければ文字列)。**制約**: アーティファクトからは oretachi_list_terminals が呼べないため、read/write_terminal に渡す session_id は生成時にコードへ埋め込むこと(アプリ再起動やタブ再作成で無効になる)。oretachi_poll_inbox / oretachi_ack_message / notify_worktree(kind: \"worktree.message\") はそのワークツリーで AI エージェント端末がちょうど1つ走行中でないとエラーになるので、AI セッション終了後も動かしたいボタンには使わないこと。他ワークツリーの端末へ read/write_terminal したい場合は、アーティファクトの置き場所ワークツリー側から宛先を購読しておくこと(逆向き＝宛先側が置き場所を購読しているだけでは通らない)。**宛先がダイアログ(ツール許可 / プラン承認 / AskUserQuestion)で止まっている場合に write_terminal で自由テキストを送ってはいけない**: テキストはダイアログに吸われ、末尾の CR が意図しない選択肢(既定は `1. Yes`)の確定として解釈される。先に oretachi_inspect_prompt(session_id) で画面の形状と実在する選択肢を取り、oretachi_answer_prompt(session_id, expect_fingerprint, kind, ...) で答えること")]
     pub content: Option<String>,
     #[schemars(description = "コード言語 (type=application/vnd.ant.code の時のみ)")]
     pub language: Option<String>,
@@ -983,6 +983,69 @@ pub struct WriteTerminalParams {
     pub text: String,
     #[schemars(description = "true なら改行を \\r 正規化＋末尾 \\r 保証してから送信（デフォルト true）。末尾 CR は本文と別 write で送るので Claude Code 宛でも確実にターンが始まる。vitest の単一キー入力など改行不要時は false")]
     pub submit: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct InspectPromptParams {
+    #[schemars(description = "PTY セッションID（oretachi_list_terminals で取得）")]
+    pub session_id: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct AnswerPromptParams {
+    #[schemars(description = "PTY セッションID（oretachi_list_terminals で取得）")]
+    pub session_id: u32,
+    #[schemars(description = "直前の oretachi_inspect_prompt が返した fingerprint。現在の画面と一致しない場合は**何も送らず** status=\"stale\" を返す（これが安全弁。人が手でダイアログを消した後に送ると、別のダイアログの既定選択を確定しうる）")]
+    pub expect_fingerprint: String,
+    #[schemars(description = "回答の種類。\"select\"(選択肢を選ぶ: permission / plan / askUserQuestion / numbered) / \"text\"(自由入力へ本文を送る。shape が text のときだけ) / \"escapeThenText\"(ESC でダイアログを抜けてから本文を送る = 拒否して指示する) / \"yesno\"(素の (y/N) プロンプト)")]
+    pub kind: String,
+    #[schemars(description = "kind=\"select\" のとき必須。oretachi_inspect_prompt が返した questions[0].options[].index をそのまま渡す。**画面に無い番号は拒否される**")]
+    pub option_index: Option<u32>,
+    #[schemars(description = "kind=\"text\" / \"escapeThenText\" のとき必須。改行や ESC を含む制御文字が入っていると拒否する（宛先の TUI へのエスケープシーケンス注入防止）。1 行に畳んで渡すこと")]
+    pub text: Option<String>,
+    #[schemars(description = "kind=\"yesno\" のとき必須。\"y\" または \"n\"")]
+    pub value: Option<String>,
+}
+
+/// キーを送ったあと、宛先が再描画し終わるのを待つ時間。
+///
+/// 送信結果の検証（`afterShape` / `afterFingerprint`）はこの待ちの後に画面を読み直す。
+/// 短すぎると「まだ古い画面」を見て毎回 `unverified` になる。
+const ANSWER_SETTLE: std::time::Duration = std::time::Duration::from_millis(400);
+
+/// PTY セッション単位の書き込みロック。
+///
+/// `oretachi_answer_prompt` は「画面を読む → fingerprint を照合する → キーを送る」を
+/// **不可分に**行う必要がある。間に別の write が挟まると、照合した画面とキーが届く画面が
+/// 食い違い、別のダイアログの既定選択（許可ダイアログなら `1. Yes` = 任意コマンドの承認）を
+/// 確定しうる。#215 の中核の安全弁が成立するのはこのロックがあるからで、
+/// `expect_fingerprint` の照合だけでは read と write の間が閉じない。
+///
+/// `oretachi_write_terminal`（本文 → CR の 2 回書き込み）と
+/// `event_delivery::write_push`（同じく 2 回書き込み）も同じロックを取る。取らないと
+/// それらが照合とキー送信の間へ割り込めるうえ、元から「2 回の write の間に別の write が
+/// 挟まって壊れたプロンプトが飛ぶ」既知の穴があった（`oretachi_write_terminal` のコメント参照）。
+///
+/// フロント側では**自動承認の Enter だけ**が `pty_write_locked` 経由でこのロックを取る。
+/// 自動承認は `answer_prompt` が狙うのと同じダイアログへ機械的に CR を送るので、取らないと
+/// 移動途中の `❯` が指す選択肢を確定させてしまう（#215 のセルフレビューで検出して塞いだ）。
+/// 人のキー入力（`pty_write`）は**意図的にロックを取らない** — 同期コマンドのままにして
+/// キー入力の順序を保証する必要があり、人の入力を待たせたくもない。
+static SESSION_WRITE_LOCKS: std::sync::OnceLock<
+    Mutex<HashMap<u32, Arc<tokio::sync::Mutex<()>>>>,
+> = std::sync::OnceLock::new();
+
+/// 指定セッションの書き込みロックを取得する（無ければ作る）。
+///
+/// セッションが死んでもエントリは残るが、キーは `u32`、値は空の `Arc<Mutex<()>>` だけで、
+/// セッション数には `MAX_PTY_SESSIONS` の上限が付いているので放置してよい。
+pub(crate) fn session_write_lock(session_id: u32) -> Arc<tokio::sync::Mutex<()>> {
+    let map = SESSION_WRITE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());
+    guard
+        .entry(session_id)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
 }
 
 // ─── 購読 / inbox 系ツールのパラメータ (issue #123) ───────────────────────────
@@ -3430,6 +3493,13 @@ impl NotifyService {
         }
         if !submit.unwrap_or(true) {
             let bytes_len = text.len();
+            // 単発の write でもセッションロックを取る（#215）。取らないと
+            // `oretachi_answer_prompt` が「画面を照合してから矢印を送る」区間へ
+            // 割り込めて、照合した画面とキーが届く画面が食い違う。
+            // アーティファクトの `lib/send` は submit=false を使うので、ここを
+            // 素通しにすると安全弁に穴が残る
+            let lock = session_write_lock(session_id);
+            let _guard = lock.lock().await;
             self.app_handle
                 .state::<PtyManager>()
                 .write(session_id, text.into_bytes())
@@ -3458,6 +3528,19 @@ impl NotifyService {
         // 単位の書き込みロック、または PTY 書き込みの配送ワーカーへの集約が要る。
         // 実効リスクは押し込みが「宛先が idle かつ `MIN_PUSH_INTERVAL` 経過後」に
         // 限られることで抑えられている。
+        //
+        // # セッション書き込みロック (#215)
+        //
+        // 上の「2 回の write はアトミックではない」を、同じロックを取る経路の間だけは
+        // 閉じてある。`event_delivery::write_push` と `oretachi_answer_prompt` も同じ
+        // ロックを取るので、本文と CR の間にそれらが割り込むことはない。
+        //
+        // **ロックを取らない経路とは依然として競る。** 具体的にはフロントの `pty_write`
+        // （人のキー入力）だけ。自動承認の Enter は `pty_write_locked` へ寄せたので
+        // ここには割り込まない（#215 のセルフレビューで穴として検出し、塞いだ）。
+        let lock = session_write_lock(session_id);
+        let _guard = lock.lock().await;
+
         let body = submit_body(&text);
         let bytes_len = body.len() + 1;
         let wrote_body = !body.is_empty();
@@ -3494,6 +3577,227 @@ impl NotifyService {
             bytes_len
         );
         Ok(CallToolResult::success(vec![Content::text("written")]))
+    }
+
+    /// 指定セッションの画面を再生して解析する。`oretachi_inspect_prompt` / `oretachi_answer_prompt`
+    /// が共有する読み取り経路。
+    ///
+    /// `oretachi_read_terminal` の `strip_ansi` 済みテキストは**使えない。** Claude Code は
+    /// カーソル移動で差分描画するため、エスケープを捨てると再描画の断片しか残らない
+    /// （実測: 選択肢を 1 つ動かした 4 バイトが `strip_ansi` 後は空になる）。そのため
+    /// 出力履歴を VT エミュレータへ流し直して画面グリッドを作る。
+    fn inspect_screen(
+        &self,
+        session_id: u32,
+    ) -> Result<(crate::prompt_parser::ParsedPrompt, u64, u64, u16, u16), McpError> {
+        let pty = self.app_handle.state::<PtyManager>();
+        let (rows, cols) = pty.screen_size(session_id).map_err(|e| McpError::invalid_params(e, None))?;
+        let result = pty
+            .read_output_history(
+                session_id,
+                Some(crate::prompt_parser::REPLAY_BYTES),
+                None,
+            )
+            .map_err(|e| McpError::invalid_params(e, None))?;
+        // 折り返しを解いた論理行で解析する。物理行のままだと狭いターミナルで
+        // 見出し・フッタ・`(y/N)` マーカーが行の途中で割れて一致しない
+        let screen = crate::prompt_parser::render_logical_screen(&result.data, rows, cols);
+        let parsed = crate::prompt_parser::parse_prompt(&screen);
+        Ok((parsed, result.cursor, result.lost_bytes, rows, cols))
+    }
+
+    #[tool(description = "指定 PTY セッションにいま出ている「問い」を解析して返す（読み取りのみ）。返り値の JSON: { shape, header, context, questions, escapeHatch, fingerprint, tail, cursor, lostBytes, rows, cols, detectedAtMs }。shape は \"text\"(自由入力) / \"permission\"(ツール許可ダイアログ) / \"plan\"(プラン承認) / \"askUserQuestion\" / \"yesno\"((y/N) プロンプト) / \"numbered\"(素の番号選択) / \"unknown\"(分類不能)。**oretachi_read_terminal のテキストからダイアログを読もうとしないこと** — Claude Code はカーソル移動で差分描画するので ANSI を除去すると断片しか残らない。このツールは出力履歴を VT エミュレータへ流し直した画面グリッドを見る。**questions[].options[].label は画面に実在する選択肢そのもの**なので、人へ提示する候補を創作せずこれを出すこと。fingerprint は oretachi_answer_prompt へそのまま渡す（画面が変わっていたら送信されない）。shape が \"unknown\" のときはキーを送れないので tail を人に見せて手動操作へ誘導する", annotations(read_only_hint = true))]
+    fn oretachi_inspect_prompt(
+        &self,
+        Parameters(InspectPromptParams { session_id }): Parameters<InspectPromptParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let (parsed, cursor, lost_bytes, rows, cols) = self.inspect_screen(session_id)?;
+        log::info!(
+            "[mcp] oretachi_inspect_prompt: session_id={} shape={} options={} cursor_index={:?} fingerprint={} rows={} cols={} lost_bytes={}",
+            session_id,
+            parsed.shape.as_str(),
+            parsed.questions.first().map(|q| q.options.len()).unwrap_or(0),
+            parsed.questions.first().and_then(|q| q.cursor_index),
+            parsed.fingerprint,
+            rows,
+            cols,
+            lost_bytes
+        );
+        let mut json = serde_json::to_value(&parsed)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        if let Some(obj) = json.as_object_mut() {
+            obj.insert("cursor".into(), serde_json::json!(cursor));
+            obj.insert("lostBytes".into(), serde_json::json!(lost_bytes));
+            obj.insert("rows".into(), serde_json::json!(rows));
+            obj.insert("cols".into(), serde_json::json!(cols));
+            obj.insert("detectedAtMs".into(), serde_json::json!(crate::event_db::now_ms()));
+        }
+        Ok(CallToolResult::success(vec![Content::text(json.to_string())]))
+    }
+
+    #[tool(description = "oretachi_inspect_prompt で解析した「問い」へ、形状に合ったキー列を送って回答する。返り値の JSON: { status, keysSent, afterShape, afterFingerprint, reason }。status は \"sent\"(送信して画面が変わった) / \"unverified\"(キーは送ったが画面が変わらず、通ったか分からない) / \"stale\"(**画面が変わっていたので何も送っていない**) / \"unsupported\"(その形状にその回答は送れない。何も送っていない) / \"pastedOnly\"(キー列の途中で失敗。宛先の入力状態が中途半端なので同じ内容を再送してはいけない) / \"failed\"(何も送れていない)。**stale はリトライしないこと** — 画面が変わっているので oretachi_inspect_prompt から取り直す。キーは 1 キー 1 write に分けて猶予を挟む（Claude Code は同じ読み取りチャンクに来た CR を送信として扱わない）。選択は数字キーではなく矢印で ❯ を動かして CR で確定する（実測: 数字キーは確定キーではない）。許可条件は oretachi_write_terminal と同じで、他ワークツリーの端末へ送るには呼び出し元がその宛先を購読していること", annotations(destructive_hint = true))]
+    async fn oretachi_answer_prompt(
+        &self,
+        Parameters(AnswerPromptParams {
+            session_id,
+            expect_fingerprint,
+            kind,
+            option_index,
+            text,
+            value,
+        }): Parameters<AnswerPromptParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // 回答の組み立て（制御文字の検査を含む）はキーを送る前に済ませる
+        let answer = crate::prompt_parser::Answer::from_parts(
+            &kind,
+            option_index,
+            text.as_deref(),
+            value.as_deref(),
+        )
+        .map_err(|e| McpError::invalid_params(e, None))?;
+
+        {
+            let pty = self.app_handle.state::<PtyManager>();
+            if !pty
+                .list_sessions()
+                .iter()
+                .any(|s| s.session_id == session_id && s.exit_code.is_none())
+            {
+                return Err(McpError::invalid_params(
+                    format!("session_id {} は稼働中のターミナルとして見つかりません", session_id),
+                    None,
+                ));
+            }
+        }
+
+        let outcome = |status: &str, keys: Vec<String>, after: Option<&crate::prompt_parser::ParsedPrompt>, reason: Option<String>| {
+            let json = serde_json::json!({
+                "status": status,
+                "keysSent": keys,
+                "afterShape": after.map(|p| p.shape.as_str()),
+                "afterFingerprint": after.map(|p| p.fingerprint.clone()),
+                "reason": reason,
+            });
+            Ok(CallToolResult::success(vec![Content::text(json.to_string())]))
+        };
+
+        // **照合とキー送信の間に別の write を挟ませない。** fingerprint の照合だけでは
+        // read と write の間が閉じず、間に別のダイアログが開けば「照合した画面」と
+        // 「キーが届く画面」が食い違う
+        let lock = session_write_lock(session_id);
+        let _guard = lock.lock().await;
+
+        let (parsed, _cursor, lost_bytes, _rows, _cols) = self.inspect_screen(session_id)?;
+
+        // ここが本 issue の中核の安全弁。人が手でダイアログを消していた場合、
+        // 送ればその後に開いた別のダイアログを操作してしまう
+        if parsed.fingerprint != expect_fingerprint {
+            log::info!(
+                "[mcp] oretachi_answer_prompt: session_id={} status=stale expected={} actual={} shape={}",
+                session_id,
+                expect_fingerprint,
+                parsed.fingerprint,
+                parsed.shape.as_str()
+            );
+            return outcome(
+                "stale",
+                Vec::new(),
+                Some(&parsed),
+                Some(format!(
+                    "画面が変わったためキーを送っていません（期待 fingerprint {} / 現在 {} / 現在の形状 {}）。**リトライせず** oretachi_inspect_prompt から取り直してください",
+                    expect_fingerprint,
+                    parsed.fingerprint,
+                    parsed.shape.as_str()
+                )),
+            );
+        }
+
+        let keys = match crate::prompt_parser::plan_keys(&parsed, &answer) {
+            Ok(keys) => keys,
+            Err(e) => {
+                log::info!(
+                    "[mcp] oretachi_answer_prompt: session_id={} status=unsupported shape={} reason={}",
+                    session_id,
+                    parsed.shape.as_str(),
+                    e.0
+                );
+                return outcome("unsupported", Vec::new(), Some(&parsed), Some(e.0));
+            }
+        };
+        let preview = crate::prompt_parser::keys_preview(&keys);
+        log::info!(
+            "[mcp] oretachi_answer_prompt: session_id={} shape={} fingerprint={} keys={} lost_bytes={}",
+            session_id,
+            parsed.shape.as_str(),
+            parsed.fingerprint,
+            preview.join(" → "),
+            lost_bytes
+        );
+
+        // 1 キー 1 write + 各キー間に猶予。Claude Code は同じ読み取りチャンクに来た CR を
+        // 送信として扱わないため、まとめて書くと確定しない
+        let mut sent: Vec<String> = Vec::new();
+        for (i, key) in keys.iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(crate::event_delivery::SUBMIT_DELAY).await;
+            }
+            let write_result = self
+                .app_handle
+                .state::<PtyManager>()
+                .write(session_id, key.bytes.clone());
+            if let Err(e) = write_result {
+                // 途中で失敗した場合、既に送ったキーは宛先へ届いている。同じ回答を
+                // そのまま再送すると矢印が二重に動いて別の選択肢を確定しうるので、
+                // 呼び出し元が「再送してはいけない」と分かる status を返す
+                let status = if sent.is_empty() { "failed" } else { "pastedOnly" };
+                log::warn!(
+                    "[mcp] oretachi_answer_prompt: session_id={} status={} sent={:?} error={}",
+                    session_id, status, sent, e
+                );
+                return outcome(
+                    status,
+                    sent,
+                    None,
+                    Some(format!(
+                        "キー '{}' の送信に失敗しました: {}{}",
+                        key.label,
+                        e,
+                        if status == "pastedOnly" {
+                            "。**同じ回答を再送しないでください**（既に送ったキーで ❯ が動いており、再送すると別の選択肢を確定しえます）。ターミナルを開いて状態を確認してください"
+                        } else {
+                            ""
+                        }
+                    )),
+                );
+            }
+            sent.push(key.label.clone());
+        }
+
+        // 送信後にもう一度解析する。ロックはまだ握っているので、この再解析までの間に
+        // 別の write が割り込むことはない
+        tokio::time::sleep(ANSWER_SETTLE).await;
+        let after = self.inspect_screen(session_id).ok().map(|t| t.0);
+        let changed = after
+            .as_ref()
+            .map(|a| a.fingerprint != parsed.fingerprint)
+            .unwrap_or(false);
+        let status = if changed { "sent" } else { "unverified" };
+        let reason = if changed {
+            None
+        } else {
+            Some(format!(
+                "キー列 ({}) は送りましたが、{}ms 後も画面が変わっていません。通っていない可能性があります（同じ回答をそのまま再送すると ❯ が二重に動くので、oretachi_inspect_prompt で取り直してから判断してください）",
+                sent.join(" → "),
+                ANSWER_SETTLE.as_millis()
+            ))
+        };
+        log::info!(
+            "[mcp] oretachi_answer_prompt: session_id={} status={} after_shape={:?}",
+            session_id,
+            status,
+            after.as_ref().map(|a| a.shape.as_str())
+        );
+        outcome(status, sent, after.as_ref(), reason)
     }
 }
 
@@ -4248,6 +4552,13 @@ struct SubscriberIdentity {
 ///   件数 / 種別 / 初回通知時刻）を返す。得た ID を渡せるツールはホワイトリスト内に
 ///   無いので権限昇格には繋がらないが、「アーティファクトの権限は自ワークツリーへ固定」
 ///   という原則の例外になっている。
+/// - **`oretachi_answer_prompt` は「宛先のダイアログを操作する」ツール（#215）。**
+///   `oretachi_write_terminal` で矢印キーを送れば同じことができるので新しい権限ではないが、
+///   他ワークツリーの**ツール許可ダイアログを承認しうる**（＝任意コード実行と等価）。
+///   そのためフロントの `ORETACHI_AUTO_APPROVE_TOOLS` には**入れていない**。
+///   代わりに 2 つの安全弁を置いている: `expect_fingerprint` が現在の画面と一致しなければ
+///   何も送らない（`stale`）、`shape` が `unknown` なら何も送らない（`unsupported`）。
+///   照合とキー送信の間は `session_write_lock` で直列化してある。
 pub(crate) const ARTIFACT_CALLABLE_TOOLS: &[&str] = &[
     "oretachi_write_terminal",
     "oretachi_add_task",
@@ -4256,6 +4567,8 @@ pub(crate) const ARTIFACT_CALLABLE_TOOLS: &[&str] = &[
     "oretachi_ack_message",
     "oretachi_read_terminal",
     "oretachi_list_worktree_notifications",
+    "oretachi_inspect_prompt",
+    "oretachi_answer_prompt",
 ];
 
 /// 自由文（`add_task` の prompt / `notify_worktree` の body）へ前置する出自の断り書き。
@@ -4558,7 +4871,13 @@ pub(crate) async fn call_tool_for_artifact(
     // 終了済みセッションへ書いても無意味なので、そちらもここで弾く。
     // 自ワークツリー宛は無条件、別ワークツリー宛は購読関係があるときだけ通す（#211）
     let mut cross: Option<(String, CrossWorktreeGrant)> = None;
-    if matches!(tool, "oretachi_read_terminal" | "oretachi_write_terminal") {
+    if matches!(
+        tool,
+        "oretachi_read_terminal"
+            | "oretachi_write_terminal"
+            | "oretachi_inspect_prompt"
+            | "oretachi_answer_prompt"
+    ) {
         let session_id: u32 = obj
             .get("session_id")
             .and_then(|v| v.as_u64())
@@ -4630,6 +4949,10 @@ pub(crate) async fn call_tool_for_artifact(
             service.oretachi_write_terminal(Parameters(parse(tool, args)?)).await
         }
         "oretachi_read_terminal" => service.oretachi_read_terminal(Parameters(parse(tool, args)?)),
+        "oretachi_inspect_prompt" => service.oretachi_inspect_prompt(Parameters(parse(tool, args)?)),
+        "oretachi_answer_prompt" => {
+            service.oretachi_answer_prompt(Parameters(parse(tool, args)?)).await
+        }
         "oretachi_add_task" => service.oretachi_add_task(Parameters(parse(tool, args)?)),
         "notify_worktree" => service.notify_worktree(Parameters(parse(tool, args)?)).await,
         "oretachi_poll_inbox" => service.oretachi_poll_inbox(Parameters(parse(tool, args)?)).await,
@@ -6763,6 +7086,7 @@ mod tests {
             "oretachi_list_workgroups",
             "oretachi_list_terminals",
             "oretachi_read_terminal",
+            "oretachi_inspect_prompt",
             "oretachi_show_worktree",
         ];
         const NOT_READ_ONLY: &[&str] = &[
@@ -6774,6 +7098,7 @@ mod tests {
             "oretachi_spawn_terminal",
             "oretachi_kill_terminal",
             "oretachi_write_terminal",
+            "oretachi_answer_prompt",
             "oretachi_import_worktree",
         ];
 

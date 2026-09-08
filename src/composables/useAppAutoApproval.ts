@@ -126,7 +126,11 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
       const terminalForApproval: TerminalForApproval[] = wt.terminals.flatMap((t) => {
         const ref = deps.getTerminalRef(t.id);
         if (!ref) return [];
-        return [{ id: t.id, getTerminal: () => ref.getTerminal(), write: (d: string) => ref.write(d) }];
+        // **承認の Enter は `writeLocked` で送る（#215）。** `oretachi_answer_prompt` が
+        // 「fingerprint を照合 → 矢印で ❯ を動かす → CR で確定」を行っている区間に
+        // 素の write で CR が割り込むと、移動途中の ❯ が指す選択肢（許可ダイアログなら
+        // `2. Yes, and don't ask again` = 以後の無条件承認）を確定させてしまう
+        return [{ id: t.id, getTerminal: () => ref.getTerminal(), write: (d: string) => ref.writeLocked(d) }];
       });
       loopResult = await runApprovalLoop(
         terminalForApproval,

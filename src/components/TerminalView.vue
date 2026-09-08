@@ -60,7 +60,7 @@ let serializeAddon: SerializeAddon | null = null;
 let resizeObserver: ResizeObserver | null = null;
 let resizeDebounce: ReturnType<typeof setTimeout> | null = null;
 
-const { sessionId, spawn, attachToSession, write, resize, kill, isRunning, detach } = usePty();
+const { sessionId, spawn, attachToSession, write, writeLocked, resize, kill, isRunning, detach } = usePty();
 const batcher = usePtyWriteBatcher(() => terminal);
 const visibility = useTerminalVisibility({
   getTerminal: () => terminal,
@@ -427,6 +427,8 @@ defineExpose({
   detach: detachPty,
   focus,
   write,
+  // 自動承認の Enter 専用（#215）。人のキー入力は `write` を使う
+  writeLocked,
   getTerminal,
   isRunning,
   sessionId,

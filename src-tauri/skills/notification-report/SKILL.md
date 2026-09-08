@@ -1,7 +1,7 @@
 ---
 name: notification-report
 description: 購読しているワークツリーから通知が溜まったときに、関連する通知の一覧を読んでレポートアーティファクトを作成する。人はレポートを見るだけで、ターミナルを1つずつ開かずに溜まった通知へ一括でクイックに返答できる。ホームタブや teamwork-parent の親ワークツリーからの利用を想定。ユーザーが「通知をまとめて確認したい」「溜まった通知にまとめて返したい」等と言ったときに使う。
-allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__plugin_oretachi_oretachi__oretachi_subscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_worktree_notifications, mcp__plugin_oretachi_oretachi__oretachi_poll_inbox, mcp__plugin_oretachi_oretachi__oretachi_ack_message, mcp__plugin_oretachi_oretachi__oretachi_clear_worktree_notification, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp__plugin_oretachi_oretachi__oretachi_list_terminals, mcp__plugin_oretachi_oretachi__oretachi_read_terminal, mcp__plugin_oretachi_oretachi__notify_worktree, mcp__plugin_oretachi_oretachi__artifact, mcp__plugin_oretachi_oretachi__artifact_module, mcp__plugin_oretachi_oretachi__artifact_store, mcp__plugin_oretachi_oretachi__search_artifact, Read, Glob, Grep
+allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__plugin_oretachi_oretachi__oretachi_subscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_worktree_notifications, mcp__plugin_oretachi_oretachi__oretachi_poll_inbox, mcp__plugin_oretachi_oretachi__oretachi_ack_message, mcp__plugin_oretachi_oretachi__oretachi_clear_worktree_notification, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp__plugin_oretachi_oretachi__oretachi_list_terminals, mcp__plugin_oretachi_oretachi__oretachi_read_terminal, mcp__plugin_oretachi_oretachi__oretachi_inspect_prompt, mcp__plugin_oretachi_oretachi__notify_worktree, mcp__plugin_oretachi_oretachi__artifact, mcp__plugin_oretachi_oretachi__artifact_module, mcp__plugin_oretachi_oretachi__artifact_store, mcp__plugin_oretachi_oretachi__search_artifact, Read, Glob, Grep
 ---
 
 # notification-report スキル
@@ -84,6 +84,82 @@ oretachi_read_terminal(session_id: <上で得た値>, max_bytes: 8192)
 
 この (a)(b) は**レポート生成時のこのセッションが MCP クライアントとして呼ぶ**ので、他ワークツリーの端末も読める（アーティファクトの JS からの `read_terminal` にかかる購読条件は適用されない）。
 
+### 1-4(c). 「いまどんな問いで止まっているか」を取る（**必須**）
+
+```
+oretachi_inspect_prompt(session_id: <1-4(b) と同じ値>)
+```
+
+**戻り値をそのまま `prompt` フィールドへ焼き込む。** 要約・言い換え・整形をしてはいけない。
+
+- `options[].label` は**宛先の画面に実在する選択肢そのもの**。言い換えると人が「画面に無い選択肢」を選ぶことになる
+- `fingerprint` は送信直前の照合キー。書き換えると照合が必ず外れて何も送れなくなる
+- `cursorIndex` はいま `❯` が当たっている番号。キー列（矢印の回数）がここから決まる
+- `shape` が `text` のときの `header` は**受け手の種類**（`[Claude Code の入力欄]` /
+  `[シェルのプロンプト] PS X:\...>`）。fingerprint に混ざっており、「レポート生成時は CC の
+  入力欄だったが送信時には CC が終了してシェルのプロンプトだけが残っている」状況を `stale` で
+  弾くために使う。**書き換えないこと**
+- `truncated` が `true` なら**ダイアログが宛先の画面に収まっておらず、選択肢を全部読めていない**。
+  カードは選択 UI を出さず、警告と画面末尾を表示して ESC 経路だけを残す。**このフィールドを
+  落とすと「読めた選択肢だけ」が完全な一覧として提示され、拒否の選択肢を見ないまま承認させる**
+  （実測: 7 行のタブで `options` が `[{1, "Yes"}]` だけになった）
+- `navigation` は選択肢の選び方（`arrows` / `digits` / `none`）。**`shape` とは独立**で、
+  Claude Code のフッタという構造的な手がかりから決まる。狭いターミナルで見出しが折り返して
+  `shape` の推定が外れても、キーの種類だけは間違えない（実測: 13 桁では
+  `Do you want to proceed?` が 3 行に、`Esc to cancel · Tab to amend` が 4 行に割れる）
+
+**`oretachi_read_terminal` のテキストから問いを読み取ろうとしないこと。** Claude Code は
+カーソル移動で差分描画するので、ANSI を除去したバイト列には再描画の断片しか残らない
+（実測: 選択肢を 1 つ動かした 4 バイトは `strip_ansi` 後に空文字列になる）。
+`oretachi_inspect_prompt` は出力履歴を VT エミュレータへ流し直した**画面グリッド**を見る。
+
+`oretachi_read_terminal` は 1-4(b) の「現況の 1 行要約」を作るためにこれまでどおり使う。
+役割が違う（要約は流れたログから、問いの形状は現在の画面から）。
+
+### 1-4(d). 問いのパターンと回答手段
+
+`shape` ごとにカードの見た目と送信経路が変わる。**候補を創作してよいのは `text` のときだけ。**
+
+| shape | 画面上の特徴 | カードの UI | 送られるキー |
+|---|---|---|---|
+| `text` | 入力欄だけ（ダイアログ無し） | 候補ボタン + 補足プロンプト（従来どおり） | 本文 → 150ms → CR |
+| `permission` | `Do you want to proceed?` + 番号付き選択肢 | **画面の選択肢そのまま**のラジオ + 承認対象の全文 | 矢印で `❯` を動かして CR |
+| `plan` | `Would you like to proceed?` + `No, keep planning` | 同上 | 同上 |
+| `askUserQuestion` | 設問 + 番号付き選択肢 + `Chat about this`、フッタ `Enter to select · Tab/Arrow keys to navigate` | 同上 | 同上 |
+| `yesno` | `(y/N)` / `[Y/n]`（シェル側の gh / npm / git など） | `y` / `n` ボタン | `y` or `n` → CR |
+| `numbered` | 素の TUI の `1) foo` | 画面の選択肢そのままのラジオ | 数字 → CR |
+| `unknown` | 分類できないが入力待ちらしい | **送信ボタン無効。** 画面末尾を読み取り専用で表示 | 送らない |
+
+`escapeHatch` が `"esc"` のカードには「**ESC で抜けて指示を書く**」欄が別に出る。
+`No, and tell Claude what to do differently` を選ぶのと同じ着地点で、選択肢の文言に依存しない。
+ただし ESC 経路が実際に使えるのは `permission` / `plan` / `askUserQuestion` の 3 形状のみ
+（`yesno` / `numbered` では `escapeHatch` が立っていても使えない）。
+
+**選択は数字キーではなく矢印 + CR。** 実測で確認済み: 許可ダイアログへ Down を 2 回送ってから
+CR を送ると、3 番目の選択肢が確定した。`cursorIndex` から目標までの移動量を Rust 側が計算するので、
+選択肢が 10 件以上あっても同じ手順で通る（数字キーだと 2 桁を打てない）。
+
+素の TUI の番号リスト（`navigation: "digits"`）だけは行入力ベースなので数字 + CR。
+この振り分けは `navigation` が持っている。
+
+### 1-4(e). 1 セッションにつきキー操作カードは 1 枚だけ
+
+**ダイアログは 1 つしか無い。** 同じ `sessionId` へ `shape` が `text` 以外のカードを 2 枚
+向けると、2 枚目は必ず `stale`（1 枚目で画面が変わっている）になるか、最悪の場合
+**1 枚目の回答が別の問いへ撃ち込まれる**。
+
+同じ宛先の通知が複数あるなら、**最新 1 件だけ**に `prompt` を付け、残りは
+`prompt: null` + `choices: []` の参考表示へ落とす。
+（`lib/send` の `promptConflicts` が 2 枚目以降を機械的に塞ぐが、そもそも作らない）
+
+### 1-4(f). 複数選択・複数設問の扱い
+
+- **`multiSelect` は画面から判別できない**（単一選択との差が画面に出ない）。`questions[].multiSelect`
+  は常に `false` で、カードも単一選択のラジオになる。**複数選ばせたい設問は人がターミナルで操作する**
+- **複数設問の 2 問目以降はそのレポートでは答えられない。** 1 問答えると画面が次の設問へ変わるので、
+  `answer_prompt` の `afterShape` が `askUserQuestion` のままなら「まだ設問が残っている」と
+  カードに出る。続きは次のレポートで答える
+
 ### 1-5. 送信先の session_id を決める
 
 1-4(b) で得た「そのワークツリーで走っている AI エージェント端末」の `session_id` をそのまま `sessionId` に入れる。見つからなければ `null` を入れる（カードが「稼働中の AI 端末が見つからなかったため送信できません」になる）。
@@ -119,7 +195,15 @@ oretachi_read_terminal(session_id: <上で得た値>, max_bytes: 8192)
 | `templates/lib--send.jsx` | `lib/send` | そのまま利用 |
 | `templates/data--report.example.jsx` | `data/report` | ※スキーマ参照用、新規生成 |
 
-## Step 4: 候補ボタンを作る
+## Step 4: 候補ボタンを作る（`shape` が `text` のときだけ）
+
+**`shape` が `text` 以外のカードでは候補を創作してはいけない。** `prompt` を焼き込むだけで、
+カードが `options[].label`（宛先の画面に実在する選択肢）をそのまま出す。`choices` は無視されるので `[]` にする。
+
+実在しない選択肢を人へ見せると、「押したのに画面と違う」「押した内容が届かない」という
+形で判断を誤らせる。#215 の要点はここ。
+
+以下は `shape` が `text`（ダイアログ無しで入力待ち）のカードにだけ当てはまる。
 
 `choices` は**通知内容から作る**。その通知に対して人が返しそうな短い返答を 2〜4 個。
 
@@ -183,10 +267,37 @@ notify_worktree(worktree_name: <自分のワークツリー名>, kind: "general"
 
 実装は `lib/send` と `entry-point` にある。読む人向けの要約:
 
-1. ユーザーが候補ボタン + 補足を選び、「選択した N 件へ送信」を押す
-2. **通知 1 件ごとに** その宛先へ `oretachi_write_terminal` を 2 回呼ぶ（本文 → 150ms → CR）。宛先の端末が別々なので 1 本にまとめられない
+1. ユーザーが選択肢（または候補ボタン + 補足）を選び、「選択した N 件へ送信」を押す
+2. **通知 1 件ごとに**、形状に応じた経路で送る
+   - `shape` が `text` … `oretachi_write_terminal` を 2 回（本文 → 150ms → CR）
+   - それ以外 … `oretachi_answer_prompt(session_id, expect_fingerprint, kind, ...)` を 1 回
 3. 1 件ごとにサイドカーへ結果を書く（途中で閉じても「どこまで届いたか」が残る）
-4. 全件終わったら成功分の inbox ID をまとめて `oretachi_ack_message`。**失敗は許容**して「ack 不可」を表示する
+4. 全件終わったら `sent` 分の inbox ID をまとめて `oretachi_ack_message`。**失敗は許容**して「ack 不可」を表示する
+
+### ダイアログ経路の安全弁（#215）
+
+`oretachi_answer_prompt` は**送信直前に宛先の画面を読み直して `expect_fingerprint` と照合し、
+一致しなければ何も送らない**（`stale`）。照合とキー送信の間は PTY セッション単位の
+書き込みロックで直列化されているので、間に別の write（他の通知の押し込み / 別の
+`write_terminal`）が割り込むこともない。
+
+これが無いと「人が手でダイアログを消したあとにレポートの送信を押して、その後に開いた
+**別の許可ダイアログを承認してしまう**」が起きる。fingerprint には `❯` の位置も入っているので、
+矢印の移動量が変わる状況も `stale` として弾かれる。
+
+`status` は 7 種類:
+
+| status | 意味 | 再送 |
+|---|---|---|
+| `sent` | 送信して画面が変わった | 不要 |
+| `unverified` | キーは送ったが画面が変わらなかった | **してはいけない**（矢印が二重に動く） |
+| `stale` | 画面が変わっていたので**何も送っていない** | **してはいけない**。レポートを作り直す |
+| `unsupported` | その形状にその回答は送れない。**何も送っていない** | 不可 |
+| `pastedOnly` | キー列の途中 / Enter だけ失敗。入力状態が中途半端 | **してはいけない** |
+| `failed` | 何も送れていない | 自由入力のカードだけ可 |
+
+**ダイアログのカードは一度送ったら結果に関わらず読み取り専用になる。** カードに再送ボタンは
+出ない（画面が変わっているか矢印が既に動いているので、同じ回答が別の選択肢を確定しうる）。
 
 ### 本文と Enter は別の呼び出しに分ける
 
@@ -216,6 +327,8 @@ await callTool('oretachi_write_terminal', { session_id, text: '\r', submit: fals
 
 - **`oretachi_ack_message` / `oretachi_poll_inbox` / `notify_worktree`（`kind: "worktree.message"` 指定）はアーティファクトからは AI セッション稼働中しか使えない。** `terminal_id` を取らないので、レポートを置いたワークツリーで走行中の AI エージェント端末が**ちょうど 1 つ**でないと失敗する。AI セッション終了後にユーザーがレポートを触る場合は常に失敗するので、**ack の失敗を前提に設計してある**（返答自体は届く）。
 - **表示中ロックが守るのは「そのウィンドウでいま表示している 1 件」だけ。** ウィンドウが開いたままでもユーザーが別のアーティファクトへ切り替えるとロックは外れる。レポートはユーザーがそのページに留まっている前提で扱う。
+- **`multiSelect` の設問と複数設問の 2 問目以降はレポートから答えられない（#215）。** 複数選択は画面から単一選択と判別できず、トグルキーを推測して送ると意図しない選択を確定しうるため、単一選択の 1 つ選んで CR だけを提供する。複数設問は 1 問答えると画面が次へ変わるので、続きは次のレポートに回る（カードに「まだ設問が残っています」と出る）。どちらも人がターミナルを開いて操作するのが確実。
+- **`shape` の判定はレポート生成時点のスナップショット。** 生成後に宛先が進んでダイアログが消えていれば、送信時に `stale` になって何も送られない（安全側に倒れる）。
 - **ホーム / リポジトリ擬似ワークツリー宛はワイルドカード購読からしか許可が出ない。** 名前指定の購読ができないため、これらからの通知に返答したい場合は `*` / `repo:` 購読が必要。
 
 ## 禁止事項
@@ -228,5 +341,17 @@ await callTool('oretachi_write_terminal', { session_id, text: '\r', submit: fals
 - **`その他（補足で指示）` を `choices` に入れない。** コード側が足すので二重になる。
 - **送信テキストに改行を入れない。** 行ごとに送信されて宛先のエージェントへプロンプトが分割して飛ぶ。
 - **本文と Enter を 1 回の `write_terminal` でまとめない。** テキストは届くのにターンが始まらない。
-- **`flatten()` の制御文字除去を外さない。** 宛先の TUI へエスケープシーケンスを注入できてしまう。
+- **`flatten()` の制御文字除去を外さない。** 宛先の TUI へエスケープシーケンスを注入できてしまう。キー列は Rust 側（`oretachi_answer_prompt`）が組むので、JS から生のキーを流さない。
 - **レポートを作った時点で通知をクリアしない。** ユーザーが返答し終えてから `oretachi_clear_worktree_notification` を呼ぶ。
+
+### ダイアログ関連（#215）
+
+- **ダイアログで止まっている宛先へ自由テキストを送らない。** テキストはダイアログに吸われ、末尾の CR が意図しない選択肢（許可ダイアログの既定は `1. Yes`）の確定として解釈される。判定は `oretachi_inspect_prompt` の `shape` で行う（`text` 以外なら全部ダイアログ）。
+- **`shape` が `text` 以外のとき、候補ボタンの文字列を創作しない。** `options[].label`（画面に実在する選択肢）だけを出す。`choices` は `[]` にする。
+- **`oretachi_inspect_prompt` の戻り値を編集しない。** 要約・言い換え・整形はどれも駄目。特に `fingerprint` を書き換えると照合が必ず外れて何も送れなくなる。
+- **フィールドを取捨選択して転記しない。** 戻り値のオブジェクトを**丸ごと**入れる。特に `truncated` を落とすと、画面に収まっていないダイアログの「読めた選択肢だけ」を完全な一覧として人へ見せ、拒否の選択肢を見ないまま承認させることになる。
+- **`stale` をリトライしない。** 画面が変わっているので何度試しても同じ。レポートを作り直す導線を出す。
+- **`unverified` / `pastedOnly` を再送しない。** 既に送ったキーで `❯` が動いているので、同じ回答をもう一度送ると別の選択肢を確定しうる。
+- **`unknown` に推測でキーを送らない。** カードは送信ボタン無効 + `tail` の表示にして、ターミナルでの手動操作へ誘導する。
+- **1 セッションに対しキー操作カードを 2 枚以上作らない。** ダイアログは 1 つしか無い。同じ宛先の通知が複数あれば最新 1 件だけに `prompt` を付ける。
+- **`oretachi_read_terminal` のテキストからダイアログを読み取ろうとしない。** Claude Code はカーソル移動で差分描画するので、ANSI を除去すると再描画の断片しか残らない。問いの形状は `oretachi_inspect_prompt` から取る。
