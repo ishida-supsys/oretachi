@@ -341,8 +341,15 @@ pub fn notify_event_queued(app: &AppHandle) {
 /// 応答は待たない。ack が届かなければ打刻されないまま `PENDING_DIGEST_TTL` で失効し、
 /// 行は未配送のまま次の hook 経路で再提示される。
 pub fn ack_digest(app: &AppHandle, digest_id: String) {
-    if let Some(h) = handle(app) {
-        h.try_send(DeliveryMsg::AckDigest { digest_id });
+    let Some(h) = handle(app) else { return };
+    // **`DeliveryHandle::try_send` を使わない。** あれは「捨てても次の tick で再評価される」
+    // メッセージ向けに debug で握り潰すが、ack にリトライ経路は無い（サイドカーは既に
+    // 出力を終えて exit する）。落とすと打刻されず次の機会に同じ未読が再提示される ——
+    // 安全側ではあるが、原因不明の重複注入として現れるので warn で残す。
+    if h.tx.try_send(DeliveryMsg::AckDigest { digest_id }).is_err() {
+        log::warn!(
+            "[delivery] キューが満杯で受領確認を取りこぼした。この分は未配送のまま次の機会に再提示される"
+        );
     }
 }
 
@@ -1003,6 +1010,14 @@ async fn collect_digest(
             return;
         }
     };
+    // 別の hook 経路へ渡して受領確認待ちの行は載せない（#221）。`Undelivered` は
+    // `delivered_at`/`notified_at` しか見ないので、打刻を ack まで遅らせた結果
+    // **同じ行が 2 つの `PendingDigest` に載りうる**（SessionStart と Stop が ack 窓の中で
+    // 続けて発火した場合など）。打刻自体は冪等だが、同じ本文が 2 回注入されるのは避ける。
+    let items: Vec<_> = items
+        .into_iter()
+        .filter(|i| !state.is_awaiting_ack(&i.id))
+        .collect();
     // 自動承認のガードは**全経路**に掛ける。`Stop` はさらに `passive` も外す。
     let items = {
         let settings = app.state::<SettingsManager>().get();
@@ -1091,6 +1106,13 @@ async fn collect_digest(
         );
         return;
     }
+    // 打刻対象が無い digest は受領確認を待たない。`SessionStart` は
+    // `reports_carryover_only()` が true なので、本文0件でも「N 件残っています」という
+    // 告知だけを返す（`format_inbox_digest`）。これを pending に入れると、打刻するものが
+    // 無いまま 30 秒待って「0 件を渡した（受領確認待ち）」という誤解を招くログが残る。
+    if pending.ids.is_empty() {
+        return;
+    }
     if !can_ack {
         // ack を送れない旧サイドカー。従来どおり即打刻する（`DeliveryMsg::CollectDigest`
         // の `can_ack` の doc 参照）。
@@ -1164,17 +1186,14 @@ async fn confirm_pending(
     // 状態の変化そのものは直前の `event-inbox-changed` がフロントへ伝えている。
 }
 
-/// 受領確認が来ないまま `PENDING_DIGEST_TTL` を過ぎた digest を捨てる（#221）。
-///
-/// 捨てた行は未配送のまま残るので、次の hook 経路で再提示される。**打刻しないのが要点**
-/// —— ここで打つと `oneshot` の競合を直した意味が消える。
 impl WorkerState {
     /// 受領確認待ちの digest に載っている inbox 行か（#221）。
     ///
-    /// 打刻を ack まで遅らせた副作用として、`list_pushable` / `list_stale_unpushed` は
-    /// **hook 経路へ渡し済みの行をまだ未配送として返す**。素通りさせると同じ本文が
-    /// `additionalContext` と PTY 押し込みの両方で届く（#124 が単一ワーカーで潰した
-    /// 二重配送が、打刻のタイミングをずらしたことで別の形で戻る）。押し込み側で除外する。
+    /// 打刻を ack まで遅らせた副作用として、`list_pushable` / `list_stale_unpushed` /
+    /// `list_inbox(Undelivered)` は **hook 経路へ渡し済みの行をまだ未配送として返す**。
+    /// 素通りさせると同じ本文が `additionalContext` と PTY 押し込みの両方で届く
+    /// （#124 が単一ワーカーで潰した二重配送が、打刻のタイミングをずらしたことで別の形で
+    /// 戻る）。押し込み側と hook 側の両方で除外する。
     fn is_awaiting_ack(&self, inbox_id: &str) -> bool {
         self.pending_digests
             .values()
@@ -1182,6 +1201,10 @@ impl WorkerState {
     }
 }
 
+/// 受領確認が来ないまま `PENDING_DIGEST_TTL` を過ぎた digest を捨てる（#221）。
+///
+/// 捨てた行は未配送のまま残るので、次の hook 経路で再提示される。**打刻しないのが要点**
+/// —— ここで打つと `oneshot` の競合を直した意味が消える。
 fn expire_pending_digests(state: &mut WorkerState) {
     let before = state.pending_digests.len();
     state
@@ -2696,6 +2719,23 @@ mod tests {
         state
             .pending_digests
             .insert("d-1".to_string(), pending(&["inbox-1", "inbox-2"], std::time::Duration::ZERO));
+
+        assert!(state.is_awaiting_ack("inbox-1"));
+        assert!(state.is_awaiting_ack("inbox-2"));
+        assert!(!state.is_awaiting_ack("inbox-3"));
+    }
+
+    /// 複数の digest にまたがっても判定できること。`SessionStart` と `Stop` が ack 窓の
+    /// 中で続けて発火すると pending が並ぶので、どちらに載った行も除外される必要がある。
+    #[test]
+    fn test_awaiting_ack_spans_multiple_pending_digests() {
+        let mut state = WorkerState::default();
+        state
+            .pending_digests
+            .insert("d-1".to_string(), pending(&["inbox-1"], std::time::Duration::ZERO));
+        state
+            .pending_digests
+            .insert("d-2".to_string(), pending(&["inbox-2"], std::time::Duration::ZERO));
 
         assert!(state.is_awaiting_ack("inbox-1"));
         assert!(state.is_awaiting_ack("inbox-2"));
