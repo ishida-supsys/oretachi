@@ -60,6 +60,12 @@ export interface ArtifactChangedEvent {
   worktreeId: string;
   artifactId: string;
   command: string;
+  /**
+   * 作業の副産物として作られたか（フックによる URL アーティファクトの自動登録など）。
+   * `false` のときはユーザーの作業に割り込まない（ビューアを開かない・通知しない）。
+   * 省略時は AI が明示的に作ったものとして扱う。
+   */
+  autoOpen?: boolean;
 }
 
 export interface RepoArtifactChangedEvent {

@@ -7,6 +7,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask, message } from "@tauri-apps/plugin-dialog";
 import Toast from "primevue/toast";
+import type { ToastMessageOptions } from "primevue/toast";
 import Popover from "primevue/popover";
 import ArtifactCodeView from "./components/artifact/ArtifactCodeView.vue";
 import ArtifactMarkdownView from "./components/artifact/ArtifactMarkdownView.vue";
@@ -210,6 +211,54 @@ const hasSelectedMemory = computed(() => {
   return !!memory && Object.keys(memory).length > 0;
 });
 
+/**
+ * 「新しいアーティファクトが追加された」トーストに載せる導線。
+ * 表示中の画面は奪わないので、ここを踏まない限り選択は変わらない。
+ */
+interface CreatedToastData {
+  artifactId: string;
+}
+
+/**
+ * PrimeVue は `add()` に渡したオブジェクトをそのまま保持して `#message` スロットへ流すため、
+ * 宣言外のフィールドも往復する。`ToastMessageOptions` に `data` が無いのでここで足す。
+ */
+type ArtifactToastMessage = ToastMessageOptions & { data?: CreatedToastData };
+
+function createdToastArtifactId(toastMessage: ArtifactToastMessage): string | null {
+  return toastMessage.data?.artifactId ?? null;
+}
+
+/** 既定の描画を差し替えた分、severity アイコンは自前で出す（PrimeVue の既定と同じ絵柄） */
+const toastIcons: Record<string, string> = {
+  success: "pi-check",
+  info: "pi-info-circle",
+  warn: "pi-exclamation-triangle",
+  error: "pi-times-circle",
+};
+
+function toastIcon(severity: string | undefined): string {
+  return toastIcons[severity ?? "info"] ?? "pi-info-circle";
+}
+
+/** トーストの「開く」。踏まれて初めて表示を切り替える */
+async function openFromToast(toastMessage: ArtifactToastMessage) {
+  const artifactId = createdToastArtifactId(toastMessage);
+  toast.remove(toastMessage);
+  if (!artifactId) return;
+  // 押されるまでの間に消えている可能性がある（削除・ワークツリーごと破棄）
+  if (!artifacts.value.some((a) => a.id === artifactId)) {
+    toast.add({
+      severity: "warn",
+      summary: t("navigate.notFound"),
+      detail: artifactId,
+      life: 4000,
+    });
+    return;
+  }
+  await selectArtifact(artifactId);
+}
+
 /** メモリーの保存失敗。アーティファクト側は入力を受け付け続けるので必ず見せる */
 function onMemoryError(msg: string) {
   toast.add({ severity: "error", summary: t("memory.saveFailed"), detail: msg, life: 6000 });
@@ -397,7 +446,11 @@ async function onNavigate(href: string) {
   }
 }
 
-async function refreshSelected(artifactId: string, command: string) {
+async function refreshSelected(artifactId: string, command: string, autoOpen = true) {
+  // 一覧を更新する前に既知かどうかを見ておく。artifact_module の create は
+  // 「既存アーティファクトへのモジュール追加」でも command="create" を emit するため、
+  // 更新後の一覧では本当の新規追加と区別できなくなる
+  const isNewArtifact = !artifacts.value.some((a) => a.id === artifactId);
   await loadList();
   // サイドカーは削除で消えるだけでなく、転送（同じ ID への上書き = command "create"）で
   // メモリーが差し替わる。据え置くと古い memory を初期値にした iframe が
@@ -426,21 +479,30 @@ async function refreshSelected(artifactId: string, command: string) {
       // 選択中の本文を捨てて読み直させる
       selectedArtifact.value = null;
       await selectArtifact(artifactId);
-    } else if (selectedId.value === null) {
+    } else if (
+      selectedId.value === null &&
+      // 絞り込みで隠れているものを本文にだけ出すと、サイドバーが「一致なし」なのに
+      // 表示はある、という食い違いになる（delete 側のフォールバックと揃える）
+      visibleArtifacts.value.some((a) => a.id === artifactId)
+    ) {
       // まだ何も開いていないときだけ拾う（ビューアを開いた直後の初期表示）
       await selectArtifact(artifactId);
-    } else {
-      // 別のアーティファクトを閲覧中に、無関係な ID が作られた（AI の生成、
-      // 転送、フックによる URL 自動登録など）。ここで選択を奪うと iframe が
-      // 作り直され、読んでいた位置や入力途中のフォームが飛ぶ。
-      // 一覧には既に載っているので、存在だけ知らせて表示は据え置く
+    } else if (isNewArtifact && autoOpen) {
+      // 別のアーティファクトを閲覧中に、無関係な ID が作られた（AI の生成、転送など）。
+      // ここで選択を奪うと iframe が作り直され、読んでいた位置や入力途中のフォームが
+      // 飛ぶ。表示は据え置き、代わりに「開く」付きのトーストで導線だけ残す。
+      //
+      // autoOpen=false（フックによる URL 自動登録）は作業の副産物なので黙って取り込む。
+      // 既知の ID（モジュール追加）も「追加されました」は嘘になるので出さない。
       const created = artifacts.value.find((a) => a.id === artifactId);
-      toast.add({
+      const toastMessage: ArtifactToastMessage = {
         severity: "info",
         summary: t("created.summary"),
         detail: created?.title ?? artifactId,
-        life: 4000,
-      });
+        life: 6000,
+        data: { artifactId },
+      };
+      toast.add(toastMessage);
     }
   } else if (selectedId.value === artifactId) {
     try {
@@ -610,7 +672,11 @@ onMounted(async () => {
   } else {
     unlisten = await listen<ArtifactChangedEvent>("artifact-changed", async (event) => {
       if (event.payload.worktreeId !== worktreeId) return;
-      await refreshSelected(event.payload.artifactId, event.payload.command);
+      await refreshSelected(
+        event.payload.artifactId,
+        event.payload.command,
+        event.payload.autoOpen !== false,
+      );
     });
   }
 
@@ -642,7 +708,27 @@ onUnmounted(() => {
 
 <template>
   <div class="artifact-viewer">
-    <Toast />
+    <!-- 既定の描画をそのまま使うと「開く」を挿せないため、本文だけ自前で描く -->
+    <Toast>
+      <template #message="slotProps">
+        <div class="toast-body">
+          <i :class="`pi ${toastIcon(slotProps.message.severity)} toast-icon`" />
+          <div class="toast-text">
+            <div class="toast-summary">{{ slotProps.message.summary }}</div>
+            <div v-if="slotProps.message.detail" class="toast-detail">
+              {{ slotProps.message.detail }}
+            </div>
+          </div>
+          <button
+            v-if="createdToastArtifactId(slotProps.message)"
+            class="toast-open"
+            @click="openFromToast(slotProps.message)"
+          >
+            {{ t("created.open") }}
+          </button>
+        </div>
+      </template>
+    </Toast>
     <div class="sidebar">
       <div class="sidebar-header">
         <span :class="isRepositoryScope ? 'pi pi-folder sidebar-icon' : 'pi pi-box sidebar-icon'" />
@@ -1251,6 +1337,53 @@ onUnmounted(() => {
   display: flex;
   flex-direction: column;
 }
+
+/* トースト本文。既定の描画を #message で置き換えているので自前で組む */
+.toast-body {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.toast-icon {
+  flex-shrink: 0;
+  align-self: flex-start;
+  margin-top: 2px;
+}
+
+.toast-text {
+  flex: 1;
+  min-width: 0;
+}
+
+.toast-summary {
+  font-weight: 600;
+}
+
+.toast-detail {
+  margin-top: 2px;
+  font-size: 12px;
+  /* 長いタイトルでトーストが横に伸びないよう省略する */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toast-open {
+  flex-shrink: 0;
+  padding: 3px 10px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.toast-open:hover {
+  background: rgba(255, 255, 255, 0.12);
+}
 </style>
 
 <i18n lang="json">
@@ -1277,7 +1410,8 @@ onUnmounted(() => {
       "tooltip": "Transfer or delete this artifact"
     },
     "created": {
-      "summary": "New artifact added"
+      "summary": "New artifact added",
+      "open": "Open"
     },
     "navigate": {
       "notFound": "Artifact not found",
@@ -1336,7 +1470,8 @@ onUnmounted(() => {
       "tooltip": "このアーティファクトを転送 / 削除する"
     },
     "created": {
-      "summary": "アーティファクトが追加されました"
+      "summary": "アーティファクトが追加されました",
+      "open": "開く"
     },
     "navigate": {
       "notFound": "アーティファクトが見つかりません",
