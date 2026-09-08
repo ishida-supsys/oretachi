@@ -74,6 +74,11 @@ function App() {
     // 返答が届いた宛先ワークツリー。ack（inbox）とは別ストアのトレイバッジを
     // 落とすのに使う（#218）
     const sentWorktreeIds = [];
+    // この送信ループ後の各カードの status。トレイバッジはワークツリー粒度でしか
+    // 落とせないので、**そのワークツリーのカードが全部 sent になったか**をここで見る。
+    // `answers` はクロージャに閉じ込まれた送信前の値なので使えない
+    const statusById = {};
+    for (const x of NOTIFICATIONS) statusById[x.id] = (answers[x.id] || {}).status || null;
     try {
       for (const n of targets) {
         const prev = answers[n.id];
@@ -123,6 +128,7 @@ function App() {
           // サイドカーへ書けなくても送信自体は済んでいる。表示だけが古くなる
           console.warn('返答状態の保存に失敗しました', e);
         }
+        statusById[n.id] = result.status;
         if (result.status === 'sent') {
           acked.push(...(n.inboxIds || []));
           if (n.worktreeId) sentWorktreeIds.push(n.worktreeId);
@@ -140,9 +146,20 @@ function App() {
       }
       // 返答が届いた宛先のトレイバッジを落とす（#218）。ack は inbox（sqlite）で
       // バッジはフロントの別ストアなので、両方やらないと捌き終わったワークツリーが
-      // トレイポップアップの巡回に残り続ける。ack と違い AI セッションの稼働は不要
-      if (sentWorktreeIds.length > 0) {
-        const outcome = await clearNotifications(sentWorktreeIds);
+      // トレイポップアップの巡回に残り続ける。ack と違い AI セッションの稼働は不要。
+      //
+      // **落とせるのはワークツリー単位**（`NotificationRegistry` に通知単位の粒度が無い）。
+      // なので「そのワークツリーのカードが全部 sent」になった宛先だけに絞る。絞らないと、
+      // まだ未返答のカードが残っているワークツリーのバッジまで消えて、人が気づく導線が
+      // 失われる（`promptConflicts` で塞がれた 2 枚目など）。
+      // レポート生成後に届いた通知はこの粒度では区別できず一緒に落ちるが、それは
+      // トレイポップアップを1件送りしても同じ（離脱時にワークツリーごと既読になる）。
+      const clearable = sentWorktreeIds.filter(wid => {
+        const cards = NOTIFICATIONS.filter(x => x.worktreeId === wid);
+        return cards.length > 0 && cards.every(x => statusById[x.id] === 'sent');
+      });
+      if (clearable.length > 0) {
+        const outcome = await clearNotifications(clearable);
         try {
           await setCleared({ ...outcome, at: nowLabel() });
         } catch (e) {

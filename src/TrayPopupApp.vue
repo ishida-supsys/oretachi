@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, nextTick, computed } from "vue";
+import { ref, reactive, onMounted, onUnmounted, nextTick, computed, watch } from "vue";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import TerminalView from "./components/TerminalView.vue";
@@ -76,6 +76,9 @@ const menuOpen = ref(false);
 // アーカイブ確認ダイアログ
 const showArchiveConfirm = ref(false);
 const archiveDirtyCount = ref(0);
+// アーカイブ依頼の進行中フラグ。onArchiveConfirmed は await を挟んでから一覧を
+// splice するので、その間に外からの通知クリア（#218）で一覧を触られてはいけない
+const archiving = ref(false);
 
 // フレームレイアウト（useWorktreeFrameで共通化）
 const {
@@ -313,8 +316,14 @@ async function goTo(index: number, options: GoToOptions = {}): Promise<void> {
     // await 中に閉鎖 / 別遷移が始まっていたら以降は行わない
     if (token !== navToken || closing.value) return;
 
-    currentIndex.value = index;
-    const entering = allWorktrees.value[index];
+    // await を挟む間に一覧が縮んでいることがある（外からの通知クリアの取り込み /
+    // アーカイブ）。範囲外のまま進むと `entering` が undefined になり、
+    // `entering.worktreeId` で例外を投げて**ターミナルを手放したまま何も表示されない**
+    // 状態で固まる。末尾側へ丸めて必ず何か表示する
+    const target = Math.min(index, allWorktrees.value.length - 1);
+    if (target < 0) return;
+    currentIndex.value = target;
+    const entering = allWorktrees.value[target];
     await emitTo("main", "tray-current-worktree-changed", { worktreeId: entering.worktreeId });
     if (token !== navToken || closing.value) return;
     await showWorktree(entering);
@@ -422,68 +431,133 @@ async function onArchiveConfirmed(options: { deleteBranch: boolean }) {
   const wt = currentWorktree.value;
   if (!wt || closing.value) return;
 
-  const index = currentIndex.value;
-  const wasLast = isLast.value;
+  // await を 2 回挟むので、その間に外からの通知クリア（#218）で一覧を触られないよう
+  // 印を立てる。触られると splice する index が別のワークツリーを指す
+  archiving.value = true;
+  try {
+    // main 側のターミナル kill / git worktree remove とトレイの attach が競合しないよう、
+    // アーカイブ依頼より前にトレイ側のターミナルを必ず切り離す
+    await detachCurrentTerminals();
 
-  // main 側のターミナル kill / git worktree remove とトレイの attach が競合しないよう、
-  // アーカイブ依頼より前にトレイ側のターミナルを必ず切り離す
-  await detachCurrentTerminals();
+    // アーカイブは数秒〜数十秒かかり、失敗時のエラーダイアログは main 側に出る。
+    // トレイは完了を待たずに次へ進む。通知クリアも archiveWorktree 内の clearNotification
+    // が行うので tray-clear-notification は出さない。
+    await emitTo("main", "tray-archive-worktree", {
+      worktreeId: wt.worktreeId,
+      deleteBranch: options.deleteBranch,
+    });
 
-  // アーカイブは数秒〜数十秒かかり、失敗時のエラーダイアログは main 側に出る。
-  // トレイは完了を待たずに次へ進む。通知クリアも archiveWorktree 内の clearNotification
-  // が行うので tray-clear-notification は出さない。
-  await emitTo("main", "tray-archive-worktree", {
-    worktreeId: wt.worktreeId,
-    deleteBranch: options.deleteBranch,
-  });
+    // index は捕まえ直す（`archiving` で守ってはいるが、位置の根拠を
+    // 「await 前の currentIndex」ではなく worktreeId 一致に寄せておく）
+    const index = allWorktrees.value.findIndex((w) => w.worktreeId === wt.worktreeId);
+    const wasLast = index < 0 || index >= allWorktrees.value.length - 1;
 
-  if (wasLast) {
-    // 「アーカイブ化して完了」: 表示中が最後の1件 → ポップアップを閉じる
-    await closePopup({ clearCurrentNotification: false });
-    return;
+    if (wasLast) {
+      // 「アーカイブ化して完了」: 表示中が最後の1件 → ポップアップを閉じる
+      await closePopup({ clearCurrentNotification: false });
+      return;
+    }
+
+    // 「アーカイブ化して次へ」: 一覧から取り除くと後続が詰まるので、同じ index を再表示する。
+    // wasLast === false なので splice 後も index <= length - 1 が保証される。
+    allWorktrees.value.splice(index, 1);
+    await goTo(index, { clearLeaving: false, alreadyDetached: true });
+  } finally {
+    archiving.value = false;
   }
-
-  // 「アーカイブ化して次へ」: 一覧から取り除くと後続が詰まるので、同じ index を再表示する。
-  // wasLast === false なので splice 後も index <= length - 1 が保証される。
-  allWorktrees.value.splice(index, 1);
-  await goTo(index, { clearLeaving: false, alreadyDetached: true });
 }
 
 /**
- * 表示中の一覧から1件を取り除く（#218）。
+ * ダイアログ表示中か。**表示中カードを差し替えてはいけない状態**を表す。
+ *
+ * ダイアログは `currentWorktree` にリアクティブ束縛されており、確定ハンドラも
+ * `currentWorktree.value` を読み直す。開いている間にカードを差し替えると
+ * **ダイアログを開いた対象と別のワークツリーがアーカイブされる**（`deleteBranch` 付きなら
+ * ブランチも消える）。ホットキーのナビゲーションを止めているのと同じ理由・同じ条件。
+ */
+const dialogOpen = computed(
+  () => showArchiveConfirm.value || showIdeDialog.value || showAutoApprovalPromptDialog.value,
+);
+
+/**
+ * 外からクリアされたが、まだ一覧から外せていないワークツリー（#218）。
+ *
+ * 取り除きは「遷移中でもダイアログ中でもアーカイブ依頼中でもない」瞬間にしかできない。
+ * 割り込むと `goTo` が await の後で読む index / 配列長が変わり、確定待ちのダイアログが
+ * 別のワークツリーを指す。**捨てずに溜めて後で流す**（捨てると #218 が直そうとした
+ * 「捌き終わったカードが巡回に残る」に戻る）。
+ */
+const pendingRemovals = new Set<string>();
+/** `flushRemovals` の再入防止。goTo / closePopup を await する間に watch から再入する */
+let flushing = false;
+
+/**
+ * 表示中の一覧から、クリア済みのワークツリーを取り除く（#218）。
  *
  * トレイの一覧は開いた時点のスナップショットなので、開いている間に外から通知が
- * クリアされると（通知レポートから返答を送った宛先など）、捌き終わったワークツリーが
+ * クリアされると（通知レポートから返答を送った宛先など）捌き終わったカードが
  * 巡回に残り続ける。離脱側の通知クリアは既に外で済んでいるため `clearLeaving` は立てない。
+ *
+ * 非表示のカードを先に全部抜いてから表示中カードを処理する。順序を逆にすると、
+ * 表示中カードの `goTo` の await 中に残りを抜くことになり、`goTo` が読む index がずれる。
  */
-async function removeWorktreeFromList(worktreeId: string): Promise<void> {
-  if (closing.value) return;
-  const index = allWorktrees.value.findIndex((w) => w.worktreeId === worktreeId);
-  if (index < 0) return;
+async function flushRemovals(): Promise<void> {
+  if (flushing) return;
+  if (closing.value || navigating.value || archiving.value || dialogOpen.value) return;
+  if (pendingRemovals.size === 0) return;
 
-  // 表示していないカードなら、表示中のカードを動かさずに抜くだけ
-  if (index !== currentIndex.value) {
+  flushing = true;
+  try {
+    // 非表示のカードは表示中カードを動かさずに抜けるので同期的に片付ける
+    for (const worktreeId of Array.from(pendingRemovals)) {
+      const index = allWorktrees.value.findIndex((w) => w.worktreeId === worktreeId);
+      if (index < 0) {
+        // 既に一覧に無い（アーカイブ導線が抜いた等）。溜めておく意味が無い
+        pendingRemovals.delete(worktreeId);
+        continue;
+      }
+      if (index === currentIndex.value) continue; // 表示中は後回し
+      allWorktrees.value.splice(index, 1);
+      if (index < currentIndex.value) currentIndex.value -= 1;
+      pendingRemovals.delete(worktreeId);
+    }
+
+    const current = currentWorktree.value;
+    if (!current || !pendingRemovals.has(current.worktreeId)) return;
+    pendingRemovals.delete(current.worktreeId);
+
+    // 表示中のカードが消える。トレイが掴んでいるターミナルを先に手放す
+    const index = currentIndex.value;
+    await detachCurrentTerminals();
     allWorktrees.value.splice(index, 1);
-    if (index < currentIndex.value) currentIndex.value -= 1;
-    return;
+    if (allWorktrees.value.length === 0) {
+      // 最後の1件だった。クリアは外で済んでいるので改めて出さない
+      await closePopup({ clearCurrentNotification: false });
+      return;
+    }
+    // splice で後続が詰まるので、末尾を消したときだけ1つ戻る
+    await goTo(Math.min(index, allWorktrees.value.length - 1), {
+      clearLeaving: false,
+      alreadyDetached: true,
+    });
+  } finally {
+    flushing = false;
   }
-
-  // 表示中のカードが消える。遷移中に割り込むと detach 後の goTo が
-  // `navigating` ガードで弾かれ、ターミナルを手放したまま何も表示されなくなる。
-  // クリア自体は外で済んでいるので、この1回は諦めて次の遷移に任せる
-  if (navigating.value) return;
-  // トレイが掴んでいるターミナルを先に手放す
-  await detachCurrentTerminals();
-  allWorktrees.value.splice(index, 1);
-  if (allWorktrees.value.length === 0) {
-    // 最後の1件だった。クリアは外で済んでいるので改めて出さない
-    await closePopup({ clearCurrentNotification: false });
-    return;
-  }
-  // splice で後続が詰まるので、末尾を消したときだけ1つ戻る
-  const next = Math.min(index, allWorktrees.value.length - 1);
-  await goTo(next, { clearLeaving: false, alreadyDetached: true });
+  // 表示中カードの処理中に溜まった分を続けて流す。1 周ごとに必ず 1 件以上
+  // `pendingRemovals` から落ちるので止まる
+  if (pendingRemovals.size > 0) void flushRemovals();
 }
+
+/** 外からクリアされたワークツリーを取り除き予約へ積む（実際に抜くのは `flushRemovals`） */
+function removeWorktreeFromList(worktreeId: string): void {
+  pendingRemovals.add(worktreeId);
+  void flushRemovals();
+}
+
+// 取り除きを見送った条件が解けたら流し直す。見送りっぱなしにするとカードが残る
+watch([navigating, archiving, dialogOpen], () => {
+  if (pendingRemovals.size > 0) void flushRemovals();
+});
 
 function onHeaderDrag(e: MouseEvent) {
   if ((e.target as HTMLElement).closest('button')) return
@@ -598,8 +672,8 @@ onMounted(async () => {
   // その場でカードを一覧から落とす（#218）
   unlistenCleared = await appWindow.listen<{ worktreeId: string }>(
     "tray-notification-cleared",
-    async (event) => {
-      await removeWorktreeFromList(event.payload.worktreeId);
+    (event) => {
+      removeWorktreeFromList(event.payload.worktreeId);
     }
   );
 
