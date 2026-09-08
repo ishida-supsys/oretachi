@@ -1204,7 +1204,6 @@ function getSoundLabel(sound: string | null | undefined): string {
     "autoApproval": {
       "label": "Auto Approval",
       "approvalAgent": "AI Agent (Auto Approval, Commit Msg, Task Gen)",
-      "taskAddAgent": "AI Agent (Task Execution)",
       "notSet": "(Not set)",
       "notDetected": " (Not detected)",
       "aiTimeout": "AI Timeout",
@@ -1315,7 +1314,6 @@ function getSoundLabel(sound: string | null | undefined): string {
     "autoApproval": {
       "label": "自動承認 / AI エージェント",
       "approvalAgent": "自動承認・コミットメッセージ・タスク生成",
-      "taskAddAgent": "タスク追加コード実行",
       "notSet": "(未設定)",
       "notDetected": " (未検出)",
       "aiTimeout": "AI タイムアウト",
