@@ -937,9 +937,9 @@ struct ShowWorktreeEvent {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ListTerminalsParams {
-    #[schemars(description = "絞り込みするワークツリー名（省略時は全ワークツリー横断）")]
+    #[schemars(description = "絞り込みするワークツリー名（省略時は全ワークツリー横断）。**ID が分かっているなら worktree_id を使うこと**: 同名ワークツリーが複数あるとエラーになり、綴り違いは「該当なし」と区別が付かない")]
     pub worktree_name: Option<String>,
-    #[schemars(description = "ワークツリーID（同名ワークツリーが複数ある場合に指定）")]
+    #[schemars(description = "絞り込みするワークツリーID。**名前より優先される推奨の指定方法**（同名で曖昧にならず、他ツールが返した ID をそのまま渡せる。例: oretachi_poll_inbox の sourceWorktreeId）")]
     pub worktree_id: Option<String>,
 }
 
@@ -3379,7 +3379,7 @@ impl NotifyService {
         }
     }
 
-    #[tool(description = "現在の PTY セッション一覧を返す。sessionId, terminalId, cwd, isAiAgent, agentName, agentSessionId, ワークツリー名/ID を含む。terminalId は oretachi がタブ毎に発番する UUID で、SessionStart 時に自分の terminal_id が伝えられているので、それと突合すれば自分自身のターミナルを同定できる。oretachi_kill_terminal を呼ぶ前の確認に使う", annotations(read_only_hint = true))]
+    #[tool(description = "現在の PTY セッション一覧を返す。sessionId, terminalId, cwd, isAiAgent, agentName, agentSessionId, ワークツリー名/ID を含む。terminalId は oretachi がタブ毎に発番する UUID で、SessionStart 時に自分の terminal_id が伝えられているので、それと突合すれば自分自身のターミナルを同定できる。oretachi_kill_terminal を呼ぶ前の確認に使う。**絞り込みは worktree_id を推奨**（worktree_name は同名でエラー / 綴り違いが「該当なし」と区別できない）。**絞り込みは各 PTY の cwd から解決したワークツリーで行う**ので、cwd をワークツリー外へ移した生存端末は絞り込み結果から落ちる。0 件でも「AI 端末が無い」と断定せず、絞り込みなしで呼び直して cwd を確認すること", annotations(read_only_hint = true))]
     fn oretachi_list_terminals(
         &self,
         Parameters(ListTerminalsParams { worktree_name, worktree_id }): Parameters<ListTerminalsParams>,

@@ -79,6 +79,8 @@ function App() {
     // `answers` はクロージャに閉じ込まれた送信前の値なので使えない
     const statusById = {};
     for (const x of NOTIFICATIONS) statusById[x.id] = (answers[x.id] || {}).status || null;
+    // `worktreeId` が入っていない（= バッジを落とす宛先が分からない）カード
+    const missingWorktreeIds = [];
     try {
       for (const n of targets) {
         const prev = answers[n.id];
@@ -131,7 +133,10 @@ function App() {
         statusById[n.id] = result.status;
         if (result.status === 'sent') {
           acked.push(...(n.inboxIds || []));
+          // `worktreeId` はスキーマ上必須だが、欠けていたらバッジを落とせない。
+          // 黙って飛ばすと「クリアされていないこと」がどこにも出ないので失敗として見せる
           if (n.worktreeId) sentWorktreeIds.push(n.worktreeId);
+          else missingWorktreeIds.push(n.worktreeName || n.id);
         }
       }
       // 1 件も送れていないときは ack を触らない。触ると直前の
@@ -158,8 +163,13 @@ function App() {
         const cards = NOTIFICATIONS.filter(x => x.worktreeId === wid);
         return cards.length > 0 && cards.every(x => statusById[x.id] === 'sent');
       });
-      if (clearable.length > 0) {
-        const outcome = await clearNotifications(clearable);
+      if (clearable.length > 0 || missingWorktreeIds.length > 0) {
+        const outcome = clearable.length > 0
+          ? await clearNotifications(clearable)
+          : { ok: [], failed: {} };
+        for (const label of missingWorktreeIds) {
+          outcome.failed[label] = 'このカードに worktreeId が入っていないため宛先を特定できません（レポートを作り直してください）';
+        }
         try {
           await setCleared({ ...outcome, at: nowLabel() });
         } catch (e) {
