@@ -23,7 +23,8 @@ export interface NotifyWorktreeEvent {
   kind: NotifyKind;
   body?: string;
   agent?: string;
-  /** false のとき通知系（トレイバッジ / ポップアップ / 通知音 / OS通知）を一括で抑制する */
+  /** false のとき通知系（トレイバッジ / ポップアップ / 通知音 / OS通知）を抑制する。
+   *  例外は `approval` で、`false` でも提示する（#225。`passesTrayOff` を参照）。 */
   tray?: boolean;
 }
 

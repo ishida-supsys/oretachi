@@ -278,7 +278,7 @@ async function onReapplyPluginConfig() {
     },
     "trayNotification": {
       "label": "Tray notification",
-      "desc": "Shows a desktop notification from the tray when this worktree needs attention. Even when off, approval waits (tool permission, plan approval, AskUserQuestion) still notify — only completion and other lifecycle-hook notifications are suppressed."
+      "desc": "Shows a desktop notification from the tray when this worktree needs attention. Turning it off no longer suppresses approval waits (tool permission, plan approval, AskUserQuestion); what it suppresses is completion (Stop) and the high-frequency lifecycle hooks. Repositories with no notification hooks configured stay silent either way."
     },
     "hotkey": {
       "assign": "Assign hotkey",
@@ -304,7 +304,7 @@ async function onReapplyPluginConfig() {
     },
     "trayNotification": {
       "label": "トレイ通知",
-      "desc": "このワークツリーが応答待ちになったとき、トレイからデスクトップ通知を出します。オフにしても承認待ち（ツール許可・プラン承認・AskUserQuestion）は通知されます。止まるのは作業完了などフック由来の通知だけです。"
+      "desc": "このワークツリーが応答待ちになったとき、トレイからデスクトップ通知を出します。オフにしても承認待ち（ツール許可・プラン承認・AskUserQuestion）は抑制されません。止まるのは作業完了（Stop）と高頻度なライフサイクルフックの通知です。なお通知フックを設定していないリポジトリでは、オン・オフによらずフック由来の通知は出ません。"
     },
     "hotkey": {
       "assign": "ホットキーを割り当て",

@@ -1901,7 +1901,7 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "ワークツリーのトレイ通知（フック由来の承認待ち・作業完了通知）のオン/オフを切り替える。enabled=true で通知する / enabled=false で通知しない / **enabled を省略すると「未設定」に戻る（= 通知する。実効値は true）**。ワークグループの設定は新規ワークツリー作成時の初期値でしかなく、フォールバック先にはならない。オフにしても (a) ツール `notify_worktree` による明示通知と (b) 承認待ち(`PermissionRequest` 由来の `approval` = ツール許可 / プラン承認 / AskUserQuestion) は常にトレイへ出るため、ユーザーの判断を仰ぐ経路は残る。止まるのは `Stop` → `completed` や高頻度な `hook` などのノイズだけ。teamwork-parent のような進行管理セッションが自分自身のノイズを止める用途を想定している。他人のワークツリーを勝手にオフにしないこと")]
+    #[tool(description = "ワークツリーのトレイ通知（フック由来の承認待ち・作業完了通知）のオン/オフを切り替える。enabled=true で通知する / enabled=false で通知しない / **enabled を省略すると「未設定」に戻る（= 通知する。実効値は true）**。ワークグループの設定は新規ワークツリー作成時の初期値でしかなく、フォールバック先にはならない。オフで止まるのは `Stop` → `completed` や高頻度な `hook` などのノイズで、**`approval`(既定では `PermissionRequest` 由来 = ツール許可 / プラン承認 / AskUserQuestion) は抑制されない**ため、ユーザーの判断を仰ぐ経路は残る。ツール `notify_worktree` による明示通知はこの設定に一切左右されず常にトレイへ出るので、確実に呼び戻したいときはそちらを使うこと(フック由来の通知は、リポジトリに通知フックが1件も設定されていなければ `approval` を含めて出ない)。teamwork-parent のような進行管理セッションが自分自身のノイズを止める用途を想定している。他人のワークツリーを勝手にオフにしないこと")]
     fn oretachi_set_tray_notification(
         &self,
         Parameters(SetTrayNotificationParams { enabled, project_dir, worktree_name, worktree_id }): Parameters<SetTrayNotificationParams>,
