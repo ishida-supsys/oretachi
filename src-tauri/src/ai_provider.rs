@@ -14,19 +14,35 @@ pub enum AiAgentKind {
 
 /// エージェントごとの既定モデル。空文字は「`--model` を渡さず CLI 側の既定に任せる」を意味する。
 ///
-/// Codex CLI は空にしている（#223）。ChatGPT アカウントで使っている環境では
-/// oretachi が選んだモデル名が `400 invalid_request_error`
+/// ここで使うのは判定・生成という短い構造化出力の用途なので、各エージェントの
+/// **軽量・高速な**モデルを指名する。CLI の既定に委ねてはいけない（#223）:
+/// codex は `~/.codex/config.toml` の `model` / `model_reasoning_effort` を拾うため、
+/// ユーザーが重い設定（例: `gpt-5.5` + `xhigh`）にしているとタスク生成がそのぶん
+/// 遅くなり、`aiTimeoutSecs`（既定 120 秒）を踏み抜きやすくなる。
+///
+/// Codex CLI は `gpt-5.5`（#223）。以前の `gpt-5.4-mini` は ChatGPT アカウントで
+/// `400 invalid_request_error`
 /// (`The '<model>' model is not supported when using Codex with a ChatGPT account.`)
-/// で弾かれ、タスク生成がまるごと失敗する。どのモデルが使えるかは
-/// アカウント種別依存でこちらからは判定できないため、codex 側の既定に委ねる。
+/// になり、タスク生成がまるごと失敗していた。codex-cli 0.147.0 + ChatGPT アカウントで
+/// 実測したところ、`gpt-5.4` / `gpt-5.1` / `*-codex` / `*-mini` はいずれも同じ 400 で、
+/// 通るのは `gpt-5.5` のみだった（mini 系は API キー専用）。速さは
+/// `CODEX_REASONING_EFFORT` 側で確保する。
 pub fn default_model(kind: &AiAgentKind) -> &'static str {
     match kind {
         AiAgentKind::ClaudeCode => "claude-haiku-4-5",
         AiAgentKind::GeminiCli => "gemini-2.5-flash",
-        AiAgentKind::CodexCli => "",
+        AiAgentKind::CodexCli => "gpt-5.5",
         AiAgentKind::ClineCli => "",
     }
 }
+
+/// Codex CLI へ渡す推論強度。`~/.codex/config.toml` の `model_reasoning_effort` を上書きする。
+///
+/// モデルを指名するだけでは足りない（#223）。推論強度はモデルとは別のキーで、
+/// ユーザー設定がそのまま効いてしまう。実測（タスク生成相当のプロンプト、
+/// codex-cli 0.147.0 / gpt-5.5）で `xhigh` は 18 秒、`low` は 9 秒。判定・生成は
+/// スキーマ付きの短い出力なので `low` でも結果は変わらず、タイムアウト余裕だけが増える。
+const CODEX_REASONING_EFFORT: &str = "low";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -205,6 +221,11 @@ pub fn build_execution_plan(
             let (program, mut args) = make_platform_cmd(&resolved);
             args.extend(["exec".to_string(), "--skip-git-repo-check".to_string()]);
             args.extend(model_args(model));
+            // ユーザー config の `model_reasoning_effort` を上書きする（#223）
+            args.extend([
+                "-c".to_string(),
+                format!("model_reasoning_effort={}", CODEX_REASONING_EFFORT),
+            ]);
             AiExecutionPlan {
                 program,
                 args,
@@ -439,14 +460,34 @@ mod tests {
         assert!(plan.stdin_content.contains("my prompt"));
     }
 
-    /// #223: codex の既定モデルは空。ChatGPT アカウントでは oretachi が選んだモデル名が
-    /// 400 で弾かれるので、`--model` を渡さず codex 側の既定に任せる。
+    /// #223: codex の既定モデルは ChatGPT アカウントで通る値を指名する。旧値
+    /// `gpt-5.4-mini` は 400 で弾かれ、CLI の既定に委ねるとユーザー config の
+    /// 重い設定を拾ってタイムアウトしやすくなる。
     #[test]
-    fn test_default_model_codex_is_empty() {
-        assert_eq!(default_model(&AiAgentKind::CodexCli), "");
+    fn test_default_model_codex_is_pinned() {
+        assert_eq!(default_model(&AiAgentKind::CodexCli), "gpt-5.5");
         assert_eq!(default_model(&AiAgentKind::ClineCli), "");
         assert!(!default_model(&AiAgentKind::ClaudeCode).is_empty());
         assert!(!default_model(&AiAgentKind::GeminiCli).is_empty());
+    }
+
+    /// 既定モデルは `--model` として実際に渡り、推論強度も固定されること（#223）。
+    /// どちらか片方だけではユーザー config の `model_reasoning_effort` が効いてしまう。
+    #[test]
+    fn test_build_execution_plan_codex_pins_model_and_effort() {
+        let plan = build_execution_plan(
+            &AiAgentKind::CodexCli,
+            "my prompt",
+            "{}",
+            default_model(&AiAgentKind::CodexCli),
+            false,
+        );
+        assert!(plan.args.contains(&"--model".to_string()));
+        assert!(plan.args.contains(&"gpt-5.5".to_string()));
+        assert!(plan.args.contains(&"-c".to_string()));
+        assert!(plan
+            .args
+            .contains(&format!("model_reasoning_effort={}", CODEX_REASONING_EFFORT)));
     }
 
     /// 空モデルではフラグ自体が落ちること。空文字を渡すと CLI 側が
@@ -470,16 +511,6 @@ mod tests {
                 kind
             );
         }
-        // codex は既定モデルが空なので、default_model 経由でも --model は付かない
-        let plan = build_execution_plan(
-            &AiAgentKind::CodexCli,
-            "my prompt",
-            "{}",
-            default_model(&AiAgentKind::CodexCli),
-            false,
-        );
-        assert!(plan.args.contains(&"exec".to_string()));
-        assert!(!plan.args.contains(&"--model".to_string()));
     }
 
     #[test]
