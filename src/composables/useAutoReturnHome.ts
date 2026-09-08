@@ -13,8 +13,10 @@ export interface AutoReturnHomeDeps {
   isWindowFocused: Ref<boolean>;
   /** サブウィンドウへ移されたワークツリーか（メインのタブが動かないので対象外にする） */
   isDetached: (worktreeId: string) => boolean;
-  /** ホームタブへ戻す */
-  goHome: () => void;
+  /** そのワークツリーのタブが今アクティブか（ユーザーが自分で他タブへ移ったら予約を捨てる） */
+  isActiveWorktree: (worktreeId: string) => boolean;
+  /** ホームタブへ戻す。実際に遷移したら true（設定画面表示中などで見送ったら false） */
+  goHome: () => boolean;
 }
 
 /**
@@ -26,7 +28,10 @@ export interface AutoReturnHomeDeps {
  * （旧実装は「完了時点でフォーカス中なら予約しない」だったため、タスク完了を見届けてから
  *   離席したケースで永久に復帰しなかった。#224）
  *
- * 予約が消えるのは次のタスクが走り出したとき / 復帰が実行されたとき / アンマウント時のみ。
+ * 予約はタスクが開いたタブを見ている間だけ有効で、ユーザーが自分で別タブへ移ったら破棄する。
+ * これがないと、無関係な作業中の離席（他アプリへの Alt-Tab、トレイポップアップやサブウィンドウへの
+ * フォーカス移動も blur になる）で見ていたタブを奪ってしまう。
+ * 予約が消えるのは他に、次のタスクが走り出したとき / 復帰が実行されたとき / アンマウント時。
  */
 export function useAutoReturnHome(deps: AutoReturnHomeDeps) {
   let timer: ReturnType<typeof setTimeout> | null = null;
@@ -48,12 +53,21 @@ export function useAutoReturnHome(deps: AutoReturnHomeDeps) {
     }
   }
 
-  function startCountdown(): void {
+  function startCountdown(createdWorktreeId: string): void {
     clearCountdown();
+    // ユーザーが自分で別タブへ移っていれば、この予約はもう用済み
+    if (!deps.isActiveWorktree(createdWorktreeId)) {
+      cancel();
+      return;
+    }
     timer = setTimeout(() => {
       timer = null;
-      cancel();
-      deps.goHome();
+      if (!deps.isActiveWorktree(createdWorktreeId)) {
+        cancel();
+        return;
+      }
+      // 見送られた（設定画面表示中など）ときは予約を残し、次に離席したときに再試行する
+      if (deps.goHome()) cancel();
     }, AUTO_RETURN_HOME_DELAY_MS);
   }
 
@@ -71,7 +85,7 @@ export function useAutoReturnHome(deps: AutoReturnHomeDeps) {
     // 実際の所属は executeAddWorktree が実行時の activeWorkgroupId で決めるため、
     // 追加時点で見込んだグループとは食い違いうる。生成されたエントリの所属を正とする。
     const entry = deps.settings.value.worktrees?.find((w) => w.id === createdWorktreeId);
-    const groupId = deps.resolvedGroupId(entry?.workgroupId ?? fallbackGroupId);
+    const groupId = deps.resolvedGroupId(entry ? entry.workgroupId : fallbackGroupId);
     const group = deps.settings.value.workgroups?.find((g) => g.id === groupId);
     if (!group?.autoReturnHomeAfterTask) return;
 
@@ -79,9 +93,9 @@ export function useAutoReturnHome(deps: AutoReturnHomeDeps) {
     unwatch = watch(deps.isWindowFocused, (focused) => {
       // 見に来ている間は待機し、離れたらカウントダウンを開始/再開する
       if (focused) clearCountdown();
-      else startCountdown();
+      else startCountdown(createdWorktreeId);
     });
-    if (!deps.isWindowFocused.value) startCountdown();
+    if (!deps.isWindowFocused.value) startCountdown(createdWorktreeId);
   }
 
   return { schedule, cancel };

@@ -17,8 +17,10 @@ interface AutoReturnHomeOptions {
   isWindowFocused: Ref<boolean>;
   /** サブウィンドウへ移されたワークツリーか（メインのタブが動かないので対象外にする） */
   isDetached: (worktreeId: string) => boolean;
-  /** ホームタブへ戻す */
-  goHome: () => void;
+  /** そのワークツリーのタブが今アクティブか */
+  isActiveWorktree: (worktreeId: string) => boolean;
+  /** ホームタブへ戻す。実際に遷移したら true */
+  goHome: () => boolean;
 }
 
 let executionQueue: Promise<void> = Promise.resolve();

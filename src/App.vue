@@ -473,9 +473,12 @@ const { showAddTaskDialog, rerunTaskId, rerunPrompt, onAddTaskConfirm, onAddTask
   }, {
     isWindowFocused,
     isDetached,
-    // 設定画面などを開いている間に横から画面を奪わない
+    isActiveWorktree: (worktreeId: string) => activeWorktreeId.value === worktreeId,
+    // 設定画面などを開いている間に横から画面を奪わない（見送りを返して予約は残す）
     goHome: () => {
-      if (viewMode.value === "terminal") goHome();
+      if (viewMode.value !== "terminal") return false;
+      goHome();
+      return true;
     },
   });
 

@@ -11,6 +11,8 @@ interface Harness {
   schedule: (createdWorktreeId?: string | null, fallbackGroupId?: string) => void;
   cancel: () => void;
   setFocus: (focused: boolean) => Promise<void>;
+  /** ユーザーが自分で別のタブへ移った状態にする */
+  leaveTab: () => void;
 }
 
 function setup(options?: {
@@ -20,9 +22,14 @@ function setup(options?: {
   worktreeGroupId?: string;
   /** グループごとの autoReturnHomeAfterTask。既定は wg-1 が有効 */
   groups?: { id: string; autoReturnHomeAfterTask?: boolean }[];
+  /** goHome が実際に遷移したか（設定画面表示中は false 相当） */
+  goHomeAccepted?: boolean;
+  /** 今アクティブなタブのワークツリーID（既定は対象ワークツリー） */
+  activeWorktreeId?: string;
 }): Harness {
   const focused = ref(options?.focused ?? false);
-  const goHome = vi.fn();
+  const activeWorktreeId = ref<string | null>(options?.activeWorktreeId ?? WT_ID);
+  const goHome = vi.fn(() => options?.goHomeAccepted ?? true);
   const settings = ref({
     worktrees: [{ id: WT_ID, workgroupId: options?.worktreeGroupId }],
     workgroups: options?.groups ?? [{ id: "wg-1", autoReturnHomeAfterTask: true }],
@@ -38,6 +45,7 @@ function setup(options?: {
     },
     isWindowFocused: focused,
     isDetached: () => options?.detached ?? false,
+    isActiveWorktree: (id) => activeWorktreeId.value === id,
     goHome,
   });
 
@@ -50,6 +58,9 @@ function setup(options?: {
     setFocus: async (value) => {
       focused.value = value;
       await nextTick();
+    },
+    leaveTab: () => {
+      activeWorktreeId.value = "wt-other";
     },
   };
 }
@@ -138,6 +149,42 @@ describe("useAutoReturnHome", () => {
     expect(h.goHome).not.toHaveBeenCalled();
   });
 
+  it("ユーザーが自分で別タブへ移っていたら予約を捨てる", async () => {
+    const h = setup({ focused: true });
+    h.schedule();
+    h.leaveTab();
+    await h.setFocus(false);
+    vi.advanceTimersByTime(AUTO_RETURN_HOME_DELAY_MS * 10);
+    expect(h.goHome).not.toHaveBeenCalled();
+
+    // 予約は破棄済みなので、そのタブへ戻ってきても復活しない
+    await h.setFocus(true);
+    await h.setFocus(false);
+    vi.advanceTimersByTime(AUTO_RETURN_HOME_DELAY_MS * 10);
+    expect(h.goHome).not.toHaveBeenCalled();
+  });
+
+  it("カウントダウン中に別タブへ移ったら発火しない", () => {
+    const h = setup({ focused: false });
+    h.schedule();
+    vi.advanceTimersByTime(AUTO_RETURN_HOME_DELAY_MS - 1);
+    h.leaveTab();
+    vi.advanceTimersByTime(AUTO_RETURN_HOME_DELAY_MS * 10);
+    expect(h.goHome).not.toHaveBeenCalled();
+  });
+
+  it("goHome が見送られたら予約を残し、次の離席で再試行する", async () => {
+    const h = setup({ focused: false, goHomeAccepted: false });
+    h.schedule();
+    vi.advanceTimersByTime(AUTO_RETURN_HOME_DELAY_MS);
+    expect(h.goHome).toHaveBeenCalledTimes(1);
+
+    await h.setFocus(true);
+    await h.setFocus(false);
+    vi.advanceTimersByTime(AUTO_RETURN_HOME_DELAY_MS);
+    expect(h.goHome).toHaveBeenCalledTimes(2);
+  });
+
   it("判定は生成されたワークツリーの実際の所属グループで行う", () => {
     // 追加時点の見込みは wg-1（無効）だが、実際の所属は wg-2（有効）
     const h = setup({
@@ -156,6 +203,7 @@ describe("useAutoReturnHome", () => {
   it("生成されたワークツリーが settings に無ければ見込みグループで判定する", () => {
     const h = setup({
       focused: false,
+      activeWorktreeId: "wt-unknown",
       groups: [
         { id: "wg-1", autoReturnHomeAfterTask: false },
         { id: "wg-2", autoReturnHomeAfterTask: true },
