@@ -6,6 +6,27 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.31.1] - 2026-09-08
+
+### Added
+- `notify_worktree` の `kind` と `event_kind` を単一の `kind` へ統合し、7 種別すべてを購読・通知音・ON/OFF トグルで同格に扱うようにした (#140)
+- HTTP `/notify` からも購読イベントを発行するようにした (#140)
+- 購読 kind のメモリインデックスを導入し、購読者のいない種別では events.db に書き込まないようにした (#140)
+- 通知種別ごとの ON/OFF トグル(7 種別)を設定に追加した (#140)
+
+### Fixed
+- HTTP `/notify` の kind 検証漏れを修正 (`worktree.closed` などの偽装発行を遮断) (#140)
+- 購読インデックスの世代カウンタにパリティ検査を追加し、購読の取りこぼしレースを塞いだ (#140)
+- `notifyApproval` が種別ごとの ON/OFF ゲートを通らずバッジ・OS 通知を出していた問題を修正 (#140)
+- 自動承認 ON のワークツリーで `hook` 通知が保留に捕まって消える問題を修正 (#140)
+- `NotificationKindSetting.enabled` の serde 既定を `true` にし、手編集で種別が黙って全消えしないようにした (#140)
+- `worktree-event-fired` を `emit_to("main")` にして通知音の重複を防いだ (#140)
+
+### Changed
+- `worktree.*` 種別の既定を OFF にした (#140)
+- `worktree.message` 受信トーストを廃止し、`worktree.*` は発火元で音・OS 通知のみ出す経路に分離した (#140)
+- `notify_handler` の生存判定を遅延評価にして毎回の `list_sessions()` を回避した (#140)
+
 ## [0.31.0] - 2026-09-08
 
 ### Added
@@ -705,7 +726,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.31.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.31.1...HEAD
+[0.31.1]: https://github.com/ishida-supsys/oretachi/compare/0.31.0...0.31.1
 [0.31.0]: https://github.com/ishida-supsys/oretachi/compare/0.30.0...0.31.0
 [0.30.0]: https://github.com/ishida-supsys/oretachi/compare/0.29.2...0.30.0
 [0.29.2]: https://github.com/ishida-supsys/oretachi/compare/0.29.1...0.29.2
