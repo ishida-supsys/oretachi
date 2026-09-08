@@ -6,7 +6,8 @@ import type { TerminalForApproval } from "../utils/autoApproval";
 import type { Ref } from "vue";
 import type { Worktree } from "../types/worktree";
 import type { AppSettings } from "../types/settings";
-import type { NotificationKind, NotifyWorktreeEvent } from "./useNotifications";
+import type { NotifyWorktreeEvent } from "./useNotifications";
+import type { NotifyKind } from "../types/settings";
 import {
   createPendingNotifyStore,
   queuePendingNotify,
@@ -24,10 +25,10 @@ interface UseAppAutoApprovalDeps {
   getTerminalRef: (id: number) => InstanceType<typeof TerminalView> | undefined;
   autoApprovalPromptMap: Map<string, string>;
   lastJudgedCommandMap: Map<string, string>;
-  addNotification: (id: string, kind: NotificationKind) => void;
+  addNotification: (id: string, kind: NotifyKind) => void;
   isWorktreeFocused: (id: string) => boolean;
   onClickAutoApproval: (id: string) => void;
-  playSoundForKind: (kind: NotificationKind) => void;
+  playSoundForKind: (kind: NotifyKind) => void;
   sendOsNotification: (name: string, title: string) => Promise<void>;
   t: (key: string) => string;
 }
@@ -158,8 +159,13 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
     await listen<NotifyWorktreeEvent>("notify-worktree", async (event) => {
       const { worktree_name: worktreeName, kind } = event.payload;
 
-      // hook/completed はこのリスナーでは不要。フィルタをすべての async 処理の前に置く
-      if (kind === "completed" || kind === "hook") return;
+      // このリスナーが扱うのは「承認待ちかもしれない通知」だけ。フィルタをすべての
+      // async 処理の前に置く。
+      //
+      // **許可リスト方式にしている（#140）。** kind と event_kind を統合して種別が
+      // 7値へ増えたため、「completed と hook 以外はすべて承認候補」という除外方式だと
+      // `worktree.message` などが承認待ち扱いになり、AI 判定ループが走ってしまう。
+      if (kind !== "approval" && kind !== "general") return;
 
       const wt = deps.worktrees.value.find((w) => w.name === worktreeName);
       if (!wt) return;

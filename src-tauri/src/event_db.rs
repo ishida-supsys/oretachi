@@ -34,18 +34,137 @@ pub const KIND_WORKTREE_CLOSED: &str = "worktree.closed";
 pub const KIND_WORKTREE_CREATED: &str = "worktree.created";
 
 /// イベント種別: エージェントが `notify_worktree` から送る**自由文**メッセージ（#126）。
-///
-/// `notify_worktree` の既存パラメータ `kind`（`hook` / `approval` / `completed` / `general`）は
-/// トーストの**通知種別**であって購読イベント種別ではない。名前空間を分けるため、
-/// 購読イベントは別パラメータ `event_kind` で受ける（#120 §1）。
 pub const KIND_WORKTREE_MESSAGE: &str = "worktree.message";
 
-/// 購読で受け付けるイベント種別。
+/// 通知種別: Claude Code のライフサイクルフック由来（高頻度）。
+pub const KIND_HOOK: &str = "hook";
+
+/// 通知種別: 承認待ち。
+pub const KIND_APPROVAL: &str = "approval";
+
+/// 通知種別: 作業完了。
+pub const KIND_COMPLETED: &str = "completed";
+
+/// 通知種別: 汎用。
+pub const KIND_GENERAL: &str = "general";
+
+/// 購読で受け付けるイベント種別（#140 で7値へ統合）。
 pub const SUPPORTED_EVENT_KINDS: &[&str] = &[
-    KIND_WORKTREE_CLOSED,
-    KIND_WORKTREE_CREATED,
+    KIND_HOOK,
+    KIND_APPROVAL,
+    KIND_COMPLETED,
+    KIND_GENERAL,
     KIND_WORKTREE_MESSAGE,
+    KIND_WORKTREE_CREATED,
+    KIND_WORKTREE_CLOSED,
 ];
+
+/// 通知種別と購読イベント種別を統合した固定7値（#140）。
+///
+/// #120 / #126 では `kind`（トースト種別）と `event_kind`（購読イベント種別）を別の
+/// パラメータに分けていたが、使う側からは区別が付きづらく、1回の呼び出しで両方を
+/// 独立に指定できる自由度が複雑さの原因になっていた。#140 で単一の `kind` に統合し、
+/// **7値すべてを購読対象・通知音・ON/OFF トグルにおいて同格に扱う**。
+///
+/// 唯一の非対称は `agent_publishable()`（`notify_worktree` ツールの入力バリデーション）
+/// だけで、これは「型が分かれている」という意味ではない。`worktree.created` /
+/// `worktree.closed` は oretachi 内部の `fire_worktree_*` からしか発行されない。
+///
+/// 命名は接頭辞ありとなしが混在しているが、`kind` の値は `settings.json` と各
+/// ワークツリーの `.claude/settings.local.json`（`claude_plugin::write_plugin_config`）
+/// および `events.kind` / `subscriptions.event_kinds` に既に焼き付いているため、
+/// 揃えるには全面的な移行処理が要る。混在を許容して移行ゼロを選んでいる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum NotifyKind {
+    #[serde(rename = "hook")]
+    Hook,
+    #[serde(rename = "approval")]
+    Approval,
+    #[serde(rename = "completed")]
+    Completed,
+    #[serde(rename = "general")]
+    General,
+    #[serde(rename = "worktree.message")]
+    WorktreeMessage,
+    #[serde(rename = "worktree.created")]
+    WorktreeCreated,
+    #[serde(rename = "worktree.closed")]
+    WorktreeClosed,
+}
+
+impl NotifyKind {
+    /// 7値すべて。UI / 設定 / テストの走査に使う。
+    pub const ALL: [NotifyKind; 7] = [
+        NotifyKind::Hook,
+        NotifyKind::Approval,
+        NotifyKind::Completed,
+        NotifyKind::General,
+        NotifyKind::WorktreeMessage,
+        NotifyKind::WorktreeCreated,
+        NotifyKind::WorktreeClosed,
+    ];
+
+    /// DB / JSON / MCP の境界で使う文字列表現。**既存の `KIND_*` 定数をそのまま返す**
+    /// ので、統合前から文字列で書かれている箇所と一字一句一致する。
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            NotifyKind::Hook => KIND_HOOK,
+            NotifyKind::Approval => KIND_APPROVAL,
+            NotifyKind::Completed => KIND_COMPLETED,
+            NotifyKind::General => KIND_GENERAL,
+            NotifyKind::WorktreeMessage => KIND_WORKTREE_MESSAGE,
+            NotifyKind::WorktreeCreated => KIND_WORKTREE_CREATED,
+            NotifyKind::WorktreeClosed => KIND_WORKTREE_CLOSED,
+        }
+    }
+
+    /// 文字列から解決する。未知の値は `None`（default-deny）。
+    pub fn parse(s: &str) -> Option<Self> {
+        NotifyKind::ALL.into_iter().find(|k| k.as_str() == s)
+    }
+
+    /// `notify_worktree` ツールの入力として受け付けてよいか。
+    ///
+    /// `worktree.created` / `worktree.closed` は oretachi 内部の `fire_worktree_created` /
+    /// `fire_worktree_closed` からしか発行されない。エージェントに名乗らせると
+    /// 「実際には閉じていないワークツリーのクローズ」を購読者へ配れてしまう。
+    ///
+    /// **これは入力バリデーションだけの話で、購読対象や通知音設定からこの2種別を
+    /// 除外する根拠ではない**（#140 の本文が明示的に注意している点）。
+    pub const fn agent_publishable(self) -> bool {
+        !matches!(self, NotifyKind::WorktreeCreated | NotifyKind::WorktreeClosed)
+    }
+
+    /// `repositories[].notificationHooks[].kind` に書いてよいか。
+    ///
+    /// ここを7値そのまま受けると、**設定1行で Claude Code のフック JSON が
+    /// `worktree.message` として他ワークツリーへ自由文配送される**。フックが名乗れるのは
+    /// トースト種別の4値だけに閉じる。
+    pub const fn allowed_as_hook_entry(self) -> bool {
+        matches!(
+            self,
+            NotifyKind::Hook | NotifyKind::Approval | NotifyKind::Completed | NotifyKind::General
+        )
+    }
+
+    /// 送信の debounce 秒数。`None` の種別は debounce しない（毎回送信）。
+    ///
+    /// hook / approval は短時間に大量発火しうるので絞る。`worktree.*` は低頻度かつ
+    /// 落とすと #120 の動機そのものが壊れるため掛けない（#120 §1）。
+    pub const fn debounce_secs(self) -> Option<u64> {
+        match self {
+            NotifyKind::Hook => Some(3),
+            NotifyKind::Approval => Some(1),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for NotifyKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 /// 購読対象のワイルドカード（#126）。**まだ存在しないワークツリーの `created` を購読したい**
 /// という要求はワークツリー ID 固定の target では表現できないため、`worktree.created` と
@@ -118,6 +237,15 @@ const PTY_TEXT_MAX_CHARS: usize = 600;
 /// 注入（`format_inbox_digest`）に無制限のテキストが流れ込む。押し込み側は
 /// `PTY_TEXT_MAX_CHARS` で切れるが、注入側は切らないので入口で止める。
 pub const MESSAGE_TEXT_MAX_CHARS: usize = 4000;
+
+/// トースト種別（`hook` / `approval` / `completed` / `general`）を購読イベントとして
+/// 発行するときの本文の最大文字数（#140）。**超過分は切り詰めるだけでエラーにしない。**
+///
+/// `worktree.message` の本文はエージェントが書くので長すぎればエラーで返して書き直させる
+/// （`MESSAGE_TEXT_MAX_CHARS`）。一方こちらの本文は Claude Code のフック JSON で、
+/// 生成したのは oretachi でもエージェントでもないため**誰もリトライできない**。
+/// エラーにすると通知そのものが落ちるので、切り詰めて通す。
+pub const HOOK_BODY_MAX_CHARS: usize = 1000;
 
 /// `SessionStart` / `Stop` の `additionalContext` へ一度に注入する本文の上限文字数（#126）。
 ///
@@ -410,6 +538,17 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 /// 戻り値は**実際に DB に入っている購読 ID**。既存行を更新した場合は `sub.id` ではなく
 /// 既存の id が返るので、呼び出し元はこれをエージェントへ返すこと。
 pub async fn upsert_subscription(pool: &SqlitePool, sub: &SubscriptionRow) -> Result<String, String> {
+    // **入口と成功後の二重 bump（#140）。** 購読 kind のインデックスを見て
+    // 「誰も購読していないから DB を触らない」と決める経路があるため、
+    // 「購読が入った直後の最初のイベントを落とす」レースを構造的に潰す必要がある。
+    //
+    //   入口の bump  … この書き込みの**最中**に作られたスナップショットを無効化する
+    //   成功後の bump … この書き込みの**直前**に作られたスナップショットを無効化する
+    //
+    // 発行側は「epoch を読む → スナップショットを見る → スキップを決める →
+    // epoch を読み直して一致を確認する」ので、この2つがあれば
+    // 「epoch E のもとで確定したスキップの区間には購読の書き込みが1件も無い」が成り立つ。
+    bump_subscriptions_epoch();
     sqlx::query(
         "INSERT INTO subscriptions (id, subscriber_terminal_id, subscriber_worktree_id, subscriber_agent_session, target, event_kinds, delivery, spawn_if_closed, created_at, expires_at, state, orphaned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(subscriber_terminal_id, target) DO UPDATE SET \
@@ -446,6 +585,7 @@ pub async fn upsert_subscription(pool: &SqlitePool, sub: &SubscriptionRow) -> Re
     .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())?;
+    bump_subscriptions_epoch();
     Ok(stored.0)
 }
 
@@ -464,6 +604,8 @@ pub async fn delete_subscription(
             .execute(pool)
             .await
             .map_err(|e| e.to_string())?;
+    // 購読 kind のメモリインデックスを無効化する（#140）。
+    bump_subscriptions_epoch();
     Ok(result.rows_affected())
 }
 
@@ -480,6 +622,8 @@ pub async fn delete_subscription_by_target(
             .execute(pool)
             .await
             .map_err(|e| e.to_string())?;
+    // 購読 kind のメモリインデックスを無効化する（#140）。
+    bump_subscriptions_epoch();
     Ok(result.rows_affected())
 }
 
@@ -977,6 +1121,8 @@ pub async fn mark_orphaned_subscribers(
         }
     }
 
+    // 購読 kind のメモリインデックスを無効化する（#140）。
+    bump_subscriptions_epoch();
     Ok((subs, inbox, deleted))
 }
 
@@ -1169,6 +1315,9 @@ pub async fn rebind_orphaned_group(
     .map_err(|e| e.to_string())?;
 
     tx.commit().await.map_err(|e| e.to_string())?;
+    // **必須。** 引き継ぎは死んだタブの購読を生きたタブへ付け替える＝購読を「復活」
+    // させる向きの変更なので、忘れると引き継ぎ直後のイベントが落ちる。
+    bump_subscriptions_epoch();
     Ok((subs, inbox))
 }
 
@@ -1349,6 +1498,8 @@ pub async fn purge_orphaned_expired(
     .await
     .map_err(|e| e.to_string())?
     .rows_affected();
+    // 購読 kind のメモリインデックスを無効化する（#140）。
+    bump_subscriptions_epoch();
     Ok((subs, inbox))
 }
 
@@ -1525,12 +1676,15 @@ pub async fn ack_all(pool: &SqlitePool, terminal_id: &str, now: i64) -> Result<u
 /// UI からの購読解除。MCP 経由（`delete_subscription`）と違い呼び出し元タブに
 /// 縛られない —— 人間は引き継ぎ待ちの（＝どのタブからも触れない）購読も消せる必要がある。
 pub async fn delete_subscription_by_id(pool: &SqlitePool, id: &str) -> Result<u64, String> {
-    Ok(sqlx::query("DELETE FROM subscriptions WHERE id = ?")
+    let deleted = sqlx::query("DELETE FROM subscriptions WHERE id = ?")
         .bind(id)
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?
-        .rows_affected())
+        .rows_affected();
+    // 購読 kind のメモリインデックスを無効化する（#140）。
+    bump_subscriptions_epoch();
+    Ok(deleted)
 }
 
 // ─── 掃除 ─────────────────────────────────────────────────────────────────────
@@ -1569,6 +1723,8 @@ pub async fn purge_subscriber_worktree(
         .map_err(|e| e.to_string())?
         .rows_affected();
 
+    // 購読 kind のメモリインデックスを無効化する（#140）。
+    bump_subscriptions_epoch();
     Ok((subs_deleted, inbox_deleted))
 }
 
@@ -1582,12 +1738,15 @@ pub async fn delete_subscriptions_for_target(
     pool: &SqlitePool,
     target: &str,
 ) -> Result<u64, String> {
-    Ok(sqlx::query("DELETE FROM subscriptions WHERE target = ?")
+    let deleted = sqlx::query("DELETE FROM subscriptions WHERE target = ?")
         .bind(target)
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?
-        .rows_affected())
+        .rows_affected();
+    // 購読 kind のメモリインデックスを無効化する（#140）。
+    bump_subscriptions_epoch();
+    Ok(deleted)
 }
 
 /// 失効した購読と保持期限切れの inbox / 参照されなくなった events を削除する。
@@ -1643,6 +1802,8 @@ pub async fn purge_expired(
     .map_err(|e| e.to_string())?
     .rows_affected();
 
+    // 購読 kind のメモリインデックスを無効化する（#140）。
+    bump_subscriptions_epoch();
     Ok((subs, inbox, events))
 }
 
@@ -1737,7 +1898,29 @@ pub fn format_inbox_line(item: &InboxItem) -> String {
             .unwrap_or_else(|_| {
                 format!("'{}' からのメッセージ: {}", item.source_worktree_id, item.body)
             }),
-        other => format!("イベント '{}': {}", other, item.body),
+        KIND_HOOK | KIND_APPROVAL | KIND_COMPLETED | KIND_GENERAL => {
+            // 本文は Claude Code のフック JSON（＝ツール出力＝攻撃者の影響下）なので、
+            // `WorktreeMessageBody` と同じ包みに入れて `text` だけを読む。パースに
+            // 失敗しても `item.body` を素で展開しないこと（生 JSON がそのまま出る）。
+            serde_json::from_str::<WorktreeMessageBody>(&item.body)
+                .map(|b| {
+                    let from = b
+                        .source_worktree_name
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| item.source_worktree_id.clone());
+                    format!("'{}' の通知[{}]: {}", from, item.kind, b.text)
+                })
+                .unwrap_or_else(|_| {
+                    format!("'{}' の通知[{}]", item.source_worktree_id, item.kind)
+                })
+        }
+        // **本文を展開しないこと。** #140 で 7 値すべてが上のアームで既知になったので、
+        // ここは到達しないはずの防御コードになった。未知種別の body は誰が書いたか
+        // 分からない以上、`SessionStart` 注入や PTY 押し込みへ素通しさせてはいけない。
+        other => format!("イベント '{}'（種別未対応。本文は表示しません）", other),
     };
     format!("- [{}] {}", item.id, detail)
 }
@@ -1809,8 +1992,10 @@ fn format_pointer_text(count: i64) -> String {
 /// 書いたか**」。`worktree.closed` / `worktree.created` は oretachi が定型文に組み直す
 /// （`format_inbox_line`）ので、そのまま運んでよい。
 pub(crate) fn is_free_text_kind(kind: &str) -> bool {
-    // `format_inbox_line` の `other` 分岐は未知種別の本文を丸ごと展開するため、
-    // **既知の定型種別だけを許可する** default-deny にしておく。
+    // **既知の定型種別だけを許可する** default-deny。#140 で足した `hook` /
+    // `approval` / `completed` / `general` の本文は Claude Code のフック JSON で、
+    // 書いたのは oretachi ではない。ここが default-deny なので**変更不要で自動的に
+    // 「本文を運ばない」側に入る**（この性質を `event_delivery.rs` のテストが固定している）。
     !matches!(kind, KIND_WORKTREE_CLOSED | KIND_WORKTREE_CREATED)
 }
 
@@ -1955,6 +2140,129 @@ pub fn format_inbox_digest(items: &[InboxItem], carryover: i64) -> Option<(Strin
         ),
         used,
     ))
+}
+
+// ─── 購読 kind のメモリインデックス（#140） ──────────────────────────────────
+
+/// `subscriptions` テーブルの世代。**購読を「増やす」向きの変更で必ず進む。**
+///
+/// `hook` のような高頻度の種別まで購読対象になったので、発火のたびに
+/// `insert_event` + `fanout` を走らせると events.db（**非 WAL** なので書き込みが読み取りを
+/// ブロックする）が SessionStart フックのリクエストパスと競合する。誰も購読していない
+/// 種別は DB に触らずトーストだけで済ませたいが、そのためには「今どの種別に購読者が
+/// いるか」をメモリで持つ必要がある。
+///
+/// インデックス本体を各所で差分更新するのではなくカウンタ方式にしているのは、
+/// **`&self` も `pool` も要らない同期1行**で無効化できるため。差分更新は購読1件の
+/// 増減から集合の変化を計算する必要があり、全再構築は `await` が必要で同期文脈から
+/// 呼べない。
+static SUBSCRIPTIONS_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// 購読テーブルを変更したことを知らせる。**`subscriptions` に書く関数はすべて呼ぶこと。**
+pub fn bump_subscriptions_epoch() {
+    SUBSCRIPTIONS_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// 現在の世代。
+pub fn current_subscriptions_epoch() -> u64 {
+    SUBSCRIPTIONS_EPOCH.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// インデックスを作り直す間隔。`expires_at` による自然失効はイベントを伴わないので、
+/// 古いスナップショットを有界にするためだけに置いている（失効は購読集合を**減らす**
+/// 方向にしか効かず、古くて余計に DB へ行っても `fanout` の SQL が正しく落とす）。
+const SUBSCRIBED_KINDS_TTL_MS: i64 = 60 * 1000;
+
+struct KindSnapshot {
+    epoch: u64,
+    built_at: i64,
+    kinds: std::collections::HashSet<String>,
+}
+
+/// 購読者がいる kind の集合のメモリキャッシュ（#140）。
+///
+/// **不変条件: 偽陽性（余計な DB 書き込み）は許すが、偽陰性（配送落ち）は許さない。**
+/// 未構築 / 世代不一致 / TTL 超過はすべて `None`（＝不明）を返し、呼び出し元は DB 経路へ
+/// フォールバックする。`Tauri` の `manage` に登録されていない場合も同じ扱いになるので、
+/// event_db の初期化に失敗した環境では全経路が従来どおり動く。
+pub struct SubscribedKinds(std::sync::Mutex<Option<KindSnapshot>>);
+
+impl Default for SubscribedKinds {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SubscribedKinds {
+    pub fn new() -> Self {
+        SubscribedKinds(std::sync::Mutex::new(None))
+    }
+
+    /// 有効なスナップショットがあれば返す。`None` は「分からない」であって
+    /// 「購読者がいない」ではない。
+    pub fn snapshot(&self, now: i64) -> Option<std::collections::HashSet<String>> {
+        let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let snap = guard.as_ref()?;
+        if snap.epoch != current_subscriptions_epoch() {
+            return None;
+        }
+        if now.saturating_sub(snap.built_at) > SUBSCRIBED_KINDS_TTL_MS {
+            return None;
+        }
+        Some(snap.kinds.clone())
+    }
+
+    /// 構築結果を保存する。`epoch` は**読み出しを始める前**に取った値を渡すこと
+    /// （SELECT 中に入った購読を取りこぼさないため）。
+    pub fn store(&self, epoch: u64, now: i64, kinds: std::collections::HashSet<String>) {
+        let mut guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        *guard = Some(KindSnapshot { epoch, built_at: now, kinds });
+    }
+}
+
+/// 生きている購読が指定している kind の集合を DB から読む。
+///
+/// `state` は `fanout` と同じく `active` / `orphaned` の両方を含める。**`active` だけに
+/// すると「タブが死んでいる間に届いたイベント」が落ち、#120 の動機②が壊れる。**
+pub async fn load_subscribed_kinds(
+    pool: &SqlitePool,
+    now: i64,
+) -> Result<std::collections::HashSet<String>, String> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "SELECT event_kinds FROM subscriptions          WHERE state IN ('active', 'orphaned') AND (expires_at IS NULL OR expires_at > ?)",
+    )
+    .bind(now)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let mut kinds = std::collections::HashSet::new();
+    for (json,) in rows {
+        // 照合側（`event_kinds_match`）と同じ default-deny。パースできない行は
+        // どの種別にもマッチしないので、インデックスにも入れない。
+        if let Ok(serde_json::Value::Array(arr)) = serde_json::from_str::<serde_json::Value>(&json) {
+            for v in arr {
+                if let Some(k) = v.as_str() {
+                    kinds.insert(k.to_string());
+                }
+            }
+        }
+    }
+    Ok(kinds)
+}
+
+/// インデックスを作り直して保存する。起動時と、無効化されたあとの再構築で呼ぶ。
+pub async fn rebuild_subscribed_kinds(
+    pool: &SqlitePool,
+    index: &SubscribedKinds,
+    now: i64,
+) -> Result<(), String> {
+    // **SELECT の前に epoch を取る。** 後で取ると、読み出し中に入った購読を
+    // 「反映済み」として保存してしまい、その種別の初回イベントを取りこぼす。
+    let epoch = current_subscriptions_epoch();
+    let kinds = load_subscribed_kinds(pool, now).await?;
+    index.store(epoch, now, kinds);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2148,6 +2456,343 @@ mod tests {
             .expect("connect");
         run_migrations(&pool).await.expect("migrate");
         pool
+    }
+
+
+    // ─── #140: kind 統合 ──────────────────────────────────────────────────────
+
+    /// 7値の文字列表現を固定する。**フロント側（`src/types/settings.ts` の
+    /// `NOTIFY_KINDS`）と同じ配列を `src/utils/notificationKinds.test.ts` でも
+    /// 固定しているので、片方だけ変えると必ずどちらかが落ちる。**
+    #[test]
+    fn test_notify_kind_all_seven_values_pinned() {
+        let names: Vec<&str> = NotifyKind::ALL.iter().map(|k| k.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "hook",
+                "approval",
+                "completed",
+                "general",
+                "worktree.message",
+                "worktree.created",
+                "worktree.closed",
+            ]
+        );
+        // 購読で受け付ける集合と同一（片方に足してもう片方を忘れると落ちる）
+        let mut supported: Vec<&str> = SUPPORTED_EVENT_KINDS.to_vec();
+        let mut all = names.clone();
+        supported.sort_unstable();
+        all.sort_unstable();
+        assert_eq!(supported, all);
+    }
+
+    /// 統合前から文字列で書かれている箇所と一字一句一致していること。
+    #[test]
+    fn test_notify_kind_as_str_matches_legacy_consts() {
+        assert_eq!(NotifyKind::WorktreeClosed.as_str(), KIND_WORKTREE_CLOSED);
+        assert_eq!(NotifyKind::WorktreeCreated.as_str(), KIND_WORKTREE_CREATED);
+        assert_eq!(NotifyKind::WorktreeMessage.as_str(), KIND_WORKTREE_MESSAGE);
+    }
+
+    #[test]
+    fn test_notify_kind_parse_rejects_unknown() {
+        assert_eq!(NotifyKind::parse("hook"), Some(NotifyKind::Hook));
+        assert_eq!(
+            NotifyKind::parse("worktree.message"),
+            Some(NotifyKind::WorktreeMessage)
+        );
+        // default-deny。大文字small違い・前後空白・未知の値はすべて None
+        assert_eq!(NotifyKind::parse("Hook"), None);
+        assert_eq!(NotifyKind::parse(" hook"), None);
+        assert_eq!(NotifyKind::parse("worktree.unknown"), None);
+        assert_eq!(NotifyKind::parse(""), None);
+    }
+
+    /// `notify_worktree` の入力として拒否するのは `worktree.created` / `worktree.closed`
+    /// **だけ**。これは入力バリデーションであって、購読対象や通知音設定から
+    /// この2種別を外す根拠ではない（#140 本文が明示している読み違えポイント）。
+    #[test]
+    fn test_notify_kind_agent_publishable_only_excludes_internal_two() {
+        let denied: Vec<&str> = NotifyKind::ALL
+            .iter()
+            .filter(|k| !k.agent_publishable())
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(denied, vec!["worktree.created", "worktree.closed"]);
+    }
+
+    /// フック設定が名乗れるのはトースト種別の4値だけ。ここが緩むと、設定1行で
+    /// Claude Code のフック JSON が自由文メッセージとして他ワークツリーへ流れる。
+    #[test]
+    fn test_notify_kind_allowed_as_hook_entry_is_four_values() {
+        let allowed: Vec<&str> = NotifyKind::ALL
+            .iter()
+            .filter(|k| k.allowed_as_hook_entry())
+            .map(|k| k.as_str())
+            .collect();
+        assert_eq!(allowed, vec!["hook", "approval", "completed", "general"]);
+    }
+
+    /// `worktree.*` に debounce を掛けると #120 の動機そのものが壊れる。
+    #[test]
+    fn test_notify_kind_debounce_only_for_hook_and_approval() {
+        assert_eq!(NotifyKind::Hook.debounce_secs(), Some(3));
+        assert_eq!(NotifyKind::Approval.debounce_secs(), Some(1));
+        for k in [
+            NotifyKind::Completed,
+            NotifyKind::General,
+            NotifyKind::WorktreeMessage,
+            NotifyKind::WorktreeCreated,
+            NotifyKind::WorktreeClosed,
+        ] {
+            assert_eq!(k.debounce_secs(), None, "{} は debounce しない", k);
+        }
+    }
+
+    /// #140 で足した4種別は `is_free_text_kind` を**変更せずに**自由文側へ入る。
+    /// 本文を書いたのは oretachi ではないので、PTY 押し込みへは出してはいけない。
+    #[test]
+    fn test_is_free_text_kind_covers_new_four_kinds() {
+        for k in ["hook", "approval", "completed", "general"] {
+            assert!(is_free_text_kind(k), "{} は本文を運ばない側", k);
+        }
+        assert!(is_free_text_kind(KIND_WORKTREE_MESSAGE));
+        assert!(!is_free_text_kind(KIND_WORKTREE_CLOSED));
+        assert!(!is_free_text_kind(KIND_WORKTREE_CREATED));
+    }
+
+    /// フック由来の本文（＝ツール出力）が生のまま行に展開されないこと。
+    #[test]
+    fn test_format_inbox_line_hook_does_not_dump_raw_body() {
+        let secret = "SHOULD_NOT_APPEAR_VERBATIM";
+        let raw = format!(r#"{{"tool_response":"{}","junk":"{}"}}"#, secret, "x".repeat(9000));
+        // 包みに入っていない生 JSON はパースに失敗し、本文なしの1行になる
+        let item = inbox_item(KIND_HOOK, &raw);
+        let line = format_inbox_line(&item);
+        assert!(!line.contains(secret), "生 body が展開されている: {}", line);
+        assert!(line.contains("の通知[hook]"));
+
+        // 正しく包まれていれば text だけが出る（body 全体ではない）
+        let wrapped = serde_json::json!({ "text": "停止しました", "sourceWorktreeName": "wt-a" })
+            .to_string();
+        let line = format_inbox_line(&inbox_item(KIND_COMPLETED, &wrapped));
+        assert!(line.contains("'wt-a' の通知[completed]: 停止しました"), "{}", line);
+    }
+
+    /// 未知種別の `other` 分岐は**本文を出さない**（#140 で塞いだ穴）。
+    #[test]
+    fn test_format_inbox_line_other_arm_omits_body() {
+        let item = inbox_item("worktree.unknown", r#"{"text":"LEAKED"}"#);
+        let line = format_inbox_line(&item);
+        assert!(!line.contains("LEAKED"), "{}", line);
+        assert!(line.contains("worktree.unknown"));
+    }
+
+    // ─── #140: 購読 kind インデックス ─────────────────────────────────────────
+
+    /// `SUBSCRIPTIONS_EPOCH` はプロセス全体で1つなので、**世代を観測するテストは
+    /// 直列化しないと他のテストの `bump` を拾って落ちる**（cargo test は既定で並列）。
+    static EPOCH_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn epoch_guard() -> std::sync::MutexGuard<'static, ()> {
+        EPOCH_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// `active` / `orphaned` の両方を拾い、失効した購読は拾わない。
+    /// **`orphaned` を落とすと「タブが死んでいる間に届いたイベント」が消える**（#120 動機②）。
+    #[test]
+    fn test_load_subscribed_kinds_covers_orphaned_and_excludes_expired() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+
+            let mut active = sub("term-a", Some("wt-a"), r#"["worktree.closed"]"#);
+            active.id = "s-active".to_string();
+            upsert_subscription(&pool, &active).await.unwrap();
+
+            let mut orphaned = sub("term-b", Some("wt-b"), r#"["completed"]"#);
+            orphaned.id = "s-orphaned".to_string();
+            orphaned.state = STATE_ORPHANED.to_string();
+            orphaned.orphaned_at = Some(now - 1);
+            upsert_subscription(&pool, &orphaned).await.unwrap();
+
+            let mut expired = sub("term-c", Some("wt-c"), r#"["hook"]"#);
+            expired.id = "s-expired".to_string();
+            expired.target = "wt-other".to_string();
+            expired.expires_at = Some(now - 1);
+            upsert_subscription(&pool, &expired).await.unwrap();
+
+            let mut broken = sub("term-d", Some("wt-d"), "not json");
+            broken.id = "s-broken".to_string();
+            broken.target = "wt-broken".to_string();
+            upsert_subscription(&pool, &broken).await.unwrap();
+
+            let kinds = load_subscribed_kinds(&pool, now).await.unwrap();
+            assert!(kinds.contains(KIND_WORKTREE_CLOSED));
+            assert!(kinds.contains(KIND_COMPLETED), "orphaned な購読も含める");
+            assert!(!kinds.contains(KIND_HOOK), "失効した購読は含めない");
+            assert_eq!(kinds.len(), 2, "壊れた JSON は default-deny: {:?}", kinds);
+        });
+    }
+
+    /// 購読テーブルを触る操作はすべて世代を進める。
+    #[test]
+    fn test_epoch_bumps_on_subscription_mutations() {
+        let _guard = epoch_guard();
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-a", Some("wt-a"), r#"["worktree.closed"]"#);
+
+            let before = current_subscriptions_epoch();
+            upsert_subscription(&pool, &s).await.unwrap();
+            // 入口と成功後の二重 bump（レース対策）
+            assert!(current_subscriptions_epoch() >= before + 2);
+
+            let before = current_subscriptions_epoch();
+            delete_subscription_by_target(&pool, "term-a", "wt-target").await.unwrap();
+            assert!(current_subscriptions_epoch() > before);
+
+            let before = current_subscriptions_epoch();
+            purge_expired(&pool, now, INBOX_RETENTION_MS).await.unwrap();
+            assert!(current_subscriptions_epoch() > before);
+        });
+    }
+
+    /// インデックスは世代が変わった瞬間に「分からない」へ倒れる。
+    /// **これが「購読直後の初回イベントを落とさない」の土台。**
+    #[test]
+    fn test_subscribed_kinds_snapshot_invalidated_by_epoch() {
+        let _guard = epoch_guard();
+        let index = SubscribedKinds::new();
+        let now = 1_000_000i64;
+        assert!(index.snapshot(now).is_none(), "未構築は None（＝毎回 DB へ）");
+
+        let epoch = current_subscriptions_epoch();
+        index.store(epoch, now, std::collections::HashSet::new());
+        assert_eq!(index.snapshot(now).map(|k| k.len()), Some(0));
+
+        bump_subscriptions_epoch();
+        assert!(index.snapshot(now).is_none(), "世代が進んだら無効");
+
+        // TTL 超過も無効
+        let epoch = current_subscriptions_epoch();
+        index.store(epoch, now, std::collections::HashSet::new());
+        assert!(index.snapshot(now + SUBSCRIBED_KINDS_TTL_MS + 1).is_none());
+    }
+
+    /// 購読が入った直後に発火しても、インデックスは stale になっているので
+    /// スキップ判定は成立しない（＝初回イベントを取りこぼさない）。
+    #[test]
+    fn test_subscribe_then_immediate_publish_is_not_skipped() {
+        let _guard = epoch_guard();
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let index = SubscribedKinds::new();
+
+            // 誰も購読していない状態でインデックスを構築 → hook はスキップ対象
+            rebuild_subscribed_kinds(&pool, &index, now).await.unwrap();
+            assert!(
+                !load_subscribed_kinds(&pool, now).await.unwrap().contains(KIND_HOOK),
+                "前提: この時点では hook の購読者はいない"
+            );
+
+            // ここで購読が入る
+            let s = sub("term-a", Some("wt-a"), r#"["hook"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+
+            // **ここが本題。** 直後の発火では snapshot が None（世代不一致）になるので、
+            // 発行側は「購読者がいない」と誤判定できず DB 経路へ落ちる。
+            assert!(
+                index.snapshot(now).is_none(),
+                "購読直後のスナップショットは無効でなければならない"
+            );
+
+            // 実際に配送されること
+            let mut e = event("wt-target", None);
+            e.kind = KIND_HOOK.to_string();
+            insert_event(&pool, &e).await.unwrap();
+            assert_eq!(fanout_all(&pool, &e, now).await.unwrap(), 1);
+
+            // 作り直せば hook が入る。**`snapshot` ではなく DB を直接見る**——
+            // `SUBSCRIPTIONS_EPOCH` はプロセス共有なので、並列実行中の他テストの
+            // `bump` を拾って `snapshot` が None に倒れうる（それは正しい挙動）。
+            assert!(load_subscribed_kinds(&pool, now).await.unwrap().contains(KIND_HOOK));
+        });
+    }
+
+    /// 連鎖の深さは `worktree.message` だけで数える（#126）。hook を数えると、
+    /// 分単位で降ってくるフックで購読者が即座に上限へ張り付く。
+    #[test]
+    fn test_max_inbound_depth_ignores_hook_rows() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-a", Some("wt-a"), r#"["hook"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+
+            let mut e = event("wt-target", None);
+            e.kind = KIND_HOOK.to_string();
+            e.depth = 3;
+            insert_event(&pool, &e).await.unwrap();
+            assert_eq!(fanout_all(&pool, &e, now).await.unwrap(), 1);
+
+            let depth = max_inbound_depth(&pool, "term-a", now + 1, CHAIN_WINDOW_MS)
+                .await
+                .unwrap();
+            assert_eq!(depth, None, "hook は連鎖に数えない");
+        });
+    }
+
+    /// 統合後の kind が実際に購読・配送されること。
+    #[test]
+    fn test_fanout_delivers_new_kinds() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = 1_000_000i64;
+            let s = sub("term-a", Some("wt-a"), r#"["completed","approval"]"#);
+            upsert_subscription(&pool, &s).await.unwrap();
+
+            let mut e = event("wt-target", None);
+            e.kind = KIND_COMPLETED.to_string();
+            insert_event(&pool, &e).await.unwrap();
+            assert_eq!(fanout_all(&pool, &e, now).await.unwrap(), 1);
+
+            // 購読していない種別は落ちる
+            let mut other = event("wt-target", None);
+            other.id = "ev-2".to_string();
+            other.kind = KIND_GENERAL.to_string();
+            insert_event(&pool, &other).await.unwrap();
+            assert_eq!(fanout_all(&pool, &other, now).await.unwrap(), 0);
+        });
+    }
+
+    /// **`subscriptions` を書く関数を足したのに `bump_subscriptions_epoch()` を
+    /// 忘れる**、という事故だけはレビューでもテストでも捕まえにくいので、
+    /// ソースを走査して機械的に確認する。
+    #[test]
+    fn test_every_subscriptions_mutation_bumps_epoch() {
+        let src = include_str!("event_db.rs");
+        // `#[cfg(test)]` 以降（テストコード）は対象外
+        let body = src.split("\n#[cfg(test)]").next().unwrap();
+        let mut offenders = Vec::new();
+        for chunk in body.split("\npub async fn ").skip(1) {
+            let name = chunk.split('(').next().unwrap_or("?");
+            let fn_body = chunk.split("\npub ").next().unwrap_or(chunk);
+            let writes = fn_body.contains("INSERT INTO subscriptions")
+                || fn_body.contains("DELETE FROM subscriptions")
+                || fn_body.contains("UPDATE subscriptions");
+            if writes && !fn_body.contains("bump_subscriptions_epoch()") {
+                offenders.push(name.to_string());
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "subscriptions を書き換えているのに bump_subscriptions_epoch() を呼んでいない関数: {:?}",
+            offenders
+        );
     }
 
     /// SQL 文と FromRow のマッピングを一通り通す往復テスト（cargo check では検出できない）。

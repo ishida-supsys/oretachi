@@ -29,12 +29,12 @@ import { useI18n } from "vue-i18n";
 import { useSubWindows, requestSubWindowLayout } from "./composables/useSubWindows";
 import { useCodeReviewWindow } from "./composables/useCodeReviewWindow";
 import { useArtifactWindow } from "./composables/useArtifactWindow";
-import { useNotifications, sendOsNotification, playSoundForKind, type NotificationKind } from "./composables/useNotifications";
+import { useNotifications, sendOsNotification, playSoundForKind } from "./composables/useNotifications";
 import { useTrayPopup } from "./composables/useTrayPopup";
 import { useWindowFocus } from "./composables/useWindowFocus";
 import { useTasks } from "./composables/useTasks";
 import type { TrayWorktreeData, TrayTerminalData } from "./composables/useTrayPopup";
-import type { WorktreeEntry } from "./types/settings";
+import type { NotifyKind, WorktreeEntry } from "./types/settings";
 import type { SavedTerminal } from "./types/worktree";
 import type { UrlArtifactEntry } from "./types/artifact";
 import { extractUrlArtifacts } from "./utils/artifactUrl";
@@ -1931,7 +1931,7 @@ onMounted(async () => {
   // 通知リスナー初期化 (ワークツリー名 → ID 解決関数と自動承認中は保留するコールバックを渡す)
   await initNotificationListener(
     (name: string) => worktrees.value.find((w) => w.name === name)?.id,
-    (id: string, kind: NotificationKind) => {
+    (id: string, kind: NotifyKind) => {
       if (kind === "completed") return isWorktreeFocused(id);
       return autoApprovalMap.get(id) === true || isWorktreeFocused(id);
     },
@@ -1951,6 +1951,10 @@ onMounted(async () => {
       general: t("notification.title"),
       approval: t("notification.titleApproval"),
       completed: t("notification.titleCompleted"),
+      hook: t("notification.titleHook"),
+      "worktree.message": t("notification.titleWorktreeMessage"),
+      "worktree.created": t("notification.titleWorktreeCreated"),
+      "worktree.closed": t("notification.titleWorktreeClosed"),
     },
     () => settings.value.notificationSound,
   );

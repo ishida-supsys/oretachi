@@ -12,6 +12,7 @@ import type {
   Workgroup,
   WorktreeEntry,
 } from "../types/settings";
+import { migrateNotificationSound } from "../utils/notificationKinds";
 import { setLocale } from "../i18n";
 import { setVerboseLogging } from "../utils/log";
 import { isHomeWorktree, makeHomeWorktreeEntry } from "../utils/homeWorktree";
@@ -359,7 +360,16 @@ async function loadSettingsOnce() {
   const workgroupChanged = migrateWorkgroups(loaded);
   // ワークグループ確定後に実行する（workgroupId の補完結果を使うため）
   const trayChanged = migrateTrayNotification(loaded);
-  if (hotkeyChanged || homeChanged || repositoryChanged || workgroupChanged || trayChanged) {
+  // 通知音設定のフラット3キー → kinds マップ（#140）。冪等。
+  const soundChanged = migrateNotificationSound(loaded.notificationSound);
+  if (
+    hotkeyChanged ||
+    homeChanged ||
+    repositoryChanged ||
+    workgroupChanged ||
+    trayChanged ||
+    soundChanged
+  ) {
     try {
       await invoke("save_settings", { settings: loaded });
     } catch (e) {

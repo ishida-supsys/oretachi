@@ -18,6 +18,7 @@ use tokio::sync::{broadcast, oneshot, watch, RwLock};
 
 use crate::git_worktree::get_git_remotes;
 use crate::pty_manager::PtyManager;
+use crate::event_db::NotifyKind;
 use crate::settings::{resolve_tray_notification, AppSettings, SettingsManager, Workgroup, WorktreeEntry};
 
 /// artifact / artifact_module の read-modify-write を直列化するグローバルロック。
@@ -339,6 +340,17 @@ pub struct McpServerManager {
     /// 見せるべき通知を弾いてはいけない。窓を分けることで `tray: false` の連投抑制
     /// （WebView イベントキュー保護）も従来どおり維持する。
     notify_last_sent: Mutex<HashMap<NotifyDebounceKey, Option<std::time::Instant>>>,
+    /// 購読イベント発行の rate limiting: (source_worktree_id, kind) → 最終送信時刻（#140）。
+    ///
+    /// **トースト用の `notify_last_sent` とは別マップにする。** 同じマップを共有すると
+    /// 片方の判定がもう片方の debounce 窓を消費し、「トーストは出たがイベントは出ない」
+    /// （逆も）という、2経路が互いを巻き添えにしない設計と真逆の挙動になる。
+    ///
+    /// キーがトースト側の `worktree_name`（＝宛先）ではなく `source_worktree_id`（＝発信元）
+    /// なのは、購読方式では宛先を送信側が決めないため（#120）。型は
+    /// `should_send_notify` を共有するため `notify_last_sent` と同じだが、`tray` は
+    /// 画面表示の属性で購読配送とは無関係なので、常に `true` 固定で窓を1本に保つ。
+    event_last_sent: Mutex<HashMap<NotifyDebounceKey, Option<std::time::Instant>>>,
     /// /prompt-context のスロットル: worktree_id → 最終送信時刻。
     /// UserPromptSubmit はプロンプトごとに発火するため、期間内は skip を返して
     /// コンテキスト注入のノイズを抑える。
@@ -351,11 +363,9 @@ pub struct McpServerManager {
 /// 圧迫するため debounce する。general/completed や任意のカスタム kind は
 /// MCP クライアントの意図的な通知のため握り潰さない。
 fn notify_debounce_secs(kind: &str) -> Option<u64> {
-    match kind {
-        "hook" => Some(3),
-        "approval" => Some(1),
-        _ => None,
-    }
+    // 窓の定義は `NotifyKind::debounce_secs` に一本化する（#140）。未知の文字列は
+    // debounce しない＝毎回通す、という従来の挙動を保つ。
+    crate::event_db::NotifyKind::parse(kind).and_then(|k| k.debounce_secs())
 }
 
 /// 通知 debounce のキー: (worktree_name, kind, tray)
@@ -421,6 +431,7 @@ impl McpServerManager {
             notify_listener_id: Mutex::new(None),
             hook_tx: broadcast::channel::<NotifyWorktreeEvent>(256).0,
             notify_last_sent: Mutex::new(HashMap::new()),
+            event_last_sent: Mutex::new(HashMap::new()),
             prompt_context_last_sent: Mutex::new(HashMap::new()),
         }
     }
@@ -540,15 +551,13 @@ pub struct PromptContextPayload {
 pub struct NotifyWorktreeParams {
     #[schemars(description = "通知するワークツリー名")]
     pub worktree_name: String,
-    #[schemars(description = "通知種別: \"approval\"(承認待ち) / \"completed\"(作業完了) / \"general\"(汎用) / \"hook\"(ライフサイクルフック)。省略時は \"general\"。これは画面に出すトーストの種別であり、購読イベントの種別(event_kind)とは別物")]
+    #[schemars(description = "通知種別 兼 購読イベント種別: \"approval\"(承認待ち) / \"completed\"(作業完了) / \"general\"(汎用) / \"hook\"(ライフサイクルフック) / \"worktree.message\"(他ワークツリーへの自由文メッセージ)。省略時は \"general\"。どの種別でも、その種別を購読している他のワークツリーがあれば body が配送される。\"worktree.created\" / \"worktree.closed\" は oretachi が自動で発行するためここでは指定できない")]
     pub kind: Option<String>,
-    #[schemars(description = "通知本文（ライフサイクルフックのコンテキスト情報など）。省略可")]
+    #[schemars(description = "通知本文（ライフサイクルフックのコンテキスト情報や、購読者へ届けるメッセージ本文）。kind が \"worktree.message\" のときは必須")]
     pub body: Option<String>,
-    #[schemars(description = "購読イベントとしても発行する場合の**イベント種別**。現在は \"worktree.message\" のみ。トースト種別 kind とは名前空間が別。指定すると body が自由文メッセージとして、自分のワークツリーを購読している他のワークツリーへ配送される（宛先は購読者が決めるので worktree_name とは無関係）")]
-    pub event_kind: Option<String>,
-    #[schemars(description = "呼び出し元ターミナルの terminal_id。event_kind 指定時の発信元の同定に使う（セッション開始時に oretachi から注入されている）")]
+    #[schemars(description = "呼び出し元ターミナルの terminal_id。購読イベントの発信元の同定に使う（セッション開始時に oretachi から注入されている）")]
     pub terminal_id: Option<String>,
-    #[schemars(description = "呼び出し元の作業ディレクトリ絶対パス。event_kind 指定時に terminal_id を省略した場合のフォールバック同定に使う")]
+    #[schemars(description = "呼び出し元の作業ディレクトリ絶対パス。terminal_id を省略した場合のフォールバック同定に使う")]
     pub project_dir: Option<String>,
 }
 
@@ -623,7 +632,7 @@ pub struct ArtifactParams {
     pub content_type: Option<String>,
     #[schemars(description = "アーティファクトのタイトル (create時必須)")]
     pub title: Option<String>,
-    #[schemars(description = "アーティファクトの中身 (create/rewrite時必須)。markdown / html / react では `artifact:` リンクで他のアーティファクトへ遷移できる: 同一ワークツリー内は `artifact:<アーティファクトID>`、他ワークツリー宛は `artifact://worktree/<worktreeId>/<アーティファクトID>`、リポジトリ保管庫宛は `artifact://repository/<encodeURIComponent(リポジトリの絶対パス)>/<アーティファクトID>`。react ではメモリー（アーティファクトごとに永続化される JSON ストア）が使える: `import { useMemory } from 'oretachi'` して `const [value, setValue] = useMemory('key', 初期値)`。書き込みはデバウンスされ、ウィンドウを閉じて開き直しても・リポジトリへ転送しても復元される（合計 1MB まで。他に getMemory / setMemory / clearMemory / subscribeMemory がある）。さらに `import { callTool } from 'oretachi'` で oretachi の MCP ツールを呼べる: `await callTool('oretachi_write_terminal', { session_id: 12, text: 'echo hi' })`。呼べるのは oretachi_write_terminal / oretachi_add_task / notify_worktree / oretachi_poll_inbox / oretachi_ack_message / oretachi_read_terminal / oretachi_list_worktree_notifications だけで、terminal_id / project_dir / notify_worktree の宛先 / add_task の追加先ワークグループはアーティファクトの置き場所のワークツリーへ強制される(session_id は同じワークツリーの稼働中端末、または**アーティファクトの置き場所ワークツリーが oretachi_subscribe_worktree で購読しているワークツリー**の稼働中端末に限る)。戻り値はツールの結果を JSON.parse したもの(パースできなければ文字列)。**制約**: アーティファクトからは oretachi_list_terminals が呼べないため、read/write_terminal に渡す session_id は生成時にコードへ埋め込むこと(アプリ再起動やタブ再作成で無効になる)。oretachi_poll_inbox / oretachi_ack_message / notify_worktree(event_kind 付き) はそのワークツリーで AI エージェント端末がちょうど1つ走行中でないとエラーになるので、AI セッション終了後も動かしたいボタンには使わないこと。他ワークツリーの端末へ read/write_terminal したい場合は、アーティファクトの置き場所ワークツリー側から宛先を購読しておくこと(逆向き＝宛先側が置き場所を購読しているだけでは通らない)")]
+    #[schemars(description = "アーティファクトの中身 (create/rewrite時必須)。markdown / html / react では `artifact:` リンクで他のアーティファクトへ遷移できる: 同一ワークツリー内は `artifact:<アーティファクトID>`、他ワークツリー宛は `artifact://worktree/<worktreeId>/<アーティファクトID>`、リポジトリ保管庫宛は `artifact://repository/<encodeURIComponent(リポジトリの絶対パス)>/<アーティファクトID>`。react ではメモリー（アーティファクトごとに永続化される JSON ストア）が使える: `import { useMemory } from 'oretachi'` して `const [value, setValue] = useMemory('key', 初期値)`。書き込みはデバウンスされ、ウィンドウを閉じて開き直しても・リポジトリへ転送しても復元される（合計 1MB まで。他に getMemory / setMemory / clearMemory / subscribeMemory がある）。さらに `import { callTool } from 'oretachi'` で oretachi の MCP ツールを呼べる: `await callTool('oretachi_write_terminal', { session_id: 12, text: 'echo hi' })`。呼べるのは oretachi_write_terminal / oretachi_add_task / notify_worktree / oretachi_poll_inbox / oretachi_ack_message / oretachi_read_terminal / oretachi_list_worktree_notifications だけで、terminal_id / project_dir / notify_worktree の宛先 / add_task の追加先ワークグループはアーティファクトの置き場所のワークツリーへ強制される(session_id は同じワークツリーの稼働中端末、または**アーティファクトの置き場所ワークツリーが oretachi_subscribe_worktree で購読しているワークツリー**の稼働中端末に限る)。戻り値はツールの結果を JSON.parse したもの(パースできなければ文字列)。**制約**: アーティファクトからは oretachi_list_terminals が呼べないため、read/write_terminal に渡す session_id は生成時にコードへ埋め込むこと(アプリ再起動やタブ再作成で無効になる)。oretachi_poll_inbox / oretachi_ack_message / notify_worktree(kind: \"worktree.message\") はそのワークツリーで AI エージェント端末がちょうど1つ走行中でないとエラーになるので、AI セッション終了後も動かしたいボタンには使わないこと。他ワークツリーの端末へ read/write_terminal したい場合は、アーティファクトの置き場所ワークツリー側から宛先を購読しておくこと(逆向き＝宛先側が置き場所を購読しているだけでは通らない)")]
     pub content: Option<String>,
     #[schemars(description = "コード言語 (type=application/vnd.ant.code の時のみ)")]
     pub language: Option<String>,
@@ -986,7 +995,7 @@ pub struct WriteTerminalParams {
 pub struct SubscribeWorktreeParams {
     #[schemars(description = "購読対象。ワークツリー名 / ID のほか、ワイルドカードとして \"*\"(全ワークツリー) / \"workgroup:<ID または名前>\" / \"repo:<リポジトリ名>\" を指定できる。**これから作成されるワークツリーの worktree.created を購読したい場合はワイルドカードを使う**（ID 固定では表現できない）")]
     pub target: String,
-    #[schemars(description = "購読するイベント種別の配列。\"worktree.closed\"(クローズ) / \"worktree.created\"(作成) / \"worktree.message\"(他ワークツリーのエージェントが notify_worktree で送る自由文)。省略時は [\"worktree.closed\"]")]
+    #[schemars(description = "購読するイベント種別の配列。\"worktree.closed\"(クローズ) / \"worktree.created\"(作成) / \"worktree.message\"(他ワークツリーのエージェントが notify_worktree で送る自由文) / \"completed\"(相手のエージェントが作業を終えた) / \"approval\"(相手が承認待ちになった) / \"general\"(汎用通知) / \"hook\"(ライフサイクルフック。高頻度なので通常は購読しない)。省略時は [\"worktree.closed\"]")]
     pub event_kinds: Option<Vec<String>>,
     #[schemars(description = "配送戦略: \"turn_end\"(既定。待機中なら PTY へ押し込み、走行中はターン境界を待つ) / \"interrupt\"(走行中でも即 PTY へ割り込む) / \"passive\"(押し込まない。oretachi_poll_inbox で自分から取りに来る)。どの戦略でもセッション開始時の回収と oretachi_poll_inbox は使える")]
     pub delivery: Option<String>,
@@ -1626,38 +1635,87 @@ impl NotifyService {
         }
     }
 
-    #[tool(description = "ワークツリーに通知を送信する。event_kind に \"worktree.message\" を指定すると、通知に加えて自分のワークツリーを購読している他のワークツリーへ body を自由文メッセージとして配送する（購読方式なので送信側は宛先を指定しない）。受信側には本文ではなく「届いている」ことだけが提示され、本文は受信側が oretachi_poll_inbox で取得する")]
+    #[tool(description = "ワークツリーに通知を送信する。kind は通知種別であると同時に購読イベント種別でもあり、\"hook\" / \"approval\" / \"completed\" / \"general\" / \"worktree.message\" を指定できる（\"worktree.created\" / \"worktree.closed\" は oretachi がワークツリーの追加・削除時に自動で発行するため、このツールからは指定できない）。どの kind でも、その kind を購読している他のワークツリーがあれば body が配送される（購読方式なので送信側は宛先を指定しない）。受信側には本文ではなく「届いている」ことだけが提示され、本文は受信側が oretachi_poll_inbox で取得する。自由文メッセージを送りたいときは kind に \"worktree.message\" を指定する")]
     async fn notify_worktree(
         &self,
-        Parameters(NotifyWorktreeParams { worktree_name, kind, body, event_kind, terminal_id, project_dir }): Parameters<NotifyWorktreeParams>,
+        Parameters(NotifyWorktreeParams { worktree_name, kind, body, terminal_id, project_dir }): Parameters<NotifyWorktreeParams>,
     ) -> Result<CallToolResult, McpError> {
-        // 購読イベントの発行は通知トーストとは**独立した第三の経路**（event_db → 配送
-        // ワーカー）に載せる。`hook_tx`（broadcast channel）も WebView IPC もトースト用の
-        // 経路で、下の `should_send_notify` による debounce（hook 3s / approval 1s）が
-        // かかる。購読配送を debounce に載せるとイベントが黙って落ちる（#120 §1）ので、
-        // 判定より前にここで発行しきる。
+        // #140 で `kind` と `event_kind` を統合した。値域は固定7値で、未知の文字列は
+        // ここで弾く。統合前の `kind` は無検証の自由文字列だったので、通知音や購読対象の
+        // 設定を種別ごとに持たせると破綻する（設定に無い kind が無限に生えうる）。
+        let kind_str = kind
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .unwrap_or(crate::event_db::KIND_GENERAL);
+        let kind = NotifyKind::parse(kind_str).ok_or_else(|| {
+            McpError::invalid_params(
+                format!(
+                    "kind '{}' は不正です。指定できるのは {} のいずれかです",
+                    kind_str,
+                    crate::event_db::SUPPORTED_EVENT_KINDS.join(" / ")
+                ),
+                None,
+            )
+        })?;
+        // `worktree.created` / `worktree.closed` は oretachi 内部の `fire_worktree_*` からしか
+        // 発行されない。エージェントに名乗らせると「実際には閉じていないワークツリーの
+        // クローズ」を購読者へ配れてしまう。**これは入力バリデーションだけの制約で、
+        // この2種別が購読対象や通知音設定から外れるという意味ではない。**
+        if !kind.agent_publishable() {
+            return Err(McpError::invalid_params(
+                format!(
+                    "kind '{}' は notify_worktree からは発行できません（'{}' / '{}' は oretachi がワークツリーの追加・削除時に自動で発行します）",
+                    kind,
+                    crate::event_db::KIND_WORKTREE_CREATED,
+                    crate::event_db::KIND_WORKTREE_CLOSED,
+                ),
+                None,
+            ));
+        }
+
+        // 購読イベントの発行は通知トーストとは**独立した第二の経路**（event_db → 配送
+        // ワーカー）に載せる。トースト側の debounce（hook 3s / approval 1s）に購読配送を
+        // 載せるとイベントが黙って落ちる（#120 §1）ので、判定より前にここで発行しきる。
+        // イベント側の rate limiting は別マップ（`event_last_sent`）で独立に行う。
         //
         // **失敗しても `?` で早期 return しない。** イベント発行のエラー（DB 未初期化、
         // terminal_id の解決失敗、body 空など）でトーストまで巻き添えにすると、
-        // 「`kind=approval` に `event_kind` を添えただけで承認待ちトーストが出ない」という
-        // 独立経路の設計と真逆の挙動になる。トーストは必ず送り、失敗はレスポンスで返す。
-        let event_result = match event_kind.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            Some(k) => Some(
-                publish_worktree_message(
-                    &self.app_handle,
-                    k,
-                    body.as_deref(),
-                    terminal_id.as_deref(),
-                    project_dir.as_deref(),
-                )
-                .await,
-            ),
-            None => None,
+        // 「購読の都合で承認待ちトーストが出ない」という独立経路の設計と真逆の挙動になる。
+        // トーストは必ず送り、失敗はレスポンスで返す。
+        let event_result = match mcp_notify_source(
+            &self.app_handle,
+            terminal_id.as_deref(),
+            project_dir.as_deref(),
+        ) {
+            Ok(source) => {
+                let pass = {
+                    let manager = self.app_handle.state::<McpServerManager>();
+                    // `tray` は画面表示の属性で購読配送とは無関係なので true 固定
+                    // (窓を1本に保つ。トースト側の #161 の窓分けとは目的が違う)。
+                    should_send_notify(&manager.event_last_sent, &source.worktree_id, kind.as_str(), true)
+                };
+                if pass {
+                    Some(
+                        publish_notify_event(&self.app_handle, kind, body.as_deref(), source).await,
+                    )
+                } else {
+                    None
+                }
+            }
+            // 発信元を特定できないと `matching_targets` も自己エコー抑止も成立しないので
+            // イベントは作らない。`worktree.message` は本来の目的が果たせないのでエラーに
+            // するが、トースト種別は通知が主目的なので黙ってトーストだけに落とす。
+            Err(e) if kind == NotifyKind::WorktreeMessage => Some(Err(e)),
+            Err(e) => {
+                log::debug!("[mcp] 発信元を特定できないためイベント発行を省略: {}", e.message);
+                None
+            }
         };
 
         let event = NotifyWorktreeEvent {
             worktree_name: worktree_name.clone(),
-            kind: kind.unwrap_or_else(|| "general".to_string()),
+            kind: kind.as_str().to_string(),
             body,
             agent: None,
             // `notify_worktree` ツール経由の通知は意図的な呼び出しなので、`kind` の
@@ -1688,6 +1746,15 @@ impl NotifyService {
             Ok(result)
         };
 
+        // `worktree.message` は受信側にトーストを出さない（#137 / #140）。他ワークツリーの
+        // 状態変化は購読バッジが常時見せており、それをどう扱うかは購読する側が決めるもので、
+        // 送信側からのトースト通知は不要。発火元での音 / OS 通知だけを別イベントで届ける。
+        if kind == NotifyKind::WorktreeMessage {
+            emit_worktree_event_fired(&self.app_handle, &worktree_name, kind);
+            log::info!("[mcp] notify_worktree: {} kind={}（トーストなし）", worktree_name, kind);
+            return reply(false);
+        }
+
         let hook_tx = {
             let manager = self.app_handle.state::<McpServerManager>();
             // HTTP 経路と同じ debounce ポリシー (hook=3s, approval=1s, 他は対象外) を適用
@@ -1696,7 +1763,7 @@ impl NotifyService {
             }
             manager.hook_tx.clone()
         };
-        if event.kind == "hook" {
+        if kind == NotifyKind::Hook {
             // hook イベントは broadcast channel 経由で MCP ピアに直接送信する（WebView IPC をバイパス）
             let _ = hook_tx.send(event);
             reply(true)
@@ -1713,7 +1780,7 @@ impl NotifyService {
                 }
                 return reply(false);
             }
-            log::info!("[mcp] notify_worktree: {} kind={}", worktree_name, event.kind);
+            log::info!("[mcp] notify_worktree: {} kind={}", worktree_name, kind);
             reply(true)
         }
     }
@@ -2577,7 +2644,7 @@ impl NotifyService {
         }
     }
 
-    #[tool(description = "他ワークツリーのイベント（クローズ / 作成 / エージェントからの自由文メッセージ）を購読する。別ワークツリーで進めている関連作業の完了や開始を自分のセッションで検知したいときに使う。target には \"*\" / \"workgroup:<ID>\" / \"repo:<名前>\" のワイルドカードも指定でき、まだ存在しないワークツリーの作成も購読できる。クローズ / 作成は本文ごと提示される。自由文メッセージは**本文を運ばず「届いている」ことと件数だけ**が提示されるので、本文は oretachi_poll_inbox で取りに来ること。提示のタイミングは待機中なら随時、走行中はターン境界、およびセッション開始時。ターミナルを閉じたりアプリを再起動したりしても購読は引き継ぎ待ちとして保持され、同じワークツリーで**同じ AI セッション**（--resume で再開した会話）が立ち上がったときに自動で引き継がれる。別のセッションへ渡す場合は oretachi の購読パネルから人間が引き継ぎ先を選ぶ（無関係なタスクのセッションが黙って他ワークツリーのイベントを拾わないようにするため）")]
+    #[tool(description = "他ワークツリーのイベント（クローズ / 作成 / エージェントからの自由文メッセージ / 相手の作業完了・承認待ちなどの通知）を購読する。別ワークツリーで進めている関連作業の完了や開始を自分のセッションで検知したいときに使う。target には \"*\" / \"workgroup:<ID>\" / \"repo:<名前>\" のワイルドカードも指定でき、まだ存在しないワークツリーの作成も購読できる。クローズ / 作成は本文ごと提示される。自由文メッセージは**本文を運ばず「届いている」ことと件数だけ**が提示されるので、本文は oretachi_poll_inbox で取りに来ること。提示のタイミングは待機中なら随時、走行中はターン境界、およびセッション開始時。ターミナルを閉じたりアプリを再起動したりしても購読は引き継ぎ待ちとして保持され、同じワークツリーで**同じ AI セッション**（--resume で再開した会話）が立ち上がったときに自動で引き継がれる。別のセッションへ渡す場合は oretachi の購読パネルから人間が引き継ぎ先を選ぶ（無関係なタスクのセッションが黙って他ワークツリーのイベントを拾わないようにするため）")]
     async fn oretachi_subscribe_worktree(
         &self,
         Parameters(SubscribeWorktreeParams {
@@ -2610,7 +2677,7 @@ impl NotifyService {
             if !crate::event_db::SUPPORTED_EVENT_KINDS.contains(&k.as_str()) {
                 return Err(McpError::invalid_params(
                     format!(
-                        "event_kind '{}' は未対応です。対応種別: [{}]",
+                        "イベント種別 '{}' は未対応です。対応種別: [{}]",
                         k,
                         crate::event_db::SUPPORTED_EVENT_KINDS.join(", ")
                     ),
@@ -3803,11 +3870,131 @@ fn resolve_subscription_target(
     })
 }
 
-/// `notify_worktree` の `event_kind` 指定時に購読イベントを発行する（#126）。
+/// 発火元ワークツリーへ「イベントが出た」ことだけを伝える（#140）。
+///
+/// `worktree.*` の3種別は受信側にトーストを出さない（#137 / #140）。他ワークツリーの
+/// 状態変化は購読バッジが常時見せており、それをどう扱うかは購読する側が決めるもの。
+/// ただし発火元では音 / OS 通知を鳴らせるようにしたいので、そのためだけの経路を分ける。
+///
+/// **`notify-worktree` に相乗りさせないこと。** あちらは
+///   1. `start_mcp_server` のリスナーが**全 MCP ピアへ broadcast** し、
+///   2. フロントの自動承認リスナーが `completed` / `hook` 以外を承認待ち候補として扱う
+/// ため、`worktree.*` を流すと AI 判定ループが走る。
+pub(crate) fn emit_worktree_event_fired(
+    app_handle: &AppHandle,
+    worktree_name: &str,
+    kind: NotifyKind,
+) {
+    if let Err(e) = app_handle.emit(
+        "worktree-event-fired",
+        serde_json::json!({ "worktreeName": worktree_name, "kind": kind.as_str() }),
+    ) {
+        // 音が鳴らないだけなので、失敗しても呼び出し元へは伝えない。
+        log::debug!("[mcp] worktree-event-fired の emit に失敗: {}", e);
+    }
+}
+
+/// 購読イベントの発信元（#140）。
 ///
 /// **発信元は呼び出し元のワークツリー**であって、`notify_worktree` の `worktree_name`
 /// （トーストの宛先）ではない。#120 は「送信側が宛先を知っている前提を置くと破綻する」
 /// ため購読方式を採っており、宛先を決めるのは購読者側。
+pub(crate) struct NotifySource {
+    pub worktree_id: String,
+    pub worktree_name: Option<String>,
+    /// 発火元タブ。自己エコー抑止と depth 伝播の起点になる。**特定できないなら `None`。**
+    /// 捏造すると他タブ宛の配送を握り潰す。
+    pub terminal_id: Option<String>,
+    pub repository_name: Option<String>,
+    pub workgroup_id: Option<String>,
+    /// `events.actor`（監査用）。"mcp" / "hook"
+    pub actor: &'static str,
+    /// `events.origin`（ループ解析用）
+    pub origin: String,
+}
+
+/// 設定から発信元のスコープ（ワークツリー名 / リポジトリ名 / ワークグループ ID）を補う。
+fn notify_source_scope(
+    settings: &AppSettings,
+    worktree_id: &str,
+) -> (Option<String>, Option<String>, Option<String>) {
+    let wt = settings.worktrees.iter().find(|w| w.id == worktree_id);
+    let group = wt
+        .and_then(|w| resolve_workgroup(settings, w))
+        .map(|g| g.id.clone());
+    (
+        wt.map(|w| w.name.clone()),
+        wt.map(|w| w.repository_name.clone()),
+        group,
+    )
+}
+
+/// `notify_worktree` の呼び出し元タブから発信元を組み立てる。
+fn mcp_notify_source(
+    app_handle: &AppHandle,
+    terminal_id: Option<&str>,
+    project_dir: Option<&str>,
+) -> Result<NotifySource, McpError> {
+    // await をまたいで State / settings の参照を持たないよう、ここで所有権のある値へ確定させる
+    let subscriber = resolve_subscriber(app_handle, terminal_id, project_dir)?;
+    let Some(worktree_id) = subscriber.worktree_id.clone() else {
+        return Err(McpError::invalid_params(
+            "呼び出し元ターミナルの作業ディレクトリから oretachi 管理下のワークツリーを特定できませんでした。oretachi が管理しているワークツリー内で実行してください",
+            None,
+        ));
+    };
+    let settings = app_handle.state::<SettingsManager>().get();
+    let (worktree_name, repository_name, workgroup_id) =
+        notify_source_scope(&settings, &worktree_id);
+    Ok(NotifySource {
+        worktree_id,
+        worktree_name,
+        origin: format!("mcp-notify:{}", subscriber.terminal_id),
+        terminal_id: Some(subscriber.terminal_id),
+        repository_name,
+        workgroup_id,
+        actor: "mcp",
+    })
+}
+
+/// 発火した `kind` に購読者がいる可能性があるか（#140）。
+///
+/// **`true` は「いるかもしれない」で、`false` は「確実にいない」。** 偽陽性（余計な
+/// DB 書き込み）は許すが、偽陰性（配送落ち）は許さない。判定できないときは必ず `true`。
+///
+/// スナップショットが無効（未構築 / 世代不一致 / TTL 超過）なら**その場で作り直す**。
+/// 購読の追加・削除や `purge_expired` のたびに世代が進むので、作り直さないと索引は
+/// 最初の変更以降ずっと「分からない」に張り付き、ゲートが永久に無効化される。
+/// 再構築は `event_kinds` 列の SELECT 1回で、スキップできれば
+/// `insert_event` + `fanout`（書き込み2回 + SELECT）を丸ごと省ける。
+///
+/// 呼び出し元は返り値を使ってスキップを決めたあと、epoch が動いていないことを
+/// 再確認すること（`publish_notify_event` を参照）。
+async fn may_have_subscribers(
+    app_handle: &AppHandle,
+    pool: &sqlx::SqlitePool,
+    kind: NotifyKind,
+    now: i64,
+) -> bool {
+    let Some(index) = app_handle.try_state::<crate::event_db::SubscribedKinds>() else {
+        // 索引が manage されていない（event_db の初期化に失敗した等）＝分からない
+        return true;
+    };
+    if let Some(kinds) = index.snapshot(now) {
+        return kinds.contains(kind.as_str());
+    }
+    if let Err(e) = crate::event_db::rebuild_subscribed_kinds(pool, &index, now).await {
+        log::debug!("[mcp] 購読 kind インデックスの再構築に失敗: {}", e);
+        return true;
+    }
+    // 作り直した直後でも、その最中に購読が入っていれば世代が進んで `None` に倒れる。
+    // その場合は「分からない」＝ DB 経路へ落とすのが正しい。
+    index
+        .snapshot(now)
+        .map_or(true, |kinds| kinds.contains(kind.as_str()))
+}
+
+/// 購読イベントを発行する（#126 / #140 で7種別へ一般化）。
 ///
 /// `depth` はエージェントに申告させず、そのタブが直近に受け取ったイベントから自動計算する。
 /// 申告制にすると「返信時に depth を足す」という約束を破るだけで `MAX_EVENT_DEPTH` の
@@ -3816,102 +4003,122 @@ fn resolve_subscription_target(
 /// 既知の限界（#126）: `depth` が止めるのは**連鎖**であって連打ではない。同じタブから
 /// 立て続けに送れば他ワークツリーの inbox には積まれる。押し込み側は宛先ごとの
 /// 最小間隔（30秒）と保持期限で有界なので、実害は「未読が増える」までに留まる。
-async fn publish_worktree_message(
+pub(crate) async fn publish_notify_event(
     app_handle: &AppHandle,
-    event_kind: &str,
+    kind: NotifyKind,
     body: Option<&str>,
-    terminal_id: Option<&str>,
-    project_dir: Option<&str>,
+    source: NotifySource,
 ) -> Result<serde_json::Value, McpError> {
-    if event_kind != crate::event_db::KIND_WORKTREE_MESSAGE {
-        return Err(McpError::invalid_params(
-            format!(
-                "event_kind '{}' は notify_worktree からは発行できません。指定できるのは '{}' のみです（'{}' / '{}' は oretachi がワークツリーの追加・削除時に自動で発行します）",
-                event_kind,
-                crate::event_db::KIND_WORKTREE_MESSAGE,
-                crate::event_db::KIND_WORKTREE_CREATED,
-                crate::event_db::KIND_WORKTREE_CLOSED,
-            ),
-            None,
-        ));
-    }
-    let text = body
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            McpError::invalid_params(
-                "event_kind を指定する場合は body（購読者へ届けるメッセージ本文）が必要です",
-                None,
-            )
-        })?
-        .to_string();
-    // 自由文は他ワークツリーのエージェントのコンテキストへそのまま注入される。
-    // 上限が無いと相手のセッションを本文で埋められるので入口で弾く（切り詰めではなく
-    // エラーにするのは、勝手に削って「送れた」と誤解させないため）。
-    let text_len = text.chars().count();
-    if text_len > crate::event_db::MESSAGE_TEXT_MAX_CHARS {
-        return Err(McpError::invalid_params(
-            format!(
-                "body が長すぎます（{} 文字 / 上限 {} 文字）。要点を絞って送るか、詳細は共有ファイルや issue に置いて参照を送ってください",
-                text_len,
-                crate::event_db::MESSAGE_TEXT_MAX_CHARS
-            ),
-            None,
-        ));
-    }
-
-    // await をまたいで State / settings の参照を持たないよう、ここで所有権のある値へ確定させる
-    let (source_terminal_id, source_worktree_id, source_worktree_name, repository_name, workgroup_id) = {
-        let subscriber = resolve_subscriber(app_handle, terminal_id, project_dir)?;
-        let Some(worktree_id) = subscriber.worktree_id.clone() else {
+    let raw = body.map(str::trim).filter(|s| !s.is_empty());
+    let text = if kind == NotifyKind::WorktreeMessage {
+        // 自由文は他ワークツリーのエージェントのコンテキストへそのまま注入される。
+        // 上限が無いと相手のセッションを本文で埋められるので入口で弾く（切り詰めではなく
+        // エラーにするのは、勝手に削って「送れた」と誤解させないため）。
+        let text = raw
+            .ok_or_else(|| {
+                McpError::invalid_params(
+                    "kind に worktree.message を指定する場合は body（購読者へ届けるメッセージ本文）が必要です",
+                    None,
+                )
+            })?
+            .to_string();
+        let text_len = text.chars().count();
+        if text_len > crate::event_db::MESSAGE_TEXT_MAX_CHARS {
             return Err(McpError::invalid_params(
-                "呼び出し元ターミナルの作業ディレクトリから oretachi 管理下のワークツリーを特定できませんでした。oretachi が管理しているワークツリー内で実行してください",
+                format!(
+                    "body が長すぎます（{} 文字 / 上限 {} 文字）。要点を絞って送るか、詳細は共有ファイルや issue に置いて参照を送ってください",
+                    text_len,
+                    crate::event_db::MESSAGE_TEXT_MAX_CHARS
+                ),
                 None,
             ));
-        };
-        let settings = app_handle.state::<SettingsManager>().get();
-        let wt = settings.worktrees.iter().find(|w| w.id == worktree_id);
-        let group = wt
-            .and_then(|w| resolve_workgroup(&settings, w))
-            .map(|g| g.id.clone());
-        (
-            subscriber.terminal_id,
-            worktree_id,
-            wt.map(|w| w.name.clone()),
-            wt.map(|w| w.repository_name.clone()),
-            group,
-        )
+        }
+        text
+    } else {
+        // トースト種別の本文は Claude Code のフック JSON で、**書いたのは oretachi でも
+        // エージェントでもない**（＝誰もリトライできない）。長すぎてもエラーにせず切る。
+        // 本文は `is_free_text_kind` により PTY へは出ず、`oretachi_poll_inbox` でだけ読める。
+        let text = raw.unwrap_or_default();
+        if text.chars().count() > crate::event_db::HOOK_BODY_MAX_CHARS {
+            let cut: String = text
+                .chars()
+                .take(crate::event_db::HOOK_BODY_MAX_CHARS)
+                .collect();
+            format!("{}…（切り詰め）", cut)
+        } else {
+            text.to_string()
+        }
     };
 
     let pool = event_pool(app_handle)?;
     let now = crate::event_db::now_ms();
+
+    // 購読者がいない種別は DB を触らずに返す（#140）。events.db は非 WAL なので、
+    // 高頻度の hook を無条件に書くと SessionStart フックの読み取りと競合する。
+    //
+    // 対象はトースト由来の4種別だけ。`worktree.created` / `worktree.closed` /
+    // `worktree.message` は低頻度で、かつ events テーブルが `has_event`（作成の重複抑止）と
+    // `max_inbound_depth`（連鎖の深さ）から直接参照されているため無条件に書く。
+    let gated = matches!(
+        kind,
+        NotifyKind::Hook | NotifyKind::Approval | NotifyKind::Completed | NotifyKind::General
+    );
+    if gated {
+        // **判定の前後で epoch を突き合わせる。** 「スナップショットを読む」と
+        // 「スキップを決める」の間に購読が入ると、その購読者への初回イベントを落とす。
+        // `upsert_subscription` が入口と成功後の両方で epoch を進めるので、前後で一致
+        // していれば「この区間に購読の書き込みは1件も無い」と言える。
+        let epoch_before = crate::event_db::current_subscriptions_epoch();
+        let skip = !may_have_subscribers(app_handle, &pool, kind, now).await;
+        if skip && crate::event_db::current_subscriptions_epoch() == epoch_before {
+            log::debug!(
+                "[mcp] 購読者がいないためイベント発行をスキップ kind={} source={}",
+                kind,
+                source.worktree_id
+            );
+            return Ok(serde_json::json!({
+                "eventKind": kind.as_str(),
+                "sourceWorktreeId": source.worktree_id,
+                "delivered": 0,
+                "skipped": true,
+                "message": "この種別を購読しているセッションがないため、イベントは記録しませんでした。",
+            }));
+        }
+    }
+
     // 受信した最大 depth + 1。受信が無ければ 0（連鎖の起点）。
-    let depth = crate::event_db::max_inbound_depth(
-        &pool,
-        &source_terminal_id,
-        now,
-        crate::event_db::CHAIN_WINDOW_MS,
-    )
-    .await
-    .map_err(|e| McpError::internal_error(e, None))?
-    .map_or(0, |d| d + 1);
+    // 数えるのは `worktree.message` だけ（`max_inbound_depth` の SQL）。トースト種別を
+    // 連鎖に数えると、hook が分単位で降ってくる購読者は即座に上限へ張り付いて
+    // 本来のメッセージを送れなくなる。
+    let depth = match (&source.terminal_id, kind) {
+        (Some(tid), NotifyKind::WorktreeMessage) => crate::event_db::max_inbound_depth(
+            &pool,
+            tid,
+            now,
+            crate::event_db::CHAIN_WINDOW_MS,
+        )
+        .await
+        .map_err(|e| McpError::internal_error(e, None))?
+        .map_or(0, |d| d + 1),
+        _ => 0,
+    };
 
     let body_json = serde_json::json!({
         "text": text,
-        "sourceWorktreeName": source_worktree_name,
+        "sourceWorktreeName": source.worktree_name,
     })
     .to_string();
     let event = crate::event_db::EventRow {
         id: uuid::Uuid::new_v4().to_string(),
-        source_worktree_id: source_worktree_id.clone(),
+        source_worktree_id: source.worktree_id.clone(),
         // 自己エコー抑止（同じタブへ配り返さない）と depth 伝播の起点になる
-        source_terminal_id: Some(source_terminal_id.clone()),
-        kind: crate::event_db::KIND_WORKTREE_MESSAGE.to_string(),
+        source_terminal_id: source.terminal_id.clone(),
+        kind: kind.as_str().to_string(),
         body: body_json,
-        actor: Some("mcp".to_string()),
+        actor: Some(source.actor.to_string()),
         created_at: now,
         depth,
-        origin: Some(format!("mcp-notify:{}", source_terminal_id)),
+        origin: Some(source.origin.clone()),
     };
     // 閾値超過でも events には残す（監査とループ解析用）。配送は `fanout` が落とす。
     crate::event_db::insert_event(&pool, &event)
@@ -3919,9 +4126,9 @@ async fn publish_worktree_message(
         .map_err(|e| McpError::internal_error(e, None))?;
 
     let targets = crate::event_db::matching_targets(
-        &source_worktree_id,
-        workgroup_id.as_deref(),
-        repository_name.as_deref(),
+        &source.worktree_id,
+        source.workgroup_id.as_deref(),
+        source.repository_name.as_deref(),
     );
     let delivered = crate::event_db::fanout(&pool, &event, &targets, now)
         .await
@@ -3930,10 +4137,10 @@ async fn publish_worktree_message(
         crate::event_delivery::notify_event_queued(app_handle);
     }
     log::info!(
-        "[mcp] notify_worktree event_kind={} source={} terminal={} depth={} targets={:?} delivered={}",
-        event_kind,
-        source_worktree_id,
-        source_terminal_id,
+        "[mcp] publish_notify_event kind={} source={} terminal={:?} depth={} targets={:?} delivered={}",
+        kind,
+        source.worktree_id,
+        source.terminal_id,
         depth,
         targets,
         delivered
@@ -3948,15 +4155,15 @@ async fn publish_worktree_message(
             crate::event_db::MAX_EVENT_DEPTH
         )
     } else if delivered == 0 {
-        "メッセージを発行しましたが、このワークツリーを購読しているセッションがありませんでした。".to_string()
+        "イベントを発行しましたが、このワークツリーのこの種別を購読しているセッションがありませんでした。".to_string()
     } else {
-        format!("{} 件の購読者へメッセージを配送しました。", delivered)
+        format!("{} 件の購読者へ配送しました。", delivered)
     };
     Ok(serde_json::json!({
         "eventId": event.id,
         "eventKind": event.kind,
-        "sourceWorktreeId": source_worktree_id,
-        "sourceTerminalId": source_terminal_id,
+        "sourceWorktreeId": source.worktree_id,
+        "sourceTerminalId": source.terminal_id,
         "depth": depth,
         "maxDepth": crate::event_db::MAX_EVENT_DEPTH,
         "delivered": delivered,
@@ -4017,12 +4224,12 @@ struct SubscriberIdentity {
 ///   宛先になる**ので、`*` / `repo:` 購読はメインのクローンで走っている端末への書き込みも
 ///   含む（擬似ワークツリーは厳密一致では購読できないため、ワイルドカードしか経路が無い）。
 /// - **`oretachi_poll_inbox` / `oretachi_ack_message` /
-///   `notify_worktree`（`event_kind` 付き）は AI セッション稼働中しか使えない。**
+///   `notify_worktree`（`kind: "worktree.message"`）は AI セッション稼働中しか使えない。**
 ///   `terminal_id` を受け取らない（本人性が検証できないため）ので
 ///   `resolve_subscriber` の `project_dir` フォールバックに倒れ、そのワークツリーで
 ///   走行中の AI エージェント端末が **ちょうど 1 つ** でないとエラーになる。
 ///   AI セッション終了後にユーザーがレポートを開いて操作する用途では常に失敗する
-///   （`event_kind` 無しの `notify_worktree` = トースト通知だけは影響を受けない）。
+///   （トースト種別の `notify_worktree` = 通知だけは影響を受けない）。
 /// - **`oretachi_list_worktree_notifications` だけはワークツリースコープが効かない。**
 ///   パラメータを取らず `NotificationRegistry` の全ワークツリー分（worktreeId / 名前 /
 ///   件数 / 種別 / 初回通知時刻）を返す。得た ID を渡せるツールはホワイトリスト内に
@@ -4088,7 +4295,7 @@ pub(crate) fn normalize_artifact_tool_params(
     );
 
     // 宛先ワークツリーは常に自分。指定を許すと任意ワークツリーへトーストを出せてしまう。
-    // body にも出自を前置する: `event_kind="worktree.message"` は購読側エージェントの
+    // body にも出自を前置する: `kind="worktree.message"` は購読側エージェントの
     // inbox へ自由文として配送されるので、前置が無いと「AI 生成アーティファクトの
     // コードが書いた文」を人／エージェントの発言と区別できない
     if tool == "notify_worktree" {
@@ -4730,25 +4937,75 @@ fn repo_has_notification_hooks(settings: &AppSettings, worktree: &WorktreeEntry)
 }
 
 /// イベント名の既定 kind。ユーザー設定 (repo.notification_hooks) が無い場合のフォールバック。
-fn default_kind_for_event(event: &str) -> &'static str {
+fn default_kind_for_event(event: &str) -> NotifyKind {
     match event {
-        "Stop" => "completed",
-        "PermissionRequest" => "approval",
-        _ => "hook",
+        "Stop" => NotifyKind::Completed,
+        "PermissionRequest" => NotifyKind::Approval,
+        _ => NotifyKind::Hook,
     }
 }
 
 /// ワークツリーの所属リポジトリの notification_hooks から event に対応する kind を解決する。
 /// 設定が無ければ default_kind_for_event にフォールバック。
-fn resolve_kind_for_event(settings: &AppSettings, worktree: &WorktreeEntry, event: &str) -> String {
+fn resolve_kind_for_event(
+    settings: &AppSettings,
+    worktree: &WorktreeEntry,
+    event: &str,
+) -> NotifyKind {
     settings
         .repositories
         .iter()
         .find(|r| r.id == worktree.repository_id)
         .and_then(|r| r.notification_hooks.as_ref())
         .and_then(|hooks| hooks.iter().find(|h| h.event == event))
-        .map(|h| h.kind.clone())
-        .unwrap_or_else(|| default_kind_for_event(event).to_string())
+        .map(|h| h.kind)
+        .unwrap_or_else(|| default_kind_for_event(event))
+}
+
+/// `/notify` の payload から購読イベントの発信元を解決する（#140）。
+///
+/// **引けなければ `None` を返してイベントを作らない。** `source_worktree_id` の無い
+/// イベントは `matching_targets` も `is_self_echo` も成立せず、自己エコー抑止が
+/// 効かないまま配られる。トースト自体はワークツリー名だけで出せるので、
+/// ここで諦めても通知は失われない。
+fn resolve_notify_source(
+    settings: &AppSettings,
+    payload: &NotifyPayload,
+    live_terminal_ids: &[String],
+) -> Option<NotifySource> {
+    // `projectDir` からの逆引きが本筋。取れなければ後方互換の worktree 名で引き直す。
+    let worktree_id = payload
+        .project_dir
+        .as_deref()
+        .and_then(|d| resolve_worktree_by_dir(settings, d))
+        .or_else(|| {
+            let name = payload.worktree.as_deref().map(str::trim).filter(|s| !s.is_empty())?;
+            settings.worktrees.iter().find(|w| w.name == name)
+        })
+        .map(|w| w.id.clone())?;
+
+    let (worktree_name, repository_name, workgroup_id) =
+        notify_source_scope(settings, &worktree_id);
+
+    // **実在するタブでなければ `None`。** 捏造した terminal_id を載せると、
+    // その ID を持つ購読者への配送が自己エコーとして握り潰される。
+    let terminal_id = payload
+        .terminal_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter(|id| live_terminal_ids.iter().any(|t| t == id))
+        .map(str::to_string);
+
+    Some(NotifySource {
+        worktree_id,
+        worktree_name,
+        origin: format!("http-notify:{}", terminal_id.as_deref().unwrap_or("-")),
+        terminal_id,
+        repository_name,
+        workgroup_id,
+        actor: "hook",
+    })
 }
 
 /// hook body の JSON にサブエージェント（Task tool）内部発火の目印 `agent_id` があるか判定する（#141）。
@@ -4842,10 +5099,72 @@ async fn notify_handler(
         true
     };
 
+    // kind: 明示指定(旧形式/MCP) > event からの解決 > "general"
+    // 明示指定が不正な値だった場合は落とさずに event からの解決へ落とす（旧形式の
+    // 呼び出し元は自由文字列を送れたので、いきなり通知が消えるのは避ける）。
+    let kind = payload
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(NotifyKind::parse)
+        .or_else(|| {
+            payload.event.as_deref().map(|ev| match worktree {
+                Some(w) => resolve_kind_for_event(&settings, w, ev),
+                None => default_kind_for_event(ev),
+            })
+        })
+        .unwrap_or(NotifyKind::General);
+
+    // 購読イベントの発行（#140）。フックの発火点はここなので、この経路を外すと
+    // 「別ワークツリーの CC が停止した(completed)のを検知する」が実質成立しない。
+    //
+    // **応答パスに乗せない。** サイドカーの読み取りタイムアウトは短く、events.db は
+    // 非 WAL（書き込みが読み取りをブロックする）なので、`insert_event` + `fanout` を
+    // ここで await すると hook 発火のたびに Claude Code 側を待たせる。上の
+    // artifact URL 自動登録が同じ理由で spawn しているのと同型。
+    if let Some(source) = resolve_notify_source(
+        &settings,
+        &payload,
+        &app_handle
+            .state::<crate::pty_manager::PtyManager>()
+            .list_sessions()
+            .into_iter()
+            .map(|s| s.terminal_id)
+            .collect::<Vec<_>>(),
+    ) {
+        let pass = {
+            let manager = app_handle.state::<McpServerManager>();
+            // トースト側とは**別マップ**。同じマップを共有すると片方の判定がもう片方の
+            // 窓を消費し、「トーストは出たがイベントは出ない」（逆も）が起きる。
+            // `tray` は画面表示の属性で購読配送とは無関係なので true 固定
+            // （窓を1本に保つ。トースト側の #161 の窓分けとは目的が違う）。
+            should_send_notify(&manager.event_last_sent, &source.worktree_id, kind.as_str(), true)
+        };
+        if pass {
+            let handle = app_handle.clone();
+            let body = payload.body.clone();
+            tokio::spawn(async move {
+                if let Err(e) =
+                    publish_notify_event(&handle, kind, body.as_deref(), source).await
+                {
+                    log::warn!("[notify] 購読イベントの発行に失敗: {}", e.message);
+                }
+            });
+        }
+    }
+
     // ライフサイクルフック由来（event 指定・kind 明示なし）の通知は、通知フックが1件も
-    // 設定されていないリポジトリでは破棄する。プラグインは全ワークツリーで無条件有効化される
-    // （SessionStart 注入用）ため、未設定リポジトリの通知挙動を従来（プラグイン無効=通知なし）
-    // と一致させる。kind 明示指定（旧形式/MCP 経由）は意図的な通知なので対象外。
+    // 設定されていないリポジトリでは**トーストを**破棄する。プラグインは全ワークツリーで
+    // 無条件有効化される（SessionStart 注入用）ため、未設定リポジトリの通知挙動を
+    // 従来（プラグイン無効=通知なし）と一致させる。kind 明示指定（旧形式/MCP 経由）は
+    // 意図的な通知なので対象外。
+    //
+    // **購読イベントの発行より後に置くこと（#140）。** 購読は受信側が張るもので、
+    // 発信元リポジトリのトースト設定とは無関係。ここで先に return すると
+    // 「相手のリポジトリに通知フックを設定しないと completed を購読できない」という
+    // 不可解な依存が生まれる。購読者ゼロなら索引が DB 書き込みを止めるので、
+    // 全リポジトリで発行を試みてもコストは増えない。
     if payload.kind.is_none() && payload.event.is_some() {
         if let Some(w) = worktree {
             if !repo_has_notification_hooks(&settings, w) {
@@ -4854,26 +5173,13 @@ async fn notify_handler(
         }
     }
 
-    // kind: 明示指定(旧形式/MCP) > event からの解決 > "general"
-    let kind = if let Some(k) = payload.kind.clone() {
-        k
-    } else if let Some(ev) = payload.event.as_deref() {
-        match worktree {
-            Some(w) => resolve_kind_for_event(&settings, w, ev),
-            None => default_kind_for_event(ev).to_string(),
-        }
-    } else {
-        "general".to_string()
-    };
-
     let event = NotifyWorktreeEvent {
         worktree_name,
-        kind,
+        kind: kind.as_str().to_string(),
         body: payload.body,
         agent: payload.agent,
         tray,
     };
-    // terminal_id は現状ログのみ（発火元タブの同定に使う）。購読機構 (#123 以降) で消費する。
     log::info!(
         "[notify] worktree={} kind={} tray={} terminal={:?}",
         event.worktree_name,
@@ -4893,7 +5199,7 @@ async fn notify_handler(
         return StatusCode::OK;
     }
 
-    if event.kind == "hook" {
+    if kind == NotifyKind::Hook {
         // hook 通知は WebView IPC を経由せず broadcast channel で直接 MCP ピアへ配信。
         // app_handle.emit() は WebView UIスレッドを経由するため、高頻度の hook 通知では
         // UIスレッドへの負荷が累積しフリーズの原因になる。
@@ -5973,6 +6279,134 @@ mod tests {
         let restored: NotifyWorktreeEvent =
             serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
         assert!(!restored.tray);
+    }
+
+    // ─── #140: kind 統合 ──────────────────────────────────────────────────────
+
+    fn notify_payload(project_dir: Option<&str>, worktree: Option<&str>, terminal: Option<&str>) -> NotifyPayload {
+        NotifyPayload {
+            project_dir: project_dir.map(str::to_string),
+            event: Some("Stop".into()),
+            worktree: worktree.map(str::to_string),
+            kind: None,
+            body: None,
+            agent: Some("cc".into()),
+            terminal_id: terminal.map(str::to_string),
+        }
+    }
+
+    /// `projectDir` からの逆引きが本筋。
+    #[test]
+    fn resolve_notify_source_from_project_dir() {
+        let settings = target_settings();
+        let src = resolve_notify_source(
+            &settings,
+            &notify_payload(Some("X:/wt"), None, Some("term-live")),
+            &["term-live".to_string()],
+        )
+        .expect("projectDir から引けるはず");
+        assert_eq!(src.worktree_id, "wt-1");
+        assert_eq!(src.worktree_name.as_deref(), Some("oretachi-abcd"));
+        assert_eq!(src.repository_name.as_deref(), Some("OreTachi"));
+        assert_eq!(src.workgroup_id.as_deref(), Some("wg-2"));
+        assert_eq!(src.terminal_id.as_deref(), Some("term-live"));
+        assert_eq!(src.actor, "hook");
+    }
+
+    /// `projectDir` が取れないときは後方互換のワークツリー名で引き直す。
+    #[test]
+    fn resolve_notify_source_falls_back_to_worktree_name() {
+        let settings = target_settings();
+        let src = resolve_notify_source(
+            &settings,
+            &notify_payload(None, Some("oretachi-abcd"), None),
+            &[],
+        )
+        .expect("名前からも引けるはず");
+        assert_eq!(src.worktree_id, "wt-1");
+        assert!(src.terminal_id.is_none());
+    }
+
+    /// **引けなければイベントを作らない。** `source_worktree_id` の無いイベントは
+    /// `matching_targets` も自己エコー抑止も成立しないまま配られてしまう。
+    #[test]
+    fn resolve_notify_source_returns_none_when_unresolvable() {
+        let settings = target_settings();
+        assert!(resolve_notify_source(&settings, &notify_payload(None, None, None), &[]).is_none());
+        assert!(resolve_notify_source(
+            &settings,
+            &notify_payload(Some("X:/somewhere-else"), Some("no-such-worktree"), None),
+            &[]
+        )
+        .is_none());
+    }
+
+    /// **実在しない terminal_id は捨てる。** 捏造した ID を載せると、その ID を持つ
+    /// 購読者への配送が自己エコーとして握り潰される。
+    #[test]
+    fn resolve_notify_source_drops_unknown_terminal_id() {
+        let settings = target_settings();
+        let src = resolve_notify_source(
+            &settings,
+            &notify_payload(Some("X:/wt"), None, Some("term-ghost")),
+            &["term-live".to_string()],
+        )
+        .unwrap();
+        assert!(src.terminal_id.is_none(), "実在しないタブ ID は載せない");
+    }
+
+    /// フック設定の kind は `NotifyKind` に正規化される。不正値は settings 読み込みの
+    /// 段階で `hook` へ倒れているので、ここに未知の値は来ない。
+    #[test]
+    fn resolve_kind_for_event_uses_repo_setting_then_default() {
+        let mut settings = target_settings();
+        // 設定が無ければイベント名の既定値
+        assert_eq!(
+            resolve_kind_for_event(&settings, &settings.worktrees[0].clone(), "Stop"),
+            NotifyKind::Completed
+        );
+        assert_eq!(
+            resolve_kind_for_event(&settings, &settings.worktrees[0].clone(), "PermissionRequest"),
+            NotifyKind::Approval
+        );
+        assert_eq!(
+            resolve_kind_for_event(&settings, &settings.worktrees[0].clone(), "PostToolUse"),
+            NotifyKind::Hook
+        );
+
+        // リポジトリ設定があればそちらが勝つ
+        settings.repositories[0].notification_hooks = Some(vec![
+            serde_json::from_str(r#"{"event":"Stop","kind":"general"}"#).unwrap(),
+        ]);
+        assert_eq!(
+            resolve_kind_for_event(&settings, &settings.worktrees[0].clone(), "Stop"),
+            NotifyKind::General
+        );
+    }
+
+    /// debounce の窓は `NotifyKind` に一本化されている。
+    #[test]
+    fn notify_debounce_secs_delegates_to_notify_kind() {
+        assert_eq!(notify_debounce_secs("hook"), Some(3));
+        assert_eq!(notify_debounce_secs("approval"), Some(1));
+        assert_eq!(notify_debounce_secs("completed"), None);
+        assert_eq!(notify_debounce_secs("worktree.message"), None);
+        // 未知の文字列は従来どおり素通し（握り潰さない）
+        assert_eq!(notify_debounce_secs("bogus"), None);
+    }
+
+    /// **トースト用とイベント用の debounce マップは独立している。** 共有すると
+    /// 片方の判定がもう片方の窓を消費し、「トーストは出たがイベントは出ない」が起きる。
+    #[test]
+    fn event_debounce_map_is_independent_from_toast_map() {
+        let toast = debounce_map();
+        let events = debounce_map();
+
+        // トースト側で窓を1つ消費しても、イベント側の初回はそのまま通る
+        assert!(should_send_notify(&toast, "wt-a", "hook", true));
+        assert!(!should_send_notify(&toast, "wt-a", "hook", true));
+        assert!(should_send_notify(&events, "wt-a", "hook", true), "イベント側は独立");
+        assert!(!should_send_notify(&events, "wt-a", "hook", true));
     }
 
     /// name 未設定のグループは UI 側 (useWorkgroups.displayName / i18n workgroup.autoName) が

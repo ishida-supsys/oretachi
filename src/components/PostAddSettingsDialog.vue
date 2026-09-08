@@ -2,7 +2,11 @@
 import { ref, onMounted } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useI18n } from "vue-i18n";
-import type { NotificationHookEntry } from "../types/settings";
+import {
+  HOOK_NOTIFY_KINDS,
+  type HookNotifyKind,
+  type NotificationHookEntry,
+} from "../types/settings";
 
 const props = defineProps<{
   repoPath: string;
@@ -38,13 +42,16 @@ const BRANCH_PATTERN_EXAMPLES = ["worktree/<task>", "{feature|fix}/<task>"];
 const ALL_PMS = ["npm", "pnpm", "yarn", "bun"];
 
 const HOOK_EVENTS = ["Stop", "Notification", "SubagentStop", "PreToolUse", "PostToolUse", "PermissionRequest"] as const;
-const NOTIFY_KINDS = ["completed", "approval", "general"] as const;
+// フックが名乗れるのは4値だけ（Rust 側 `NotifyKind::allowed_as_hook_entry` と対応）。
+// **統合後の7値をここへ出してはいけない**: `worktree.message` を選べるようにすると、
+// 設定1行で Claude Code のフック JSON が他ワークツリーへ自由文配送される。
+const NOTIFY_KINDS = HOOK_NOTIFY_KINDS;
 // event → { enabled, kind }
-const hookState = ref<Map<string, { enabled: boolean; kind: string }>>(new Map());
+const hookState = ref<Map<string, { enabled: boolean; kind: HookNotifyKind }>>(new Map());
 
 // 初期化: 既存設定またはデフォルト推奨設定
 {
-  const DEFAULTS: Record<string, string> = { Stop: "completed", PermissionRequest: "approval" };
+  const DEFAULTS: Record<string, HookNotifyKind> = { Stop: "completed", PermissionRequest: "approval" };
   for (const ev of HOOK_EVENTS) {
     const existing = props.currentNotificationHooks?.find((h) => h.event === ev);
     if (existing) {
@@ -103,7 +110,7 @@ function onConfirm() {
   for (const ev of HOOK_EVENTS) {
     const state = hookState.value.get(ev);
     if (state?.enabled) {
-      hooks.push({ event: ev as NotificationHookEntry["event"], kind: state.kind as NotificationHookEntry["kind"] });
+      hooks.push({ event: ev as NotificationHookEntry["event"], kind: state.kind });
     }
   }
   emit("confirm", Array.from(selected.value), selectedPM.value || undefined, pmArgs.value.trim() || undefined, hooks, pullBeforeAdd.value, branchNamePattern.value.trim() || undefined);
@@ -193,7 +200,7 @@ function onConfirm() {
               class="hook-kind-select"
               :disabled="!hookState.get(ev)?.enabled"
               :value="hookState.get(ev)?.kind"
-              @change="hookState.get(ev)!.kind = ($event.target as HTMLSelectElement).value"
+              @change="hookState.get(ev)!.kind = ($event.target as HTMLSelectElement).value as HookNotifyKind"
             >
               <option v-for="kind in NOTIFY_KINDS" :key="kind" :value="kind">{{ kind }}</option>
             </select>

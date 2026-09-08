@@ -26,6 +26,12 @@ export default {
     title: 'Worktree通知',
     titleApproval: '承認が必要です',
     titleCompleted: 'タスク完了',
+    // #140: kind の統合で購読イベント種別も同じ `kind` になったため、
+    // すべての種別に OS 通知のタイトルが要る。
+    titleHook: 'ライフサイクルフック',
+    titleWorktreeMessage: 'メッセージを送信しました',
+    titleWorktreeCreated: 'ワークツリーを作成しました',
+    titleWorktreeClosed: 'ワークツリーをクローズしました',
   },
   // 自動 spawn の警告トースト (issue #120 §7 / #130 / #137)。
   // メイン / サブウィンドウが共通の composable から引くため、SFC ローカルではなくここに置く。

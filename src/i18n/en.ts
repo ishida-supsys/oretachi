@@ -26,6 +26,12 @@ export default {
     title: 'Worktree Notification',
     titleApproval: 'Approval Required',
     titleCompleted: 'Task Completed',
+    // #140: the unified `kind` covers subscription event kinds too, so every kind
+    // needs an OS-notification title.
+    titleHook: 'Lifecycle Hook',
+    titleWorktreeMessage: 'Message Sent',
+    titleWorktreeCreated: 'Worktree Created',
+    titleWorktreeClosed: 'Worktree Closed',
   },
   // Warning toast for auto spawn (issue #120 §7 / #130 / #137).
   // Shared by the main window and sub-windows through a common composable, so it lives
