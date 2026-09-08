@@ -11,8 +11,6 @@ const {
   sendOne,
   sendEnter,
   answerPrompt,
-  ackInbox,
-  clearNotifications,
   isDialog,
   promptConflicts,
 } = require('./lib/send');
@@ -32,10 +30,12 @@ function App() {
   // 本体 JSON ではなくサイドカーに置くのは、送信後に「返答済み」へ書き換える操作が
   // 本体だと自分自身の locked_while_open に弾かれるため。ビューア由来の書き込みは
   // ロックの対象外なので、サイドカーなら開いたまま更新できる。
+  //
+  // ack（inbox）とトレイ通知のクリアはここには無い。**レポート生成時に生成側の
+  // セッションが済ませている**ので、このレポートは「その時点で拾った通知」だけを
+  // 抱えた閉じたスナップショットになっている（#219）。
   const [answers, setAnswers] = useMemory('answers', {});   // 送信済みの記録
   const [drafts, setDrafts] = useMemory('drafts', {});      // 選択と補足の下書き
-  const [ack, setAck] = useMemory('ack', null);             // ack の結果
-  const [cleared, setCleared] = useMemory('cleared', null); // トレイ通知クリアの結果
 
   // ── ローカル state（永続不要な進行状況） ──────────────────────────────
   const [busy, setBusy] = useState(false);
@@ -70,17 +70,6 @@ function App() {
   const send = useCallback(async (targets) => {
     if (busy || targets.length === 0) return;
     setBusy(true);
-    const acked = [];
-    // 返答が届いた宛先ワークツリー。ack（inbox）とは別ストアのトレイバッジを
-    // 落とすのに使う（#218）
-    const sentWorktreeIds = [];
-    // この送信ループ後の各カードの status。トレイバッジはワークツリー粒度でしか
-    // 落とせないので、**そのワークツリーのカードが全部 sent になったか**をここで見る。
-    // `answers` はクロージャに閉じ込まれた送信前の値なので使えない
-    const statusById = {};
-    for (const x of NOTIFICATIONS) statusById[x.id] = (answers[x.id] || {}).status || null;
-    // `worktreeId` が入っていない（= バッジを落とす宛先が分からない）カード
-    const missingWorktreeIds = [];
     try {
       for (const n of targets) {
         const prev = answers[n.id];
@@ -130,57 +119,12 @@ function App() {
           // サイドカーへ書けなくても送信自体は済んでいる。表示だけが古くなる
           console.warn('返答状態の保存に失敗しました', e);
         }
-        statusById[n.id] = result.status;
-        if (result.status === 'sent') {
-          acked.push(...(n.inboxIds || []));
-          // `worktreeId` はスキーマ上必須だが、欠けていたらバッジを落とせない。
-          // 黙って飛ばすと「クリアされていないこと」がどこにも出ないので失敗として見せる
-          if (n.worktreeId) sentWorktreeIds.push(n.worktreeId);
-          else missingWorktreeIds.push(n.worktreeName || n.id);
-        }
-      }
-      // 1 件も送れていないときは ack を触らない。触ると直前の
-      // 「N 件既読化しました」/「ack 不可」の表示が skipped で消える
-      if (acked.length > 0) {
-        const outcome = await ackInbox(acked);
-        try {
-          await setAck({ ...outcome, at: nowLabel() });
-        } catch (e) {
-          console.warn('ack 結果の保存に失敗しました', e);
-        }
-      }
-      // 返答が届いた宛先のトレイバッジを落とす（#218）。ack は inbox（sqlite）で
-      // バッジはフロントの別ストアなので、両方やらないと捌き終わったワークツリーが
-      // トレイポップアップの巡回に残り続ける。ack と違い AI セッションの稼働は不要。
-      //
-      // **落とせるのはワークツリー単位**（`NotificationRegistry` に通知単位の粒度が無い）。
-      // なので「そのワークツリーのカードが全部 sent」になった宛先だけに絞る。絞らないと、
-      // まだ未返答のカードが残っているワークツリーのバッジまで消えて、人が気づく導線が
-      // 失われる（`promptConflicts` で塞がれた 2 枚目など）。
-      // レポート生成後に届いた通知はこの粒度では区別できず一緒に落ちるが、それは
-      // トレイポップアップを1件送りしても同じ（離脱時にワークツリーごと既読になる）。
-      const clearable = sentWorktreeIds.filter(wid => {
-        const cards = NOTIFICATIONS.filter(x => x.worktreeId === wid);
-        return cards.length > 0 && cards.every(x => statusById[x.id] === 'sent');
-      });
-      if (clearable.length > 0 || missingWorktreeIds.length > 0) {
-        const outcome = clearable.length > 0
-          ? await clearNotifications(clearable)
-          : { ok: [], failed: {} };
-        for (const label of missingWorktreeIds) {
-          outcome.failed[label] = 'このカードに worktreeId が入っていないため宛先を特定できません（レポートを作り直してください）';
-        }
-        try {
-          await setCleared({ ...outcome, at: nowLabel() });
-        } catch (e) {
-          console.warn('通知クリア結果の保存に失敗しました', e);
-        }
       }
     } finally {
       setInflightId(null);
       setBusy(false);
     }
-  }, [busy, answers, drafts, setAnswers, setAck, setCleared, conflicts]);
+  }, [busy, answers, drafts, setAnswers, conflicts]);
 
   const sentCount = NOTIFICATIONS.filter(n => (answers[n.id] || {}).status === 'sent').length;
   const failedCount = NOTIFICATIONS.filter(n => {
@@ -234,8 +178,10 @@ function App() {
           background: '#cba6f712', border: '1px solid #cba6f744', borderRadius: 6,
           padding: '9px 12px', lineHeight: 1.7,
         }}>
-          このレポートは {META.generatedAt} 時点のスナップショットです。開いている間に届いた通知は含まれず、
-          次のレポートに回ります。各カードの現況要約も生成時にターミナルを読んだ内容で、以後は更新されません。
+          このレポートは {META.generatedAt} 時点のスナップショットです。ここに載っている通知は
+          <b>生成時に既読化（ack）とトレイ通知のクリアを済ませてあり</b>、以後のレポートには出てきません
+          （このレポートが唯一の返答窓口です）。生成後に届いた通知は含まれず、次のレポートに回ります。
+          各カードの現況要約も生成時にターミナルを読んだ内容で、以後は更新されません。
         </div>
 
         {/* ダイアログ操作の注意。何が送られるのかを人が理解した上で押させる */}
@@ -275,44 +221,6 @@ function App() {
             onRetry={() => send([n])}
           />
         ))}
-
-        {/* ack の結果。走行中の AI 端末がちょうど 1 つでないと失敗する */}
-        {ack && ack.state === 'failed' && (
-          <div style={{
-            fontSize: 12, color: '#fab387',
-            background: '#fab38714', border: '1px solid #fab38744', borderRadius: 6,
-            padding: '9px 12px', lineHeight: 1.8,
-          }}>
-            <b>ack 不可（{ack.at}）</b> — 返答は届いていますが、通知の既読化に失敗しました。
-            未 ack のまま残るため、次のセッション開始時に同じ通知が再掲されます。
-            <div style={{ marginTop: 4, color: '#9399b2', fontFamily: MONO, fontSize: 11 }}>{ack.error}</div>
-          </div>
-        )}
-        {ack && ack.state === 'ok' && (
-          <div style={{ fontSize: 11.5, color: '#a6e3a1' }}>
-            {ack.count} 件の通知を既読化しました（{ack.at}）
-          </div>
-        )}
-
-        {/* トレイバッジのクリア結果。失敗してもバッジが残るだけで返答は届いている */}
-        {cleared && cleared.ok && cleared.ok.length > 0 && (
-          <div style={{ fontSize: 11.5, color: '#a6e3a1' }}>
-            {cleared.ok.length} 件のワークツリーのトレイ通知をクリアしました（{cleared.at}）
-          </div>
-        )}
-        {cleared && cleared.failed && Object.keys(cleared.failed).length > 0 && (
-          <div style={{
-            fontSize: 12, color: '#fab387',
-            background: '#fab38714', border: '1px solid #fab38744', borderRadius: 6,
-            padding: '9px 12px', lineHeight: 1.8,
-          }}>
-            <b>トレイ通知のクリアに失敗（{cleared.at}）</b> — 返答は届いていますが、
-            トレイバッジが残るため同じワークツリーがトレイポップアップの巡回に出続けます。
-            <div style={{ marginTop: 4, color: '#9399b2', fontFamily: MONO, fontSize: 11 }}>
-              {Object.entries(cleared.failed).map(([id, err]) => `${id}: ${err}`).join(' / ')}
-            </div>
-          </div>
-        )}
 
         {/* 宛先の内訳。session_id は生成時に埋め込んだ値なので、失効したら作り直す */}
         <div style={{

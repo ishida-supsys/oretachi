@@ -260,6 +260,10 @@ function NotificationCard({ n, answer, draft, blocked, canSend, inflight, busy, 
   const d = draft || {};
   const status = answer ? answer.status : 'pending';
   const accent = ACCENT[status] || ACCENT.pending;
+  // 送信済みカードは既定で縮小表示にする。レポートは上から順に捌いていくので、
+  // 済んだカードが本文全文の高さのまま残ると未返答のカードが画面外へ押し出される。
+  // **消さずに畳む**（何を送ったかは 1 行で残し、「展開」で全文へ戻せる）
+  const [expanded, setExpanded] = React.useState(false);
   const kindColor = KIND_COLOR[n.kind] || KIND_COLOR.general;
   const shape = shapeOf(n);
   const dialog = isDialog(n);
@@ -282,6 +286,41 @@ function NotificationCard({ n, answer, draft, blocked, canSend, inflight, busy, 
   const escapeAvailable = canEscape(n);
   // ダイアログが宛先の画面に収まっていない。読めたぶんだけで選ばせてはいけない
   const truncated = isTruncated(n);
+
+  // 縮小表示は `sent` のときだけ。`failed` / `stale` / `unverified` / `pastedOnly` は
+  // 人が次の手を決める必要がある（何が起きたかを畳むと気づかれない）ので畳まない
+  const collapsible = status === 'sent';
+  if (collapsible && !expanded) {
+    return (
+      <div style={{
+        border: '1px solid #262637', borderLeft: `4px solid ${accent}`,
+        borderRadius: 8, background: '#16161f', opacity: 0.62,
+        padding: '8px 14px', display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
+      }}>
+        <span style={{ color: accent, fontSize: 12 }}>{MARK.sent}</span>
+        <span style={{ fontSize: 12.5, fontWeight: 700, color: '#bac2de', fontFamily: FONT }}>
+          {n.worktreeName}
+        </span>
+        {n.issueRef && (
+          <span style={{ fontSize: 11.5, color: '#7f849c', fontFamily: MONO }}>{n.issueRef}</span>
+        )}
+        <span style={{ fontSize: 10.5, color: '#585b70', fontFamily: MONO }}>{n.at}</span>
+        <span style={{
+          fontSize: 11.5, color: '#7f849c', fontFamily: FONT,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 420,
+        }}>
+          送信内容: {describeSent(n, answer)}
+        </span>
+        <div style={{ flex: 1 }} />
+        <Badge label={`${STATUS_LABEL.sent} ${(answer && answer.at) || ''}`.trim()} color={accent} />
+        <button type="button" onClick={() => setExpanded(true)} style={{
+          border: '1px solid #45475a', borderRadius: 6, padding: '3px 10px',
+          background: 'transparent', color: '#9399b2',
+          fontSize: 11, fontWeight: 600, fontFamily: FONT, cursor: 'pointer',
+        }}>展開</button>
+      </div>
+    );
+  }
 
   return (
     <div style={{
@@ -316,6 +355,13 @@ function NotificationCard({ n, answer, draft, blocked, canSend, inflight, busy, 
             color={accent} />
         )}
         {inflight && <Badge label="送信中…" color="#89b4fa" />}
+        {collapsible && (
+          <button type="button" onClick={() => setExpanded(false)} style={{
+            border: '1px solid #45475a', borderRadius: 6, padding: '3px 10px',
+            background: 'transparent', color: '#9399b2',
+            fontSize: 11, fontWeight: 600, fontFamily: FONT, cursor: 'pointer',
+          }}>畳む</button>
+        )}
       </div>
 
       <WorktreeIdentity n={n} />
