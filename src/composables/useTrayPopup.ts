@@ -100,6 +100,11 @@ export function useTrayPopup() {
     currentTrayWorktreeId = worktreeId;
   }
 
+  /** トレイポップアップが開いているか。開いている間だけ届く更新イベントの送信判定に使う */
+  function isTrayPopupOpen(): boolean {
+    return trayWindow !== null;
+  }
+
   function isTrayShowingWorktree(worktreeId: string): boolean {
     return trayWindow !== null && currentTrayWorktreeId === worktreeId;
   }
@@ -116,6 +121,7 @@ export function useTrayPopup() {
     getPendingWorktrees,
     clearPendingWorktrees,
     setCurrentTrayWorktreeId,
+    isTrayPopupOpen,
     isTrayShowingWorktree,
     focusTrayWindow,
   };

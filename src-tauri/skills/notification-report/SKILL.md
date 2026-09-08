@@ -34,6 +34,14 @@ oretachi_poll_inbox(terminal_id: <自分の terminal_id>)
 
 `sourceWorktreeId` を 1-1 の購読対象と突き合わせ、購読していないワークツリー由来のものは落とす（載せても返答を送れない）。
 
+**発信元ワークツリーは `sourceWorktreeId` / `sourceWorktreeName` を必ずここから取る（#218）。**
+以降のステップ（1-4 の `oretachi_get_worktree_status` / `oretachi_list_terminals`）へ渡す宛先は
+**この 2 つだけを使い、通知本文やターミナル出力から名前を推測しない。** 名前を取り違えると
+`oretachi_list_terminals` が別のワークツリー（または該当なし）を返し、`sessionId` が `null` の
+カード（「稼働中の AI 端末が見つからなかったため送信できません」）になる。実際にこれが起きていた。
+`sourceWorktreeName` が `null` のメッセージは発信元が settings から消えている（クローズ済み）ので、
+返答を送れない。レポートに載せない。
+
 ユーザーが「購読外も含めて全部見たい」と明示した場合だけ、`oretachi_subscribe_worktree` で購読を張ってから含める。**購読は勝手に張らない** — 張ることはそのワークツリーの端末への書き込みを許すことなので、ユーザーの指示なしに範囲を広げない。
 
 ### 1-3. トレイ通知は補助情報として使う（母集合にしない）
@@ -57,17 +65,41 @@ oretachi_list_worktree_notifications()
 **(a) ミッション**
 
 ```
-oretachi_get_worktree_status(query: <ワークツリー名>)
+oretachi_get_worktree_status(query: <1-2 の sourceWorktreeName>)
 ```
+
+返る各エントリの `id` を `sourceWorktreeId` と突き合わせて**同名の別ワークツリーを取り違えない**
+（`query` は部分一致なので、名前が前方一致する別ワークツリーも返る）。
 
 `description` が入っていればそれを使う。**未設定なら `null` を入れ**、代わりに 1-4(b) のターミナル出力からミッションを推定して `descFallback` に書く（カードには `[description 未設定]` バッジ付きで出る）。
 
 **(b) 現況**
 
 ```
-oretachi_list_terminals(worktree_name: <ワークツリー名>)   → isAiAgent: true / status: "running" の session_id
-oretachi_read_terminal(session_id: <上で得た値>, max_bytes: 8192)
+oretachi_list_terminals(worktree_id: <1-2 の sourceWorktreeId>)   → isAiAgent: true / status: "running" の sessionId
+oretachi_read_terminal(session_id: <上で得た sessionId>, max_bytes: 8192)
 ```
+
+**絞り込みは `worktree_id` で行う（`worktree_name` ではない）。** 名前指定は同名ワークツリーが
+あるとエラーになり、綴りが 1 文字違うだけで「該当なし」になる。ID なら `oretachi_poll_inbox` が
+返した値をそのまま渡せる（#218）。
+
+返り値のフィールド名は **`sessionId`**（camelCase）。`session_id` というキーは無い。
+
+**0 件だったときに `sessionId: null` へ直行しないこと。** このツールの絞り込みは
+**各 PTY の `cwd` から解決したワークツリー**で行われる（`resolve_worktree_by_cwd` は
+`cwd` に前方一致するワークツリーのうち最も深いものを採る）。そのため
+**cwd をワークツリー外へ移した生存 AI 端末や、そのワークツリーの下にネストして登録された
+別ワークツリーへ吸われた端末は、ID 指定でも結果から落ちる。** 0 件のときは:
+
+1. 絞り込みなしで `oretachi_list_terminals()` を呼ぶ
+2. `isAiAgent: true` / `status: "running"` かつ `cwd` が 1-2 の `sourceWorktreePath` 配下に
+   あるものを探す（`worktreeId` が別の値になっていても、そこで走っているのは
+   その発信元の端末）
+3. それでも無ければ本当に AI 端末が無い（素のシェルだけ / タブを閉じた）
+
+ID 指定がエラーになるのは「その ID の登録が無い」＝発信元がクローズ済みの場合だけなので、
+そのときは 1-2 の判断（レポートに載せない）へ戻る。
 
 読んだ出力から**フェーズと 1 行要約**にまとめる。フェーズは次のいずれか（カード側の色分けがこの文字列に対応している）:
 
@@ -162,7 +194,14 @@ CR を送ると、3 番目の選択肢が確定した。`cursorIndex` から目�
 
 ### 1-5. 送信先の session_id を決める
 
-1-4(b) で得た「そのワークツリーで走っている AI エージェント端末」の `session_id` をそのまま `sessionId` に入れる。見つからなければ `null` を入れる（カードが「稼働中の AI 端末が見つからなかったため送信できません」になる）。
+1-4(b) で得た「そのワークツリーで走っている AI エージェント端末」の `sessionId` をそのまま `sessionId` に入れる。見つからなければ `null` を入れる（カードが「稼働中の AI 端末が見つからなかったため送信できません」になる）。
+
+**`null` を入れる前に 1-4(b) の 0 件時の手順（絞り込みなしで引き直して `cwd` を見る）を
+必ず通す。** そのカードは人が押せないので、レポートの価値がそのぶん失われる。実測で起きていた
+`null` はどれも「宛先ワークツリー名を推測して `oretachi_list_terminals(worktree_name: ...)` が
+空を返した」ケースで、端末は生きていた（#218）。本当に AI 端末が無いのか
+（素のシェルだけ / タブを閉じた）を `oretachi_list_terminals` の返り値そのもので
+確認してから `null` にすること。
 
 アーティファクトからは `oretachi_list_terminals` が呼べないため、`session_id` は**ここで焼き込むしかない**。アプリ再起動やタブ再作成で失効するので、失効したらレポートを作り直す。
 
@@ -261,7 +300,11 @@ notify_worktree(worktree_name: <自分のワークツリー名>, kind: "general"
   body: "通知レポート <ID> を作成しました（未返答 N 件）")
 ```
 
-**ここで通知をクリアしない。** `oretachi_clear_worktree_notification` はユーザーが返答を送り終えたあとに呼ぶ（レポートを作った時点では、まだ人が捌いていない）。
+**ここで通知をクリアしない。** 宛先のトレイ通知は、ユーザーが返答を送った時点で
+**レポート自身が** `oretachi_clear_worktree_notification` を呼んで落とす（`lib/send` の
+`clearNotifications`。#218）。レポートを開くのは AI セッションが終わったあとのことが多く、
+生成側のセッションがクリアする経路は当てにできないので、生成時にも生成後にも
+このセッションからクリアしないこと。
 
 ## 送信の仕組み（レポート側の挙動）
 
@@ -273,6 +316,30 @@ notify_worktree(worktree_name: <自分のワークツリー名>, kind: "general"
    - それ以外 … `oretachi_answer_prompt(session_id, expect_fingerprint, kind, ...)` を 1 回
 3. 1 件ごとにサイドカーへ結果を書く（途中で閉じても「どこまで届いたか」が残る）
 4. 全件終わったら `sent` 分の inbox ID をまとめて `oretachi_ack_message`。**失敗は許容**して「ack 不可」を表示する
+5. `sent` になった宛先ワークツリーの未確認通知を `oretachi_clear_worktree_notification`
+   （`worktree_id` 指定）で落とす。**失敗は許容**して「クリア失敗」を表示する
+
+### ack とトレイ通知クリアは別のストア（#218）
+
+`oretachi_ack_message` が触るのは sqlite の event_db（inbox の行）で、トレイバッジ /
+ホームのカードの件数はフロントが持つ**別の写し**（`NotificationRegistry`）。
+**ack だけではバッジが残る。** 残ると、返答済みのワークツリーがトレイポップアップの
+巡回に出続け、人が同じ通知を何度も見ることになる（これが #217 の項目4）。
+
+クリアには AI セッションの稼働が要らない（`worktree_id` を明示するので
+`resolve_subscriber` のフォールバックに倒れない）。許可条件は `write_terminal` と同じ
+#211 の購読なので、**返答を送れた宛先なら必ず通る**。
+
+トレイポップアップが開いたまま外からクリアされた場合は、メインウィンドウが
+`tray-notification-cleared` を投げてポップアップの一覧からそのカードを取り除く
+（ポップアップの一覧は開いた時点のスナップショットなので、これが無いと消えない）。
+遷移中・ダイアログ表示中・アーカイブ依頼中は取り除きを予約に溜めて後で流す
+（割り込むと確定待ちのダイアログが別のワークツリーを指す）。
+
+**クリアの粒度はワークツリー単位。** `NotificationRegistry` に通知 1 件ごとの粒度が無いため、
+レポートは「そのワークツリーのカードが**全部** `sent` になった宛先」だけをクリアする。
+一部だけ送った時点でクリアすると、未返答のカードが残っているのにバッジが消えて
+人が気づく導線が失われる。
 
 ### ダイアログ経路の安全弁（#215）
 
@@ -325,7 +392,7 @@ await callTool('oretachi_write_terminal', { session_id, text: '\r', submit: fals
 
 ## 制約
 
-- **`oretachi_ack_message` / `oretachi_poll_inbox` / `notify_worktree`（`kind: "worktree.message"` 指定）はアーティファクトからは AI セッション稼働中しか使えない。** `terminal_id` を取らないので、レポートを置いたワークツリーで走行中の AI エージェント端末が**ちょうど 1 つ**でないと失敗する。AI セッション終了後にユーザーがレポートを触る場合は常に失敗するので、**ack の失敗を前提に設計してある**（返答自体は届く）。
+- **`oretachi_ack_message` / `oretachi_poll_inbox` / `notify_worktree`（`kind: "worktree.message"` 指定）はアーティファクトからは AI セッション稼働中しか使えない。** `terminal_id` を取らないので、レポートを置いたワークツリーで走行中の AI エージェント端末が**ちょうど 1 つ**でないと失敗する。AI セッション終了後にユーザーがレポートを触る場合は常に失敗するので、**ack の失敗を前提に設計してある**（返答自体は届く）。`oretachi_write_terminal` / `oretachi_answer_prompt` / `oretachi_clear_worktree_notification` は宛先を明示するのでこの制約を受けない。
 - **表示中ロックが守るのは「そのウィンドウでいま表示している 1 件」だけ。** ウィンドウが開いたままでもユーザーが別のアーティファクトへ切り替えるとロックは外れる。レポートはユーザーがそのページに留まっている前提で扱う。
 - **`multiSelect` の設問と複数設問の 2 問目以降はレポートから答えられない（#215）。** 複数選択は画面から単一選択と判別できず、トグルキーを推測して送ると意図しない選択を確定しうるため、単一選択の 1 つ選んで CR だけを提供する。複数設問は 1 問答えると画面が次へ変わるので、続きは次のレポートに回る（カードに「まだ設問が残っています」と出る）。どちらも人がターミナルを開いて操作するのが確実。
 - **`shape` の判定はレポート生成時点のスナップショット。** 生成後に宛先が進んでダイアログが消えていれば、送信時に `stale` になって何も送られない（安全側に倒れる）。
@@ -342,7 +409,8 @@ await callTool('oretachi_write_terminal', { session_id, text: '\r', submit: fals
 - **送信テキストに改行を入れない。** 行ごとに送信されて宛先のエージェントへプロンプトが分割して飛ぶ。
 - **本文と Enter を 1 回の `write_terminal` でまとめない。** テキストは届くのにターンが始まらない。
 - **`flatten()` の制御文字除去を外さない。** 宛先の TUI へエスケープシーケンスを注入できてしまう。キー列は Rust 側（`oretachi_answer_prompt`）が組むので、JS から生のキーを流さない。
-- **レポートを作った時点で通知をクリアしない。** ユーザーが返答し終えてから `oretachi_clear_worktree_notification` を呼ぶ。
+- **通知のクリアを生成側のセッションでやらない。** レポート自身が送信成功時に呼ぶ（#218）。生成時にクリアすると、人が捌く前にバッジが消える。
+- **宛先ワークツリー名を推測しない。** `oretachi_poll_inbox` の `sourceWorktreeId` / `sourceWorktreeName` だけを使う。推測した名前で `oretachi_list_terminals` を引くと空が返り、`sessionId: null` の押せないカードになる（#218）。
 
 ### ダイアログ関連（#215）
 

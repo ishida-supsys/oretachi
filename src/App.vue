@@ -105,7 +105,21 @@ const { notifications, initNotificationListener, addNotification, clearNotificat
 // するので、**そのワークツリーを表示しているウィンドウだけ**が出す。分離済みならサブウィンドウの担当。
 // 配送トーストは #137 で廃止（購読状態はカードの購読バッジが常時見せる）。
 useEventToast({ shouldShow: (wid) => mainWindowShowsDelivery(wid, isDetached) });
-const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees, setCurrentTrayWorktreeId, isTrayShowingWorktree, focusTrayWindow } = useTrayPopup();
+const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees, setCurrentTrayWorktreeId, isTrayPopupOpen, isTrayShowingWorktree, focusTrayWindow } = useTrayPopup();
+/**
+ * 通知バッジを落とし、開いているトレイポップアップの一覧からもそのカードを取り除く（#218）。
+ *
+ * トレイポップアップの一覧は開いた時点のスナップショットなので、自分では消えない。
+ * **トレイ由来のクリア（`tray-clear-notification`）では呼ばない** — 巡回で離脱した側を
+ * トレイ自身が消すことになり、遷移中に一覧が縮んで index がずれる。
+ */
+function clearNotificationAndTray(worktreeId: string) {
+  clearNotification(worktreeId);
+  if (isTrayPopupOpen()) {
+    emitTo("tray-popup", "tray-notification-cleared", { worktreeId }).catch(() => {});
+  }
+}
+
 const { closeAllCodeReviewWindows } = useCodeReviewWindow();
 const { openArtifactViewer, closeArtifactWindow, closeAllArtifactWindows } = useArtifactWindow();
 const { tryAutoAssignHotkey } = useAutoHotkey();
@@ -650,7 +664,7 @@ async function onTerminalReady(worktreeId: string, terminalId: number) {
 async function switchToTerminal(terminalId: number) {
   // detached ワークツリーのターミナルはサブウィンドウにフォーカス
   const worktreeId = terminalWorktreeMap.get(terminalId);
-  if (worktreeId) clearNotification(worktreeId);
+  if (worktreeId) clearNotificationAndTray(worktreeId);
   if (worktreeId && isDetached(worktreeId)) {
     await focusSubWindow(worktreeId);
     await emitTo(`sub-${worktreeId}`, "sub-focus-terminal", { terminalId });
@@ -794,7 +808,7 @@ async function onAddTerminal(
   options?: { background?: boolean; pendingCommand?: string },
 ) {
   const background = options?.background === true;
-  clearNotification(worktreeId);
+  clearNotificationAndTray(worktreeId);
   if (isDetached(worktreeId)) {
     // detached worktree は handleSubAddTerminalRequest 経由で処理し、pendingCommand 連携は未対応。
     await handleSubAddTerminalRequest(worktreeId);
@@ -944,7 +958,7 @@ async function onRemoveRepository(repositoryId: string) {
   }
   worktree?.terminals.splice(0);
   worktreeFrameBundles.delete(pseudoId);
-  clearNotification(pseudoId);
+  clearNotificationAndTray(pseudoId);
   artifactCounts.delete(pseudoId);
   artifactUrls.delete(pseudoId);
   descriptionOpenMap.delete(pseudoId);
@@ -1203,7 +1217,7 @@ watch(
   () => isWindowFocused.value && viewMode.value === "terminal" && activeWorktreeId.value,
   (worktreeId) => {
     if (worktreeId) {
-      clearNotification(worktreeId);
+      clearNotificationAndTray(worktreeId);
     }
   },
 );
@@ -1415,7 +1429,7 @@ function onFrameAddTerminal(wid: string, leafId: string) {
 
 
 async function onFocusSubWindow(worktreeId: string) {
-  clearNotification(worktreeId);
+  clearNotificationAndTray(worktreeId);
   await focusSubWindow(worktreeId);
 }
 
@@ -1924,7 +1938,7 @@ onMounted(async () => {
   // 通知が積まれ始めるのは initNotificationListener が notify-worktree を購読して
   // からなので、その前に登録しておけば取りこぼす窓が構造的に無くなる。
   await listen<{ worktree: string; worktreeId: string }>("clear-worktree-notification", (event) => {
-    clearNotification(event.payload.worktreeId);
+    clearNotificationAndTray(event.payload.worktreeId);
     logDebug(`[Notification] cleared by MCP: ${event.payload.worktree} (${event.payload.worktreeId})`);
   });
 
@@ -2049,17 +2063,25 @@ onMounted(async () => {
 
   // トレイポップアップ準備完了 → init データ送信
   await listen("tray-ready", async () => {
-    const worktrees = getPendingWorktrees();
-    if (worktrees) {
+    const pending = getPendingWorktrees();
+    if (pending) {
+      // webview の起動には数百ms かかり、その間に届いたクリア通知は
+      // 受信者ゼロで捨てられる（#218）。スナップショットは開いた時点のものなので、
+      // 送る直前に現在の通知状態で絞り直さないとクリア済みのカードが載る
+      const notified = new Set(getNotifiedWorktreeIds());
+      const worktrees = pending.filter((w) => notified.has(w.worktreeId));
+      clearPendingWorktrees();
+      if (worktrees.length === 0) {
+        // 開いてから ready までの間に全部捌かれた。見せるものが無い
+        await closeTrayPopup();
+        return;
+      }
       try {
         await emitTo("tray-popup", "tray-init", { worktrees });
-        if (worktrees.length > 0) {
-          setCurrentTrayWorktreeId(worktrees[0].worktreeId);
-        }
+        setCurrentTrayWorktreeId(worktrees[0].worktreeId);
       } catch (e) {
         console.error("tray-init 送信失敗:", e);
       }
-      clearPendingWorktrees();
     }
   });
 

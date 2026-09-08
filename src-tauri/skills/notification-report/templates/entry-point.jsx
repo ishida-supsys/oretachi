@@ -12,6 +12,7 @@ const {
   sendEnter,
   answerPrompt,
   ackInbox,
+  clearNotifications,
   isDialog,
   promptConflicts,
 } = require('./lib/send');
@@ -34,6 +35,7 @@ function App() {
   const [answers, setAnswers] = useMemory('answers', {});   // 送信済みの記録
   const [drafts, setDrafts] = useMemory('drafts', {});      // 選択と補足の下書き
   const [ack, setAck] = useMemory('ack', null);             // ack の結果
+  const [cleared, setCleared] = useMemory('cleared', null); // トレイ通知クリアの結果
 
   // ── ローカル state（永続不要な進行状況） ──────────────────────────────
   const [busy, setBusy] = useState(false);
@@ -69,6 +71,16 @@ function App() {
     if (busy || targets.length === 0) return;
     setBusy(true);
     const acked = [];
+    // 返答が届いた宛先ワークツリー。ack（inbox）とは別ストアのトレイバッジを
+    // 落とすのに使う（#218）
+    const sentWorktreeIds = [];
+    // この送信ループ後の各カードの status。トレイバッジはワークツリー粒度でしか
+    // 落とせないので、**そのワークツリーのカードが全部 sent になったか**をここで見る。
+    // `answers` はクロージャに閉じ込まれた送信前の値なので使えない
+    const statusById = {};
+    for (const x of NOTIFICATIONS) statusById[x.id] = (answers[x.id] || {}).status || null;
+    // `worktreeId` が入っていない（= バッジを落とす宛先が分からない）カード
+    const missingWorktreeIds = [];
     try {
       for (const n of targets) {
         const prev = answers[n.id];
@@ -118,7 +130,14 @@ function App() {
           // サイドカーへ書けなくても送信自体は済んでいる。表示だけが古くなる
           console.warn('返答状態の保存に失敗しました', e);
         }
-        if (result.status === 'sent') acked.push(...(n.inboxIds || []));
+        statusById[n.id] = result.status;
+        if (result.status === 'sent') {
+          acked.push(...(n.inboxIds || []));
+          // `worktreeId` はスキーマ上必須だが、欠けていたらバッジを落とせない。
+          // 黙って飛ばすと「クリアされていないこと」がどこにも出ないので失敗として見せる
+          if (n.worktreeId) sentWorktreeIds.push(n.worktreeId);
+          else missingWorktreeIds.push(n.worktreeName || n.id);
+        }
       }
       // 1 件も送れていないときは ack を触らない。触ると直前の
       // 「N 件既読化しました」/「ack 不可」の表示が skipped で消える
@@ -130,11 +149,38 @@ function App() {
           console.warn('ack 結果の保存に失敗しました', e);
         }
       }
+      // 返答が届いた宛先のトレイバッジを落とす（#218）。ack は inbox（sqlite）で
+      // バッジはフロントの別ストアなので、両方やらないと捌き終わったワークツリーが
+      // トレイポップアップの巡回に残り続ける。ack と違い AI セッションの稼働は不要。
+      //
+      // **落とせるのはワークツリー単位**（`NotificationRegistry` に通知単位の粒度が無い）。
+      // なので「そのワークツリーのカードが全部 sent」になった宛先だけに絞る。絞らないと、
+      // まだ未返答のカードが残っているワークツリーのバッジまで消えて、人が気づく導線が
+      // 失われる（`promptConflicts` で塞がれた 2 枚目など）。
+      // レポート生成後に届いた通知はこの粒度では区別できず一緒に落ちるが、それは
+      // トレイポップアップを1件送りしても同じ（離脱時にワークツリーごと既読になる）。
+      const clearable = sentWorktreeIds.filter(wid => {
+        const cards = NOTIFICATIONS.filter(x => x.worktreeId === wid);
+        return cards.length > 0 && cards.every(x => statusById[x.id] === 'sent');
+      });
+      if (clearable.length > 0 || missingWorktreeIds.length > 0) {
+        const outcome = clearable.length > 0
+          ? await clearNotifications(clearable)
+          : { ok: [], failed: {} };
+        for (const label of missingWorktreeIds) {
+          outcome.failed[label] = 'このカードに worktreeId が入っていないため宛先を特定できません（レポートを作り直してください）';
+        }
+        try {
+          await setCleared({ ...outcome, at: nowLabel() });
+        } catch (e) {
+          console.warn('通知クリア結果の保存に失敗しました', e);
+        }
+      }
     } finally {
       setInflightId(null);
       setBusy(false);
     }
-  }, [busy, answers, drafts, setAnswers, setAck, conflicts]);
+  }, [busy, answers, drafts, setAnswers, setAck, setCleared, conflicts]);
 
   const sentCount = NOTIFICATIONS.filter(n => (answers[n.id] || {}).status === 'sent').length;
   const failedCount = NOTIFICATIONS.filter(n => {
@@ -245,6 +291,26 @@ function App() {
         {ack && ack.state === 'ok' && (
           <div style={{ fontSize: 11.5, color: '#a6e3a1' }}>
             {ack.count} 件の通知を既読化しました（{ack.at}）
+          </div>
+        )}
+
+        {/* トレイバッジのクリア結果。失敗してもバッジが残るだけで返答は届いている */}
+        {cleared && cleared.ok && cleared.ok.length > 0 && (
+          <div style={{ fontSize: 11.5, color: '#a6e3a1' }}>
+            {cleared.ok.length} 件のワークツリーのトレイ通知をクリアしました（{cleared.at}）
+          </div>
+        )}
+        {cleared && cleared.failed && Object.keys(cleared.failed).length > 0 && (
+          <div style={{
+            fontSize: 12, color: '#fab387',
+            background: '#fab38714', border: '1px solid #fab38744', borderRadius: 6,
+            padding: '9px 12px', lineHeight: 1.8,
+          }}>
+            <b>トレイ通知のクリアに失敗（{cleared.at}）</b> — 返答は届いていますが、
+            トレイバッジが残るため同じワークツリーがトレイポップアップの巡回に出続けます。
+            <div style={{ marginTop: 4, color: '#9399b2', fontFamily: MONO, fontSize: 11 }}>
+              {Object.entries(cleared.failed).map(([id, err]) => `${id}: ${err}`).join(' / ')}
+            </div>
           </div>
         )}
 
