@@ -421,14 +421,26 @@ async function refreshSelected(artifactId: string, command: string) {
       }
     }
   } else if (command === "create") {
-    // 同じ ID の再作成（上書き転送）では selectArtifact が早期 return するため、
-    // 選択中の本文を捨てて読み直させる
-    const isSelected = selectedId.value === artifactId;
-    if (isSelected) selectedArtifact.value = null;
-    // リポジトリ側は「保管庫を眺める」用途なので、他ウィンドウからの転送で
-    // 閲覧中の表示を奪わない。ワークツリー側は生成直後に見せる従来動作を維持する。
-    if (isSelected || !isRepositoryScope || selectedId.value === null) {
+    if (selectedId.value === artifactId) {
+      // 同じ ID の再作成（上書き転送）では selectArtifact が早期 return するため、
+      // 選択中の本文を捨てて読み直させる
+      selectedArtifact.value = null;
       await selectArtifact(artifactId);
+    } else if (selectedId.value === null) {
+      // まだ何も開いていないときだけ拾う（ビューアを開いた直後の初期表示）
+      await selectArtifact(artifactId);
+    } else {
+      // 別のアーティファクトを閲覧中に、無関係な ID が作られた（AI の生成、
+      // 転送、フックによる URL 自動登録など）。ここで選択を奪うと iframe が
+      // 作り直され、読んでいた位置や入力途中のフォームが飛ぶ。
+      // 一覧には既に載っているので、存在だけ知らせて表示は据え置く
+      const created = artifacts.value.find((a) => a.id === artifactId);
+      toast.add({
+        severity: "info",
+        summary: t("created.summary"),
+        detail: created?.title ?? artifactId,
+        life: 4000,
+      });
     }
   } else if (selectedId.value === artifactId) {
     try {
@@ -1264,6 +1276,9 @@ onUnmounted(() => {
       "label": "Actions",
       "tooltip": "Transfer or delete this artifact"
     },
+    "created": {
+      "summary": "New artifact added"
+    },
     "navigate": {
       "notFound": "Artifact not found",
       "invalidLink": "Invalid artifact link",
@@ -1319,6 +1334,9 @@ onUnmounted(() => {
     "menu": {
       "label": "操作",
       "tooltip": "このアーティファクトを転送 / 削除する"
+    },
+    "created": {
+      "summary": "アーティファクトが追加されました"
     },
     "navigate": {
       "notFound": "アーティファクトが見つかりません",
