@@ -58,6 +58,19 @@ pub(crate) const SUBMIT_DELAY: std::time::Duration = std::time::Duration::from_m
 /// spawn 要求を出してからフロントの応答を待つ上限。過ぎたら単一フライトを解放する。
 const SPAWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// hook 経路へ渡した digest の受領確認を待つ上限（#221）。
+///
+/// サイドカーは `additionalContext` を stdout へ出したらすぐ `/digest-ack` を撃つので、
+/// 実際には秒未満で戻る。ここが効くのはサイドカーが落ちた / oretachi が応答を返す前に
+/// hook がタイムアウトした場合で、そのときは**打刻せずに捨てる**のが正しい
+/// （行は未配送のまま残り、次の hook 経路で再提示される）。
+///
+/// hook の発火間隔（人間のターン）より十分短くしないと、失効前に次のターンが来て
+/// 同じ行を二重に載せた digest を作る。逆に短すぎると、正常な ack が失効に負けて
+/// 毎ターン同じ内容を再掲する。30 秒はサイドカーの最長経路（接続 3 秒 + 読み取り 2 秒）の
+/// 数倍を取った値。
+const PENDING_DIGEST_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// MCP の購読 / inbox 系ツールが引き継ぎの完了を待つ上限（#137）。
 ///
 /// 引き継ぎ自体は `rebind_next_orphaned_group` の UPDATE 数本で、実測でもミリ秒台。
@@ -173,8 +186,20 @@ pub enum DeliveryMsg {
     CollectDigest {
         terminal_id: String,
         reason: DigestReason,
-        reply: oneshot::Sender<Option<String>>,
+        /// サイドカーが `/digest-ack` を撃ち返せるか（#221）。
+        ///
+        /// **旧サイドカーとの版ずれを吸収するための鍵。** 通常サイドカーはアプリと同じ
+        /// ビルドで配られるが、`ORETACHI_PLUGIN_OVERWRITE=false`（開発時）ではプラグイン
+        /// ディレクトリが更新されず、ack を知らないバイナリが残りうる。それを打刻の
+        /// 遅延だけで扱うと**毎ターン同じ未読を再注入し続ける**ので、ack を送れない
+        /// 相手には従来どおり即打刻する（この経路は #221 の競合が残るが、旧挙動より
+        /// 悪くはならない）。
+        can_ack: bool,
+        reply: oneshot::Sender<Option<Digest>>,
     },
+    /// サイドカーが `additionalContext` を出力し切ったという受領確認（`Digest` の doc 参照）。
+    /// これを受けて初めて打刻する。
+    AckDigest { digest_id: String },
     /// このタブへ、同じワークツリーの引き継ぎ待ちグループを1つ引き継ぐ。
     ///
     /// `reply` を渡すと完了を待てる。**引き継いだ結果を自分で読む経路は必ず待つこと**
@@ -197,6 +222,38 @@ pub enum DeliveryMsg {
         request_id: String,
         session_id: Option<u32>,
     },
+}
+
+/// hook 経路へ渡す未読テキストと、その受領確認に使う ID（#221）。
+///
+/// **`id` を持つのが要点。** 以前は `oneshot::Sender::send` が `Ok` を返した時点で
+/// `delivered_at` を打っていたが、`Ok` は「チャネルに値を置けた」だけを意味し、受信側が
+/// 受け取ったことは意味しない。受信側は `INBOX_DIGEST_BUDGET_MS` の、さらに外側の
+/// サイドカーは 2 秒の読み取りタイムアウトを持っており、ワーカーが締切ぎわに送ると
+/// **値が捨てられたのに送信側は成功と見なす**。配送済みの行は再掲しない方針（#120 §5.2）
+/// なので、一度この競合を踏んだイベントはどの hook 経路からも永久に見えなくなり、
+/// 未 ack バッジだけが増え続ける（本 issue の症状）。
+///
+/// そこでサイドカーが `additionalContext` を stdout へ出し切ってから `/digest-ack` を
+/// 撃ち返し、それを受けて打刻する。ack が失われた場合は打刻されないまま次の機会に
+/// 再提示される —— **取りこぼすより一度重複するほうが安全**（`collect_digest` の
+/// 打刻失敗時と同じ判断）。
+#[derive(Debug, Clone)]
+pub struct Digest {
+    pub id: String,
+    pub text: String,
+}
+
+/// 受領確認を待っている digest 1件分。
+struct PendingDigest {
+    terminal_id: String,
+    /// 打刻対象の inbox 行
+    ids: Vec<String>,
+    /// `delivered_at` か `notified_at` か（`DigestReason::starts_turn` 由来）
+    starts_turn: bool,
+    /// `TurnEnd` の「1ターン1回」の鍵。ack 時に `last_turn` へ入れる
+    prompt_id: Option<String>,
+    issued_at: Instant,
 }
 
 pub struct DeliveryHandle {
@@ -279,6 +336,16 @@ pub fn notify_event_queued(app: &AppHandle) {
     }
 }
 
+/// サイドカーからの受領確認（`/digest-ack`）。ここで初めて打刻される（#221）。
+///
+/// 応答は待たない。ack が届かなければ打刻されないまま `PENDING_DIGEST_TTL` で失効し、
+/// 行は未配送のまま次の hook 経路で再提示される。
+pub fn ack_digest(app: &AppHandle, digest_id: String) {
+    if let Some(h) = handle(app) {
+        h.try_send(DeliveryMsg::AckDigest { digest_id });
+    }
+}
+
 /// hook 経路へ渡す未読テキストを組み、出した分に `delivered_at` を打つ（#124）。
 ///
 /// **押し込み (`push_pending`) と同じワーカーで処理させるのが要点。** 別経路で
@@ -292,7 +359,8 @@ pub async fn collect_digest_and_wait(
     app: &AppHandle,
     terminal_id: &str,
     reason: DigestReason,
-) -> Option<String> {
+    can_ack: bool,
+) -> Option<Digest> {
     let (tx, rx) = oneshot::channel();
     {
         let h = handle(app)?;
@@ -300,6 +368,7 @@ pub async fn collect_digest_and_wait(
             .try_send(DeliveryMsg::CollectDigest {
                 terminal_id: terminal_id.to_string(),
                 reason,
+                can_ack,
                 reply: tx,
             })
             .is_err()
@@ -368,6 +437,9 @@ struct WorkerState {
     /// これがターン境界の正確な鍵になる（`session_id` は複数ターンで共通なので粗い）。
     /// タブが消えたら忘れる。
     last_turn: HashMap<String, String>,
+    /// hook 経路へ渡したが、まだサイドカーの受領確認が来ていない digest（#221）。
+    /// `Digest` の doc 参照。`PENDING_DIGEST_TTL` を過ぎたものは打刻せずに捨てる。
+    pending_digests: HashMap<String, PendingDigest>,
     /// 前回 `Reconcile` を処理したときの生存タブ一覧（ソート済み）。
     ///
     /// ポーリングは 10 秒ごとに送ってくるが、`events.db` は WAL ではない（sqlx は
@@ -565,9 +637,13 @@ async fn handle_msg(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState,
         DeliveryMsg::CollectDigest {
             terminal_id,
             reason,
+            can_ack,
             reply,
         } => {
-            collect_digest(app, pool, state, &terminal_id, &reason, reply).await;
+            collect_digest(app, pool, state, &terminal_id, &reason, can_ack, reply).await;
+        }
+        DeliveryMsg::AckDigest { digest_id } => {
+            confirm_digest(app, pool, state, &digest_id).await;
         }
         DeliveryMsg::EventQueued => {
             let _ = app.emit("event-inbox-changed", ());
@@ -885,7 +961,8 @@ async fn collect_digest(
     state: &mut WorkerState,
     terminal_id: &str,
     reason: &DigestReason,
-    reply: oneshot::Sender<Option<String>>,
+    can_ack: bool,
+    reply: oneshot::Sender<Option<Digest>>,
 ) {
     if let DigestReason::TurnEnd { prompt_id } = reason {
         if !should_deliver_turn(
@@ -972,10 +1049,41 @@ async fn collect_digest(
         return;
     };
 
-    // **先に渡してから打刻する。** 呼び出し元がタイムアウトで諦めていれば送信は失敗し、
-    // その場合は打刻しない（未配送のまま残るので次の機会に再度出る）。逆順にすると
-    // 「配送済みだが誰も見ていない」本文が生まれ、再送しない方針のせいで永久に失われる。
-    if reply.send(Some(digest)).is_err() {
+    // **打刻はここでは行わない（#221）。** `oneshot::Sender::send` の `Ok` は「チャネルに
+    // 値を置けた」だけで、受信側（`INBOX_DIGEST_BUDGET_MS` のタイムアウト内）とサイドカー
+    // （2 秒の読み取りタイムアウト）が実際に受け取ったことは意味しない。ここで打刻すると
+    // 締切ぎわの送信が捨てられたケースで「配送済みだが誰も見ていない」本文が生まれ、
+    // 再送しない方針（#120 §5.2）のせいで永久に失われる。`Digest` の doc 参照。
+    //
+    // 上限で載らなかった分は最初から対象に含めない（未配送のまま次の機会に回す）。全件を
+    // 対象にすると、本文に出ていない未読まで「配送済み」になって二度と出ない。
+    let ids: Vec<String> = items.iter().take(used).map(|i| i.id.clone()).collect();
+    let digest_id = uuid::Uuid::new_v4().to_string();
+    let pending = PendingDigest {
+        terminal_id: terminal_id.to_string(),
+        ids,
+        // **ターンを開始する経路と、しない経路で打刻先を分ける。**
+        //
+        // `SessionStart` の `additionalContext` は文脈に載るだけでターンを開始しない。
+        // `delivered_at` を打つと `list_pushable` から外れ、ターンを開始できる PTY 押し込みが
+        // 候補を永久に失う（＝誰も動かないまま未 ack バッジが残る）。`notified_at` へ打てば
+        // 「再掲はしない」だけを表現でき、押し込みの候補には残る。
+        // `Stop` / `UserPromptSubmit` は実際にターンが動くので `delivered_at`。
+        starts_turn: reason.starts_turn(),
+        prompt_id: match reason {
+            DigestReason::TurnEnd { prompt_id } => prompt_id.clone(),
+            _ => None,
+        },
+        issued_at: Instant::now(),
+    };
+
+    if reply
+        .send(Some(Digest {
+            id: digest_id.clone(),
+            text: digest,
+        }))
+        .is_err()
+    {
         log::warn!(
             "[delivery] 注入本文の受け取り手が既に居ない（タイムアウト）ため打刻しない terminal={} 経路={}",
             terminal_id,
@@ -983,44 +1091,109 @@ async fn collect_digest(
         );
         return;
     }
+    if !can_ack {
+        // ack を送れない旧サイドカー。従来どおり即打刻する（`DeliveryMsg::CollectDigest`
+        // の `can_ack` の doc 参照）。
+        confirm_pending(app, pool, state, &digest_id, pending).await;
+        return;
+    }
+    log::debug!(
+        "[delivery] {} 件を {} 経由で渡した（受領確認待ち）terminal={} digest={}",
+        pending.ids.len(),
+        reason.label(),
+        terminal_id,
+        digest_id
+    );
+    state.pending_digests.insert(digest_id, pending);
+}
 
-    // 上限で載らなかった分は打刻しない（未配送のまま次の機会に回す）。全件打刻すると
-    // 本文に出ていない未読が「配送済み」になり、再送しない方針のせいで二度と出ない。
-    let ids: Vec<String> = items.iter().take(used).map(|i| i.id.clone()).collect();
-    // **ターンを開始する経路と、しない経路で打刻先を分ける。**
-    //
-    // `SessionStart` の `additionalContext` は文脈に載るだけでターンを開始しない。ここで
-    // `delivered_at` を打つと `list_pushable` から外れ、ターンを開始できる PTY 押し込みが
-    // 候補を永久に失う（＝誰も動かないまま未 ack バッジが残る）。`notified_at` へ打てば
-    // 「再掲はしない」だけを表現でき、押し込みの候補には残る。
-    // `Stop` / `UserPromptSubmit` は実際にターンが動くので従来どおり `delivered_at`。
-    let stamp = if reason.starts_turn() {
-        event_db::mark_delivered(pool, &ids, event_db::now_ms()).await
+/// サイドカーが `additionalContext` を出力し切ったので打刻する（#221）。
+///
+/// 未知の ID（失効済み / 二重 ack）は無視する。打刻は `mark_delivered` /
+/// `mark_notified` のどちらも `WHERE ... IS NULL` で冪等なので、取りこぼしより
+/// 一度の重複を選ぶ方針をここでも保つ。
+async fn confirm_digest(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    state: &mut WorkerState,
+    digest_id: &str,
+) {
+    let Some(pending) = state.pending_digests.remove(digest_id) else {
+        log::debug!(
+            "[delivery] 受領確認に対応する digest が無い（失効済みか二重 ack）digest={}",
+            digest_id
+        );
+        return;
+    };
+    confirm_pending(app, pool, state, digest_id, pending).await;
+}
+
+/// 打刻本体。`confirm_digest`（ack 経路）と、ack を送れない旧サイドカー向けの
+/// 即時打刻の両方から呼ぶ。
+async fn confirm_pending(
+    app: &AppHandle,
+    pool: &SqlitePool,
+    state: &mut WorkerState,
+    digest_id: &str,
+    pending: PendingDigest,
+) {
+    let stamp = if pending.starts_turn {
+        event_db::mark_delivered(pool, &pending.ids, event_db::now_ms()).await
     } else {
-        event_db::mark_notified(pool, &ids, event_db::now_ms()).await
+        event_db::mark_notified(pool, &pending.ids, event_db::now_ms()).await
     };
     if let Err(e) = stamp {
-        // 打刻に失敗しても本文は既に渡している。未配送のまま残るので次の機会に再度出る
+        // 打刻に失敗しても本文は既に届いている。未配送のまま残るので次の機会に再度出る
         // （取りこぼすより一度重複するほうが安全）。
         log::warn!("[delivery] 配送の打刻に失敗: {}", e);
     }
-    if let DigestReason::TurnEnd { prompt_id } = reason {
-        if let Some(p) = prompt_id {
-            state.last_turn.insert(terminal_id.to_string(), p.clone());
-        }
+    if let Some(p) = pending.prompt_id {
+        state.last_turn.insert(pending.terminal_id.clone(), p);
     }
-    if !ids.is_empty() {
+    if !pending.ids.is_empty() {
         log::info!(
-            "[delivery] {} 件を {} 経由で注入した terminal={}",
-            ids.len(),
-            reason.label(),
-            terminal_id
+            "[delivery] {} 件の注入が確認できたので配送済みにした terminal={} digest={}",
+            pending.ids.len(),
+            pending.terminal_id,
+            digest_id
         );
         let _ = app.emit("event-inbox-changed", ());
     }
     // 配送ごとのトースト (`event-delivered`) は #137 で廃止した。知りたいのは個々の
     // 配送イベントではなく購読関係の現況で、それはカードのバッジが常時見せている。
     // 状態の変化そのものは直前の `event-inbox-changed` がフロントへ伝えている。
+}
+
+/// 受領確認が来ないまま `PENDING_DIGEST_TTL` を過ぎた digest を捨てる（#221）。
+///
+/// 捨てた行は未配送のまま残るので、次の hook 経路で再提示される。**打刻しないのが要点**
+/// —— ここで打つと `oneshot` の競合を直した意味が消える。
+impl WorkerState {
+    /// 受領確認待ちの digest に載っている inbox 行か（#221）。
+    ///
+    /// 打刻を ack まで遅らせた副作用として、`list_pushable` / `list_stale_unpushed` は
+    /// **hook 経路へ渡し済みの行をまだ未配送として返す**。素通りさせると同じ本文が
+    /// `additionalContext` と PTY 押し込みの両方で届く（#124 が単一ワーカーで潰した
+    /// 二重配送が、打刻のタイミングをずらしたことで別の形で戻る）。押し込み側で除外する。
+    fn is_awaiting_ack(&self, inbox_id: &str) -> bool {
+        self.pending_digests
+            .values()
+            .any(|p| p.ids.iter().any(|id| id == inbox_id))
+    }
+}
+
+fn expire_pending_digests(state: &mut WorkerState) {
+    let before = state.pending_digests.len();
+    state
+        .pending_digests
+        .retain(|_, p| p.issued_at.elapsed() < PENDING_DIGEST_TTL);
+    let expired = before - state.pending_digests.len();
+    if expired > 0 {
+        log::info!(
+            "[delivery] 受領確認が来なかった digest {} 件を破棄した（未配送のまま次の機会に再提示する）",
+            expired
+        );
+    }
 }
 
 // ─── 配送の駆動 ───────────────────────────────────────────────────────────────
@@ -1188,6 +1361,9 @@ fn agent_command_for_worktree(
 
 async fn drive(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerState) {
     let now = event_db::now_ms();
+    // **押し込みより先に回す。** 失効した digest の行は未配送に戻るので、この直後の
+    // `push_pending` が同じ tick で拾い直せる。
+    expire_pending_digests(state);
     push_pending(app, pool, state, now).await;
     push_stale_pointers(app, pool, state, now).await;
     spawn_for_closed_tabs(app, pool, state, now).await;
@@ -1221,6 +1397,11 @@ async fn push_stale_pointers(
             return;
         }
     };
+    // 新鮮な行と同じく、受領確認待ちは押し込まない（#221）。
+    let items: Vec<_> = items
+        .into_iter()
+        .filter(|i| !state.is_awaiting_ack(&i.id))
+        .collect();
     if items.is_empty() {
         return;
     }
@@ -1339,6 +1520,11 @@ async fn push_pending(app: &AppHandle, pool: &SqlitePool, state: &mut WorkerStat
             return;
         }
     };
+    // hook 経路へ渡して受領確認待ちの行は押し込まない（`is_awaiting_ack` の doc、#221）。
+    let items: Vec<_> = items
+        .into_iter()
+        .filter(|i| !state.is_awaiting_ack(&i.id))
+        .collect();
     if items.is_empty() {
         return;
     }
@@ -2488,6 +2674,54 @@ mod tests {
     fn test_should_deliver_turn_without_prompt_id() {
         assert!(should_deliver_turn(None, None));
         assert!(should_deliver_turn(Some("p-1"), None));
+    }
+
+    // ─── 受領確認待ちの digest（#221） ────────────────────────────────────────
+
+    fn pending(ids: &[&str], age: std::time::Duration) -> PendingDigest {
+        PendingDigest {
+            terminal_id: "term-a".to_string(),
+            ids: ids.iter().map(|s| s.to_string()).collect(),
+            starts_turn: true,
+            prompt_id: None,
+            issued_at: Instant::now() - age,
+        }
+    }
+
+    /// 受領確認待ちの行は PTY 押し込みの対象から外す。外さないと、同じ本文が
+    /// `additionalContext` と押し込みの両方で届く。
+    #[test]
+    fn test_awaiting_ack_covers_every_id_in_the_digest() {
+        let mut state = WorkerState::default();
+        state
+            .pending_digests
+            .insert("d-1".to_string(), pending(&["inbox-1", "inbox-2"], std::time::Duration::ZERO));
+
+        assert!(state.is_awaiting_ack("inbox-1"));
+        assert!(state.is_awaiting_ack("inbox-2"));
+        assert!(!state.is_awaiting_ack("inbox-3"));
+    }
+
+    /// 受領確認が来ないまま TTL を過ぎたら**打刻せずに**捨てる。捨てた行は未配送のまま
+    /// 残るので、次の hook 経路と押し込みが拾い直せる。
+    #[test]
+    fn test_expired_digest_is_dropped_and_releases_its_rows() {
+        let mut state = WorkerState::default();
+        state
+            .pending_digests
+            .insert("fresh".to_string(), pending(&["inbox-1"], std::time::Duration::ZERO));
+        state.pending_digests.insert(
+            "stale".to_string(),
+            pending(&["inbox-2"], PENDING_DIGEST_TTL + std::time::Duration::from_secs(1)),
+        );
+
+        expire_pending_digests(&mut state);
+
+        assert!(state.pending_digests.contains_key("fresh"));
+        assert!(!state.pending_digests.contains_key("stale"));
+        // 失効した digest の行は押し込み候補へ戻る
+        assert!(state.is_awaiting_ack("inbox-1"));
+        assert!(!state.is_awaiting_ack("inbox-2"));
     }
 
     /// `passive` は「押し込まないでほしい」の明示指定。Stop の注入はターンを開始させる

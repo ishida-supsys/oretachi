@@ -78,6 +78,8 @@ fn main() {
             ctx.inbox.as_deref(),
         ) {
             println!("{}", out);
+            // 未読を載せられた回だけ ack する（`digest_id` は未読があるときしか返らない）。
+            ack_digest(ctx.digest_id.as_deref());
         }
         std::process::exit(0);
     }
@@ -88,8 +90,11 @@ fn main() {
     if has_flag(&args, "--prompt-context", "-c") {
         let dir = resolve_project_dir(&args);
         match send_prompt_context(&dir) {
-            Ok(Some(output)) => println!("{}", output),
-            Ok(None) => {}
+            Ok((Some(output), digest_id)) => {
+                println!("{}", output);
+                ack_digest(digest_id.as_deref());
+            }
+            Ok((None, _)) => {}
             Err(_e) => {
                 #[cfg(debug_assertions)]
                 eprintln!("Prompt context failed: {}", _e);
@@ -111,8 +116,11 @@ fn main() {
             std::process::exit(0);
         }
         match send_turn_context(&dir, hook_json.as_deref()) {
-            Ok(Some(output)) => println!("{}", output),
-            Ok(None) => {}
+            Ok((Some(output), digest_id)) => {
+                println!("{}", output);
+                ack_digest(digest_id.as_deref());
+            }
+            Ok((None, _)) => {}
             Err(_e) => {
                 #[cfg(debug_assertions)]
                 eprintln!("Turn context failed: {}", _e);
@@ -265,12 +273,55 @@ fn send_set_description(project_dir: &str, hook_json: Option<&str>) -> Result<()
 struct SessionContext {
     prompt: Option<String>,
     inbox: Option<String>,
+    /// `inbox` の受領確認に使う ID（#221）。`ack_digest` を撃つまでサーバは打刻しない。
+    digest_id: Option<String>,
+}
+
+/// このサイドカーが `/digest-ack` を撃ち返せることをサーバへ伝える（#221）。
+///
+/// これが無いレスポンス（旧サイドカー）に対して、サーバは従来どおり digest を組んだ
+/// 時点で打刻する。フラグにしておかないと、ack を知らないバイナリが残っている環境で
+/// 未読が毎ターン再注入され続ける。
+fn attach_ack_capability(payload: &mut serde_json::Value) {
+    payload["ackDigest"] = serde_json::Value::Bool(true);
+}
+
+/// hook 経路の未読を「確かに出力した」とサーバへ伝える（#221）。
+///
+/// **`additionalContext` を stdout へ書き切ってから呼ぶこと。** これが来るまでサーバは
+/// `delivered_at` / `notified_at` を打たないので、途中で落ちた分は次の機会に再提示される。
+/// 以前はサーバが「レスポンスを組めた」時点で打刻しており、読み取りタイムアウトで
+/// 応答を捨てた回の未読が二度と出てこなかった（未 ack バッジだけが増え続ける）。
+///
+/// 失敗しても hook はブロックしない。ack が落ちれば一度重複するだけで、取りこぼしよりは軽い。
+fn ack_digest(digest_id: Option<&str>) {
+    let Some(id) = digest_id.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    // stdout がパイプの場合、exit までにフラッシュされない可能性を潰してから ack する。
+    use std::io::Write;
+    let _ = std::io::stdout().flush();
+    if let Err(_e) = post_json("/digest-ack", &serde_json::json!({ "digestId": id })) {
+        #[cfg(debug_assertions)]
+        eprintln!("Digest ack failed: {}", _e);
+    }
+}
+
+/// レスポンスボディから `digestId` を取り出す。旧サーバには無いので欠落は None。
+fn parse_digest_id(body: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()?
+        .get("digestId")?
+        .as_str()
+        .map(str::to_string)
+        .filter(|s| !s.trim().is_empty())
 }
 
 /// /session-context からグループの systemPrompt と未確認の購読メッセージを取得する。
 fn fetch_session_context(project_dir: &str) -> Result<SessionContext, String> {
     let mut payload = serde_json::json!({ "projectDir": project_dir });
     attach_terminal_id(&mut payload, read_terminal_id().as_deref());
+    attach_ack_capability(&mut payload);
     let body = post_json_read_body("/session-context", &payload)?;
     Ok(parse_session_context(&body)?)
 }
@@ -288,32 +339,40 @@ fn parse_session_context(body: &str) -> Result<SessionContext, String> {
     Ok(SessionContext {
         prompt: field("prompt"),
         inbox: field("inbox"),
+        digest_id: field("digestId"),
     })
 }
 
 /// UserPromptSubmit フック用。/prompt-context から現在の description を取得し、
 /// stdout に出力すべき additionalContext JSON を返す。skip 時は Ok(None)。
-fn send_prompt_context(project_dir: &str) -> Result<Option<String>, String> {
+/// 戻り値の 2 要素目は未読の受領確認 ID（`ack_digest` 参照）。
+fn send_prompt_context(project_dir: &str) -> Result<(Option<String>, Option<String>), String> {
     let mut payload = serde_json::json!({
         "projectDir": project_dir,
     });
     attach_terminal_id(&mut payload, read_terminal_id().as_deref());
+    attach_ack_capability(&mut payload);
     let body = post_json_read_body("/prompt-context", &payload)?;
-    Ok(build_prompt_context_output(&body))
+    Ok((build_prompt_context_output(&body), parse_digest_id(&body)))
 }
 
 /// Stop フック用。/turn-context からこのタブ宛の未読を取得し、stdout に出力すべき
 /// additionalContext JSON を返す。未読なしは Ok(None)。
-fn send_turn_context(project_dir: &str, hook_json: Option<&str>) -> Result<Option<String>, String> {
+/// 戻り値の 2 要素目は未読の受領確認 ID（`ack_digest` 参照）。
+fn send_turn_context(
+    project_dir: &str,
+    hook_json: Option<&str>,
+) -> Result<(Option<String>, Option<String>), String> {
     let mut payload = serde_json::json!({
         "projectDir": project_dir,
     });
     attach_terminal_id(&mut payload, read_terminal_id().as_deref());
+    attach_ack_capability(&mut payload);
     if let Some(j) = hook_json {
         payload["hookJson"] = serde_json::Value::String(j.to_string());
     }
     let body = post_json_read_body("/turn-context", &payload)?;
-    Ok(build_turn_context_output(&body))
+    Ok((build_turn_context_output(&body), parse_digest_id(&body)))
 }
 
 /// Stop フックの stdin JSON を見て、サーバへ問い合わせるべきか判定する（#124）。
@@ -579,6 +638,32 @@ mod tests {
         let args = vec!["bin".to_string(), "--notify".to_string(), "--agent".to_string(), "cc".to_string()];
         assert!(has_flag(&args, "--notify", "-n"));
         assert!(!has_flag(&args, "--set-description", "-d"));
+    }
+
+    /// `digestId` はサーバが未読を返したときだけ付く。旧サーバのレスポンスには
+    /// 存在しないので、欠落は「ack しない」（＝サーバ側も打刻しない旧挙動）に倒す。
+    #[test]
+    fn test_parse_digest_id() {
+        assert_eq!(
+            parse_digest_id(r#"{"inbox":"x","digestId":"d-1"}"#).as_deref(),
+            Some("d-1")
+        );
+        assert_eq!(parse_digest_id(r#"{"inbox":"x"}"#), None);
+        assert_eq!(parse_digest_id(r#"{"inbox":null,"digestId":null}"#), None);
+        assert_eq!(parse_digest_id(r#"{"digestId":"  "}"#), None);
+        assert_eq!(parse_digest_id("not json"), None);
+    }
+
+    /// 未読と一緒に返ってくる `digestId` は `SessionContext` に載せて main へ運ぶ。
+    #[test]
+    fn test_parse_session_context_carries_digest_id() {
+        let ctx =
+            parse_session_context(r#"{"prompt":"p","inbox":"i","digestId":"d-9"}"#).unwrap();
+        assert_eq!(ctx.inbox.as_deref(), Some("i"));
+        assert_eq!(ctx.digest_id.as_deref(), Some("d-9"));
+
+        let none = parse_session_context(r#"{"prompt":"p","inbox":null}"#).unwrap();
+        assert_eq!(none.digest_id, None);
     }
 
     #[test]
