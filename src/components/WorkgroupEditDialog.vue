@@ -102,6 +102,7 @@ function save() {
           <option value="">{{ t('notSet') }}</option>
           <option v-for="kind in ALL_AGENT_KINDS" :key="kind" :value="kind">{{ AI_AGENT_LABELS[kind] }}</option>
         </select>
+        <p class="hint">{{ t('taskAddAgentHint') }}</p>
       </div>
 
       <div v-if="taskAddAgent === 'claudeCode'" class="field">
@@ -356,7 +357,8 @@ function save() {
     "autoAssignHotkey": "Auto-assign hotkeys",
     "autoReturnHomeAfterTask": "Return to Home after task",
     "autoReturnHomeAfterTaskHint": "5 seconds after a task finishes, switch back to the Home tab. Only when the main window is unfocused; cancelled if you focus it.",
-    "taskAddAgent": "Task execution agent",
+    "taskAddAgent": "Agent launched in the worktree",
+    "taskAddAgentHint": "The agent started in the terminal of a worktree created by a task. This is NOT the agent that generates the task code — that one is Settings > Auto Approval / AI Agent > \"AI Agent (Auto Approval, Commit Msg, Task Gen)\".",
     "notSet": "Not set (use global)",
     "claudeCodeMode": "Claude Code mode",
     "mode": { "plan": "Plan", "manual": "Manual", "acceptEdit": "AcceptEdit", "auto": "Auto" },
@@ -380,7 +382,8 @@ function save() {
     "autoAssignHotkey": "ホットキー自動割り当て",
     "autoReturnHomeAfterTask": "タスク完了後にホームへ復帰",
     "autoReturnHomeAfterTaskHint": "タスク完了の5秒後にホームタブへ戻ります。メインウィンドウが非フォーカスのときのみ動作し、フォーカスするとキャンセルされます。",
-    "taskAddAgent": "タスク実行エージェント",
+    "taskAddAgent": "ワークツリーで起動するエージェント",
+    "taskAddAgentHint": "タスクで作成されたワークツリーの端末で起動するエージェントです。タスクコードを生成するエージェントはこれとは別で、設定 > 自動承認 / AI エージェント > 「自動承認・コミットメッセージ・タスク生成」で選びます。",
     "notSet": "未設定（全体設定を使用）",
     "claudeCodeMode": "Claude Code モード",
     "mode": { "plan": "Plan", "manual": "Manual", "acceptEdit": "AcceptEdit", "auto": "Auto" },

@@ -26,6 +26,7 @@ export default {
     title: 'Worktree Notification',
     titleApproval: 'Approval Required',
     titleCompleted: 'Task Completed',
+    titleTaskFailed: 'Task Failed',
     // #140: the unified `kind` covers subscription event kinds too, so every kind
     // needs an OS-notification title.
     titleHook: 'Lifecycle Hook',

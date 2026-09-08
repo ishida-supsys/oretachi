@@ -12,11 +12,18 @@ pub enum AiAgentKind {
     ClineCli,
 }
 
+/// エージェントごとの既定モデル。空文字は「`--model` を渡さず CLI 側の既定に任せる」を意味する。
+///
+/// Codex CLI は空にしている（#223）。ChatGPT アカウントで使っている環境では
+/// oretachi が選んだモデル名が `400 invalid_request_error`
+/// (`The '<model>' model is not supported when using Codex with a ChatGPT account.`)
+/// で弾かれ、タスク生成がまるごと失敗する。どのモデルが使えるかは
+/// アカウント種別依存でこちらからは判定できないため、codex 側の既定に委ねる。
 pub fn default_model(kind: &AiAgentKind) -> &'static str {
     match kind {
         AiAgentKind::ClaudeCode => "claude-haiku-4-5",
         AiAgentKind::GeminiCli => "gemini-2.5-flash",
-        AiAgentKind::CodexCli => "gpt-5.4-mini",
+        AiAgentKind::CodexCli => "",
         AiAgentKind::ClineCli => "",
     }
 }
@@ -150,6 +157,17 @@ fn json_schema_prompt_suffix(json_schema: &str) -> String {
     )
 }
 
+/// `--model` フラグを組み立てる。`model` が空なら**フラグ自体を落とす**（#223）。
+/// 空文字をそのまま渡すと CLI 側が「モデル名 ""」として扱って失敗するため、
+/// 「CLI の既定に任せる」は引数を出さないことで表現する。
+fn model_args(model: &str) -> Vec<String> {
+    if model.trim().is_empty() {
+        vec![]
+    } else {
+        vec!["--model".to_string(), model.to_string()]
+    }
+}
+
 pub fn build_execution_plan(
     kind: &AiAgentKind,
     prompt: &str,
@@ -161,9 +179,8 @@ pub fn build_execution_plan(
     match kind {
         AiAgentKind::ClaudeCode => {
             let (program, mut args) = make_platform_cmd(&resolved);
+            args.extend(model_args(model));
             args.extend([
-                "--model".to_string(),
-                model.to_string(),
                 "-p".to_string(),
                 "--output-format".to_string(),
                 "json".to_string(),
@@ -177,7 +194,7 @@ pub fn build_execution_plan(
         }
         AiAgentKind::GeminiCli => {
             let (program, mut args) = make_platform_cmd(&resolved);
-            args.extend(["--model".to_string(), model.to_string()]);
+            args.extend(model_args(model));
             AiExecutionPlan {
                 program,
                 args,
@@ -186,7 +203,8 @@ pub fn build_execution_plan(
         }
         AiAgentKind::CodexCli => {
             let (program, mut args) = make_platform_cmd(&resolved);
-            args.extend(["exec".to_string(), "--skip-git-repo-check".to_string(), "--model".to_string(), model.to_string()]);
+            args.extend(["exec".to_string(), "--skip-git-repo-check".to_string()]);
+            args.extend(model_args(model));
             AiExecutionPlan {
                 program,
                 args,
@@ -419,6 +437,56 @@ mod tests {
         assert!(plan.args.contains(&"--skip-git-repo-check".to_string()));
         assert!(!plan.args.contains(&"-q".to_string()));
         assert!(plan.stdin_content.contains("my prompt"));
+    }
+
+    /// #223: codex の既定モデルは空。ChatGPT アカウントでは oretachi が選んだモデル名が
+    /// 400 で弾かれるので、`--model` を渡さず codex 側の既定に任せる。
+    #[test]
+    fn test_default_model_codex_is_empty() {
+        assert_eq!(default_model(&AiAgentKind::CodexCli), "");
+        assert_eq!(default_model(&AiAgentKind::ClineCli), "");
+        assert!(!default_model(&AiAgentKind::ClaudeCode).is_empty());
+        assert!(!default_model(&AiAgentKind::GeminiCli).is_empty());
+    }
+
+    /// 空モデルではフラグ自体が落ちること。空文字を渡すと CLI 側が
+    /// 「モデル名 ""」として解釈して失敗するため、素通ししてはいけない。
+    #[test]
+    fn test_build_execution_plan_omits_model_when_empty() {
+        for kind in [
+            AiAgentKind::ClaudeCode,
+            AiAgentKind::GeminiCli,
+            AiAgentKind::CodexCli,
+        ] {
+            let plan = build_execution_plan(&kind, "my prompt", "{}", "", false);
+            assert!(
+                !plan.args.contains(&"--model".to_string()),
+                "{:?} should omit --model for empty model",
+                kind
+            );
+            assert!(
+                !plan.args.iter().any(|a| a.is_empty()),
+                "{:?} should not pass an empty argument",
+                kind
+            );
+        }
+        // codex は既定モデルが空なので、default_model 経由でも --model は付かない
+        let plan = build_execution_plan(
+            &AiAgentKind::CodexCli,
+            "my prompt",
+            "{}",
+            default_model(&AiAgentKind::CodexCli),
+            false,
+        );
+        assert!(plan.args.contains(&"exec".to_string()));
+        assert!(!plan.args.contains(&"--model".to_string()));
+    }
+
+    #[test]
+    fn test_build_execution_plan_codex_keeps_explicit_model() {
+        let plan = build_execution_plan(&AiAgentKind::CodexCli, "my prompt", "{}", "model-x", false);
+        assert!(plan.args.contains(&"--model".to_string()));
+        assert!(plan.args.contains(&"model-x".to_string()));
     }
 
     #[test]

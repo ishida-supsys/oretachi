@@ -87,8 +87,17 @@ export function playSoundForKind(kind: NotifyKind) {
 
 /**
  * OS通知を送信する。App.vue の自動承認不承認ハンドラからも呼ばれる。
+ *
+ * @param body 本文の差し替え。既定はワークツリー名。クリック時のフォーカス先は
+ *   `extra.worktreeName` で決まるので、本文だけ差し替えたい呼び出し
+ *   （タスク失敗の理由を出したい #223 など）はこちらを使う。
  */
-export async function sendOsNotification(worktreeName: string, title?: string, kind?: NotifyKind) {
+export async function sendOsNotification(
+  worktreeName: string,
+  title?: string,
+  kind?: NotifyKind,
+  body?: string,
+) {
   if (!osNotificationEnabled?.()) return;
   // 種別ごとの ON/OFF（#140）。`title` 直指定の経路（自動承認の否決など）は
   // 呼び出し元が出すと決めているので、kind が無ければ従来どおり素通しする。
@@ -104,7 +113,7 @@ export async function sendOsNotification(worktreeName: string, title?: string, k
       (kind ? storedNotificationTitles[kind] : undefined) ??
       storedNotificationTitles.general ??
       "Notification";
-    sendNotification({ title: resolvedTitle, body: worktreeName, extra: { worktreeName } });
+    sendNotification({ title: resolvedTitle, body: body ?? worktreeName, extra: { worktreeName } });
   }
 }
 

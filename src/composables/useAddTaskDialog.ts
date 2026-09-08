@@ -6,6 +6,10 @@ import type { ToastMessageOptions } from "primevue/toast";
 import { useTasks } from "./useTasks";
 import { useSettings } from "./useSettings";
 import { useWorkgroups } from "./useWorkgroups";
+import { useNotifications, playSoundForKind, sendOsNotification } from "./useNotifications";
+import { resolveKindSetting } from "../utils/notificationKinds";
+import { buildTrayNotificationMap } from "../utils/trayNotification";
+import { HOME_WORKTREE_ID, isHomeWorktree } from "../utils/homeWorktree";
 import type { TaskCode, TaskProcessCode } from "../types/task";
 
 /** add_worktree ステップでは生成された worktree ID を返す */
@@ -31,6 +35,7 @@ export function useAddTaskDialog(executeStep: StepExecutor, autoReturnHome?: Aut
   const { settings, scheduleSave } = useSettings();
   const { activeWorkgroupId } = useWorkgroups();
   const { sortedTasks, addTask, setTaskSteps, updateStepStatus, updateTaskStatus } = useTasks();
+  const { addNotification } = useNotifications();
 
   const showAddTaskDialog = ref(false);
   const rerunTaskId = ref<string | null>(null);
@@ -231,13 +236,36 @@ export function useAddTaskDialog(executeStep: StepExecutor, autoReturnHome?: Aut
       // エラー時は scheduleAutoReturnHome を通らないので予約は張られない。
       // ここで cancelAutoReturnHome() すると別タスクの正当な予約まで消すのでしない。
 
+      // 自動で消さない。5 秒で消えると席を外している間の失敗が痕跡ごと消える（#223）
       showTaskToast({
         severity: "error",
         summary: t("taskFailedSummary"),
         detail: msg,
-        life: 5000,
       });
+      await notifyTaskFailure(msg);
     }
+  }
+
+  /**
+   * タスクの生成・実行が失敗したことを人に届ける（#223）。
+   *
+   * トーストだけでは足りない。MCP の `oretachi_add_task` 由来のタスクは投げっぱなしで
+   * 実行されるので、メインウィンドウを見ていない間に失敗すると誰も気付かず、
+   * `oretachi_list_tasks` を明示的に叩くまで分からなかった。失敗したタスクは
+   * まだワークツリーを持たないため、バッジはホームカードへ積む。
+   *
+   * `notify-worktree` へ相乗りさせないこと。あれは全 MCP ピアへブロードキャストされ、
+   * 自動承認の AI 判定まで走らせてしまう。
+   */
+  async function notifyTaskFailure(detail: string): Promise<void> {
+    // 種別ごとの ON/OFF と、ホームの trayNotification を尊重する
+    if (!resolveKindSetting(settings.value.notificationSound, "general").enabled) return;
+    if (!(buildTrayNotificationMap(settings.value).get(HOME_WORKTREE_ID) ?? true)) return;
+    addNotification(HOME_WORKTREE_ID, "general");
+    playSoundForKind("general");
+    // 本文に失敗理由を出す。クリック時のフォーカス先は名前で解決されるのでホームの名前を渡す
+    const homeName = settings.value.worktrees.find(isHomeWorktree)?.name ?? "home";
+    await sendOsNotification(homeName, t("notification.titleTaskFailed"), "general", detail);
   }
 
   function onAddTaskCancel(): void {
