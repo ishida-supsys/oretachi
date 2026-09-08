@@ -20,18 +20,29 @@ pub enum AiAgentKind {
 /// ユーザーが重い設定（例: `gpt-5.5` + `xhigh`）にしているとタスク生成がそのぶん
 /// 遅くなり、`aiTimeoutSecs`（既定 120 秒）を踏み抜きやすくなる。
 ///
-/// Codex CLI は `gpt-5.5`（#223）。以前の `gpt-5.4-mini` は ChatGPT アカウントで
-/// `400 invalid_request_error`
-/// (`The '<model>' model is not supported when using Codex with a ChatGPT account.`)
-/// になり、タスク生成がまるごと失敗していた。codex-cli 0.147.0 + ChatGPT アカウントで
-/// 実測したところ、`gpt-5.4` / `gpt-5.1` / `*-codex` / `*-mini` はいずれも同じ 400 で、
-/// 通るのは `gpt-5.5` のみだった（mini 系は API キー専用）。速さは
-/// `CODEX_REASONING_EFFORT` 側で確保する。
+/// Codex CLI は `gpt-5.6-luna`（#223）。`codex debug models` の catalog で
+/// "Fast and affordable agentic coding model" とされる現行世代の軽量ティアで、
+/// 短い構造化出力というここの用途に合う。
+///
+/// 選定の経緯（codex-cli 0.147.0 / ChatGPT アカウントで実測）:
+/// - 旧既定値 `gpt-5.4-mini` は `400 invalid_request_error`
+///   (`The '<model>' model is not supported when using Codex with a ChatGPT account.`)
+///   になり、タスク生成がまるごと失敗していた。`gpt-5.4` / `gpt-5.1` / `gpt-5.5-codex` /
+///   `gpt-5.4-codex` / `gpt-5.5-mini` / `gpt-5-mini` / `codex-mini-latest` も同じ 400
+///   （mini 系は API キー専用）。
+/// - 通るのは `gpt-5.5` と `gpt-5.6-{sol,terra,luna}`。`gpt-5.5` は catalog 上
+///   "Proven previous-generation model" かつ表示順は最下位なので選ばない。
+/// - 所要はタスク生成相当のプロンプトで luna 8 秒 / `gpt-5.5` 9 秒（各3回、いずれも
+///   スキーマどおりの JSON）。
+///
+/// **モデルが retire すると同じ 400 が `default_model` の呼び出し元4経路
+/// （ai_judge / ai_commit_message / ai_description / task_executor）で同時に再発する。**
+/// 今は設定からの上書き手段が無いのでここを直す必要がある。
 pub fn default_model(kind: &AiAgentKind) -> &'static str {
     match kind {
         AiAgentKind::ClaudeCode => "claude-haiku-4-5",
         AiAgentKind::GeminiCli => "gemini-2.5-flash",
-        AiAgentKind::CodexCli => "gpt-5.5",
+        AiAgentKind::CodexCli => "gpt-5.6-luna",
         AiAgentKind::ClineCli => "",
     }
 }
@@ -39,8 +50,9 @@ pub fn default_model(kind: &AiAgentKind) -> &'static str {
 /// Codex CLI へ渡す推論強度。`~/.codex/config.toml` の `model_reasoning_effort` を上書きする。
 ///
 /// モデルを指名するだけでは足りない（#223）。推論強度はモデルとは別のキーで、
-/// ユーザー設定がそのまま効いてしまう。実測（タスク生成相当のプロンプト、
-/// codex-cli 0.147.0 / gpt-5.5）で `xhigh` は 18 秒、`low` は 9 秒。判定・生成は
+/// ユーザーの `config.toml` がそのまま効くうえ、**モデル自身の既定も重いことがある**
+/// （catalog 上 `gpt-5.5` の `default_reasoning_level` は `xhigh`）。実測（タスク生成
+/// 相当のプロンプト、codex-cli 0.147.0 / gpt-5.5）で `xhigh` は 18 秒、`low` は 9 秒。判定・生成は
 /// スキーマ付きの短い出力なので `low` でも結果は変わらず、タイムアウト余裕だけが増える。
 const CODEX_REASONING_EFFORT: &str = "low";
 
@@ -460,12 +472,12 @@ mod tests {
         assert!(plan.stdin_content.contains("my prompt"));
     }
 
-    /// #223: codex の既定モデルは ChatGPT アカウントで通る値を指名する。旧値
+    /// #223: codex の既定モデルは ChatGPT アカウントで通る現行世代の値を指名する。旧値
     /// `gpt-5.4-mini` は 400 で弾かれ、CLI の既定に委ねるとユーザー config の
     /// 重い設定を拾ってタイムアウトしやすくなる。
     #[test]
     fn test_default_model_codex_is_pinned() {
-        assert_eq!(default_model(&AiAgentKind::CodexCli), "gpt-5.5");
+        assert_eq!(default_model(&AiAgentKind::CodexCli), "gpt-5.6-luna");
         assert_eq!(default_model(&AiAgentKind::ClineCli), "");
         assert!(!default_model(&AiAgentKind::ClaudeCode).is_empty());
         assert!(!default_model(&AiAgentKind::GeminiCli).is_empty());
@@ -483,7 +495,7 @@ mod tests {
             false,
         );
         assert!(plan.args.contains(&"--model".to_string()));
-        assert!(plan.args.contains(&"gpt-5.5".to_string()));
+        assert!(plan.args.contains(&"gpt-5.6-luna".to_string()));
         assert!(plan.args.contains(&"-c".to_string()));
         assert!(plan
             .args
