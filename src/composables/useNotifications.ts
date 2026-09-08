@@ -10,6 +10,7 @@ import {
 import { playNotificationSound } from "../utils/notificationSound";
 import {
   isNotifyKind,
+  passesTrayOff,
   resolveKindSetting,
   shouldPlaySound,
   shouldSendOsNotification,
@@ -140,8 +141,10 @@ export function useNotifications() {
       // 他の種別と同様に通知される（統合前は無条件でスキップしていた）。
       if (!resolveKindSetting(getSoundSettings?.(), kind).enabled) return;
       // trayNotification オフのワークツリー由来。自動承認は notify-worktree を別途購読しており、
-      // そちらは `tray` をイベント単位で持ち回って判定する（#168）ので、ここだけ止める
-      if (event.payload.tray === false) return;
+      // そちらは `tray` をイベント単位で持ち回って判定する（#168）ので、ここだけ止める。
+      // ただし `approval`（ツール許可 / プラン承認 / AskUserQuestion）は
+      // 「人の入力を待って止まった」ことを伝える唯一のフック経路なので通す（#225）。
+      if (event.payload.tray === false && !passesTrayOff(kind)) return;
       const id = resolveWorktreeId(worktreeName);
       if (id) {
         if (shouldHold?.(id, kind)) return;

@@ -60,6 +60,8 @@ export interface WorktreeEntry {
    * 既定値は**作成時に一度だけ焼き込まれる**ので、実効値を決めるのはここだけ。
    * false でもイベント自体は流れるため自動承認は動き、
    * MCP notify_worktree による明示的な通知も常にトレイへ出る。
+   * さらに `approval`（PermissionRequest 由来 = ツール許可 / プラン承認 /
+   * AskUserQuestion）は false でも提示する（#225。`passesTrayOff` を参照）。
    */
   trayNotification?: boolean;
   description?: string; // 作業全体の目的を表す1行説明（ExitPlanMode hookのAI要約、または MCP oretachi_set_description で直接セット）
