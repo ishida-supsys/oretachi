@@ -34,7 +34,9 @@ where
 {
     // `String` ではなく `Value` で受ける。数値や null が入っていても
     // ここで型エラーにせず既定値へ倒すため。
-    let raw = serde_json::Value::deserialize(deserializer).unwrap_or(serde_json::Value::Null);
+    // JSON が壊れているときだけ失敗する（その場合は外側の parse も落ちる）ので、
+    // ここは握り潰さず伝播させてよい。握り潰すべきなのは「読めたが値が想定外」の方。
+    let raw = serde_json::Value::deserialize(deserializer)?;
     let resolved = raw
         .as_str()
         .and_then(NotifyKind::parse)
@@ -375,12 +377,29 @@ fn default_move_to_sub_window_on_mcp_spawn() -> bool { false }
 
 fn default_notification_volume() -> u32 { 80 }
 
+impl Default for NotificationKindSetting {
+    fn default() -> Self {
+        NotificationKindSetting {
+            enabled: default_notification_kind_enabled(),
+            sound: None,
+            os: None,
+        }
+    }
+}
+
+fn default_notification_kind_enabled() -> bool { true }
+
 /// 通知種別ごとの通知設定（#140）。
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NotificationKindSetting {
     /// false ならこの種別の通知（音 / OS 通知 / バッジ）を一切出さない。
-    #[serde(default)]
+    ///
+    /// **既定は `true`。** `#[serde(default)]`（＝false）にすると、手で
+    /// `{"kinds":{"approval":{"sound":"x"}}}` と書いただけでその種別の通知が
+    /// 黙って全消えする（フロントの移行は既存エントリの欠落フィールドを補わない）。
+    /// 「キーがある＝設定した」であって「無効にした」ではない。
+    #[serde(default = "default_notification_kind_enabled")]
     pub enabled: bool,
     /// None / "" = 音なし, "system:<filename>", "custom:<filename>"
     #[serde(default)]

@@ -3878,14 +3878,21 @@ fn resolve_subscription_target(
 ///
 /// **`notify-worktree` に相乗りさせないこと。** あちらは
 ///   1. `start_mcp_server` のリスナーが**全 MCP ピアへ broadcast** し、
-///   2. フロントの自動承認リスナーが `completed` / `hook` 以外を承認待ち候補として扱う
+///   2. フロントの自動承認リスナーが承認待ち候補として扱う
 /// ため、`worktree.*` を流すと AI 判定ループが走る。
+///
+/// **宛先をメインウィンドウに固定する。** `emit` は全 webview へ配るので、将来
+/// サブウィンドウやトレイで `useNotifications` を初期化すると webview の数だけ音と
+/// OS 通知が重なる。受信側の `initialized` フラグは webview ごとのモジュール変数で、
+/// 二重 listen を防げるのは同一 webview 内だけ ── 送信側で閉じるのが確実。
+/// 提示をメイン1箇所に畳む方針は #168 と同じ。
 pub(crate) fn emit_worktree_event_fired(
     app_handle: &AppHandle,
     worktree_name: &str,
     kind: NotifyKind,
 ) {
-    if let Err(e) = app_handle.emit(
+    if let Err(e) = app_handle.emit_to(
+        "main",
         "worktree-event-fired",
         serde_json::json!({ "worktreeName": worktree_name, "kind": kind.as_str() }),
     ) {
@@ -4064,13 +4071,19 @@ pub(crate) async fn publish_notify_event(
         NotifyKind::Hook | NotifyKind::Approval | NotifyKind::Completed | NotifyKind::General
     );
     if gated {
-        // **判定の前後で epoch を突き合わせる。** 「スナップショットを読む」と
-        // 「スキップを決める」の間に購読が入ると、その購読者への初回イベントを落とす。
-        // `upsert_subscription` が入口と成功後の両方で epoch を進めるので、前後で一致
-        // していれば「この区間に購読の書き込みは1件も無い」と言える。
+        // **判定の前後で epoch を突き合わせる（seqlock の読み側）。**
+        // 「スナップショットを読む」と「スキップを決める」の間に購読が入ると、
+        // その購読者への初回イベントを落とす。`upsert_subscription` は書き込み区間を
+        // `SubscriptionsWriteGuard` で囲んで世代を奇数にするので、
+        // **前後一致かつ偶数**なら「この区間に購読の書き込みは1件も無い」と言える。
         let epoch_before = crate::event_db::current_subscriptions_epoch();
         let skip = !may_have_subscribers(app_handle, &pool, kind, now).await;
-        if skip && crate::event_db::current_subscriptions_epoch() == epoch_before {
+        // 前後一致に加えて**偶数であること**を要求する。奇数は「購読の書き込みが
+        // 進行中」を意味し、その区間はカウンタが一定なので前後一致だけでは
+        // 途中で COMMIT された購読を見落とす（seqlock のパリティ検査）。
+        let stable = crate::event_db::current_subscriptions_epoch() == epoch_before
+            && epoch_before % 2 == 0;
+        if skip && stable {
             log::debug!(
                 "[mcp] 購読者がいないためイベント発行をスキップ kind={} source={}",
                 kind,
@@ -4971,7 +4984,11 @@ fn resolve_kind_for_event(
 fn resolve_notify_source(
     settings: &AppSettings,
     payload: &NotifyPayload,
-    live_terminal_ids: &[String],
+    // 「この terminal_id は生きているか」だけを問う述語。**呼ばれるのは
+    // `terminalId` が付いていたときだけ。** `PtyManager::list_sessions()` は
+    // Mutex ロック + 終了セッションの掃除 + 全件の `SessionInfo` 構築なので、
+    // PostToolUse フックごとに無条件で回すと高頻度経路の負荷になる。
+    is_live_terminal: impl Fn(&str) -> bool,
 ) -> Option<NotifySource> {
     // `projectDir` からの逆引きが本筋。取れなければ後方互換の worktree 名で引き直す。
     let worktree_id = payload
@@ -4994,7 +5011,7 @@ fn resolve_notify_source(
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .filter(|id| live_terminal_ids.iter().any(|t| t == id))
+        .filter(|id| is_live_terminal(id))
         .map(str::to_string);
 
     Some(NotifySource {
@@ -5102,12 +5119,22 @@ async fn notify_handler(
     // kind: 明示指定(旧形式/MCP) > event からの解決 > "general"
     // 明示指定が不正な値だった場合は落とさずに event からの解決へ落とす（旧形式の
     // 呼び出し元は自由文字列を送れたので、いきなり通知が消えるのは避ける）。
+    //
+    // **`agent_publishable()` で絞るのが要点（#140）。** この経路は MCP ツールと違い
+    // API キーさえあれば誰でも POST できる（キーは全ワークツリーの設定へ配られる）。
+    // `worktree.closed` を名乗れると、実際には閉じていないワークツリーのクローズを
+    // 購読者へ配れてしまう。しかも `worktree.closed` は定型種別なので
+    // `is_free_text_kind` が false ＝**本文ごと** PTY / SessionStart へ展開され、
+    // `spawn_if_closed` の自動タブ起動まで誘発しうる。
+    // MCP 側（`notify_worktree`）は同じ2値を弾いているので、ここだけ緩いと
+    // 「厳しい入口の隣に緩い入口がある」状態になる。
     let kind = payload
         .kind
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .and_then(NotifyKind::parse)
+        .filter(|k| k.agent_publishable())
         .or_else(|| {
             payload.event.as_deref().map(|ev| match worktree {
                 Some(w) => resolve_kind_for_event(&settings, w, ev),
@@ -5123,16 +5150,13 @@ async fn notify_handler(
     // 非 WAL（書き込みが読み取りをブロックする）なので、`insert_event` + `fanout` を
     // ここで await すると hook 発火のたびに Claude Code 側を待たせる。上の
     // artifact URL 自動登録が同じ理由で spawn しているのと同型。
-    if let Some(source) = resolve_notify_source(
-        &settings,
-        &payload,
-        &app_handle
+    if let Some(source) = resolve_notify_source(&settings, &payload, |id| {
+        app_handle
             .state::<crate::pty_manager::PtyManager>()
             .list_sessions()
-            .into_iter()
-            .map(|s| s.terminal_id)
-            .collect::<Vec<_>>(),
-    ) {
+            .iter()
+            .any(|s| s.terminal_id == id)
+    }) {
         let pass = {
             let manager = app_handle.state::<McpServerManager>();
             // トースト側とは**別マップ**。同じマップを共有すると片方の判定がもう片方の
@@ -6302,7 +6326,7 @@ mod tests {
         let src = resolve_notify_source(
             &settings,
             &notify_payload(Some("X:/wt"), None, Some("term-live")),
-            &["term-live".to_string()],
+            |id| id == "term-live",
         )
         .expect("projectDir から引けるはず");
         assert_eq!(src.worktree_id, "wt-1");
@@ -6320,7 +6344,7 @@ mod tests {
         let src = resolve_notify_source(
             &settings,
             &notify_payload(None, Some("oretachi-abcd"), None),
-            &[],
+            |_| false,
         )
         .expect("名前からも引けるはず");
         assert_eq!(src.worktree_id, "wt-1");
@@ -6332,11 +6356,13 @@ mod tests {
     #[test]
     fn resolve_notify_source_returns_none_when_unresolvable() {
         let settings = target_settings();
-        assert!(resolve_notify_source(&settings, &notify_payload(None, None, None), &[]).is_none());
+        assert!(
+            resolve_notify_source(&settings, &notify_payload(None, None, None), |_| false).is_none()
+        );
         assert!(resolve_notify_source(
             &settings,
             &notify_payload(Some("X:/somewhere-else"), Some("no-such-worktree"), None),
-            &[]
+            |_| false
         )
         .is_none());
     }
@@ -6349,7 +6375,7 @@ mod tests {
         let src = resolve_notify_source(
             &settings,
             &notify_payload(Some("X:/wt"), None, Some("term-ghost")),
-            &["term-live".to_string()],
+            |id| id == "term-live",
         )
         .unwrap();
         assert!(src.terminal_id.is_none(), "実在しないタブ ID は載せない");

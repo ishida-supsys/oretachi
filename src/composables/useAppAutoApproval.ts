@@ -8,6 +8,7 @@ import type { Worktree } from "../types/worktree";
 import type { AppSettings } from "../types/settings";
 import type { NotifyWorktreeEvent } from "./useNotifications";
 import type { NotifyKind } from "../types/settings";
+import { resolveKindSetting } from "../utils/notificationKinds";
 import {
   createPendingNotifyStore,
   queuePendingNotify,
@@ -29,7 +30,7 @@ interface UseAppAutoApprovalDeps {
   isWorktreeFocused: (id: string) => boolean;
   onClickAutoApproval: (id: string) => void;
   playSoundForKind: (kind: NotifyKind) => void;
-  sendOsNotification: (name: string, title: string) => Promise<void>;
+  sendOsNotification: (name: string, title: string, kind?: NotifyKind) => Promise<void>;
   t: (key: string) => string;
 }
 
@@ -43,12 +44,21 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
    * 承認待ちとしてユーザーに提示する（バッジ + 通知音 + OS通知）。
    * バッジの count はイベント件数ぶん加算するが、通知音と OS 通知は 1 回に畳む
    * （判定結果ぶんと預かりぶんが同時に立つと音が重なるため）。
+   *
+   * **種別ごとの ON/OFF（#140）をここで見る。** 自動承認が ON のワークツリーでは
+   * `shouldHold` が true を返して `useNotifications` 側のリスナーが早期 return するため、
+   * この関数が approval 通知の**唯一の出口**になる。ここを素通しにすると、設定で
+   * approval を OFF にしてもバッジと OS 通知だけが出続ける。
    */
   async function notifyApproval(worktreeId: string, worktreeName: string | undefined, count: number) {
     if (count <= 0) return;
+    if (!resolveKindSetting(deps.settings.value.notificationSound, "approval").enabled) return;
     for (let i = 0; i < count; i++) deps.addNotification(worktreeId, "approval");
     deps.playSoundForKind("approval");
-    if (worktreeName) await deps.sendOsNotification(worktreeName, deps.t("notification.titleApproval"));
+    if (worktreeName) {
+      // `kind` を渡して OS 通知側のゲートも通す（渡さないと素通りする）
+      await deps.sendOsNotification(worktreeName, deps.t("notification.titleApproval"), "approval");
+    }
   }
 
   async function onToggleAutoApproval(worktreeId: string) {

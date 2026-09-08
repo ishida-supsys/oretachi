@@ -16,21 +16,28 @@ import {
 
 /** 種別ごとの既定値。
  *
- *  - `hook` は既定 OFF。ライフサイクルフックは分単位で降ってくるので、
- *    既定で音が鳴ると使い物にならない（統合前も UI 通知を素通ししていた）。
- *  - `worktree.*` は**トーストもバッジも出さない**（#137 / #140）。購読関係は
- *    カードの購読バッジが常時見せており、配送ごとの割り込みは要らない。
- *    ここでの `enabled` は実質「音と OS 通知を出すか」の意味になる。
- *  - 残りは統合前の挙動どおり ON（音は未設定なら鳴らない）。 */
+ *  **統合前に通知が出ていなかった種別は既定 OFF にする。** #140 で設定対象が
+ *  3 種別から 7 種別へ増えたが、既定を ON にすると「設定を触っていないユーザーの
+ *  通知が勝手に増える」ことになる。トグルはあるので、欲しい人が入れれば足りる。
+ *
+ *  - `hook` は分単位で降ってくるので既定 OFF（統合前も UI 通知を素通ししていた）。
+ *  - `worktree.*` は既定 OFF。**この3種別はどれも「自分が起こした操作」**で、
+ *    発火元ワークツリーへ届く（ワークツリーを作った / 閉じた / 自分のエージェントが
+ *    メッセージを送った）。自分の操作を自分に通知し返しても情報が無く、
+ *    `enableOsNotification` を ON にしているユーザーには純粋なノイズになる。
+ *    なお受信側にはトーストもバッジも出さない（#137）ので、ここでの `enabled` は
+ *    実質「音と OS 通知を出すか」の意味。
+ *  - `approval` / `completed` / `general` は統合前の挙動どおり ON
+ *    （音は未設定なら鳴らないので、実際に増えるものは無い）。 */
 export const DEFAULT_NOTIFICATION_KIND_SETTINGS: Readonly<Record<NotifyKind, NotificationKindSetting>> =
   Object.freeze({
     hook: { enabled: false, sound: null },
     approval: { enabled: true, sound: null },
     completed: { enabled: true, sound: null },
     general: { enabled: true, sound: null },
-    "worktree.message": { enabled: true, sound: null },
-    "worktree.created": { enabled: true, sound: null },
-    "worktree.closed": { enabled: true, sound: null },
+    "worktree.message": { enabled: false, sound: null },
+    "worktree.created": { enabled: false, sound: null },
+    "worktree.closed": { enabled: false, sound: null },
   });
 
 /** 統合前のフラットなキーと種別の対応。移行でしか使わない。 */

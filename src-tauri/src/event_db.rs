@@ -538,17 +538,13 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
 /// 戻り値は**実際に DB に入っている購読 ID**。既存行を更新した場合は `sub.id` ではなく
 /// 既存の id が返るので、呼び出し元はこれをエージェントへ返すこと。
 pub async fn upsert_subscription(pool: &SqlitePool, sub: &SubscriptionRow) -> Result<String, String> {
-    // **入口と成功後の二重 bump（#140）。** 購読 kind のインデックスを見て
-    // 「誰も購読していないから DB を触らない」と決める経路があるため、
-    // 「購読が入った直後の最初のイベントを落とす」レースを構造的に潰す必要がある。
+    // 購読 kind のインデックスを見て「誰も購読していないから DB を触らない」と決める
+    // 経路があるため、「購読が入った直後の最初のイベントを落とす」レースを構造的に
+    // 潰す必要がある。書き込み区間全体を seqlock で囲み、その間に作られた／その間に
+    // 検証されたスナップショットを読み手が**必ず**捨てられるようにする。
     //
-    //   入口の bump  … この書き込みの**最中**に作られたスナップショットを無効化する
-    //   成功後の bump … この書き込みの**直前**に作られたスナップショットを無効化する
-    //
-    // 発行側は「epoch を読む → スナップショットを見る → スキップを決める →
-    // epoch を読み直して一致を確認する」ので、この2つがあれば
-    // 「epoch E のもとで確定したスキップの区間には購読の書き込みが1件も無い」が成り立つ。
-    bump_subscriptions_epoch();
+    // ガードは drop で閉じるので、下の `?` で途中 return してもカウンタは偶数へ戻る。
+    let _write = SubscriptionsWriteGuard::begin();
     sqlx::query(
         "INSERT INTO subscriptions (id, subscriber_terminal_id, subscriber_worktree_id, subscriber_agent_session, target, event_kinds, delivery, spawn_if_closed, created_at, expires_at, state, orphaned_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
          ON CONFLICT(subscriber_terminal_id, target) DO UPDATE SET \
@@ -585,7 +581,6 @@ pub async fn upsert_subscription(pool: &SqlitePool, sub: &SubscriptionRow) -> Re
     .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())?;
-    bump_subscriptions_epoch();
     Ok(stored.0)
 }
 
@@ -2159,13 +2154,46 @@ pub fn format_inbox_digest(items: &[InboxItem], carryover: i64) -> Option<(Strin
 static SUBSCRIPTIONS_EPOCH: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// 購読テーブルを変更したことを知らせる。**`subscriptions` に書く関数はすべて呼ぶこと。**
+///
+/// **偶数を保つため 2 進める。** 奇数は「書き込み進行中」を意味する予約値
+/// （`SubscriptionsWriteGuard` を参照）。1 ずつ進めると単発の変更でパリティが
+/// 反転し、以後インデックスが永久に無効化される。
 pub fn bump_subscriptions_epoch() {
-    SUBSCRIPTIONS_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    SUBSCRIPTIONS_EPOCH.fetch_add(2, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// 現在の世代。
+/// 現在の世代。奇数なら購読の書き込みが進行中。
 pub fn current_subscriptions_epoch() -> u64 {
     SUBSCRIPTIONS_EPOCH.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// 購読の書き込み区間を囲む seqlock ガード（#140）。
+///
+/// 生成時に世代を奇数へ、drop 時に偶数へ進める。読み手は
+/// 「前後で世代が一致」かつ「**その値が偶数**」のときだけスナップショットを信じてよい。
+///
+/// **パリティが要る理由。** 単に「入口と成功後で 2 回進める」だけだと、その 2 回の間は
+/// カウンタが一定なので、読み手の「世代を読む → スナップショットを見る → スキップを
+/// 決める → 世代を読み直す」が丸ごとその区間に収まったとき、区間の途中で
+/// COMMIT された購読を見落としたまま前後一致が成立してしまう。events.db は
+/// 非 WAL（ロールバックジャーナル）で、writer が RESERVED を握っている間も reader は
+/// 旧状態を読めるため、この順序は実際に起こりうる。
+///
+/// drop で必ず閉じるので、`?` による途中 return やパニックでも
+/// 「奇数のまま置き去り」にはならない（＝インデックスは無効側＝安全側に倒れる）。
+pub struct SubscriptionsWriteGuard;
+
+impl SubscriptionsWriteGuard {
+    pub fn begin() -> Self {
+        SUBSCRIPTIONS_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        SubscriptionsWriteGuard
+    }
+}
+
+impl Drop for SubscriptionsWriteGuard {
+    fn drop(&mut self) {
+        SUBSCRIPTIONS_EPOCH.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// インデックスを作り直す間隔。`expires_at` による自然失効はイベントを伴わないので、
@@ -2203,6 +2231,11 @@ impl SubscribedKinds {
     pub fn snapshot(&self, now: i64) -> Option<std::collections::HashSet<String>> {
         let guard = self.0.lock().unwrap_or_else(|e| e.into_inner());
         let snap = guard.as_ref()?;
+        // 奇数＝購読の書き込みが進行中。作られた世代が奇数なら、その SELECT は
+        // 未コミットの書き込みをまたいでいる可能性があるので信じてはいけない。
+        if snap.epoch % 2 == 1 {
+            return None;
+        }
         if snap.epoch != current_subscriptions_epoch() {
             return None;
         }
@@ -2441,10 +2474,19 @@ mod tests {
     ///
     /// `tokio` に `macros` / `rt` feature が無く `#[tokio::test]` が使えないので、
     /// 同期テストの中から `tauri::async_runtime::block_on` で回す。
+    /// DB を触るテストの共通ラッパ。
+    ///
+    /// **`SUBSCRIPTIONS_EPOCH`（#140）のためにロックを取る。** カウンタはプロセス全体で
+    /// 1つなので、世代やパリティを観測するテストの隣で別テストが購読を書き換えると、
+    /// 観測側が他人の bump を拾って落ちる。購読を書き換えるテストは例外なくここを
+    /// 通るため、入口で直列化してしまうのが確実（in-memory sqlite なので実行時間への
+    /// 影響は無視できる）。**このロックは再入不可なので、`with_pool` を使うテストで
+    /// `epoch_guard()` を別途取らないこと。**
     fn with_pool<F, T>(f: F) -> T
     where
         F: std::future::Future<Output = T>,
     {
+        let _lock = epoch_guard();
         tauri::async_runtime::block_on(f)
     }
 
@@ -2639,16 +2681,18 @@ mod tests {
     /// 購読テーブルを触る操作はすべて世代を進める。
     #[test]
     fn test_epoch_bumps_on_subscription_mutations() {
-        let _guard = epoch_guard();
         with_pool(async {
             let pool = memory_pool().await;
             let now = 1_000_000i64;
             let s = sub("term-a", Some("wt-a"), r#"["worktree.closed"]"#);
 
+            // 単発の変更は必ず**偶数**を保つ（奇数は「書き込み進行中」の予約値）。
             let before = current_subscriptions_epoch();
+            assert_eq!(before % 2, 0, "定常状態の世代は偶数");
             upsert_subscription(&pool, &s).await.unwrap();
-            // 入口と成功後の二重 bump（レース対策）
-            assert!(current_subscriptions_epoch() >= before + 2);
+            let after = current_subscriptions_epoch();
+            assert!(after > before);
+            assert_eq!(after % 2, 0, "書き込み後は偶数へ戻る");
 
             let before = current_subscriptions_epoch();
             delete_subscription_by_target(&pool, "term-a", "wt-target").await.unwrap();
@@ -2658,6 +2702,56 @@ mod tests {
             purge_expired(&pool, now, INBOX_RETENTION_MS).await.unwrap();
             assert!(current_subscriptions_epoch() > before);
         });
+    }
+
+    /// **seqlock のパリティ。** 書き込み区間の中は奇数で、読み手はそれを見て
+    /// 「前後一致」だけでは足りないことを検出する。ここが無いと、入口 bump と
+    /// 成功 bump の間にカウンタが一定な窓ができ、その中で COMMIT された購読を
+    /// 読み手が見落としたまま「変化なし」と判定してしまう。
+    #[test]
+    fn test_subscriptions_write_guard_marks_odd_and_closes_on_drop() {
+        let _lock = epoch_guard();
+        let before = current_subscriptions_epoch();
+        assert_eq!(before % 2, 0);
+        {
+            let _write = SubscriptionsWriteGuard::begin();
+            assert_eq!(current_subscriptions_epoch() % 2, 1, "書き込み中は奇数");
+        }
+        let after = current_subscriptions_epoch();
+        assert_eq!(after % 2, 0, "drop で偶数へ戻る");
+        assert!(after > before, "区間をまたいだことが読み手に見える");
+    }
+
+    /// 途中 return（`?`）でも drop が走るので、奇数のまま置き去りにならない。
+    #[test]
+    fn test_subscriptions_write_guard_closes_on_early_return() {
+        let _lock = epoch_guard();
+        fn failing() -> Result<(), ()> {
+            let _write = SubscriptionsWriteGuard::begin();
+            Err(())
+        }
+        let before = current_subscriptions_epoch();
+        let _ = failing();
+        let after = current_subscriptions_epoch();
+        assert_eq!(after % 2, 0, "エラー経路でも偶数へ戻る");
+        assert!(after > before);
+    }
+
+    /// 書き込み区間の中で作られたスナップショットは、たとえ世代が一致していても
+    /// 信じてはいけない（未コミットの書き込みをまたいで SELECT している）。
+    #[test]
+    fn test_snapshot_rejects_odd_epoch() {
+        let _lock = epoch_guard();
+        let index = SubscribedKinds::new();
+        let now = 1_000_000i64;
+        let _write = SubscriptionsWriteGuard::begin();
+        let epoch = current_subscriptions_epoch();
+        assert_eq!(epoch % 2, 1);
+        index.store(epoch, now, std::collections::HashSet::new());
+        assert!(
+            index.snapshot(now).is_none(),
+            "書き込み中に作られたスナップショットは無効"
+        );
     }
 
     /// インデックスは世代が変わった瞬間に「分からない」へ倒れる。
@@ -2686,7 +2780,6 @@ mod tests {
     /// スキップ判定は成立しない（＝初回イベントを取りこぼさない）。
     #[test]
     fn test_subscribe_then_immediate_publish_is_not_skipped() {
-        let _guard = epoch_guard();
         with_pool(async {
             let pool = memory_pool().await;
             let now = 1_000_000i64;
@@ -2775,16 +2868,43 @@ mod tests {
     #[test]
     fn test_every_subscriptions_mutation_bumps_epoch() {
         let src = include_str!("event_db.rs");
-        // `#[cfg(test)]` 以降（テストコード）は対象外
-        let body = src.split("\n#[cfg(test)]").next().unwrap();
+        // テストコード（このモジュール）は対象外。**末尾から切る**――前半に
+        // `#[cfg(test)]` 属性が増えても走査範囲が縮まないようにする。
+        let body = match src.rfind("\n#[cfg(test)]\nmod tests {") {
+            Some(i) => &src[..i],
+            None => src,
+        };
+        // 宣言形（`pub` / `pub(crate)` / 非 pub / `async` の有無）に依存しないよう、
+        // トップレベルの `fn ` をすべて拾う。行頭からのインデント無しだけを見れば
+        // ネストした関数やクロージャは自然に除外される。
         let mut offenders = Vec::new();
-        for chunk in body.split("\npub async fn ").skip(1) {
-            let name = chunk.split('(').next().unwrap_or("?");
-            let fn_body = chunk.split("\npub ").next().unwrap_or(chunk);
+        let mut chunks: Vec<(usize, &str)> = Vec::new();
+        for (i, _) in body.match_indices("\nfn ") {
+            chunks.push((i, "fn "));
+        }
+        for pat in ["\npub fn ", "\npub async fn ", "\npub(crate) fn ", "\npub(crate) async fn ", "\nasync fn "] {
+            for (i, _) in body.match_indices(pat) {
+                chunks.push((i, pat));
+            }
+        }
+        chunks.sort_unstable();
+        for (idx, (start, pat)) in chunks.iter().enumerate() {
+            let head = start + pat.len();
+            let end = chunks.get(idx + 1).map_or(body.len(), |(next, _)| *next);
+            let fn_body = &body[head..end];
+            let name = fn_body.split('(').next().unwrap_or("?");
             let writes = fn_body.contains("INSERT INTO subscriptions")
                 || fn_body.contains("DELETE FROM subscriptions")
                 || fn_body.contains("UPDATE subscriptions");
-            if writes && !fn_body.contains("bump_subscriptions_epoch()") {
+            // 単発の変更は `bump_subscriptions_epoch()`、read-modify-write は
+            // `SubscriptionsWriteGuard::begin()` で区間を囲む。どちらかが必要。
+            //
+            // **これは「呼び忘れ」しか検出しない。** 呼ぶ位置が正しいか
+            // （`?` の早期 return を挟んでいないか）までは静的には見ていないので、
+            // read-modify-write は必ずガード（drop で必ず閉じる）を使うこと。
+            let invalidates = fn_body.contains("bump_subscriptions_epoch()")
+                || fn_body.contains("SubscriptionsWriteGuard::begin()");
+            if writes && !invalidates {
                 offenders.push(name.to_string());
             }
         }

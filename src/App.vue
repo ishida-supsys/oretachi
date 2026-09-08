@@ -1932,7 +1932,11 @@ onMounted(async () => {
   await initNotificationListener(
     (name: string) => worktrees.value.find((w) => w.name === name)?.id,
     (id: string, kind: NotifyKind) => {
-      if (kind === "completed") return isWorktreeFocused(id);
+      // 自動承認中の保留は「AI 判定の結果が出るまで提示を遅らせる」ためのもの。
+      // 判定対象にならない種別を保留すると、自動承認リスナー側も拾わないので
+      // 通知がどこにも出ないまま消える。判定対象は approval / general だけ
+      // （`useAppAutoApproval` の許可リスト）なので、それ以外はフォーカス判定だけにする。
+      if (kind !== "approval" && kind !== "general") return isWorktreeFocused(id);
       return autoApprovalMap.get(id) === true || isWorktreeFocused(id);
     },
     () => settings.value.enableOsNotification === true,

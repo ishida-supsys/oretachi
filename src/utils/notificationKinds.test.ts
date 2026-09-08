@@ -71,14 +71,21 @@ describe("migrateNotificationSound", () => {
     expect(sound.volume).toBe(50);
   });
 
-  it("未設定の種別には既定値が入る（hook だけ OFF）", () => {
+  /** 統合前に通知が出ていなかった種別を既定 ON にすると、設定を触っていない
+   *  ユーザーの通知が勝手に増える。特に `worktree.*` はどれも「自分が起こした操作」で、
+   *  発火元へ届くのでノイズにしかならない。 */
+  it("統合で増えた種別は既定 OFF、既存3種別は ON", () => {
     const sound = { volume: 80 } as NotificationSoundSettings;
     migrateNotificationSound(sound);
     for (const kind of NOTIFY_KINDS) {
       expect(sound.kinds?.[kind]).toBeDefined();
     }
-    expect(sound.kinds?.hook?.enabled).toBe(false);
-    expect(sound.kinds?.["worktree.closed"]?.enabled).toBe(true);
+    for (const kind of ["hook", "worktree.message", "worktree.created", "worktree.closed"] as const) {
+      expect(sound.kinds?.[kind]?.enabled, `${kind} は既定 OFF`).toBe(false);
+    }
+    for (const kind of ["approval", "completed", "general"] as const) {
+      expect(sound.kinds?.[kind]?.enabled, `${kind} は従来どおり ON`).toBe(true);
+    }
   });
 
   it("冪等（2回目は何も変えない）", () => {
@@ -136,5 +143,13 @@ describe("resolveKindSetting / shouldPlaySound / shouldSendOsNotification", () =
     } as NotificationSoundSettings;
     expect(shouldPlaySound(sound, "worktree.closed")).toBe("system:a.wav");
     expect(shouldSendOsNotification(sound, "worktree.closed")).toBe(false);
+  });
+
+  /** 既定 OFF の種別は、設定を触っていない限り音も OS 通知も出さない。 */
+  it("既定 OFF の種別は何も出さない", () => {
+    for (const kind of ["hook", "worktree.created", "worktree.closed"] as const) {
+      expect(shouldPlaySound(undefined, kind)).toBeNull();
+      expect(shouldSendOsNotification(undefined, kind)).toBe(false);
+    }
   });
 });
