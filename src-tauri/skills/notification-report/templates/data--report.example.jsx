@@ -13,7 +13,9 @@
 //   id            (string)   : カードの一意キー。inbox メッセージ ID をそのまま使ってよい
 //   inboxIds      (string[]) : この カードが束ねる inbox メッセージ ID。送信成功後に ack する
 //   worktreeName  (string)   : 発信元ワークツリー名（= 送信先）
-//   worktreeId    (string)   : 発信元ワークツリーID（購読の突合に使う。表示はしない）
+//   worktreeId    (string)   : 発信元ワークツリーID。**必須**。購読の突合と、送信成功後の
+//                              トレイ通知クリア（oretachi_clear_worktree_notification）に使う。
+//                              oretachi_poll_inbox の sourceWorktreeId をそのまま入れる（表示はしない）
 //   sessionId     (number)   : 送信先の PTY セッションID。**null 可**（稼働中 AI 端末なし）
 //   subscribed    (boolean)  : callerWorktree がこの宛先を購読しているか。false なら送信不可表示
 //   issueRef      (string)   : `#187` など。無ければ省略可

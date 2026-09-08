@@ -401,6 +401,37 @@ async function answerPrompt(n, draft) {
 }
 
 /**
+ * 返答を送り終えた宛先ワークツリーの未確認通知（トレイバッジ / ホームのカードの件数）を
+ * クリアする（#218）。
+ *
+ * **inbox の ack とは別のストア。** `oretachi_ack_message` が触るのは sqlite の
+ * event_db で、トレイバッジはフロントが持つ別の写し。ack だけではバッジが残り、
+ * 返答済みのワークツリーがトレイポップアップの巡回に出続ける。
+ *
+ * 宛先の指定は `worktree_id` のみ（`worktree_name` はアーティファクト経由では
+ * 落とされる。同名ワークツリーがあると、購読チェックを通した ID とは別の
+ * ワークツリーの通知を消しうるため）。許可条件は `write_terminal` と同じ #211 の購読で、
+ * 返答が送れた宛先なら必ず通る。
+ *
+ * **失敗は許容する。** バッジが残るだけで返答自体は届いているので、
+ * ここで throw して送信フローを止める価値は無い。
+ */
+async function clearNotifications(worktreeIds) {
+  const ids = Array.from(new Set((worktreeIds || []).filter(Boolean)));
+  const ok = [];
+  const failed = {};
+  for (const worktreeId of ids) {
+    try {
+      await callTool('oretachi_clear_worktree_notification', { worktree_id: worktreeId });
+      ok.push(worktreeId);
+    } catch (e) {
+      failed[worktreeId] = errText(e);
+    }
+  }
+  return { ok, failed };
+}
+
+/**
  * 返答した通知を既読化する。
  *
  * `oretachi_ack_message` は `terminal_id` を取らないので、レポートを置いた
@@ -481,3 +512,4 @@ exports.sendOne = sendOne;
 exports.sendEnter = sendEnter;
 exports.answerPrompt = answerPrompt;
 exports.ackInbox = ackInbox;
+exports.clearNotifications = clearNotifications;

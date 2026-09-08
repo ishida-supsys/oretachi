@@ -3002,7 +3002,7 @@ impl NotifyService {
     // 意図的に付けている: plan モードで一律 ask になるのを避けるため。実際には
     // `delivered_at` を UPDATE するが、`WHERE delivered_at IS NULL` ガード付きの冪等更新なので
     // 並列実行されても破損しない。
-    #[tool(description = "購読していたワークツリーイベントの未確認メッセージを取得する。セッション開始時の自動提示を取りこぼした場合や、走行中に届いた分を自分で取りに行く場合に使う。読んだら oretachi_ack_message で ack すること", annotations(read_only_hint = true))]
+    #[tool(description = "購読していたワークツリーイベントの未確認メッセージを取得する。セッション開始時の自動提示を取りこぼした場合や、走行中に届いた分を自分で取りに行く場合に使う。読んだら oretachi_ack_message で ack すること。各メッセージは発信元を sourceWorktreeId / sourceWorktreeName / sourceWorktreePath で持つ（発信元が既に削除されていれば name / path は null）。**発信元ワークツリーを他ツールへ渡すときはこの値をそのまま使い、本文やターミナル出力から名前を推測しないこと**（取り違えると oretachi_list_terminals が別のワークツリーを返す）", annotations(read_only_hint = true))]
     async fn oretachi_poll_inbox(
         &self,
         Parameters(PollInboxParams { terminal_id, project_dir, include_acked }): Parameters<PollInboxParams>,
@@ -3046,13 +3046,26 @@ impl NotifyService {
             subscriber.terminal_id,
             items.len()
         );
+        // 発信元の**名前**も返す（#218）。`sourceWorktreeId` だけだと、受け取った側が
+        // 「どのワークツリーから来たのか」を人へ見せる／`oretachi_list_terminals` で
+        // 稼働中の AI 端末を突き合わせるために ID→名前の対応を別途引き直すことになり、
+        // `oretachi_get_worktree_status` には ID 指定の絞り込みが無いので全件走査に頼る形になる。
+        // 実際そこで名前を取り違え、通知レポートの宛先セッションが解決できなくなっていた。
+        // 未登録 ID（クローズ済みなど）なら null。
+        let settings = self.app_handle.state::<SettingsManager>().get();
         let messages: Vec<serde_json::Value> = items
             .iter()
             .map(|i| {
+                let source = settings
+                    .worktrees
+                    .iter()
+                    .find(|w| w.id == i.source_worktree_id);
                 serde_json::json!({
                     "id": i.id,
                     "kind": i.kind,
                     "sourceWorktreeId": i.source_worktree_id,
+                    "sourceWorktreeName": source.map(|w| w.name.as_str()),
+                    "sourceWorktreePath": source.map(|w| w.path.as_str()),
                     "body": serde_json::from_str::<serde_json::Value>(&i.body).unwrap_or(serde_json::Value::Null),
                     "actor": i.actor,
                     "createdAt": i.created_at,
@@ -4547,6 +4560,14 @@ struct SubscriberIdentity {
 ///   走行中の AI エージェント端末が **ちょうど 1 つ** でないとエラーになる。
 ///   AI セッション終了後にユーザーがレポートを開いて操作する用途では常に失敗する
 ///   （トースト種別の `notify_worktree` = 通知だけは影響を受けない）。
+/// - **`oretachi_clear_worktree_notification` は「宛先のトレイバッジを落とす」ツール（#218）。**
+///   `read/write_terminal` と同じ #211 の購読スコープで、自ワークツリーか購読先の
+///   ワークツリーにだけ効く（`worktree_name` は受け取らず `worktree_id` だけを見る。
+///   名前は同名ワークツリーで曖昧になるため）。通知の設定は変えず件数を 0 にするだけなので、
+///   端末操作に比べれば影響は「人が気づく機会を1回失う」程度に留まる。**入れている理由**は、
+///   レポートから返答を送ったあとに宛先の通知が残り、トレイポップアップの巡回に
+///   捌き終わったワークツリーが出続けていたため（レポートを開く時点では生成した AI
+///   セッションが終わっていることが多く、AI 側からクリアする経路は当てにできない）。
 /// - **`oretachi_list_worktree_notifications` だけはワークツリースコープが効かない。**
 ///   パラメータを取らず `NotificationRegistry` の全ワークツリー分（worktreeId / 名前 /
 ///   件数 / 種別 / 初回通知時刻）を返す。得た ID を渡せるツールはホワイトリスト内に
@@ -4569,6 +4590,7 @@ pub(crate) const ARTIFACT_CALLABLE_TOOLS: &[&str] = &[
     "oretachi_list_worktree_notifications",
     "oretachi_inspect_prompt",
     "oretachi_answer_prompt",
+    "oretachi_clear_worktree_notification",
 ];
 
 /// 自由文（`add_task` の prompt / `notify_worktree` の body）へ前置する出自の断り書き。
@@ -4672,6 +4694,15 @@ pub(crate) fn normalize_artifact_tool_params(
         obj.insert("prompt".to_string(), serde_json::Value::String(marked));
     }
 
+    // 通知クリアの宛先は `worktree_id` だけで指定させる（#218）。`worktree_name` を
+    // 残すと `resolve_worktree` が名前優先で引く一方、`call_tool_for_artifact` の
+    // 購読チェックは ID を見るため、同名ワークツリーがあると「許可した ID とは別の
+    // ワークツリーの通知を消す」形にずれる。ID を省略した場合は `project_dir`
+    // （自ワークツリーへ固定済み）に倒れる。
+    if tool == "oretachi_clear_worktree_notification" {
+        obj.remove("worktree_name");
+    }
+
     Ok(obj)
 }
 
@@ -4768,7 +4799,11 @@ pub(crate) fn cross_worktree_dest_targets(
     crate::event_db::matching_targets(dest_worktree_id, group.as_deref(), repo.as_deref())
 }
 
-/// 別ワークツリーの端末への `read/write_terminal` を、購読関係があるときだけ許可する（#211）。
+/// 別ワークツリーへの操作（端末の `read/write_terminal`、通知クリア）を、
+/// 購読関係があるときだけ許可する（#211 / #218）。
+///
+/// `action` はエラー文言に埋める「何をしようとしたか」。取り違えるとアーティファクトを
+/// 叩いているエージェントが別の原因を追い始めるので、呼び出し側で正しく渡す。
 ///
 /// 許可できない場合のエラー文言には**「購読が必要」と解除条件を必ず書く**。
 /// 書かないとアーティファクトを叩いているエージェントが原因を推測できず無限にリトライする。
@@ -4778,12 +4813,13 @@ async fn authorize_cross_worktree_session(
     caller_worktree_id: &str,
     caller_worktree_name: &str,
     dest_worktree_id: &str,
+    action: &str,
 ) -> Result<CrossWorktreeGrant, String> {
     let pool = app_handle
         .try_state::<crate::event_db::EventPool>()
         .map(|p| p.0.clone())
         .ok_or_else(|| {
-            "イベント DB が初期化されていないため、他ワークツリーの端末への送信を許可できません（oretachi のログを確認してください）".to_string()
+            "イベント DB が初期化されていないため、他ワークツリーへの操作を許可できません（oretachi のログを確認してください）".to_string()
         })?;
 
     let dest = settings.worktrees.iter().find(|w| w.id == dest_worktree_id);
@@ -4817,9 +4853,10 @@ async fn authorize_cross_worktree_session(
                 )
             };
             format!(
-                "このアーティファクトはワークツリー '{}' に置かれており、別ワークツリー '{}' の端末を操作しようとしています。他ワークツリーの端末へ送るには、**'{}' 側が '{}' を購読している**必要があります。{}。'{}' 側が '{}' を購読しているだけでは通りません。購読が張られるまでこの呼び出しは何度試しても失敗するので、現在の購読は oretachi_list_subscriptions で確認してください",
+                "このアーティファクトはワークツリー '{}' に置かれており、別ワークツリー '{}' に対して{}をしようとしています。他ワークツリーへ操作を届けるには、**'{}' 側が '{}' を購読している**必要があります。{}。'{}' 側が '{}' を購読しているだけでは通りません。購読が張られるまでこの呼び出しは何度試しても失敗するので、現在の購読は oretachi_list_subscriptions で確認してください",
                 caller_worktree_name,
                 dest_name,
+                action,
                 caller_worktree_name,
                 dest_name,
                 how,
@@ -4905,6 +4942,30 @@ pub(crate) async fn call_tool_for_artifact(
                 worktree_id,
                 &worktree_name,
                 &dest_worktree_id,
+                "端末の操作",
+            )
+            .await?;
+            cross = Some((dest_worktree_id, grant));
+        }
+    }
+
+    // 通知クリアも端末操作と同じ #211 の購読スコープで通す（#218）。`worktree_id` 未指定なら
+    // `project_dir`（自ワークツリー）へ倒れるので検査は不要。
+    if tool == "oretachi_clear_worktree_notification" {
+        if let Some(dest_worktree_id) = obj
+            .get("worktree_id")
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != worktree_id)
+            .map(str::to_string)
+        {
+            let grant = authorize_cross_worktree_session(
+                app_handle,
+                &settings,
+                worktree_id,
+                &worktree_name,
+                &dest_worktree_id,
+                "未確認通知のクリア",
             )
             .await?;
             cross = Some((dest_worktree_id, grant));
@@ -4959,6 +5020,9 @@ pub(crate) async fn call_tool_for_artifact(
         "oretachi_ack_message" => service.oretachi_ack_message(Parameters(parse(tool, args)?)).await,
         "oretachi_list_worktree_notifications" => {
             service.oretachi_list_worktree_notifications(Parameters(parse(tool, args)?))
+        }
+        "oretachi_clear_worktree_notification" => {
+            service.oretachi_clear_worktree_notification(Parameters(parse(tool, args)?))
         }
         // ARTIFACT_CALLABLE_TOOLS に足したのに dispatch を忘れた場合
         other => return Err(format!("ツール '{}' のディスパッチが未実装です", other)),
@@ -7240,6 +7304,27 @@ mod tests {
         let obj = normalize("notify_worktree", serde_json::json!({ "kind": "general" })).expect("ok");
         assert_eq!(obj["worktree_name"], serde_json::json!("oretachi-yo92"));
         assert!(!obj.contains_key("body"));
+    }
+
+    /// 通知クリアの宛先は `worktree_id` だけで指定させる（#218）。
+    ///
+    /// `worktree_name` を残すと `resolve_worktree` が名前優先で引く一方、
+    /// `call_tool_for_artifact` の購読チェックは `worktree_id` を見るため、同名ワークツリーが
+    /// あると「許可した ID とは別のワークツリーの通知を消す」形にずれる。
+    #[test]
+    fn artifact_tool_call_keeps_clear_notification_target_id_only() {
+        let obj = normalize(
+            "oretachi_clear_worktree_notification",
+            serde_json::json!({ "worktree_id": "1788700000000-xaoe", "worktree_name": "someone-else" }),
+        )
+        .expect("normalized");
+        assert_eq!(obj["worktree_id"], serde_json::json!("1788700000000-xaoe"));
+        assert!(!obj.contains_key("worktree_name"));
+        // ID 省略時は project_dir（自ワークツリーへ固定済み）に倒れる
+        let obj = normalize("oretachi_clear_worktree_notification", serde_json::json!({}))
+            .expect("normalized");
+        assert!(!obj.contains_key("worktree_id"));
+        assert_eq!(obj["project_dir"], serde_json::json!("X:/wt/oretachi-yo92"));
     }
 
     /// `add_task` は `project_dir` を持たずスコープ強制が効かないため、

@@ -449,6 +449,42 @@ async function onArchiveConfirmed(options: { deleteBranch: boolean }) {
   await goTo(index, { clearLeaving: false, alreadyDetached: true });
 }
 
+/**
+ * 表示中の一覧から1件を取り除く（#218）。
+ *
+ * トレイの一覧は開いた時点のスナップショットなので、開いている間に外から通知が
+ * クリアされると（通知レポートから返答を送った宛先など）、捌き終わったワークツリーが
+ * 巡回に残り続ける。離脱側の通知クリアは既に外で済んでいるため `clearLeaving` は立てない。
+ */
+async function removeWorktreeFromList(worktreeId: string): Promise<void> {
+  if (closing.value) return;
+  const index = allWorktrees.value.findIndex((w) => w.worktreeId === worktreeId);
+  if (index < 0) return;
+
+  // 表示していないカードなら、表示中のカードを動かさずに抜くだけ
+  if (index !== currentIndex.value) {
+    allWorktrees.value.splice(index, 1);
+    if (index < currentIndex.value) currentIndex.value -= 1;
+    return;
+  }
+
+  // 表示中のカードが消える。遷移中に割り込むと detach 後の goTo が
+  // `navigating` ガードで弾かれ、ターミナルを手放したまま何も表示されなくなる。
+  // クリア自体は外で済んでいるので、この1回は諦めて次の遷移に任せる
+  if (navigating.value) return;
+  // トレイが掴んでいるターミナルを先に手放す
+  await detachCurrentTerminals();
+  allWorktrees.value.splice(index, 1);
+  if (allWorktrees.value.length === 0) {
+    // 最後の1件だった。クリアは外で済んでいるので改めて出さない
+    await closePopup({ clearCurrentNotification: false });
+    return;
+  }
+  // splice で後続が詰まるので、末尾を消したときだけ1つ戻る
+  const next = Math.min(index, allWorktrees.value.length - 1);
+  await goTo(next, { clearLeaving: false, alreadyDetached: true });
+}
+
 function onHeaderDrag(e: MouseEvent) {
   if ((e.target as HTMLElement).closest('button')) return
   getCurrentWindow().startDragging()
@@ -507,6 +543,7 @@ let unlistenInit: UnlistenFn | null = null;
 let unlistenSettings: UnlistenFn | null = null;
 let unlistenArtifact: UnlistenFn | null = null;
 let unlistenUnread: UnlistenFn | null = null;
+let unlistenCleared: UnlistenFn | null = null;
 
 /** ▾ メニューを Escape で閉じる。ダイアログ側は各コンポーネントが自前で処理する */
 function onWindowKeydown(e: KeyboardEvent) {
@@ -557,6 +594,15 @@ onMounted(async () => {
     }
   );
 
+  // 外（MCP の oretachi_clear_worktree_notification など）で通知がクリアされたら
+  // その場でカードを一覧から落とす（#218）
+  unlistenCleared = await appWindow.listen<{ worktreeId: string }>(
+    "tray-notification-cleared",
+    async (event) => {
+      await removeWorktreeFromList(event.payload.worktreeId);
+    }
+  );
+
   // 準備完了をメインに通知
   await emitTo("main", "tray-ready", {});
 });
@@ -567,6 +613,7 @@ onUnmounted(() => {
   unlistenSettings?.();
   unlistenArtifact?.();
   unlistenUnread?.();
+  unlistenCleared?.();
 });
 </script>
 

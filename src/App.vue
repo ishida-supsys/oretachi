@@ -105,7 +105,7 @@ const { notifications, initNotificationListener, addNotification, clearNotificat
 // するので、**そのワークツリーを表示しているウィンドウだけ**が出す。分離済みならサブウィンドウの担当。
 // 配送トーストは #137 で廃止（購読状態はカードの購読バッジが常時見せる）。
 useEventToast({ shouldShow: (wid) => mainWindowShowsDelivery(wid, isDetached) });
-const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees, setCurrentTrayWorktreeId, isTrayShowingWorktree, focusTrayWindow } = useTrayPopup();
+const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktrees, setCurrentTrayWorktreeId, isTrayPopupOpen, isTrayShowingWorktree, focusTrayWindow } = useTrayPopup();
 const { closeAllCodeReviewWindows } = useCodeReviewWindow();
 const { openArtifactViewer, closeArtifactWindow, closeAllArtifactWindows } = useArtifactWindow();
 const { tryAutoAssignHotkey } = useAutoHotkey();
@@ -1926,6 +1926,12 @@ onMounted(async () => {
   await listen<{ worktree: string; worktreeId: string }>("clear-worktree-notification", (event) => {
     clearNotification(event.payload.worktreeId);
     logDebug(`[Notification] cleared by MCP: ${event.payload.worktree} (${event.payload.worktreeId})`);
+    // トレイポップアップの一覧は開いた時点のスナップショットなので、開いている間に
+    // 外からクリアされたワークツリーは自分では消えない（#218）。捌き終わったカードが
+    // 巡回に残り続けるので、開いているときだけ取り除きを依頼する
+    if (isTrayPopupOpen()) {
+      emitTo("tray-popup", "tray-notification-cleared", { worktreeId: event.payload.worktreeId }).catch(() => {});
+    }
   });
 
   // 通知リスナー初期化 (ワークツリー名 → ID 解決関数と自動承認中は保留するコールバックを渡す)
