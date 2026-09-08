@@ -16,6 +16,22 @@ describe("trayOf", () => {
     expect(trayOf({ tray: false })).toBe(false);
     expect(trayOf({ tray: true })).toBe(true);
   });
+
+  // #225: トレイ通知オフでも「人の入力待ち」は通す
+  it("tray: false でも kind: approval は表示扱い", () => {
+    expect(trayOf({ tray: false, kind: "approval" })).toBe(true);
+  });
+
+  it("tray: false の approval 以外は非表示のまま", () => {
+    expect(trayOf({ tray: false, kind: "completed" })).toBe(false);
+    expect(trayOf({ tray: false, kind: "hook" })).toBe(false);
+    expect(trayOf({ tray: false, kind: "general" })).toBe(false);
+  });
+
+  it("未知の kind 文字列は例外に載せない", () => {
+    expect(trayOf({ tray: false, kind: "Approval" })).toBe(false);
+    expect(trayOf({ tray: false, kind: "" })).toBe(false);
+  });
 });
 
 describe("shouldNotifyAfterJudge", () => {

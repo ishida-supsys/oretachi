@@ -145,6 +145,15 @@ describe("useAppAutoApproval: 明示通知の提示", () => {
     expect(h.addNotification).not.toHaveBeenCalled();
   });
 
+  /** #225: トレイ通知オフでも `approval`（ツール許可 / プラン承認 / AskUserQuestion）は
+   *  提示する。AI が承認しなかった = 人の操作が必要なので、ここで消すと誰も気付けない。 */
+  it("tray: false でも kind: approval なら AI 非承認時に提示する（#225）", async () => {
+    const h = await setup();
+    await h.notify({ kind: "approval", tray: false });
+    expect(h.addNotification).toHaveBeenCalledWith(WT_ID, "approval");
+    expect(h.sendOsNotification).toHaveBeenCalledTimes(1);
+  });
+
   it("自動承認 OFF のワークツリーでは何もしない（通知は useNotifications 側の担当）", async () => {
     const h = await setup({ autoApproval: false });
     await h.notify({ tray: true });

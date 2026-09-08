@@ -7,6 +7,7 @@ import {
   shouldSendOsNotification,
   showsBadge,
   isNotifyKind,
+  passesTrayOff,
 } from "./notificationKinds";
 
 describe("NOTIFY_KINDS", () => {
@@ -151,5 +152,23 @@ describe("resolveKindSetting / shouldPlaySound / shouldSendOsNotification", () =
       expect(shouldPlaySound(undefined, kind)).toBeNull();
       expect(shouldSendOsNotification(undefined, kind)).toBe(false);
     }
+  });
+});
+
+describe("passesTrayOff", () => {
+  /** #225: `tray: false` を kind を問わず落としていたため、`PermissionRequest` 由来の
+   *  `approval`（ツール許可 / プラン承認 / AskUserQuestion）まで消えていた。 */
+  it("approval だけがトレイ通知オフを突き抜ける", () => {
+    expect(passesTrayOff("approval")).toBe(true);
+    for (const kind of NOTIFY_KINDS.filter((k) => k !== "approval")) {
+      expect(passesTrayOff(kind)).toBe(false);
+    }
+  });
+
+  /** teamwork-parent がオフにする狙い（Stop → completed / 高頻度な hook のノイズ抑制）を
+   *  壊していないこと。ここが true になったら #225 の前提が崩れている。 */
+  it("completed / hook は抑制されたまま", () => {
+    expect(passesTrayOff("completed")).toBe(false);
+    expect(passesTrayOff("hook")).toBe(false);
   });
 });

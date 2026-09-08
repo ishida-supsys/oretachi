@@ -606,6 +606,9 @@ pub struct NotifyWorktreeEvent {
     pub agent: Option<String>,
     /// トレイ通知として提示してよいか。`false` はフック由来通知を
     /// `trayNotification: false` のワークツリーで抑制するケースのみ。
+    /// **`false` でも `kind: "approval"` はフロントで提示される**（#225。
+    /// `notificationKinds.ts` の `passesTrayOff`）。人の入力を待って止まった
+    /// ことを伝える経路まで潰すと、誰も気付けないまま止まり続けるため。
     /// **イベント自体は drop しない**（自動承認が `notify-worktree` をトリガにしている）。
     /// MCP ブロードキャスト経路の `from_str::<NotifyWorktreeEvent>` との後方互換のため
     /// `default` が必須。
@@ -1898,7 +1901,7 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "ワークツリーのトレイ通知（フック由来の承認待ち・作業完了通知）のオン/オフを切り替える。enabled=true で通知する / enabled=false で通知しない / **enabled を省略すると「未設定」に戻る（= 通知する。実効値は true）**。ワークグループの設定は新規ワークツリー作成時の初期値でしかなく、フォールバック先にはならない。オフにしてもツール `notify_worktree` による明示通知は常にトレイへ出るため、ユーザーの判断を仰ぐ経路は残る。teamwork-parent のような進行管理セッションが自分自身のノイズを止める用途を想定している。他人のワークツリーを勝手にオフにしないこと")]
+    #[tool(description = "ワークツリーのトレイ通知（フック由来の承認待ち・作業完了通知）のオン/オフを切り替える。enabled=true で通知する / enabled=false で通知しない / **enabled を省略すると「未設定」に戻る（= 通知する。実効値は true）**。ワークグループの設定は新規ワークツリー作成時の初期値でしかなく、フォールバック先にはならない。オフで止まるのは `Stop` → `completed` や高頻度な `hook` などのノイズで、**`approval`(既定では `PermissionRequest` 由来 = ツール許可 / プラン承認 / AskUserQuestion) は抑制されない**ため、ユーザーの判断を仰ぐ経路は残る。ツール `notify_worktree` による明示通知はこの設定に一切左右されず常にトレイへ出るので、確実に呼び戻したいときはそちらを使うこと(フック由来の通知は、リポジトリに通知フックが1件も設定されていなければ `approval` を含めて出ない)。teamwork-parent のような進行管理セッションが自分自身のノイズを止める用途を想定している。他人のワークツリーを勝手にオフにしないこと")]
     fn oretachi_set_tray_notification(
         &self,
         Parameters(SetTrayNotificationParams { enabled, project_dir, worktree_name, worktree_id }): Parameters<SetTrayNotificationParams>,
@@ -5494,6 +5497,10 @@ async fn notify_handler(
     // **イベント自体は drop しない** —— `useAppAutoApproval.ts` / `SubWindowApp.vue` の
     // 自動承認が `notify-worktree` をトリガにしているため、ここで落とすと
     // トレイ通知をオフにしたワークツリーで自動承認が止まる。
+    //
+    // `tray: false` を「提示しない」と読み替えるのはフロント側の責務で、そこには
+    // `approval` の例外がある（#225）。ここは「トレイ通知設定がオフだった」という
+    // 事実だけを載せる層なので、kind による分岐は入れない。
     let tray = if payload.kind.is_none() && payload.event.is_some() {
         match worktree {
             Some(w) => resolve_tray_notification(w),
