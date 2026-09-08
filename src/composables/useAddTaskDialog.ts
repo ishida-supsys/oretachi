@@ -1,4 +1,4 @@
-import { ref, computed, watch, onUnmounted, type Ref } from "vue";
+import { ref, computed, onUnmounted, type Ref } from "vue";
 import { invoke } from "@tauri-apps/api/core";
 import { useToast } from "primevue/usetoast";
 import { useI18n } from "vue-i18n";
@@ -6,21 +6,21 @@ import type { ToastMessageOptions } from "primevue/toast";
 import { useTasks } from "./useTasks";
 import { useSettings } from "./useSettings";
 import { useWorkgroups } from "./useWorkgroups";
+import { useAutoReturnHome } from "./useAutoReturnHome";
 import type { TaskCode, TaskProcessCode } from "../types/task";
 
 /** add_worktree ステップでは生成された worktree ID を返す */
 type StepExecutor = (code: TaskCode) => Promise<string | void>;
-
-/** タスク完了からホームタブへ自動復帰するまでの待ち時間 */
-const AUTO_RETURN_HOME_DELAY_MS = 5000;
 
 interface AutoReturnHomeOptions {
   /** メインウィンドウのフォーカス状態 */
   isWindowFocused: Ref<boolean>;
   /** サブウィンドウへ移されたワークツリーか（メインのタブが動かないので対象外にする） */
   isDetached: (worktreeId: string) => boolean;
-  /** ホームタブへ戻す */
-  goHome: () => void;
+  /** そのワークツリーのタブが今アクティブか */
+  isActiveWorktree: (worktreeId: string) => boolean;
+  /** ホームタブへ戻す。実際に遷移したら true */
+  goHome: () => boolean;
 }
 
 let executionQueue: Promise<void> = Promise.resolve();
@@ -29,7 +29,10 @@ export function useAddTaskDialog(executeStep: StepExecutor, autoReturnHome?: Aut
   const toast = useToast();
   const { t } = useI18n();
   const { settings, scheduleSave } = useSettings();
-  const { activeWorkgroupId } = useWorkgroups();
+  const { activeWorkgroupId, resolvedGroupId } = useWorkgroups();
+  const autoReturnHomeCtl = autoReturnHome
+    ? useAutoReturnHome({ settings, resolvedGroupId, ...autoReturnHome })
+    : null;
   const { sortedTasks, addTask, setTaskSteps, updateStepStatus, updateTaskStatus } = useTasks();
 
   const showAddTaskDialog = ref(false);
@@ -90,46 +93,20 @@ export function useAddTaskDialog(executeStep: StepExecutor, autoReturnHome?: Aut
     return createdWorktreeId;
   }
 
-  let autoReturnHomeTimer: ReturnType<typeof setTimeout> | null = null;
-  let autoReturnHomeUnwatch: (() => void) | null = null;
-
   /** 予約済みの自動ホーム復帰を破棄する */
   function cancelAutoReturnHome(): void {
-    if (autoReturnHomeTimer !== null) {
-      clearTimeout(autoReturnHomeTimer);
-      autoReturnHomeTimer = null;
-    }
-    if (autoReturnHomeUnwatch) {
-      autoReturnHomeUnwatch();
-      autoReturnHomeUnwatch = null;
-    }
+    autoReturnHomeCtl?.cancel();
   }
 
   /**
-   * タスク完了後、一定時間でホームタブへ戻す予約を入れる。
+   * タスク完了後、メインウィンドウが非フォーカスのまま一定時間経ったらホームタブへ戻す予約を入れる。
    * - ワークツリーを生成したタスクのみ（既存ワークツリーへの agent_worktree のみのタスクはタブが動かない）
-   * - 対象ワークグループで autoReturnHomeAfterTask が有効なときのみ
+   * - 生成されたワークツリーが属するワークグループで autoReturnHomeAfterTask が有効なときのみ
    * - サブウィンドウへ移された（メインのタブが動かない）ワークツリーは対象外
-   * - 完了時点でメインウィンドウがフォーカス済みなら、ユーザーが見ているので予約しない
-   * - カウントダウン中にフォーカスされたらキャンセル
+   * 詳細な判定は useAutoReturnHome を参照。
    */
   function scheduleAutoReturnHome(groupId: string | undefined, createdWorktreeId: string | null): void {
-    if (!autoReturnHome) return;
-    if (!createdWorktreeId) return;
-    const group = settings.value.workgroups?.find((g) => g.id === groupId);
-    if (!group?.autoReturnHomeAfterTask) return;
-    if (autoReturnHome.isDetached(createdWorktreeId)) return;
-    if (autoReturnHome.isWindowFocused.value) return;
-
-    const { isWindowFocused, goHome } = autoReturnHome;
-    autoReturnHomeUnwatch = watch(isWindowFocused, (focused) => {
-      if (focused) cancelAutoReturnHome();
-    });
-    autoReturnHomeTimer = setTimeout(() => {
-      autoReturnHomeTimer = null;
-      cancelAutoReturnHome();
-      goHome();
-    }, AUTO_RETURN_HOME_DELAY_MS);
+    autoReturnHomeCtl?.schedule(createdWorktreeId, groupId);
   }
 
   onUnmounted(cancelAutoReturnHome);
