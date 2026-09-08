@@ -34,7 +34,29 @@ export function getRecentLines(terminal: Terminal, n: number): string {
   return lines.join("\n");
 }
 
-/** テキスト内に承認プロンプトが含まれるか判定 */
+/**
+ * テキスト内に承認プロンプトが含まれるか判定
+ *
+ * ## Rust 側の `prompt_parser` との二重管理について（#215 で判断）
+ *
+ * Rust 側に `prompt_parser::parse_prompt` があり、ダイアログの形状と選択肢を構造化して
+ * 取り出せる。それでもここの正規表現を残して**二重管理を受け入れている**。理由:
+ *
+ * - **役割が違う。** ここは「AI 判定を走らせる価値があるか」を判断する安価な boolean ゲートで、
+ *   ポーリング tick ごとに全ターミナル分走る。構造化された選択肢は要らない。
+ * - **入力が違う。** ここは手元の xterm.js バッファ (`buffer.active`) をそのまま見る。
+ *   Rust 側は出力履歴 64KB（`prompt_parser::REPLAY_BYTES`）を VT エミュレータへ流し直して
+ *   画面を再生する。tick ごとに
+ *   全端末ぶんそれをやると、IPC 往復と再生コストが tick に乗る。
+ * - **落ちたときの向きが違う。** ここは誤検出しても AI 判定という次の関門があり、
+ *   検出漏れは「自動承認されない」で済む。`prompt_parser` の誤りは他ワークツリーの
+ *   ダイアログへキーを送る話なので、`fingerprint` 照合と `unknown` での送信拒否という
+ *   別の安全弁が要る。
+ *
+ * 寄せるなら「フロントが `oretachi_inspect_prompt` を呼ぶ」形になるが、上のコスト差から
+ * 現状維持とする。**ただし承認プロンプトの文言が変わったときは両方直す**（`ccPrompt()` の
+ * サンプルと `prompt_parser.rs` のテスト用画面が対応関係にある）。
+ */
 export function hasApprovalPrompt(content: string): boolean {
   return content
     .split("\n")
@@ -50,6 +72,8 @@ export function hasApprovalPrompt(content: string): boolean {
  * - oretachi_close_worktree / oretachi_kill_terminal … 破壊的
  * - oretachi_spawn_terminal / oretachi_write_terminal … 任意コマンドを PTY に流し込める
  *   (= 任意コード実行)。無条件承認すると安全ゲートが無効化される
+ * - oretachi_answer_prompt … 他ワークツリーの**許可ダイアログを承認しうる** (#215)。
+ *   矢印 + CR で `1. Yes` を確定できるので write_terminal と同等に任意コード実行と等価
  * - oretachi_add_task … 任意 prompt からワークツリー作成とエージェント実行を発火する
  * - oretachi_import_worktree … settings を書き換えてワークツリーを登録する
  *
@@ -69,6 +93,7 @@ export const ORETACHI_AUTO_APPROVE_TOOLS = [
   "oretachi_list_workgroups",
   "oretachi_list_terminals",
   "oretachi_read_terminal",
+  "oretachi_inspect_prompt",
 ] as const;
 
 /** 承認プロンプト行を探すときに前後何行を対象にするか */

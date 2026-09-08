@@ -67,6 +67,12 @@ struct PtySession {
     /// シェル本体が自然終了した時刻。`Some` ならゾンビ状態（map 上は残っているが死亡）。
     /// `EXITED_SESSION_TTL` 経過後の lazy sweep で除去される。
     exited_at: Arc<Mutex<Option<Instant>>>,
+    /// 直近に PTY へ通知した画面サイズ `(rows, cols)`。`spawn` の初期値を `resize` が上書きする。
+    ///
+    /// **`prompt_parser` の画面再生に必要。** 出力履歴は「その幅で描かれた」バイト列なので、
+    /// 別の幅の VT エミュレータへ流すと行の折り返し位置がずれて選択肢行が壊れる。
+    /// `resize` は master へ渡すだけで値を保持していなかったため、ここで覚えておく。
+    screen_size: Arc<Mutex<(u16, u16)>>,
 }
 
 /// 寿命の切れた exited セッションを `sessions` map から除去する。
@@ -957,6 +963,7 @@ impl PtyManagerCore {
             exit_status,
             last_command_exit_code,
             exited_at,
+            screen_size: Arc::new(Mutex::new((rows, cols))),
         };
 
         self.sessions.lock().map_err(|e| format!("lock error: {}", e))?.insert(session_id, session);
@@ -1061,13 +1068,13 @@ impl PtyManagerCore {
 
     pub fn resize(&self, session_id: u32, rows: u16, cols: u16) -> Result<(), String> {
         log::debug!("[Terminal] pty_manager::resize session_id={} rows={} cols={}", session_id, rows, cols);
-        let master_arc = {
+        let (master_arc, size_arc) = {
             let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
             sweep_exited(&mut sessions);
             let session = sessions
                 .get(&session_id)
                 .ok_or_else(|| format!("Session {} not found", session_id))?;
-            session.master.clone()
+            (session.master.clone(), session.screen_size.clone())
         };
 
         if let Some(master) = master_arc.lock().map_err(|e| format!("lock error: {}", e))?.as_ref() {
@@ -1079,9 +1086,34 @@ impl PtyManagerCore {
                     pixel_height: 0,
                 })
                 .map_err(|e| format!("Resize error: {}", e))?;
+            // **master へ通知できたときだけ覚える。** ブロックの外に置くと、子が
+            // 自然終了して master が drop されたあと（`if let` が false）にも更新が走り、
+            // `prompt_parser` が「その幅で描かれていない履歴」を新しい幅で再生して
+            // 折り返しを誤る（セルフレビューで検出）
+            match size_arc.lock() {
+                Ok(mut g) => *g = (rows, cols),
+                Err(e) => *e.into_inner() = (rows, cols),
+            }
         }
 
         Ok(())
+    }
+
+    /// 直近に PTY へ通知した画面サイズ `(rows, cols)`。
+    ///
+    /// `prompt_parser::render_screen` へ渡す。出力履歴は「その幅で描かれた」バイト列なので、
+    /// 別の幅で再生すると折り返し位置がずれ、選択肢行が途中で切れて解析不能になる。
+    pub fn screen_size(&self, session_id: u32) -> Result<(u16, u16), String> {
+        let size_arc = {
+            let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+            sweep_exited(&mut sessions);
+            let session = sessions
+                .get(&session_id)
+                .ok_or_else(|| format!("Session {} not found", session_id))?;
+            session.screen_size.clone()
+        };
+        let guard = size_arc.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(*guard)
     }
 
     pub fn kill(&self, session_id: u32, source: &str) -> Result<(), String> {

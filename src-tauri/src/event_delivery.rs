@@ -1593,6 +1593,13 @@ async fn write_push(
     text: &str,
     terminal_id: &str,
 ) -> PushWrite {
+    // 本文と CR の 2 回書き込みの間に別の write を挟ませない（#215）。
+    // `oretachi_write_terminal` / `oretachi_answer_prompt` も同じロックを取る。
+    // 特に `answer_prompt` は「画面の fingerprint を照合してから矢印を送る」ので、
+    // 間に押し込みが入ると照合した画面とキーが届く画面が食い違う。
+    let lock = crate::mcp_server::session_write_lock(session.session_id);
+    let _guard = lock.lock().await;
+
     let paste = format!("\x1b[200~{}\x1b[201~", text);
     if let Err(e) = app
         .state::<crate::pty_manager::PtyManager>()

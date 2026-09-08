@@ -1,11 +1,20 @@
 
-const { useState, useCallback } = React;
+const { useState, useCallback, useMemo } = React;
 const { useMemory } = require('oretachi');
 
 const { META, NOTIFICATIONS } = require('./data/report');
 const NotificationCard = require('./components/NotificationCard').default;
 const { Badge } = require('./components/NotificationCard');
-const { blockedReason, canSend, sendOne, sendEnter, ackInbox } = require('./lib/send');
+const {
+  blockedReason,
+  canSend,
+  sendOne,
+  sendEnter,
+  answerPrompt,
+  ackInbox,
+  isDialog,
+  promptConflicts,
+} = require('./lib/send');
 
 const FONT = 'system-ui, sans-serif';
 const MONO = 'ui-monospace, SFMono-Regular, Menlo, monospace';
@@ -35,18 +44,27 @@ function App() {
       .catch(() => {});
   }, [setDrafts]);
 
+  // **同じ宛先へキー操作カードを 2 枚向けない**（#215）。ダイアログは 1 つしか無いので、
+  // 2 枚目は必ず stale になるか、最悪の場合 1 枚目の回答を別の問いへ撃ち込む。
+  // レポート生成側の指示だけに頼らず、ここで機械的に 2 枚目以降を塞ぐ
+  const conflicts = useMemo(() => promptConflicts(NOTIFICATIONS), []);
+  const blockedFor = useCallback(n => blockedReason(n, conflicts), [conflicts]);
+
   // 送信対象の判定は `lib/send` の canSend に寄せてある。一括送信の選別・
   // 再送ボタンの活性・送信ループのガードが同じ判定を使うようにするため
-  const sendable = NOTIFICATIONS.filter(n => canSend(n, answers[n.id], drafts[n.id]));
+  const sendable = NOTIFICATIONS.filter(n => canSend(n, answers[n.id], drafts[n.id], conflicts));
 
   const pending = NOTIFICATIONS.filter(n => {
     const rec = answers[n.id];
     return !rec || rec.status !== 'sent';
   });
 
-  // 1 件ずつ順に送る。宛先ごとに write_terminal を呼ぶ（宛先の AI 端末が別々なので
-  // まとめられない）。記録は 1 件ごとにサイドカーへ書くので、途中で閉じても
-  // 「どこまで届いたか」は残る
+  // 1 件ずつ順に送る。宛先ごとに別々のツール呼び出しになる（宛先の AI 端末が
+  // 別々なのでまとめられない）。記録は 1 件ごとにサイドカーへ書くので、途中で
+  // 閉じても「どこまで届いたか」は残る。
+  //
+  // **同じ session_id へ複数向くことがあっても直列。** ダイアログ経路は 1 件ごとに
+  // Rust 側で fingerprint 照合が走るので、後続は自動的に stale になる（撃ち込まれない）。
   const send = useCallback(async (targets) => {
     if (busy || targets.length === 0) return;
     setBusy(true);
@@ -58,22 +76,42 @@ function App() {
         // 一括送信のボタンは sendable で絞ってあるが、カードの再送ボタンは
         // 1 件を直接渡してくる。ここで弾かないと、候補を解除したまま再送して
         // 中身の無いプロンプトを送れてしまう
-        if (!canSend(n, prev, d)) continue;
+        if (!canSend(n, prev, d, conflicts)) continue;
         setInflightId(n.id);
-        // 本文だけ届いている状態からの復旧は Enter の送り直し。同じ本文を
-        // もう一度書くと二重になったテキストが 1 回のプロンプトとして飛ぶ
-        const resume = prev && prev.status === 'pastedOnly';
-        const result = resume ? await sendEnter(n) : await sendOne(META, n, d);
-        const rec = resume
-          ? { ...prev, status: result.status, at: nowLabel() }
-          : { choice: d.choice, note: (d.note || '').trim(), status: result.status, at: nowLabel() };
+
+        let result;
+        let rec;
+        if (isDialog(n)) {
+          // ダイアログ経路。**キー列は Rust 側が送信直前の画面から組み立て直す。**
+          // ここで組み立てて渡すと「読んだ画面」と「キーが届く画面」がずれる
+          result = await answerPrompt(n, d);
+          rec = {
+            mode: d.mode || 'select',
+            optionIndex: typeof d.optionIndex === 'number' ? d.optionIndex : null,
+            value: d.value || null,
+            note: (d.note || '').trim(),
+            status: result.status,
+            keysSent: result.keysSent || [],
+            afterShape: result.afterShape || null,
+            at: nowLabel(),
+          };
+        } else {
+          // 自由入力経路。本文だけ届いている状態からの復旧は Enter の送り直し。
+          // 同じ本文をもう一度書くと二重になったテキストが 1 回のプロンプトとして飛ぶ
+          const resume = prev && prev.status === 'pastedOnly';
+          result = resume ? await sendEnter(n) : await sendOne(META, n, d);
+          rec = resume
+            ? { ...prev, status: result.status, at: nowLabel() }
+            : { choice: d.choice, note: (d.note || '').trim(), status: result.status, at: nowLabel() };
+        }
         if (result.error) rec.error = result.error;
         else delete rec.error;
+
         // **1 件ごとに待って保存する。** サイドカーの保存は 400ms の debounce +
         // IPC 往復なので、N 件送ると N×(400ms + 往復) が上乗せされる。それでも
         // 待つのは、ここで落ちても「どこまで届いたか」を残すため。特に
-        // `pastedOnly` は記録が無いまま閉じると、次に開いた人が同じ本文を送って
-        // テキストを二重にしてしまう。速度より取り違えの防止を採る
+        // `pastedOnly` / `unverified` は記録が無いまま閉じると、次に開いた人が
+        // 同じ回答を送って二重に入力してしまう。速度より取り違えの防止を採る
         try {
           await setAnswers(p => ({ ...p, [n.id]: rec }));
         } catch (e) {
@@ -96,10 +134,14 @@ function App() {
       setInflightId(null);
       setBusy(false);
     }
-  }, [busy, answers, drafts, setAnswers, setAck]);
+  }, [busy, answers, drafts, setAnswers, setAck, conflicts]);
 
   const sentCount = NOTIFICATIONS.filter(n => (answers[n.id] || {}).status === 'sent').length;
-  const failedCount = NOTIFICATIONS.filter(n => (answers[n.id] || {}).status === 'failed').length;
+  const failedCount = NOTIFICATIONS.filter(n => {
+    const s = (answers[n.id] || {}).status;
+    return s === 'failed' || s === 'stale' || s === 'unsupported';
+  }).length;
+  const dialogCount = NOTIFICATIONS.filter(isDialog).length;
 
   return (
     <div style={{
@@ -119,8 +161,9 @@ function App() {
         <span style={{ fontSize: 12, color: '#9399b2', fontWeight: 600 }}>
           未返答 {pending.length} / 全 {NOTIFICATIONS.length} 件
         </span>
+        {dialogCount > 0 && <Badge label={`ダイアログ待ち ${dialogCount}`} color="#f38ba8" />}
         {sentCount > 0 && <Badge label={`返答済み ${sentCount}`} color="#a6e3a1" />}
-        {failedCount > 0 && <Badge label={`失敗 ${failedCount}`} color="#f38ba8" />}
+        {failedCount > 0 && <Badge label={`未送信 ${failedCount}`} color="#f38ba8" />}
         <div style={{ flex: 1 }} />
         <button
           type="button"
@@ -149,6 +192,21 @@ function App() {
           次のレポートに回ります。各カードの現況要約も生成時にターミナルを読んだ内容で、以後は更新されません。
         </div>
 
+        {/* ダイアログ操作の注意。何が送られるのかを人が理解した上で押させる */}
+        {dialogCount > 0 && (
+          <div style={{
+            fontSize: 11.5, color: '#f38ba8',
+            background: '#f38ba812', border: '1px solid #f38ba844', borderRadius: 6,
+            padding: '9px 12px', lineHeight: 1.7,
+          }}>
+            <b>ダイアログで止まっている宛先が {dialogCount} 件あります。</b>
+            これらのカードは自由テキストではなく<b>キー操作</b>で回答します（テキストを送るとダイアログに吸われ、
+            末尾の Enter が意図しない選択肢の確定として解釈されるため）。選択肢は<b>宛先の画面に実在するものだけ</b>を
+            出しており、送信前にキー列をプレビューできます。送信直前に画面が変わっていた場合は
+            <b>何も送らず「画面が変わった」と表示</b>されます（そのときはレポートを作り直してください）。
+          </div>
+        )}
+
         {NOTIFICATIONS.length === 0 && (
           <div style={{ fontSize: 13, color: '#6c7086', padding: '24px 0', textAlign: 'center' }}>
             返答が必要な通知はありませんでした。
@@ -161,12 +219,13 @@ function App() {
             n={n}
             answer={answers[n.id] || null}
             draft={drafts[n.id]}
-            blocked={blockedReason(n)}
+            blocked={blockedFor(n)}
             inflight={inflightId === n.id}
             busy={busy}
-            canSend={canSend(n, answers[n.id], drafts[n.id])}
+            canSend={canSend(n, answers[n.id], drafts[n.id], conflicts)}
             onPick={c => setDraft(n.id, { choice: c })}
             onNote={v => setDraft(n.id, { note: v })}
+            onDraft={patch => setDraft(n.id, patch)}
             onRetry={() => send([n])}
           />
         ))}

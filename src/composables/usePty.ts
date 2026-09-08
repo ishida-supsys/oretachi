@@ -58,6 +58,29 @@ export function usePty() {
     });
   }
 
+  /**
+   * セッション書き込みロックを取ってから書く（#215）。
+   *
+   * 自動承認の Enter だけが使う。`oretachi_answer_prompt` が「画面の fingerprint を
+   * 照合 → 矢印で ❯ を動かす → CR で確定」を行っている区間に CR が割り込むと、
+   * 移動途中の ❯ が指す選択肢（許可ダイアログなら `2. Yes, and don't ask again`
+   * = 以後の無条件承認）を確定させてしまう。
+   *
+   * **人のキー入力は `write` のまま**にしておくこと。あちらは同期コマンドで
+   * キー入力の順序が保証されており、async 化すると順序が壊れる。
+   */
+  async function writeLocked(data: string | Uint8Array): Promise<void> {
+    if (sessionId.value === null) return;
+    const bytes =
+      typeof data === "string"
+        ? Array.from(new TextEncoder().encode(data))
+        : Array.from(data);
+    await invoke("pty_write_locked", {
+      sessionId: sessionId.value,
+      data: bytes,
+    });
+  }
+
   // pty_resize は async コマンド (spawn_blocking) のため、並行 invoke では適用順が
   // 逆転しうる。直列化して「最後に要求したサイズが最後に適用される」ことを保証する。
   let resizeChain: Promise<void> = Promise.resolve();
@@ -150,6 +173,7 @@ export function usePty() {
     spawn,
     attachToSession,
     write,
+    writeLocked,
     resize,
     kill,
     detach,
