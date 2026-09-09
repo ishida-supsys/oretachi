@@ -32,6 +32,39 @@ const SUBMIT_DELAY_MS = 150;
 const DIALOG_SHAPES = ['permission', 'plan', 'askUserQuestion', 'yesno', 'numbered'];
 
 /**
+ * 「報告のみ」のイベント種別（#228）。**人の判断を必要としない。**
+ *
+ * `worktree.created` / `worktree.closed` は `notify_worktree` から発行できず、
+ * oretachi 内部の `fire_worktree_created` / `fire_worktree_closed` からしか出ない
+ * （`event_db.rs`）。本文も oretachi が定型文に組み直すので、エージェントが自由文で
+ * 「判断が欲しい」と書き込む余地が構造的に無い。だから返答 UI を出さず、読むだけの
+ * カードにする。
+ *
+ * **`completed` / `hook` はここに入れない。** どちらも `notify_worktree` 経由で
+ * エージェントが任意の本文を書けるため、「実装は終わったので次の指示が欲しい」の
+ * ような返答待ちが混ざりうる。送信 UI を消すと、その返答待ちに気づく導線まで消える。
+ *
+ * **判定を `kind` に置いているのは、生成側 AI の付け忘れを構造的に防ぐため。**
+ * `data/report` に「報告カードです」というフラグを足すと、生成する AI がそれを
+ * 落とした瞬間に判断不要の通知が返答待ちとして並ぶ（あるいは逆）。`kind` は
+ * `oretachi_poll_inbox` の返り値をそのまま写す既存フィールドなので、ここから
+ * 導出すればレポート側で機械的に決まる。
+ */
+const REPORT_KINDS = ['worktree.created', 'worktree.closed'];
+
+/**
+ * このカードが「報告のみ」か（＝返答 UI を出さない）。
+ *
+ * 報告カードは送信経路を一切持たないので、`subscribed` / `sessionId` / `prompt` を
+ * 参照しない。`worktree.closed` は発信元ワークツリーが既に削除済みで、購読行も
+ * fanout 直後に消えている（`event_db.rs` の `fire_worktree_closed`）ため、
+ * そもそもこの 3 つを埋められない。
+ */
+function isReportOnly(n) {
+  return !!n && REPORT_KINDS.indexOf(n.kind) >= 0;
+}
+
+/**
  * ESC で抜けてから本文を送れる形状（Rust の `plan_keys` の `is_cc_select()` と対応）。
  *
  * **`escapeHatch` だけで判断してはいけない。** `escapeHatch` は画面末尾に
@@ -114,6 +147,9 @@ function shapeOf(n) {
 
 /** ダイアログが開いているか（＝自由テキストを送ってはいけない） */
 function isDialog(n) {
+  // 報告カードは送信しないので、`prompt` が何であれダイアログ扱いにしない（#228）。
+  // これで `promptConflicts` の「1 セッション 1 枚」の枠も食わない
+  if (isReportOnly(n)) return false;
   return DIALOG_SHAPES.indexOf(shapeOf(n)) >= 0;
 }
 
@@ -184,6 +220,9 @@ function promptConflicts(notifications) {
 
 /** この通知へ返答を送れるか。送れない理由があれば文字列で返す（送れるなら null） */
 function blockedReason(n, conflicts) {
+  // 報告カードは「送れない」ではなく「送るものが無い」（#228）。理由を返すと
+  // カードに黄色い警告ボックスが出て、判断不要の報告が不具合のように見える
+  if (isReportOnly(n)) return null;
   if (n.subscribed === false) {
     return `'${n.worktreeName}' を購読していないため送信できません（購読が許可条件です）`;
   }
@@ -416,6 +455,13 @@ async function answerPrompt(n, draft) {
 //
 // 人がレポートの存在に気づく導線は、生成側のセッションが Step 6 で撃つ
 // `notify_worktree`（レポート置き場のワークツリー宛）が担う。
+//
+// **報告カード（#228）も同じ扱い。** 返答しないカードだが ack のタイミングは
+// 要返答カードと揃える（Step 5.5 で一括）。報告カードだけ収集直後に ack すると
+// 「Step 5 の検証より前に ack しない」という原則が種別ごとに分岐し、生成が途中で
+// 落ちたときにどのレポートにも載っていない報告が inbox から消える。揃えておけば、
+// 生成失敗時は報告カードも次のレポートに再掲されるだけで済む（読むだけなので
+// 再掲は無害）。
 
 /**
  * この通知へ「いま」返答を送れるか（下書きの妥当性まで含めた判定）。
@@ -436,6 +482,9 @@ async function answerPrompt(n, draft) {
  * （画面が変わっているか、矢印が既に動いているので、同じ回答が別の選択肢を確定しうる）。
  */
 function canSend(n, answer, draft, conflicts) {
+  // 報告カードは一括送信の対象にも再送の対象にもならない（#228）。
+  // `blockedReason` が null を返すので、ここで明示的に落とす
+  if (isReportOnly(n)) return false;
   if (blockedReason(n, conflicts)) return false;
   const d = draft || {};
 
@@ -460,6 +509,8 @@ function canSend(n, answer, draft, conflicts) {
 exports.OTHER = OTHER;
 exports.SUBMIT_DELAY_MS = SUBMIT_DELAY_MS;
 exports.DIALOG_SHAPES = DIALOG_SHAPES;
+exports.REPORT_KINDS = REPORT_KINDS;
+exports.isReportOnly = isReportOnly;
 exports.SHAPE_LABEL = SHAPE_LABEL;
 exports.flatten = flatten;
 exports.buildReplyText = buildReplyText;

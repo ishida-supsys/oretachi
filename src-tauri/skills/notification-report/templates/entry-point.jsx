@@ -12,6 +12,7 @@ const {
   sendEnter,
   answerPrompt,
   isDialog,
+  isReportOnly,
   promptConflicts,
 } = require('./lib/send');
 
@@ -69,11 +70,29 @@ function App() {
   const conflicts = useMemo(() => promptConflicts(NOTIFICATIONS), []);
   const blockedFor = useCallback(n => blockedReason(n, conflicts), [conflicts]);
 
+  // ── 要返答 / 報告のみの二分（#228） ───────────────────────────────────────
+  //
+  // `worktree.created` / `worktree.closed` は人の判断が要らない報告なので、
+  // **未返答の件数に数えない。** 数えると「未返答 5 件」のうち 3 件は押すものが
+  // 無いカードということになり、人が捌ききれない残件として見えてしまう。
+  const actionable = useMemo(() => NOTIFICATIONS.filter(n => !isReportOnly(n)), []);
+  const reportOnly = useMemo(() => NOTIFICATIONS.filter(isReportOnly), []);
+
+  // 描画順は「要返答 → 報告のみ」。判断が必要なカードを上に集める。
+  //
+  // **並べ替えは描画だけで、`conflicts` は `NOTIFICATIONS` の元順で計算している。**
+  // `promptConflicts` は「同じ session への 2 枚目以降を塞ぐ」ときに配列の先頭を
+  // 生かす（生成側が最新を先頭へ置く前提）ので、ここで並べ替えた配列を渡すと
+  // どちらを生かすかが変わりうる。報告カードはダイアログ扱いにならないため、
+  // この分割自体が conflicts に影響することはない
+  const ordered = useMemo(() => actionable.concat(reportOnly), [actionable, reportOnly]);
+
   // 送信対象の判定は `lib/send` の canSend に寄せてある。一括送信の選別・
   // 再送ボタンの活性・送信ループのガードが同じ判定を使うようにするため
+  // （報告カードは `canSend` が常に false を返すので自動的に外れる）
   const sendable = NOTIFICATIONS.filter(n => canSend(n, answers[n.id], drafts[n.id], conflicts));
 
-  const pending = NOTIFICATIONS.filter(n => {
+  const pending = actionable.filter(n => {
     const rec = answers[n.id];
     return !rec || rec.status !== 'sent';
   });
@@ -143,8 +162,8 @@ function App() {
     }
   }, [busy, answers, drafts, setAnswers, conflicts]);
 
-  const sentCount = NOTIFICATIONS.filter(n => (answers[n.id] || {}).status === 'sent').length;
-  const failedCount = NOTIFICATIONS.filter(n => {
+  const sentCount = actionable.filter(n => (answers[n.id] || {}).status === 'sent').length;
+  const failedCount = actionable.filter(n => {
     const s = (answers[n.id] || {}).status;
     return s === 'failed' || s === 'stale' || s === 'unsupported';
   }).length;
@@ -166,8 +185,16 @@ function App() {
           通知レポート — {generatedLabel(META)}
         </span>
         <span style={{ fontSize: 12, color: '#9399b2', fontWeight: 600 }}>
-          未返答 {pending.length} / 全 {NOTIFICATIONS.length} 件
+          未返答 {pending.length} / 要返答 {actionable.length} 件
         </span>
+        {/* 報告のみの件数は「未返答」と別に出す。押すものが無いカードを残件に
+            数えると、人が無い判断を探すことになる（#228） */}
+        {reportOnly.length > 0 && (
+          <Badge
+            label={`報告 ${reportOnly.length}`}
+            color="#94e2d5"
+            title="人の判断を必要としないイベント（ワークツリーの作成 / クローズ）。読むだけで完結します" />
+        )}
         {dialogCount > 0 && <Badge label={`ダイアログ待ち ${dialogCount}`} color="#f38ba8" />}
         {sentCount > 0 && <Badge label={`返答済み ${sentCount}`} color="#a6e3a1" />}
         {failedCount > 0 && <Badge label={`未送信 ${failedCount}`} color="#f38ba8" />}
@@ -224,7 +251,19 @@ function App() {
           </div>
         )}
 
-        {NOTIFICATIONS.map(n => (
+        {/* 報告だけのレポート。ここで明示しないと「何も押せない」ことが不具合に見える */}
+        {NOTIFICATIONS.length > 0 && actionable.length === 0 && (
+          <div style={{
+            fontSize: 12.5, color: '#94e2d5',
+            background: '#94e2d512', border: '1px solid #94e2d544', borderRadius: 6,
+            padding: '9px 12px', lineHeight: 1.7,
+          }}>
+            このレポートには<b>返答が必要な通知はありません</b>。
+            以下はワークツリーの作成 / クローズの報告で、読むだけで完結します。
+          </div>
+        )}
+
+        {ordered.map(n => (
           <NotificationCard
             key={n.id}
             n={n}
@@ -241,23 +280,27 @@ function App() {
           />
         ))}
 
-        {/* 宛先の内訳。session_id は生成時に埋め込んだ値なので、失効したら作り直す */}
-        <div style={{
-          fontSize: 11, color: '#6c7086', fontFamily: FONT,
-          borderTop: '1px dashed #313244', paddingTop: 12, lineHeight: 1.9,
-        }}>
-          <div>
-            返答は各ワークツリーの AI 端末へ直接送られます
-            （レポートの置き場所 <b>{META.callerWorktree}</b> がその宛先を購読していることが許可条件）。
+        {/* 宛先の内訳。session_id は生成時に埋め込んだ値なので、失効したら作り直す。
+            **報告カードは宛先を持たない**ので、この内訳には出さない（#228）。
+            出すと `session —` が並んで「宛先が見つからなかった」ように見える */}
+        {actionable.length > 0 && (
+          <div style={{
+            fontSize: 11, color: '#6c7086', fontFamily: FONT,
+            borderTop: '1px dashed #313244', paddingTop: 12, lineHeight: 1.9,
+          }}>
+            <div>
+              返答は各ワークツリーの AI 端末へ直接送られます
+              （レポートの置き場所 <b>{META.callerWorktree}</b> がその宛先を購読していることが許可条件）。
+            </div>
+            <div style={{ fontFamily: MONO, fontSize: 10.5, color: '#585b70' }}>
+              {actionable.map(n => `${n.worktreeName}:session ${n.sessionId || '—'}`).join('  /  ')}
+            </div>
+            <div>
+              session_id は生成時に埋め込んだ値です。アプリ再起動やタブ再作成で失効するので、
+              送信がエラーになったら AI にレポートの作り直しを頼んでください（既読化済みの通知も拾い直せます）。
+            </div>
           </div>
-          <div style={{ fontFamily: MONO, fontSize: 10.5, color: '#585b70' }}>
-            {NOTIFICATIONS.map(n => `${n.worktreeName}:session ${n.sessionId || '—'}`).join('  /  ')}
-          </div>
-          <div>
-            session_id は生成時に埋め込んだ値です。アプリ再起動やタブ再作成で失効するので、
-            送信がエラーになったら AI にレポートの作り直しを頼んでください（既読化済みの通知も拾い直せます）。
-          </div>
-        </div>
+        )}
       </div>
     </div>
   );
