@@ -58,11 +58,46 @@ export function getRecentLines(terminal: Terminal, n: number): string {
  * サンプルと `prompt_parser.rs` のテスト用画面が対応関係にある）。
  */
 export function hasApprovalPrompt(content: string): boolean {
+  return content.split("\n").some((line) => APPROVAL_PROMPT_LINE.test(line));
+}
+
+/**
+ * 承認プロンプト行にマッチする正規表現。
+ *
+ * `❯ Yes` だけでなく **`❯ 1. Yes`（現在の Claude Code の書式）**にも一致させる。
+ * 番号付きに一致しなかった頃は、許可ダイアログで実質 `Do you want to` の 1 行だけが
+ * 検出条件になっていて、その行がダイアログ上端寄りにあるため窓が狭いと落ちていた (#252)。
+ */
+const APPROVAL_PROMPT_LINE =
+  /[❯►]\s*(?:\d+\.\s*)?Yes|\(Y\/n\)|\[Y\/n\]|Allow\s+\w|Do you want to/i;
+
+/** 承認プロンプトを探すときにバッファ末尾から見る行数 */
+export const APPROVAL_SCAN_LINES = 60;
+
+/**
+ * 画面比較用の正規化。行末の空白と末尾の空行を落とす。
+ *
+ * xterm のバッファはカーソル位置やパディングで行末の空白が揺れるため、
+ * 生の文字列比較だと「変わっていないダイアログ」を変化とみなしてしまう。
+ */
+function normalizeScreen(content: string): string {
   return content
     .split("\n")
-    .some((line) =>
-      /❯\s*Yes|►\s*Yes|\(Y\/n\)|\[Y\/n\]|Allow\s+\w|Do you want to/i.test(line)
-    );
+    .map((line) => line.replace(/\s+$/, ""))
+    .join("\n")
+    .replace(/\n+$/, "");
+}
+
+/**
+ * AI 判定の前後で同じ承認ダイアログが出続けているかを判定する。
+ *
+ * 判定には 20〜35 秒かかるため、その間に人が手でダイアログを消し、別のダイアログが
+ * 出ている可能性がある。`hasApprovalPrompt` が真でも画面が別物なら、未判定の
+ * ダイアログへ Enter を送ることになるので送らない (MCP 側の `expect_fingerprint`
+ * 照合と同じ考え方を、IPC を挟まずフロントのバッファ比較で行う)。
+ */
+export function isSameApprovalScreen(before: string, after: string): boolean {
+  return normalizeScreen(before) === normalizeScreen(after);
 }
 
 /**
@@ -114,7 +149,7 @@ export function detectOretachiToolPrompt(content: string): string | null {
   // 末尾側の承認プロンプト行を探す
   let promptIndex = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (/❯\s*Yes|►\s*Yes|Do you want to/i.test(lines[i])) {
+    if (/[❯►]\s*(?:\d+\.\s*)?Yes|Do you want to/i.test(lines[i])) {
       promptIndex = i;
       break;
     }
@@ -204,7 +239,7 @@ export async function runApprovalLoop(
     // 事前に末尾60行でプロンプト判定し、無ければAI判定と200行取得をスキップ。
     // (大半の tick は「プロンプト無し」なのでここで早期returnすれば debug log ノイズも減る)
     // 60行はプロンプト直後に追加ログが出るケースに対するマージン。
-    const quickContent = getRecentLines(terminal, 60);
+    const quickContent = getRecentLines(terminal, APPROVAL_SCAN_LINES);
     if (!hasApprovalPrompt(quickContent)) {
       continue;
     }
@@ -215,10 +250,17 @@ export async function runApprovalLoop(
       lastCommand = judgeResult.command;
     }
     if (judgeResult.safe) {
-      // バッファ再チェック: AI判定完了後、承認プロンプトがまだあるか確認
-      const freshContent = getRecentLines(terminal, 10);
+      // バッファ再チェック: AI判定完了後、同じ承認プロンプトがまだ出ているか確認。
+      // **窓は検出と必ず同じ APPROVAL_SCAN_LINES にする。** 以前は 10 行だけ見ていたため、
+      // ダイアログ上端寄りの `Do you want to` 行が窓から外れて偽陰性になり、
+      // 安全と判定した許可を捨ててセッションが止まっていた (#252)。
+      const freshContent = getRecentLines(terminal, APPROVAL_SCAN_LINES);
       if (!hasApprovalPrompt(freshContent)) {
         logDebug(`[AutoApproval] tid=${termRef.id} → prompt disappeared, skip Enter`);
+        break;
+      }
+      if (!isSameApprovalScreen(quickContent, freshContent)) {
+        logDebug(`[AutoApproval] tid=${termRef.id} → screen changed since judgment, skip Enter`);
         break;
       }
       logDebug(`[AutoApproval] tid=${termRef.id} → approved, sending Enter`);

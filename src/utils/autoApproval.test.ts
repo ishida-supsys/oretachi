@@ -10,7 +10,12 @@ vi.mock('@tauri-apps/plugin-log', () => ({
   error: vi.fn(() => Promise.resolve()),
 }))
 
-import { hasApprovalPrompt, detectOretachiToolPrompt } from './autoApproval'
+import {
+  hasApprovalPrompt,
+  detectOretachiToolPrompt,
+  isSameApprovalScreen,
+  APPROVAL_SCAN_LINES,
+} from './autoApproval'
 
 describe('hasApprovalPrompt', () => {
   it('detects ❯ Yes', () => {
@@ -57,6 +62,79 @@ describe('hasApprovalPrompt', () => {
   it('returns false for multi-line non-approval content', () => {
     const content = 'Compiling...\nDone.\nSuccess!'
     expect(hasApprovalPrompt(content)).toBe(false)
+  })
+
+  // #252: Claude Code の現在の書式は `❯ 1. Yes`。番号付きに一致しないと、許可ダイアログの
+  // 検出が実質 `Do you want to` の 1 行だけに依存する
+  it('detects numbered ❯ 1. Yes', () => {
+    expect(hasApprovalPrompt(' ❯ 1. Yes')).toBe(true)
+  })
+
+  it('detects numbered ► 2. Yes', () => {
+    expect(hasApprovalPrompt('   ► 2. Yes, and switch to acceptEdits')).toBe(true)
+  })
+
+  it('detects the numbered dialog without relying on the "Do you want to" line', () => {
+    const content = [
+      ' ❯ 1. Yes',
+      "   2. Yes, and don't ask again",
+      '   3. No',
+      '',
+      ' Esc to cancel · Tab to amend',
+    ].join('\n')
+    expect(hasApprovalPrompt(content)).toBe(true)
+  })
+
+  it('does not match a bare numbered list', () => {
+    expect(hasApprovalPrompt('  1. Yesterday の集計')).toBe(false)
+  })
+})
+
+describe('isSameApprovalScreen', () => {
+  it('treats an untouched dialog as the same screen', () => {
+    const screen = ccPrompt('Write(verify-225-3.txt)')
+    expect(isSameApprovalScreen(screen, screen)).toBe(true)
+  })
+
+  it('ignores trailing whitespace and trailing blank lines', () => {
+    const screen = ccPrompt('Write(verify-225-3.txt)')
+    expect(isSameApprovalScreen(screen, `${screen}   \n\n\n`)).toBe(true)
+    expect(isSameApprovalScreen(screen, screen.replace(' ❯ 1. Yes', ' ❯ 1. Yes    '))).toBe(true)
+  })
+
+  // 判定に 20〜35 秒かかるので、その間に人が手でダイアログを消し別のダイアログが
+  // 出ていることがある。未判定のダイアログへ Enter を送らないための照合
+  it('detects a different dialog appearing in place of the judged one', () => {
+    const before = ccPrompt('Write(verify-225-3.txt)')
+    const after = ccPrompt('Bash(rm -rf /)')
+    expect(hasApprovalPrompt(after)).toBe(true)
+    expect(isSameApprovalScreen(before, after)).toBe(false)
+  })
+
+  it('detects the selection cursor having moved', () => {
+    const before = ccPrompt('Write(a.txt)')
+    const after = before.replace(' ❯ 1. Yes', '   1. Yes').replace('   3. No', ' ❯ 3. No')
+    expect(isSameApprovalScreen(before, after)).toBe(false)
+  })
+})
+
+describe('APPROVAL_SCAN_LINES', () => {
+  // #252 の本体: 検出 60 行 / 再チェック 10 行の非対称が偽陰性を生んでいた。
+  // 両方がこの定数を使うことで窓が揺れない
+  it('is wide enough to hold the dialog plus viewport padding', () => {
+    expect(APPROVAL_SCAN_LINES).toBe(60)
+  })
+
+  it('keeps the "Do you want to" line inside the window even with viewport padding', () => {
+    // 実機のビューポート (34 行) を空行で埋めた末尾から数えると
+    // `Do you want to` は 6 行目より上に押し上げられる
+    const padding = Array.from({ length: 20 }, () => '').join('\n')
+    const screen = `${ccPrompt('Write(verify-225-3.txt)')}\n${padding}`
+    const lines = screen.split('\n')
+    const window = lines.slice(Math.max(0, lines.length - APPROVAL_SCAN_LINES)).join('\n')
+    const narrowWindow = lines.slice(Math.max(0, lines.length - 10)).join('\n')
+    expect(hasApprovalPrompt(window)).toBe(true)
+    expect(narrowWindow).not.toContain('Do you want to')
   })
 })
 
