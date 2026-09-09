@@ -37,6 +37,8 @@ const COPIED_MS = 1500;
  * 巨大な href を書けば重くなる。この長さを超える URL は目で確かめる用途に立たない
  */
 const MAX_HREF_LENGTH = 4096;
+/** URL 全文ツールチップを出すまでの待ち。WorktreeHeader のタスクツールチップと同値 */
+const TOOLTIP_DELAY_MS = 300;
 
 const boxRef = ref<HTMLElement | null>(null);
 const href = ref("");
@@ -145,11 +147,22 @@ async function copy() {
   }
 }
 
-// リサイズするとリンクが動いて座標が合わなくなる。追従させるより閉じる方が素直
-onMounted(() => window.addEventListener("resize", hideNow));
+/*
+ * リサイズするとリンクが動いて座標が合わなくなる。追従させるより閉じる方が素直。
+ * blur / visibilitychange も同じ扱い: ポップアップは position: fixed で body へ
+ * teleport されるため、ウィンドウを非アクティブにしても mouseout が発火せず
+ * (カーソルを動かさずにフォーカスだけ移す経路) 前面に浮いたまま残る (issue #248)。
+ */
+onMounted(() => {
+  window.addEventListener("resize", hideNow);
+  window.addEventListener("blur", hideNow);
+  document.addEventListener("visibilitychange", hideNow);
+});
 
 onBeforeUnmount(() => {
   window.removeEventListener("resize", hideNow);
+  window.removeEventListener("blur", hideNow);
+  document.removeEventListener("visibilitychange", hideNow);
   cancelHide();
   if (copyTimer) clearTimeout(copyTimer);
 });
@@ -167,7 +180,16 @@ defineExpose({ showFor, scheduleHide, cancelHide, hideNow });
       @mouseenter="onEnter"
       @mouseleave="onLeave"
     >
-      <span class="link-hover-url">{{ href }}</span>
+      <!-- 本体は 3 行で打ち切るので、全文はホバーのツールチップで見せる (issue #247) -->
+      <span
+        v-tooltip.bottom="{
+          value: href,
+          showDelay: TOOLTIP_DELAY_MS,
+          class: 'artifact-link-url-tooltip',
+        }"
+        class="link-hover-url"
+        >{{ href }}</span
+      >
       <!-- click.stop: リンク本体のクリック（開く / artifact: 遷移）へ伝播させない -->
       <button
         type="button"
@@ -202,13 +224,15 @@ defineExpose({ showFor, scheduleHide, cancelHide, hideNow });
 }
 
 .link-hover-url {
-  /* URL は途中に区切りが無く伸びるので折り返す (省略すると確かめる用途に立たない)。
-     長すぎる場合だけ高さで打ち切る */
+  /* URL は途中に区切りが無く伸びるので折り返す (省略すると確かめる用途に立たない) */
   color: #cdd6f4;
   font-family: monospace;
   word-break: break-all;
+  /* 長すぎる場合だけ高さで打ち切る。切られた分はホバーのツールチップで全文を出すので
+     (issue #247)、そこに続きがあることを cursor で示す */
   max-height: 4.5em;
   overflow: hidden;
+  cursor: help;
 }
 
 .link-hover-copy {
