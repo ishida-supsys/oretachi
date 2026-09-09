@@ -178,3 +178,28 @@ export function buildReactSrcdoc(
     "</body>\n</html>"
   );
 }
+
+/**
+ * srcdoc のうち**メモリー以外**の材料を表すキー。
+ *
+ * React アーティファクトの iframe は srcdoc が変わると作り直される。メモリーは
+ * 初期値としてしか使えない（`ARTIFACT_BRIDGE_JS` が `#_memory` から同期で読む）ので、
+ * ビューは「iframe がどうせ作り直されるとき」にだけ初期メモリーを最新へ取り込む。
+ * その判定にこのキーを使う。
+ *
+ * **content だけでなく modules も見ること。** teamwork-parent の計画フローのように
+ * データを `data/flow` モジュールへ置き、進捗のたびに `artifact_module` で更新する
+ * アーティファクトでは content は一度も変わらない。content だけを見ていると
+ * iframe は作り直されるのに初期メモリーが作成時のスナップショットのまま固定され、
+ * 保存済みの pan/zoom がリロードのたびに巻き戻る。
+ *
+ * 参照ではなく**値**で比べるのは、親がアーティファクト一覧を作り直すと中身が同じでも
+ * 参照だけ変わるため。参照で見ると入力中に初期メモリーが差し替わり、srcdoc の
+ * `_memory` が変わって iframe が落ちる。
+ */
+export function artifactSrcdocSourceKey(
+  content: string,
+  modules?: Record<string, string>,
+): string {
+  return JSON.stringify([content, modules ?? {}]);
+}

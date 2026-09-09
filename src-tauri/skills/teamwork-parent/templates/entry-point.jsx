@@ -1,5 +1,6 @@
 
 const { useState, useRef, useEffect, useCallback } = React;
+const { useMemory } = require('oretachi');
 const TASKS = require('./data/flow').default;
 const { DEPENDENCIES, MESSAGES } = require('./data/flow');
 const TaskNode = require('./components/TaskNode').default;
@@ -12,6 +13,34 @@ const { BOX_WIDTH, BOX_HEIGHT } = require('./components/DependencyEdge');
 // CANVAS_W = 最大タスク x + BOX_WIDTH + 40, CANVAS_H = 最大タスク y + BOX_HEIGHT + 40
 const CANVAS_W = 1200;
 const CANVAS_H = 480;
+
+const ZOOM_MIN = 0.2;
+const ZOOM_MAX = 2.5;
+// CUSTOMIZE: 初期表示位置・初期ズームをタスク数・キャンバスサイズに合わせて調整
+// （zoom は小さいほど広い範囲が見える）。⟲ でここへ戻る
+const DEFAULT_VIEW = { pan: { x: 20, y: 20 }, zoom: 1 };
+
+// 表示状態(pan/zoom)を保存するメモリーキー。
+// 親セッションは進捗が動くたびに data/flow を書き換えるので、フローを見ている最中に
+// このアーティファクト自身のリロードが走る。何もしないと毎回初期位置へ戻ってしまう。
+const VIEW_MEMORY_KEY = 'view';
+
+// ズームはホイール1回転で何度も変わるので、止まってからまとめて保存する
+const ZOOM_SAVE_DEBOUNCE_MS = 300;
+
+// メモリーから読み戻した表示状態を検証する。壊れた値・範囲外の値でキャンバスが
+// 画面外へ飛ぶと ⟲ すら押せなくなるので、少しでも怪しければ既定値へ落とす
+function sanitizeView(saved) {
+  if (!saved || typeof saved !== 'object') return DEFAULT_VIEW;
+  const { pan, zoom } = saved;
+  if (!pan || typeof pan !== 'object') return DEFAULT_VIEW;
+  if (!Number.isFinite(pan.x) || !Number.isFinite(pan.y)) return DEFAULT_VIEW;
+  if (!Number.isFinite(zoom)) return DEFAULT_VIEW;
+  return {
+    pan: { x: pan.x, y: pan.y },
+    zoom: Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoom)),
+  };
+}
 
 const TASK_MAP = {};
 TASKS.forEach(t => { TASK_MAP[t.id] = t; });
@@ -119,17 +148,34 @@ function PanelBody({ children, style }) {
 }
 
 function App() {
-  const [pan, setPan] = useState({ x: 20, y: 20 });
-  // CUSTOMIZE: 初期ズームをタスク数・キャンバスサイズに合わせて調整（小さいほど広い範囲が見える）
-  const [zoom, setZoom] = useState(1);
+  // 保存済みの表示状態。読むのはマウント時の初期値としてだけで、以降は使わない
+  // （外から artifact_store で差し替えられたときに操作中のビューが飛ばないように）
+  const [savedView, setSavedView] = useMemory(VIEW_MEMORY_KEY, null);
+  const [initialView] = useState(() => sanitizeView(savedView));
+
+  const [pan, setPan] = useState(initialView.pan);
+  const [zoom, setZoom] = useState(initialView.zoom);
   const [dragging, setDragging] = useState(false);
   // 開いている欄は常に1つだけ。null = 全部畳んだ状態（既定）
+  // openPanel は保存しない: 開きっぱなしがリロードのたびに復元されるとフローを覆って邪魔になる
   const [openPanel, setOpenPanel] = useState(null); // null | 'title' | 'help' | 'legend' | 'status'
   // 停止条件ポップアップのホバー対象(ノード or エッジ)。同時に1つだけ
   const [hover, setHover] = useState(null);
   const lastPos = useRef(null);
   const dragMoved = useRef(false); // ドラッグ中に移動が発生したか追跡
   const containerRef = useRef(null);
+
+  // 保存時に最新の pan/zoom を同期で読むための控え。pan はドラッグ中に毎フレーム
+  // 変わるので、state をそのままメモリーへ繋がず「確定したとき」だけここから書き出す
+  const viewRef = useRef(initialView);
+  useEffect(() => { viewRef.current = { pan, zoom }; }, [pan, zoom]);
+
+  const zoomSaveTimer = useRef(null);
+
+  const saveView = useCallback(() => {
+    // 保存の失敗（上限超過・外部からの差し替え）は表示を壊さないので握る
+    Promise.resolve(setSavedView(viewRef.current)).catch(() => {});
+  }, [setSavedView]);
 
   const togglePanel = useCallback(key => {
     setOpenPanel(p => (p === key ? null : key));
@@ -162,15 +208,25 @@ function App() {
   const handleMouseUp = useCallback(() => {
     // キャンバスを（パンせずに）クリックしたら開いている欄を閉じる
     if (lastPos.current && !dragMoved.current) setOpenPanel(null);
+    // パンが確定したときだけ保存する（移動中に保存すると書き込みが多すぎる）
+    if (dragMoved.current) saveView();
     setDragging(false);
     lastPos.current = null;
-  }, []);
+    // 次のクリックが直前のドラッグを引きずらないように畳んでおく
+    // （UI チップのクリックは mousedown で弾かれ、ここが再初期化の唯一の機会になる）
+    dragMoved.current = false;
+  }, [saveView]);
 
   const handleWheel = useCallback(e => {
     e.preventDefault();
     const factor = e.deltaY > 0 ? 0.9 : 1.1;
-    setZoom(z => Math.min(2.5, Math.max(0.2, z * factor)));
-  }, []);
+    setZoom(z => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z * factor)));
+    if (zoomSaveTimer.current !== null) clearTimeout(zoomSaveTimer.current);
+    zoomSaveTimer.current = setTimeout(() => {
+      zoomSaveTimer.current = null;
+      saveView();
+    }, ZOOM_SAVE_DEBOUNCE_MS);
+  }, [saveView]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -178,6 +234,11 @@ function App() {
     el.addEventListener('wheel', handleWheel, { passive: false });
     return () => el.removeEventListener('wheel', handleWheel);
   }, [handleWheel]);
+
+  // アンマウント時に残ったズーム保存タイマーを止める
+  useEffect(() => () => {
+    if (zoomSaveTimer.current !== null) clearTimeout(zoomSaveTimer.current);
+  }, []);
 
   // Esc でも開いている欄を閉じられる
   useEffect(() => {
@@ -187,9 +248,17 @@ function App() {
   }, []);
 
   const resetView = useCallback(() => {
-    setPan({ x: 20, y: 20 });
-    setZoom(1); // CUSTOMIZE: 初期ズームに合わせる
-  }, []);
+    setPan(DEFAULT_VIEW.pan);
+    setZoom(DEFAULT_VIEW.zoom);
+    viewRef.current = DEFAULT_VIEW;
+    // 保留中のズーム保存が後から古い値を書き戻さないように止める
+    if (zoomSaveTimer.current !== null) {
+      clearTimeout(zoomSaveTimer.current);
+      zoomSaveTimer.current = null;
+    }
+    // 保存値そのものを消す（次のリロードは既定の表示位置から始まる）
+    Promise.resolve(setSavedView(undefined)).catch(() => {});
+  }, [setSavedView]);
 
   const svgStyle = {
     position: 'absolute', left: 0, top: 0,
