@@ -288,8 +288,13 @@ function NotificationCard({ n, answer, draft, blocked, canSend, inflight, busy, 
   const truncated = isTruncated(n);
 
   // 縮小表示は `sent` のときだけ。`failed` / `stale` / `unverified` / `pastedOnly` は
-  // 人が次の手を決める必要がある（何が起きたかを畳むと気づかれない）ので畳まない
-  const collapsible = status === 'sent';
+  // 人が次の手を決める必要がある（何が起きたかを畳むと気づかれない）ので畳まない。
+  //
+  // **`sent` でも設問が続いているものは畳まない。** `afterShape` が `askUserQuestion` の
+  // ままなら「1 問答えたが 2 問目が残っている」状態で、その旨は full view にしか出ない。
+  // 畳むと「返答済み」に見えるまま次のレポートを待つ導線が消える
+  const questionRemains = !!(answer && answer.afterShape === 'askUserQuestion');
+  const collapsible = status === 'sent' && !questionRemains;
   if (collapsible && !expanded) {
     return (
       <div style={{
@@ -310,6 +315,7 @@ function NotificationCard({ n, answer, draft, blocked, canSend, inflight, busy, 
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 420,
         }}>
           送信内容: {describeSent(n, answer)}
+          {answer && answer.note ? ` / ${answer.note}` : ''}
         </span>
         <div style={{ flex: 1 }} />
         <Badge label={`${STATUS_LABEL.sent} ${(answer && answer.at) || ''}`.trim()} color={accent} />
@@ -428,7 +434,7 @@ function NotificationCard({ n, answer, draft, blocked, canSend, inflight, busy, 
             <div style={{ marginBottom: 4 }}>
               <b>画面が変わったため、キーは送っていません。</b>
               リトライしても同じです（照合する画面が既に別物になっています）。
-              新しいレポートを作り直してから返答してください。
+              AI にレポートの作り直しを頼んでから返答してください（既読化済みの通知も拾い直せます）。
             </div>
           )}
           {status === 'unverified' && (
