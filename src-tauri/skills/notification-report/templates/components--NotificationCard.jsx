@@ -10,6 +10,7 @@ const {
   shapeOf,
   isDialog,
   isReportOnly,
+  bodyText,
   questionOf,
   optionsOf,
   previewKeys,
@@ -297,7 +298,7 @@ function ReportCard({ n }) {
       <div style={{
         fontSize: 12.5, color: '#a6adc8', fontFamily: FONT,
         lineHeight: 1.7, whiteSpace: 'pre-wrap',
-      }}>{n.body}</div>
+      }}>{bodyText(n)}</div>
       {n.link && (
         <a href={n.link} style={{
           display: 'inline-flex', alignItems: 'center', gap: 6, alignSelf: 'flex-start',
@@ -451,7 +452,7 @@ function NotificationCard({ n, answer, draft, blocked, canSend, inflight, busy, 
 
       {/* 通知本文（人の判断に必要十分な全文） */}
       <div style={{ fontSize: 13, color: '#cdd6f4', fontFamily: FONT, lineHeight: 1.8, whiteSpace: 'pre-wrap' }}>
-        {n.body}
+        {bodyText(n)}
       </div>
 
       {/* 子ワークツリーのアーティファクトへの artifact:// リンク */}

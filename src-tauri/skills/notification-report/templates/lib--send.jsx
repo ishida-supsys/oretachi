@@ -35,10 +35,10 @@ const DIALOG_SHAPES = ['permission', 'plan', 'askUserQuestion', 'yesno', 'number
  * 「報告のみ」のイベント種別（#228）。**人の判断を必要としない。**
  *
  * `worktree.created` / `worktree.closed` は `notify_worktree` から発行できず、
- * oretachi 内部の `fire_worktree_created` / `fire_worktree_closed` からしか出ない
- * （`event_db.rs`）。本文も oretachi が定型文に組み直すので、エージェントが自由文で
- * 「判断が欲しい」と書き込む余地が構造的に無い。だから返答 UI を出さず、読むだけの
- * カードにする。
+ * oretachi 内部の `fire_worktree_created` / `fire_worktree_closed`（`src-tauri/src/lib.rs`）
+ * からしか出ない。本文も `format_inbox_line`（`event_db.rs`）が定型文に組み直すので、
+ * エージェントが自由文で「判断が欲しい」と書き込む余地が構造的に無い。だから返答 UI を
+ * 出さず、読むだけのカードにする。
  *
  * **`completed` / `hook` はここに入れない。** どちらも `notify_worktree` 経由で
  * エージェントが任意の本文を書けるため、「実装は終わったので次の指示が欲しい」の
@@ -56,8 +56,8 @@ const REPORT_KINDS = ['worktree.created', 'worktree.closed'];
  * このカードが「報告のみ」か（＝返答 UI を出さない）。
  *
  * 報告カードは送信経路を一切持たないので、`subscribed` / `sessionId` / `prompt` を
- * 参照しない。`worktree.closed` は発信元ワークツリーが既に削除済みで、購読行も
- * fanout 直後に消えている（`event_db.rs` の `fire_worktree_closed`）ため、
+ * 参照しない。`worktree.closed` は発信元ワークツリーが既に削除済みで、ID 指定の
+ * 購読行も fanout 直後に消えている（`lib.rs` の `fire_worktree_closed`）ため、
  * そもそもこの 3 つを埋められない。
  */
 function isReportOnly(n) {
@@ -109,6 +109,29 @@ function flatten(s) {
 }
 
 /**
+ * カードに表示する本文。**必ず文字列を返す。**
+ *
+ * `data/report` の `body` は文字列である前提だが、`oretachi_poll_inbox` の `body` は
+ * **パース済みの JSON オブジェクト**（人が読める 1 行は別フィールドの `text`）なので、
+ * 生成側がそちらを取り違えるとオブジェクトが入る。React はオブジェクトを子として
+ * 描画できず throw し、**アーティファクトにエラーバウンダリが無いためレポート全体が
+ * 描画不能になる**（1 枚のカードの取り違えで、他の通知への返答窓口まで失われる）。
+ *
+ * 生成側の指示（`SKILL.md` の 1-2c）で `text` を入れさせるのが本筋で、ここは
+ * 「取り違えてもレポートは開ける」ための保険。
+ */
+function bodyText(n) {
+  const b = n && n.body;
+  if (typeof b === 'string') return b;
+  if (b == null) return '(本文がありません)';
+  try {
+    return JSON.stringify(b, null, 2);
+  } catch (e) {
+    return String(b);
+  }
+}
+
+/**
  * 1 通知ぶんの返答テキスト（1 行）を組み立てる。
  *
  * 先頭に出自の断り書きを自分で入れている。`normalize_artifact_tool_params` が
@@ -129,7 +152,9 @@ function buildReplyText(meta, n, answer) {
   if (answer.note) {
     parts.push(`${answer.choice === OTHER ? '指示' : '補足'}: ${flatten(answer.note)}`);
   }
-  parts.push(`対象の通知(${n.at} / ${n.kind}): ${flatten(n.body)}`);
+  // `bodyText` を通すのは、`body` にオブジェクトが入っていたときに
+  // `flatten` が `[object Object]` を宛先へ送ってしまうのを避けるため
+  parts.push(`対象の通知(${n.at} / ${n.kind}): ${flatten(bodyText(n))}`);
   return flatten(parts.join(' '));
 }
 
@@ -513,6 +538,7 @@ exports.REPORT_KINDS = REPORT_KINDS;
 exports.isReportOnly = isReportOnly;
 exports.SHAPE_LABEL = SHAPE_LABEL;
 exports.flatten = flatten;
+exports.bodyText = bodyText;
 exports.buildReplyText = buildReplyText;
 exports.hasPrompt = hasPrompt;
 exports.shapeOf = shapeOf;

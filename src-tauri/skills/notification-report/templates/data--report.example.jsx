@@ -23,6 +23,9 @@
 //   id / inboxIds / worktreeName / kind / at / body （+ 任意で branchName / worktreeId /
 //   issueRef / link / linkLabel）
 //
+// `body` は `oretachi_poll_inbox` の **`text`**（`format_inbox_line` の出力）をそのまま。
+// `body` フィールドの方はパース済みオブジェクトなので入れてはいけない（下の `body` の項参照）。
+//
 // **報告カードでは `sessionId` / `subscribed` / `prompt` / `desc` / `descFallback` /
 // `phase` / `phaseSummary` / `readAt` / `choices` を集めない。** 送信経路が無いので
 // 使われないうえ、`worktree.closed` は発信元ワークツリーが既に削除済みで
@@ -38,9 +41,13 @@
 //   inboxIds      (string[]) : このカードが束ねる inbox メッセージ ID。**生成時（Step 5.5）に
 //                              ack 済み**の記録で、レポート側からは ack しない（#219）
 //   worktreeName  (string)   : 発信元ワークツリー名（= 送信先）
-//   worktreeId    (string)   : 発信元ワークツリーID。**必須**。購読の突合と、生成時の
-//                              トレイ通知クリア（oretachi_clear_worktree_notification）に使う。
-//                              oretachi_poll_inbox の sourceWorktreeId をそのまま入れる（表示はしない）
+//   worktreeId    (string)   : 発信元ワークツリーID。**要返答カードでは必須**。購読の突合と、
+//                              生成時のトレイ通知クリア（oretachi_clear_worktree_notification）
+//                              に使う。oretachi_poll_inbox の sourceWorktreeId を
+//                              そのまま入れる（表示はしない）。
+//                              **報告カードでは任意**（#228）。購読の突合もトレイクリアも
+//                              しないので使い道が無い（`worktree.*` は showsBadge が false で
+//                              バッジを積まないため、クリアすると無関係なバッジだけが落ちる）
 //   sessionId     (number)   : 送信先の PTY セッションID。**null 可**（稼働中 AI 端末なし）
 //   subscribed    (boolean)  : callerWorktree がこの宛先を購読しているか。false なら送信不可表示
 //   issueRef      (string)   : `#187` など。無ければ省略可
@@ -54,7 +61,13 @@
 //   phase         (string)   : 設計中 / 実装中 / 実装完了 / レビュー対応中 / 停止条件待ち / 不明
 //   phaseSummary  (string)   : 現況の 1 行要約（ターミナル読み取りから）
 //   readAt        (string)   : ターミナルを読んだ時刻（`HH:MM`）
-//   body          (string)   : 通知本文。**要約せず全文を入れる**（人の判断材料）
+//   body          (string)   : 通知本文。**要約せず全文を入れる**（人の判断材料）。
+//                              **必ず文字列。** `oretachi_poll_inbox` の `body` は
+//                              パース済みの JSON オブジェクトで、人が読める 1 行は
+//                              別フィールドの `text` にある。オブジェクトを入れると
+//                              カードの `{n.body}` で React が throw し、エラー
+//                              バウンダリが無いのでレポート全体が描画不能になる。
+//                              報告カードでは `text` をそのまま入れる（#228）
 //   link          (string)   : 子アーティファクトへの `artifact://` リンク。無ければ null
 //   linkLabel     (string)   : リンクの表示名
 //   choices       (string[]) : 候補ボタン。**`prompt.shape` が `"text"` のときだけ使う。**
@@ -337,7 +350,8 @@ const NOTIFICATIONS = [
     branchName: 'worktree/issue-214',
     at: '13:12',
     kind: 'worktree.closed',
-    body: 'ワークツリー oretachi-htlz (worktree/issue-214) がクローズされました。',
+    // `format_inbox_line` の出力そのまま（`oretachi_poll_inbox` の `text`）
+    body: "ワークツリー 'oretachi-htlz' （ブランチ: worktree/issue-214） がクローズされました",
     link: null,
     linkLabel: null,
   },
@@ -351,7 +365,8 @@ const NOTIFICATIONS = [
     branchName: 'worktree/issue-228',
     at: '13:05',
     kind: 'worktree.created',
-    body: 'ワークツリー oretachi-wnqd (worktree/issue-228) が oretachi リポジトリに作成されました。',
+    // 先頭の `[oretachi] ` はリポジトリ名。`format_inbox_line` が付ける
+    body: "[oretachi] ワークツリー 'oretachi-wnqd' （ブランチ: worktree/issue-228） が作成されました",
     link: null,
     linkLabel: null,
   },

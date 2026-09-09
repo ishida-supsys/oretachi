@@ -67,10 +67,14 @@ oretachi_poll_inbox(terminal_id: <自分の terminal_id>, include_acked: true)
 混ざるのは「1-2 の絞り込み（購読外 / `sourceWorktreeName` が `null` ＝発信元がクローズ済み）で
 全部落ちた」ケースで、0 件になる理由が ack だけではないため。返り値を次の 3 つに振り分ける:
 
+**この表の絞り込みは要返答カードの話。** `worktree.created` / `worktree.closed` は 1-2 の
+絞り込みを受けないので（→ 1-2c）、届いていれば 1-2 の母集合に入り、ここへは来ない
+（1-2 と 1-2b の poll の間に新着が届いた場合だけが例外）。
+
 | 返ってきたもの | 意味 | やること |
 |---|---|---|
 | 何も無い | 購読先から通知が 1 件も来ていない | 1-1 の購読対象と `oretachi_list_worktree_notifications` を見せて状況を伝える。**レポートは作らない** |
-| 未 ack があるが、購読外 / `sourceWorktreeName` が `null` で全部落ちた | 返答を送れる宛先が無い | どのワークツリー由来で落ちたのかを件数つきで伝える。**レポートは作らない**（購読を勝手に張らない。→ 1-2）。ただし `worktree.created` / `worktree.closed` が混ざっていれば**それは落ちない**（→ 1-2c）ので、報告カードだけのレポートとして作る |
+| 未 ack があるが、購読外 / `sourceWorktreeName` が `null` で全部落ちた | 返答を送れる宛先が無い | どのワークツリー由来で落ちたのかを件数つきで伝える。**レポートは作らない**（購読を勝手に張らない。→ 1-2） |
 | `ackedAt` が入ったものだけ | **既に前回レポートへ載せたぶん** | 下の「前回レポートを探す」へ |
 
 **前回レポートを探す:**
@@ -105,7 +109,7 @@ artifact_module(command: "read", id: <前回レポートID>, module_name: "data/
 
 母集合のうち **`kind` が `worktree.created` / `worktree.closed` のものは報告カード**にする。返答 UI が出ず、人は読むだけで済む。
 
-**この 2 つだけが報告カードになる。** どちらも `notify_worktree` からは発行できず、oretachi 内部の `fire_worktree_created` / `fire_worktree_closed` からしか出ない（`event_db.rs`）。本文も oretachi が定型文に組み直すので、エージェントが自由文で「判断が欲しい」と書き込む余地が構造的に無い。
+**この 2 つだけが報告カードになる。** どちらも `notify_worktree` からは発行できず、oretachi 内部の `fire_worktree_created` / `fire_worktree_closed`（`src-tauri/src/lib.rs`）からしか出ない。本文も `format_inbox_line`（`event_db.rs`）が定型文に組み直すので、エージェントが自由文で「判断が欲しい」と書き込む余地が構造的に無い。
 
 **`completed` / `hook` は報告カードにしない。** どちらも `notify_worktree` 経由でエージェントが任意の本文を書けるため、「実装は終わったので次の指示が欲しい」のような返答待ちが混ざる。送信 UI を消すと、その返答待ちに気づく導線まで消える。
 
@@ -117,9 +121,12 @@ artifact_module(command: "read", id: <前回レポートID>, module_name: "data/
 id / inboxIds / worktreeName / kind / at / body   （+ 任意で branchName / worktreeId / issueRef / link）
 ```
 
+- **`body` には `oretachi_poll_inbox` の `text` をそのまま入れる。** `oretachi_poll_inbox` の `body` は**パース済みの JSON オブジェクト**（`worktree.closed` なら `{worktreeId, worktreeName, branchName}`）で、人が読める 1 行は別フィールドの `text`（`format_inbox_line` の出力）にある。オブジェクトをそのまま `body` へ入れるとカードの `{n.body}` で React が throw し、**エラーバウンダリが無いのでレポート全体が描画不能になる**。実際の `text` はこの形:
+  - `worktree.closed` → `ワークツリー 'oretachi-htlz' （ブランチ: worktree/issue-214） がクローズされました`
+  - `worktree.created` → `[oretachi] ワークツリー 'oretachi-wnqd' （ブランチ: worktree/issue-228） が作成されました`（先頭の `[...]` はリポジトリ名。無ければ付かない）
 - **1-4 / 1-5 を回さない。** `oretachi_get_worktree_status` / `oretachi_list_terminals` / `oretachi_read_terminal` / `oretachi_inspect_prompt` を報告カードのために呼ばないこと。返答を送らないので使われず、`worktree.closed` は発信元ワークツリーが既に削除済みでそもそも引けない。`worktree.created` も作成直後なので description 未設定・AI 端末未起動が普通で、読めるものが無い。
 - **`worktreeName` / `branchName` は通知本文から取る。** `worktree.closed` では `sourceWorktreeName` / `sourceWorktreePath` が必ず `null` になる（発信元がもう settings に無い）。本文の `WorktreeClosedBody` / `WorktreeCreatedBody` に `worktreeName` / `branchName` が焼き付いているので、そちらを使う。**ここだけは「発信元の名前を本文から取らない」という 1-2 の原則の例外**で、成立するのは報告カードが名前を表示にしか使わない（他ツールへ渡さない）ため。
-- **購読の突合も発信元の生存確認もしない。** `worktree.closed` は fanout 直後に購読行が削除される（`event_db.rs` の `fire_worktree_closed`）ので、1-1 の `oretachi_list_subscriptions` と突き合わせると必ず落ちる。inbox に行があること自体が「配送時点で購読していた」証拠なので、それで十分。
+- **購読の突合も発信元の生存確認もしない。** `worktree.closed` は fanout 直後に、そのワークツリーを **ID 指定で**購読していた行が削除される（`lib.rs` の `fire_worktree_closed` → `delete_subscriptions_for_target` は `WHERE target = ?`）。つまり ID 指定の購読で受けていたぶんは 1-1 の `oretachi_list_subscriptions` と突き合わせると落ちる（`*` / `workgroup:` / `repo:` のワイルドカード購読なら残るので落ちない）。**どちらに転んでも突合しない。** inbox に行があること自体が「配送時点で購読していた」証拠で、返答も送らないので認可としてはそれで十分。
 - **配列では要返答カードより後ろに置く。** 判断が必要なカードを上に集める（`entry-point.jsx` も描画時に同じ並べ替えをする）。
 
 ### 1-3. トレイ通知は補助情報として使う（母集合にしない）
@@ -431,7 +438,7 @@ artifact(command: "outline", id: <同じID>, project_dir: <自分の作業ディ
 
 ```
 oretachi_ack_message(ids: <カードに載せた inboxIds の全体>, terminal_id: <自分の terminal_id>)
-oretachi_clear_worktree_notification(worktree_id: <カードに載せた発信元ワークツリーの ID>)   ← 宛先ごとに 1 回
+oretachi_clear_worktree_notification(worktree_id: <**要返答**カードに載せた発信元ワークツリーの ID>)   ← 宛先ごとに 1 回
 ```
 
 **`terminal_id` を必ず渡す。** 省略して `project_dir` も渡さないと `oretachi_ack_message` は
@@ -445,7 +452,8 @@ inbox の行は `subscriber_terminal_id` でスコープされているので、
 - **ack するのは実際にカードへ載せたぶんだけ。** 1-2 で落としたもの（購読外・発信元がクローズ済み）は ack しない。次の機会に拾い直せる状態のまま残す。
 - **報告カードも同じタイミングで ack する（#228）。** 返答しないカードだが、`inboxIds` を要返答カードのぶんと一緒に 1 回の `oretachi_ack_message` へ渡す。報告カードだけ収集直後に ack すると「Step 5 の検証より前に ack しない」が種別ごとに分岐し、生成が途中で落ちたときにどのレポートにも載っていない報告が inbox から消える。揃えておけば生成失敗時は次のレポートに再掲されるだけで済む（読むだけなので再掲は無害）。
 - **トレイクリアはワークツリー単位**（`NotificationRegistry` に通知 1 件ごとの粒度が無い）。カードに載せた発信元ワークツリーぶんだけを、`worktree_id` 指定で落とす。
-- **`worktree.closed` の発信元にはトレイクリアを撃たない（#228）。** 発信元ワークツリーは既に削除されているので、その `worktree_id` を渡しても落とすバッジが無い。報告カードのうち `worktree.created` のぶんは撃ってよい（発信元は生きている）。
+- **トレイクリアを撃つのは要返答カードの発信元だけ。報告カードは種別に関わらず対象外（#228）。** `worktree.created` / `worktree.closed` は**そもそもトレイバッジを積まない**（`src/utils/notificationKinds.ts` の `showsBadge` が `worktree.` 始まりを除外し、`useNotifications.ts` の `worktree-event-fired` も「バッジは積まず、音と OS 通知だけ」）。落とすものが無いのに撃つと、クリアがワークツリー単位である以上、**そのワークツリーが別に積んだバッジまで落ちる**。特に `approval` は「トレイ通知オフでも人待ちだけは通す」ために #225 で救済した種別なので、これを黙って消すと人の入力待ちが誰にも伝わらなくなる。得るものが無く失うものだけがある。
+  - ただし**同じワークツリーが要返答カードの発信元でもある場合は撃つ**（そちらのバッジを落とす必要がある）。判定は「報告カードかどうか」ではなく「要返答カードの発信元に含まれるか」で行う。
 - **必ず ack を先に、トレイクリアを後にする。ack が失敗したらトレイクリアはしない。** ack が落ちた通知は次のレポートに再掲されるので、バッジを残しておけば人がもう一度捌ける。逆順（またはack 失敗を無視してクリア）にすると、再掲される通知の気づく導線だけが消える。
 - **失敗自体は許容**する。ack が失敗すれば次のレポートに同じ通知が出るだけ、トレイクリアが失敗すればバッジが残るだけで、レポート自体は成立している。失敗したら Step 6 の本文にその旨を書く。
 
@@ -637,7 +645,8 @@ await callTool('oretachi_write_terminal', { session_id, text: '\r', submit: fals
 - **報告カードのために 1-4 / 1-5 を回さない。** `get_worktree_status` / `list_terminals` / `read_terminal` / `inspect_prompt` は呼ばない。返答を送らないので使われず、`worktree.closed` は発信元が削除済みで引けない。
 - **`data/report` に「報告カードです」というフラグを足さない。** 判定は `lib/send` の `isReportOnly` が `kind` からやる。フラグにすると生成側の付け忘れで、判断不要の通知が返答待ちとして並ぶ（あるいは逆に返答待ちが読むだけのカードになる）。
 - **`worktree.closed` を「発信元がクローズ済み」として落とさない。** 1-2 の除外フィルタは報告カードには適用しない（そうしないと `worktree.closed` は 1 件もレポートに載らない）。購読の突合も同じ理由で免除する。
-- **`worktree.closed` の発信元へトレイクリアを撃たない。** ワークツリーがもう無いので落とすバッジが無い。
+- **報告カードの `body` にオブジェクトを入れない。** `oretachi_poll_inbox` の `body` はパース済みの JSON オブジェクトで、人が読める 1 行は `text`。オブジェクトを入れると React が throw してレポート全体が描画不能になる（エラーバウンダリが無い）。
+- **報告カードの発信元へトレイクリアを撃たない。** `worktree.*` は `showsBadge` が false なのでバッジを積んでおらず、落とすものが無い。撃つとワークツリー単位のクリアで無関係な `approval`（#225 で救済した人待ちの通知）まで消える。
 - **報告カードを「未返答」の件数に数えない。** 押すものが無いカードを残件に数えると、人が無い判断を探すことになる。
 
 ### ダイアログ関連（#215）
