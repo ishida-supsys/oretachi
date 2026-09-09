@@ -24,6 +24,23 @@ function nowLabel() {
   return `${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+// 基準時刻の表示。生成したセッションには時刻が渡っていないため、整形は
+// ここ（ブラウザ側）でやる。`generatedAtMs` は載せた通知のうち最大の
+// `createdAt`（epoch ms）で、`oretachi_poll_inbox` の返り値からそのまま取れる。
+// `generatedAt`（文字列）が入っているレポートは旧形式なのでそちらを使う。
+function generatedLabel(meta) {
+  // Number() を通すのは、生成側が epoch ms を文字列で入れても 1970 年や
+  // 「(時刻不明)」へ黙って落ちないようにするため。`0` / 負値 / NaN は
+  // 「入っていない」と同じ扱いにする（1970-01-01 を出すより無害）
+  const ms = Number(meta.generatedAtMs);
+  if (Number.isFinite(ms) && ms > 0) {
+    const d = new Date(ms);
+    const p = v => String(v).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+  return meta.generatedAt || '(時刻不明)';
+}
+
 function App() {
   // ── サイドカー（artifact_store）に置く状態 ─────────────────────────────
   //
@@ -146,7 +163,7 @@ function App() {
       }}>
         <span style={{ fontSize: 15, fontWeight: 700 }}>
           {/* CUSTOMIZE: タイトルは data/report の META に合わせる */}
-          通知レポート — {META.generatedAt}
+          通知レポート — {generatedLabel(META)}
         </span>
         <span style={{ fontSize: 12, color: '#9399b2', fontWeight: 600 }}>
           未返答 {pending.length} / 全 {NOTIFICATIONS.length} 件
@@ -178,7 +195,7 @@ function App() {
           background: '#cba6f712', border: '1px solid #cba6f744', borderRadius: 6,
           padding: '9px 12px', lineHeight: 1.7,
         }}>
-          このレポートは {META.generatedAt} 時点のスナップショットです。ここに載っている通知は
+          このレポートは {generatedLabel(META)} 時点のスナップショットです。ここに載っている通知は
           <b>生成時に既読化（ack）とトレイ通知のクリアを済ませる運用</b>で、成功していれば以後のレポートには
           出てきません（このレポートが返答窓口になります）。既読化に失敗したぶんは次のレポートに再掲されます
           — 生成したセッションの報告を確認してください。生成後に届いた通知は含まれず、次のレポートに回ります。

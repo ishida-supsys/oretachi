@@ -6,7 +6,10 @@
 //
 // ── META フィールド仕様 ──────────────────────────────────────────────────
 //   reportId       (string) : アーティファクトID と同じ値。送信テキストの先頭に入る
-//   generatedAt    (string) : 生成時刻（`YYYY-MM-DD HH:MM` か `HH:MM`）
+//   generatedAtMs  (number) : レポートの基準時刻（epoch ms）。**載せた通知のうち最大の
+//                             `createdAt` をそのまま入れる。現在時刻を推測して入れない**
+//                             （このセッションには時刻が渡っていない。#220）。
+//                             表示用の整形は entry-point 側の `generatedLabel` がやる
 //   callerWorktree (string) : レポートを置いたワークツリー名（購読の主体）
 //
 // ── NOTIFICATIONS 配列フィールド仕様 ─────────────────────────────────────
@@ -84,8 +87,10 @@
 // （`lib/send` の `promptConflicts` が 2 枚目以降を機械的に塞ぐが、そもそも作らない）
 
 const META = {
-  reportId: 'notif-report-20260908-1432',
-  generatedAt: '2026-09-08 14:32',
+  // 載せた通知の最大 createdAt（= 下の NOTIFICATIONS で最も新しい at: '14:21'）を
+  // そのまま ID と基準時刻に使う。両者は必ず同じ通知を指す
+  reportId: 'notif-report-1788844860000',
+  generatedAtMs: 1788844860000,           // JST 2026-09-08 14:21
   callerWorktree: 'oretachi-vy7f',
 };
 
