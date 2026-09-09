@@ -2,7 +2,11 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import ArtifactCodeView from "./ArtifactCodeView.vue";
 import ArtifactLinkHoverPopup from "./ArtifactLinkHoverPopup.vue";
-import { buildVendorHead, buildReactSrcdoc } from "../../utils/reactArtifactSrcdoc";
+import {
+  buildVendorHead,
+  buildReactSrcdoc,
+  artifactSrcdocSourceKey,
+} from "../../utils/reactArtifactSrcdoc";
 import {
   readArtifactLinkHoverMessage,
   readArtifactNavigateMessage,
@@ -75,18 +79,23 @@ const mode = ref<Mode>("preview");
  * 保存のたびに srcdoc を作り直すと iframe がリロードされて入力中のフォームが飛ぶため、
  * 取り込み直すのは iframe がどうせ作り直されるときだけにする。
  *
- * 作り直されるのは content が変わったときだけ（mode 切替では iframe を v-show で残す。
- * 破棄すると Preview へ戻った iframe がマウント時点の古いメモリーで起動し、
- * 次の setMemory がそれを丸ごと書き戻して保存済みの入力を消してしまう）。
+ * 作り直されるのは srcdoc が変わったとき、つまり content **または modules** が
+ * 変わったとき（mode 切替では iframe を v-show で残す。破棄すると Preview へ戻った
+ * iframe がマウント時点の古いメモリーで起動し、次の setMemory がそれを丸ごと書き戻して
+ * 保存済みの入力を消してしまう）。
  * アーティファクトの切り替えとリセットは、親が `:key` を進めて作り直す。
+ *
+ * **modules を見落とさないこと。** teamwork-parent の計画フローのように、
+ * データを `data/flow` モジュールに置いて進捗のたびに `artifact_module` で更新する
+ * アーティファクトでは content は一度も変わらない。content だけを見ていると
+ * iframe は作り直されるのに初期メモリーが作成時のスナップショットのまま固定され、
+ * 保存した pan/zoom がリロードのたびに巻き戻る。
  */
 const initialMemory = ref<Record<string, unknown>>({ ...(props.memory ?? {}) });
-watch(
-  () => props.content,
-  () => {
-    initialMemory.value = { ...(props.memory ?? {}) };
-  },
-);
+const srcdocSourceKey = computed(() => artifactSrcdocSourceKey(props.content, props.modules));
+watch(srcdocSourceKey, () => {
+  initialMemory.value = { ...(props.memory ?? {}) };
+});
 
 /**
  * 外からストアが書き換わったことを iframe へ知らせる（MCP の `artifact_store` 由来）。
@@ -240,8 +249,9 @@ const srcdocHtml = computed(() => {
 });
 
 // Code タブへ切り替えると iframe は v-show で隠れる。座標が残ったままになるので閉じる。
-// srcdoc の差し替え（= 本文更新）でも閉じる: iframe は読み込み直しになり、新しい文書は
-// 「リンクに乗っていない」状態から始まるため、離れた通知が二度と来ず出しっぱなしになる
+// srcdoc の差し替え（content / modules の更新）でも閉じる: iframe は読み込み直しになり、
+// 新しい文書は「リンクに乗っていない」状態から始まるため、離れた通知が二度と来ず
+// 出しっぱなしになる。srcdocHtml を見れば iframe が作り直される条件を取りこぼさない
 watch([mode, srcdocHtml], () => linkPopup.value?.hideNow());
 
 const moduleNames = computed(() => Object.keys(props.modules ?? {}));

@@ -132,7 +132,7 @@ $ARGUMENTS: <artifact-id> [--repo <repo>] [--branch <branch>]
 
 ## テンプレートを読み込む
 
-このスキルディレクトリ(`SKILL.md`と同じ場所)の`templates/`フォルダにある以下のファイルをReadで読み込む:
+このスキルディレクトリ(`SKILL.md`と同じ場所)の`templates/`フォルダにある以下のファイルを使う:
 
 | ファイル | アーティファクトモジュール | カスタマイズ要否 |
 |---|---|---|
@@ -142,11 +142,23 @@ $ARGUMENTS: <artifact-id> [--repo <repo>] [--branch <branch>]
 | `templates/lib--stopConditions.jsx` | `lib/stopConditions` | そのまま利用 |
 | `templates/data--flow.example.jsx` | `data/flow` | ※スキーマ参照用、新規生成 |
 
+**「そのまま利用」の3本(`components--TaskNode` / `components--DependencyEdge` / `lib--stopConditions`)はReadしない。**
+`artifact_module`に`file_path`を渡せばoretachi側がファイルを読んで登録するので、読み込んだ内容を`content`へ
+書き戻す往復(同じテキストが2回トークンを食う)が消える。Readが要るのは`entry-point.jsx`(CUSTOMIZE箇所を変える)と
+`data--flow.example.jsx`(スキーマ参照)だけ。
+
+`<SKILL_DIR>` は**スキル読み込み時に先頭へ注入される `Base directory for this skill:` の絶対パス**を
+そのまま使う（例: `C:\Users\<user>\AppData\Roaming\com.ia.oretachi\claude-plugins\oretachi\skills\<スキル名>`）。
+`${CLAUDE_PLUGIN_ROOT}` などの環境変数は展開されないので、素で渡してはいけない。
+相対パスはワークツリー追加先ディレクトリ基準で解決されるため、テンプレートには届かない。
+
 **`data/flow`が計画フローの唯一のデータソース(TASKS/DEPENDENCIES/MESSAGESの3つをこの1ファイルにまとめる)。** Step2/Step3で進捗が変わるたびに、このモジュールを`artifact_module(command:"update", ...)`で直接更新する。専用の進捗管理マークダウン等は作らない。
 
 ## 表示操作
 
 domain-model-diagramと同様、ドラッグでパン・スクロールでズームイン/アウトができる(マウスホイールで0.2〜2.5倍)。右上の「⟲」ボタンで初期表示に戻せる。
+
+**パン位置とズーム倍率はアーティファクトのメモリー(`useMemory`)に保存される。** 親セッションが`data/flow`を更新するとアーティファクトはリロードされるが、表示位置は直前のまま復元されるので、見ていた場所を見失わない。保存はドラッグ終了時とズーム確定時(最後のホイールから300ms)にだけ行う。「⟲」を押すと保存値も消え、次回は既定の表示位置から始まる。四隅の欄の開閉状態は保存しない(開きっぱなしが復元されるとフロー図を覆うため)。
 
 フロー図を覆わないよう、四隅の欄は**既定ですべて畳まれている**。四隅のチップ(左上=進捗、右上=`⟲`/`?`、左下=凡例、右下=状況)をクリックすると展開し、同時に開くのは1つだけ。`Esc`キーまたは背景クリックで閉じる。右下の「状況」チップには畳んだ状態でも `▸<次に着手可能数> ⏸<未クリアの停止条件を持つタスク+エッジの数>` のバッジが出る(灰=未到達のものも含む総数)。
 
@@ -177,20 +189,22 @@ artifact(command: "create", id: "<artifact-id>", type: "application/vnd.ant.reac
 **2. `components/TaskNode` モジュール作成**
 ```
 artifact_module(command: "create", module_name: "components/TaskNode",
-  content: <components--TaskNode.jsx をそのまま>)
+  file_path: "<SKILL_DIR>/templates/components--TaskNode.jsx")
 ```
 
 **3. `components/DependencyEdge` モジュール作成**
 ```
 artifact_module(command: "create", module_name: "components/DependencyEdge",
-  content: <components--DependencyEdge.jsx をそのまま>)
+  file_path: "<SKILL_DIR>/templates/components--DependencyEdge.jsx")
 ```
 
 **4. `lib/stopConditions` モジュール作成**
 ```
 artifact_module(command: "create", module_name: "lib/stopConditions",
-  content: <lib--stopConditions.jsx をそのまま>)
+  file_path: "<SKILL_DIR>/templates/lib--stopConditions.jsx")
 ```
+
+2〜4はテンプレートをそのまま登録するので`content`ではなく`file_path`を渡す(Readも書き戻しも不要)。
 
 **5. `data/flow` モジュール作成**
 ```
