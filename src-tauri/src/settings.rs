@@ -120,6 +120,13 @@ pub struct Workgroup {
     pub color: Option<String>,
     #[serde(default)]
     pub auto_assign_hotkey: Option<bool>,
+    /// タスク完了後、メインウィンドウが非フォーカスのまま5秒経過したらホームタブへ自動復帰
+    /// （#224）。`None` = 未設定（OFF 扱い）。
+    ///
+    /// Rust 側では読まないが、設定は `get_settings` / `save_settings` で Rust を往復するため、
+    /// **ここにフィールドが無いと serde が黙って捨てる**（#250）。
+    #[serde(default)]
+    pub auto_return_home_after_task: Option<bool>,
     #[serde(default)]
     pub task_add_agent: Option<AiAgentKind>,
     #[serde(default)]
@@ -1123,6 +1130,60 @@ mod tests {
         let raw = serde_json::to_string(&group).unwrap();
         let restored: Workgroup = serde_json::from_str(&raw).unwrap();
         assert_eq!(restored.tray_notification, Some(false));
+    }
+
+    /// フロントの `Workgroup`（`src/types/settings.ts`）が書き出す全フィールドが
+    /// Rust 往復（`get_settings` / `save_settings`）で消えないことを固定する。
+    ///
+    /// **フロント側にフィールドを足したらここも足すこと。** Rust 側に対応フィールドが
+    /// 無いと serde が黙って捨て、「設定したのに再起動で消える」になる（#250）。
+    #[test]
+    fn test_workgroup_all_frontend_fields_round_trip() {
+        // 色が `"#...` を含むので `r##"` で囲む（`r#"` だと `"#` で閉じてしまう）
+        let json = r##"{
+            "id": "g",
+            "name": "main",
+            "color": "#fab387",
+            "autoAssignHotkey": true,
+            "autoReturnHomeAfterTask": true,
+            "taskAddAgent": "claudeCode",
+            "claudeCodeMode": "auto",
+            "execPrompt": "p",
+            "systemPrompt": "s",
+            "trayNotification": false
+        }"##;
+        let group: Workgroup = serde_json::from_str(json).unwrap();
+        let raw = serde_json::to_value(&group).unwrap();
+        // 見たい症状は「キーが消えた」ことなので `contains_key` で直に見る。
+        // `raw[key]` は object でなくてもキー不在でも `Null` を返すため、
+        // 「キー欠落」と「値が null」を区別できない（将来 null を正当に取る
+        // フィールドが増えたときに誤って落ちる）。
+        let obj = raw.as_object().expect("Workgroup は JSON object にシリアライズされる");
+        for key in [
+            "name",
+            "color",
+            "autoAssignHotkey",
+            "autoReturnHomeAfterTask",
+            "taskAddAgent",
+            "claudeCodeMode",
+            "execPrompt",
+            "systemPrompt",
+            "trayNotification",
+        ] {
+            assert!(obj.contains_key(key), "{key} が往復で失われた");
+        }
+        assert_eq!(group.auto_return_home_after_task, Some(true));
+    }
+
+    /// 未設定なら `None`（= OFF 扱い）。false を明示したら false のまま残る。
+    #[test]
+    fn test_workgroup_auto_return_home_after_task_defaults_to_none() {
+        let group: Workgroup = serde_json::from_str(r#"{"id":"g"}"#).unwrap();
+        assert_eq!(group.auto_return_home_after_task, None);
+
+        let group: Workgroup =
+            serde_json::from_str(r#"{"id":"g","autoReturnHomeAfterTask":false}"#).unwrap();
+        assert_eq!(group.auto_return_home_after_task, Some(false));
     }
 
     /// 実効値はワークツリー個別値のみで決まる。
