@@ -132,7 +132,7 @@ $ARGUMENTS: <artifact-id> [--repo <repo>] [--branch <branch>]
 
 ## テンプレートを読み込む
 
-このスキルディレクトリ(`SKILL.md`と同じ場所)の`templates/`フォルダにある以下のファイルをReadで読み込む:
+このスキルディレクトリ(`SKILL.md`と同じ場所)の`templates/`フォルダにある以下のファイルを使う:
 
 | ファイル | アーティファクトモジュール | カスタマイズ要否 |
 |---|---|---|
@@ -141,6 +141,11 @@ $ARGUMENTS: <artifact-id> [--repo <repo>] [--branch <branch>]
 | `templates/components--DependencyEdge.jsx` | `components/DependencyEdge` | そのまま利用 |
 | `templates/lib--stopConditions.jsx` | `lib/stopConditions` | そのまま利用 |
 | `templates/data--flow.example.jsx` | `data/flow` | ※スキーマ参照用、新規生成 |
+
+**「そのまま利用」の3本(`components--TaskNode` / `components--DependencyEdge` / `lib--stopConditions`)はReadしない。**
+`artifact_module`に`file_path`を渡せばoretachi側がファイルを読んで登録するので、読み込んだ内容を`content`へ
+書き戻す往復(同じテキストが2回トークンを食う)が消える。Readが要るのは`entry-point.jsx`(CUSTOMIZE箇所を変える)と
+`data--flow.example.jsx`(スキーマ参照)だけ。
 
 **`data/flow`が計画フローの唯一のデータソース(TASKS/DEPENDENCIES/MESSAGESの3つをこの1ファイルにまとめる)。** Step2/Step3で進捗が変わるたびに、このモジュールを`artifact_module(command:"update", ...)`で直接更新する。専用の進捗管理マークダウン等は作らない。
 
@@ -177,20 +182,22 @@ artifact(command: "create", id: "<artifact-id>", type: "application/vnd.ant.reac
 **2. `components/TaskNode` モジュール作成**
 ```
 artifact_module(command: "create", module_name: "components/TaskNode",
-  content: <components--TaskNode.jsx をそのまま>)
+  file_path: "<このスキルディレクトリの絶対パス>/templates/components--TaskNode.jsx")
 ```
 
 **3. `components/DependencyEdge` モジュール作成**
 ```
 artifact_module(command: "create", module_name: "components/DependencyEdge",
-  content: <components--DependencyEdge.jsx をそのまま>)
+  file_path: "<このスキルディレクトリの絶対パス>/templates/components--DependencyEdge.jsx")
 ```
 
 **4. `lib/stopConditions` モジュール作成**
 ```
 artifact_module(command: "create", module_name: "lib/stopConditions",
-  content: <lib--stopConditions.jsx をそのまま>)
+  file_path: "<このスキルディレクトリの絶対パス>/templates/lib--stopConditions.jsx")
 ```
+
+2〜4はテンプレートをそのまま登録するので`content`ではなく`file_path`を渡す(Readも書き戻しも不要)。
 
 **5. `data/flow` モジュール作成**
 ```

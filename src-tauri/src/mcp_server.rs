@@ -78,6 +78,165 @@ fn validate_artifact_id(id: &str) -> Result<(), McpError> {
     Ok(())
 }
 
+/// `file_path` 引数で読み込めるファイルの上限サイズ。
+/// アーティファクトのモジュール1本としては十分に大きく、巨大バイナリを
+/// 誤って読み込んで JSON へ埋め込む事故だけを防ぐ。
+const ARTIFACT_SOURCE_FILE_MAX_BYTES: u64 = 1024 * 1024;
+
+/// `content` の代わりに `file_path` で渡されたファイルを読む。
+///
+/// 目的はトークンの往復削減で、テンプレートをそのまま登録するケース
+/// （同梱スキルの `templates/*.jsx` など）で AI がファイルを読んでから
+/// 同じテキストを書き戻す無駄を消す。
+///
+/// 読み取り範囲は **呼び出し元ワークツリーのルート配下** と
+/// **oretachi プラグインディレクトリ配下** に限定する（#229）。呼び手は既に
+/// ファイル読み取り権限を持つエージェントだが、無制限にすると Claude Code 側の
+/// permission / deny ルールを迂回して任意ファイルを吸い出す経路になるため。
+///
+/// 相対パスはワークツリーのルート基準で解決する。判定は `canonicalize` 後に
+/// 行うので、`..` もシンボリックリンクも解決済みの実パスで比較される。
+async fn read_artifact_source_file(
+    app_handle: &AppHandle,
+    worktree_path: &str,
+    file_path: &str,
+) -> Result<String, McpError> {
+    // 許可ルート。プラグインディレクトリは dev などで未生成のことがあるので、
+    // 存在しないものは呼び出し先で候補から落とされる。
+    let roots = [
+        Some(PathBuf::from(worktree_path)),
+        crate::claude_plugin::marketplace_dir(app_handle).ok(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    read_file_within_roots(&roots, worktree_path, file_path).await
+}
+
+/// `read_artifact_source_file` の本体。許可ルートを引数で受けてテスト可能にしてある。
+async fn read_file_within_roots(
+    allowed_roots: &[PathBuf],
+    base_dir: &str,
+    file_path: &str,
+) -> Result<String, McpError> {
+    let raw = std::path::Path::new(file_path);
+    let joined = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        std::path::Path::new(base_dir).join(raw)
+    };
+
+    let resolved = tokio_fs::canonicalize(&joined).await.map_err(|e| {
+        McpError::invalid_params(
+            format!("file_path '{}' を読めません: {}", file_path, e),
+            None,
+        )
+    })?;
+
+    // ルート側も canonicalize してから比較する。`..` もシンボリックリンクも
+    // 解決済みの実パス同士になるので、`starts_with` の component 単位比較で足りる。
+    let mut roots: Vec<PathBuf> = Vec::new();
+    for candidate in allowed_roots {
+        if let Ok(c) = tokio_fs::canonicalize(candidate).await {
+            roots.push(c);
+        }
+    }
+
+    if !roots.iter().any(|r| resolved.starts_with(r)) {
+        return Err(McpError::invalid_params(
+            format!(
+                "file_path '{}' は読み取りを許可された範囲の外です。呼び出し元ワークツリーのルート配下、または oretachi プラグインディレクトリ配下のファイルだけを指定できます（許可ルート: {}）",
+                file_path,
+                roots
+                    .iter()
+                    .map(|r| r.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            None,
+        ));
+    }
+
+    let meta = tokio_fs::metadata(&resolved).await.map_err(|e| {
+        McpError::invalid_params(format!("file_path '{}' を読めません: {}", file_path, e), None)
+    })?;
+    if !meta.is_file() {
+        return Err(McpError::invalid_params(
+            format!("file_path '{}' はファイルではありません", file_path),
+            None,
+        ));
+    }
+    if meta.len() > ARTIFACT_SOURCE_FILE_MAX_BYTES {
+        return Err(McpError::invalid_params(
+            format!(
+                "file_path '{}' は {} バイトあり、上限 {} バイトを超えています",
+                file_path,
+                meta.len(),
+                ARTIFACT_SOURCE_FILE_MAX_BYTES
+            ),
+            None,
+        ));
+    }
+
+    let bytes = tokio_fs::read(&resolved).await.map_err(|e| {
+        McpError::invalid_params(format!("file_path '{}' を読めません: {}", file_path, e), None)
+    })?;
+    // BOM 付き UTF-8 はエディタが勝手に付けることがある。そのまま JSX として
+    // 埋め込むと先頭の U+FEFF がパースエラーになるので剥がす。
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(&bytes[..]);
+    String::from_utf8(bytes.to_vec()).map_err(|_| {
+        McpError::invalid_params(
+            format!(
+                "file_path '{}' は UTF-8 として読めません。UTF-8 で保存されたテキストファイルを指定してください",
+                file_path
+            ),
+            None,
+        )
+    })
+}
+
+/// ソースの指定方法。`content` と `file_path` は排他。
+#[derive(Debug, PartialEq, Eq)]
+enum SourceSpec {
+    Inline(String),
+    File(String),
+}
+
+/// `content` / `file_path` の排他を判定する。両方指定を黙ってどちらか優先で
+/// 通すと、書いたつもりの `content` が無視されて気付けないのでエラーにする。
+fn classify_source(
+    content: Option<String>,
+    file_path: Option<String>,
+    what: &str,
+) -> Result<SourceSpec, McpError> {
+    match (content, file_path) {
+        (Some(_), Some(_)) => Err(McpError::invalid_params(
+            "content と file_path は同時に指定できません。どちらか一方だけを指定してください",
+            None,
+        )),
+        (Some(c), None) => Ok(SourceSpec::Inline(c)),
+        (None, Some(p)) => Ok(SourceSpec::File(p)),
+        (None, None) => Err(McpError::invalid_params(
+            format!("{} には content または file_path が必要です", what),
+            None,
+        )),
+    }
+}
+
+/// `content` / `file_path` の排他を解いて実際のソース文字列を得る。
+async fn resolve_source_content(
+    app_handle: &AppHandle,
+    worktree_path: &str,
+    content: Option<String>,
+    file_path: Option<String>,
+    what: &str,
+) -> Result<String, McpError> {
+    match classify_source(content, file_path, what)? {
+        SourceSpec::Inline(c) => Ok(c),
+        SourceSpec::File(p) => read_artifact_source_file(app_handle, worktree_path, &p).await,
+    }
+}
+
 const PORT_FILE: &str = "mcp-port";
 const SERVER_INFO_FILE: &str = "mcp-server.json";
 
@@ -657,8 +816,10 @@ pub struct ArtifactParams {
     pub content_type: Option<String>,
     #[schemars(description = "アーティファクトのタイトル (create時必須)")]
     pub title: Option<String>,
-    #[schemars(description = "アーティファクトの中身 (create/rewrite時必須)。markdown / html / react では `artifact:` リンクで他のアーティファクトへ遷移できる: 同一ワークツリー内は `artifact:<アーティファクトID>`、他ワークツリー宛は `artifact://worktree/<worktreeId>/<アーティファクトID>`、リポジトリ保管庫宛は `artifact://repository/<encodeURIComponent(リポジトリの絶対パス)>/<アーティファクトID>`。react ではメモリー（アーティファクトごとに永続化される JSON ストア）が使える: `import { useMemory } from 'oretachi'` して `const [value, setValue] = useMemory('key', 初期値)`。書き込みはデバウンスされ、ウィンドウを閉じて開き直しても・リポジトリへ転送しても復元される（合計 1MB まで。他に getMemory / setMemory / clearMemory / subscribeMemory がある）。さらに `import { callTool } from 'oretachi'` で oretachi の MCP ツールを呼べる: `await callTool('oretachi_write_terminal', { session_id: 12, text: 'echo hi' })`。呼べるのは oretachi_write_terminal / oretachi_add_task / notify_worktree / oretachi_poll_inbox / oretachi_ack_message / oretachi_read_terminal / oretachi_list_worktree_notifications / oretachi_inspect_prompt / oretachi_answer_prompt だけで、terminal_id / project_dir / notify_worktree の宛先 / add_task の追加先ワークグループはアーティファクトの置き場所のワークツリーへ強制される(session_id は同じワークツリーの稼働中端末、または**アーティファクトの置き場所ワークツリーが oretachi_subscribe_worktree で購読しているワークツリー**の稼働中端末に限る)。戻り値はツールの結果を JSON.parse したもの(パースできなければ文字列)。**制約**: アーティファクトからは oretachi_list_terminals が呼べないため、read/write_terminal に渡す session_id は生成時にコードへ埋め込むこと(アプリ再起動やタブ再作成で無効になる)。oretachi_poll_inbox / oretachi_ack_message / notify_worktree(kind: \"worktree.message\") はそのワークツリーで AI エージェント端末がちょうど1つ走行中でないとエラーになるので、AI セッション終了後も動かしたいボタンには使わないこと。他ワークツリーの端末へ read/write_terminal したい場合は、アーティファクトの置き場所ワークツリー側から宛先を購読しておくこと(逆向き＝宛先側が置き場所を購読しているだけでは通らない)。**宛先がダイアログ(ツール許可 / プラン承認 / AskUserQuestion)で止まっている場合に write_terminal で自由テキストを送ってはいけない**: テキストはダイアログに吸われ、末尾の CR が意図しない選択肢(既定は `1. Yes`)の確定として解釈される。先に oretachi_inspect_prompt(session_id) で画面の形状と実在する選択肢を取り、oretachi_answer_prompt(session_id, expect_fingerprint, kind, ...) で答えること")]
+    #[schemars(description = "アーティファクトの中身 (create/rewrite時は content か file_path のどちらかが必須)。markdown / html / react では `artifact:` リンクで他のアーティファクトへ遷移できる: 同一ワークツリー内は `artifact:<アーティファクトID>`、他ワークツリー宛は `artifact://worktree/<worktreeId>/<アーティファクトID>`、リポジトリ保管庫宛は `artifact://repository/<encodeURIComponent(リポジトリの絶対パス)>/<アーティファクトID>`。react ではメモリー（アーティファクトごとに永続化される JSON ストア）が使える: `import { useMemory } from 'oretachi'` して `const [value, setValue] = useMemory('key', 初期値)`。書き込みはデバウンスされ、ウィンドウを閉じて開き直しても・リポジトリへ転送しても復元される（合計 1MB まで。他に getMemory / setMemory / clearMemory / subscribeMemory がある）。さらに `import { callTool } from 'oretachi'` で oretachi の MCP ツールを呼べる: `await callTool('oretachi_write_terminal', { session_id: 12, text: 'echo hi' })`。呼べるのは oretachi_write_terminal / oretachi_add_task / notify_worktree / oretachi_poll_inbox / oretachi_ack_message / oretachi_read_terminal / oretachi_list_worktree_notifications / oretachi_inspect_prompt / oretachi_answer_prompt だけで、terminal_id / project_dir / notify_worktree の宛先 / add_task の追加先ワークグループはアーティファクトの置き場所のワークツリーへ強制される(session_id は同じワークツリーの稼働中端末、または**アーティファクトの置き場所ワークツリーが oretachi_subscribe_worktree で購読しているワークツリー**の稼働中端末に限る)。戻り値はツールの結果を JSON.parse したもの(パースできなければ文字列)。**制約**: アーティファクトからは oretachi_list_terminals が呼べないため、read/write_terminal に渡す session_id は生成時にコードへ埋め込むこと(アプリ再起動やタブ再作成で無効になる)。oretachi_poll_inbox / oretachi_ack_message / notify_worktree(kind: \"worktree.message\") はそのワークツリーで AI エージェント端末がちょうど1つ走行中でないとエラーになるので、AI セッション終了後も動かしたいボタンには使わないこと。他ワークツリーの端末へ read/write_terminal したい場合は、アーティファクトの置き場所ワークツリー側から宛先を購読しておくこと(逆向き＝宛先側が置き場所を購読しているだけでは通らない)。**宛先がダイアログ(ツール許可 / プラン承認 / AskUserQuestion)で止まっている場合に write_terminal で自由テキストを送ってはいけない**: テキストはダイアログに吸われ、末尾の CR が意図しない選択肢(既定は `1. Yes`)の確定として解釈される。先に oretachi_inspect_prompt(session_id) で画面の形状と実在する選択肢を取り、oretachi_answer_prompt(session_id, expect_fingerprint, kind, ...) で答えること")]
     pub content: Option<String>,
+    #[schemars(description = "create/rewrite時: content の代わりに、このパスのファイルを読んでそのまま中身として登録する。**テンプレートをそのまま登録する場合はこちらを使う** (スキル同梱の templates/*.jsx など)。ファイルを Read してから同じテキストを content に書き戻す往復が消えるので、生成が大幅に速く・安くなる。content とは排他。相対パスは呼び出し元ワークツリーのルート基準。読めるのは**呼び出し元ワークツリーのルート配下**と **oretachi プラグインディレクトリ (claude-plugins) 配下**のファイルだけで、それ以外の絶対パスはエラーになる。UTF-8 テキスト限定 (BOM は自動で除去)、1MB まで")]
+    pub file_path: Option<String>,
     #[schemars(description = "コード言語 (type=application/vnd.ant.code の時のみ)")]
     pub language: Option<String>,
     #[schemars(description = "update時: 置き換え元の文字列 (アーティファクト内に1箇所だけ存在すること)")]
@@ -756,8 +917,10 @@ pub struct ArtifactModuleParams {
     pub branch: Option<String>,
     #[schemars(description = "モジュール名 (例: \"components/Header\", \"screens/Login\")。list時は省略可")]
     pub module_name: Option<String>,
-    #[schemars(description = "モジュールのソースコード (create/rewrite時必須)")]
+    #[schemars(description = "モジュールのソースコード (create/rewrite時は content か file_path のどちらかが必須)")]
     pub content: Option<String>,
+    #[schemars(description = "create/rewrite時: content の代わりに、このパスのファイルを読んでそのままモジュールとして登録する。**テンプレートをそのまま登録する場合はこちらを使う** (スキル同梱の templates/*.jsx など)。ファイルを Read してから同じテキストを content に書き戻す往復が消えるので、生成が大幅に速く・安くなる。content とは排他。相対パスは呼び出し元ワークツリーのルート基準。読めるのは**呼び出し元ワークツリーのルート配下**と **oretachi プラグインディレクトリ (claude-plugins) 配下**のファイルだけで、それ以外の絶対パスはエラーになる。UTF-8 テキスト限定 (BOM は自動で除去)、1MB まで")]
+    pub file_path: Option<String>,
     #[schemars(description = "update時: 置き換え元の文字列 (モジュール内に1箇所だけ存在すること)")]
     pub old_str: Option<String>,
     #[schemars(description = "update時: 置き換え後の文字列")]
@@ -1168,7 +1331,7 @@ impl NotifyService {
         }
     }
 
-    #[tool(description = "アーティファクトを操作する。create: 新規作成, update: 差分更新(old_str→new_str), rewrite: 全置換, get: 1件取得(offset/limitで行範囲指定可)。保存先は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は repository/branch では特定できないため project_dir が必須", annotations(read_only_hint = true))]
+    #[tool(description = "アーティファクトを操作する。create: 新規作成, update: 差分更新(old_str→new_str), rewrite: 全置換, get: 1件取得(offset/limitで行範囲指定可)。**テンプレートやファイルの中身をそのまま中身として登録する場合は content ではなく file_path を使うこと** (ファイルを Read して同じテキストを content へ書き戻す往復が消え、生成が大幅に速く・安くなる)。保存先は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は repository/branch では特定できないため project_dir が必須", annotations(read_only_hint = true))]
     async fn artifact(
         &self,
         Parameters(ArtifactParams {
@@ -1181,6 +1344,7 @@ impl NotifyService {
             content_type,
             title,
             content,
+            file_path,
             language,
             old_str,
             new_str,
@@ -1199,6 +1363,8 @@ impl NotifyService {
             branch.as_deref(),
         )?;
         let worktree_id = wt.id.clone();
+        // file_path の相対解決と読み取り範囲の判定に使う（#229）
+        let worktree_path = wt.path.clone();
 
         validate_artifact_id(&id)?;
 
@@ -1335,9 +1501,9 @@ impl NotifyService {
                 let title = title.ok_or_else(|| {
                     McpError::invalid_params("create には title が必須です".to_string(), None)
                 })?;
-                let content = content.ok_or_else(|| {
-                    McpError::invalid_params("create には content が必須です".to_string(), None)
-                })?;
+                let content = resolve_source_content(
+                    &self.app_handle, &worktree_path, content, file_path, "create",
+                ).await?;
                 tokio_fs::create_dir_all(&artifacts_dir).await
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
                 // create は既存ファイルを読まずに丸ごと組み立てるため、永続フラグは明示的に拾う。
@@ -1366,9 +1532,9 @@ impl NotifyService {
                 data
             }
             "rewrite" => {
-                let content = content.ok_or_else(|| {
-                    McpError::invalid_params("rewrite には content が必須です".to_string(), None)
-                })?;
+                let content = resolve_source_content(
+                    &self.app_handle, &worktree_path, content, file_path, "rewrite",
+                ).await?;
                 let mut data = existing.clone()
                     .ok_or_else(|| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))?;
                 data.content = content;
@@ -1411,14 +1577,14 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "Reactアーティファクトのモジュールを操作する。大規模アーティファクトをファイル単位で管理するために使用。list: モジュール一覧(行数のみ), get: 1モジュール取得(offset/limitで行範囲指定可), create: 追加, update: 差分更新, rewrite: 全置換, delete: 削除。対象は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は project_dir が必須", annotations(read_only_hint = true))]
+    #[tool(description = "Reactアーティファクトのモジュールを操作する。大規模アーティファクトをファイル単位で管理するために使用。list: モジュール一覧(行数のみ), get: 1モジュール取得(offset/limitで行範囲指定可), create: 追加, update: 差分更新, rewrite: 全置換, delete: 削除。**テンプレートやファイルの中身をそのままモジュールとして登録する場合は content ではなく file_path を使うこと** (ファイルを Read して同じテキストを content へ書き戻す往復が消え、生成が大幅に速く・安くなる)。対象は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は project_dir が必須", annotations(read_only_hint = true))]
     async fn artifact_module(
         &self,
         Parameters(ArtifactModuleParams {
             command, id,
             project_dir, worktree_id: target_worktree_id,
             repository, branch,
-            module_name, content, old_str, new_str,
+            module_name, content, file_path, old_str, new_str,
             offset, limit,
         }): Parameters<ArtifactModuleParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -1442,6 +1608,8 @@ impl NotifyService {
             branch.as_deref(),
         )?;
         let worktree_id = wt.id.clone();
+        // file_path の相対解決と読み取り範囲の判定に使う（#229）
+        let worktree_path = wt.path.clone();
 
         validate_artifact_id(&id)?;
 
@@ -1532,8 +1700,9 @@ impl NotifyService {
                         format!("モジュール '{}' は既に存在します。上書きするには rewrite を使用してください", name), None,
                     ));
                 }
-                let src = content
-                    .ok_or_else(|| McpError::invalid_params("content が必要です", None))?;
+                let src = resolve_source_content(
+                    &self.app_handle, &worktree_path, content, file_path, "create",
+                ).await?;
                 data.modules.insert(name.to_string(), src);
                 data.updated_at = now;
                 let json = serde_json::to_string_pretty(&data)
@@ -1548,8 +1717,9 @@ impl NotifyService {
                 let name = module_name.as_deref()
                     .ok_or_else(|| McpError::invalid_params("module_name が必要です", None))?;
                 validate_module_name(name)?;
-                let src = content
-                    .ok_or_else(|| McpError::invalid_params("content が必要です", None))?;
+                let src = resolve_source_content(
+                    &self.app_handle, &worktree_path, content, file_path, "rewrite",
+                ).await?;
                 data.modules.insert(name.to_string(), src);
                 data.updated_at = now;
                 let json = serde_json::to_string_pretty(&data)
@@ -7774,5 +7944,104 @@ mod tests {
         assert!(should_send_notify_at(&map, "wt-a", "approval", true, t0));
         assert!(should_send_notify_at(&map, "wt-b", "approval", true, t0));
         assert!(!should_send_notify_at(&map, "wt-a", "approval", true, t0));
+    }
+
+    // ─── artifact / artifact_module の file_path（#229） ──────────────────
+
+    /// `wt/` を許可ルート、`outside/` を範囲外として一組作る。
+    fn source_file_fixture(tag: &str) -> (PathBuf, PathBuf) {
+        let base = std::env::temp_dir().join(format!(
+            "oretachi-artifact-src-{}-{}",
+            std::process::id(),
+            tag
+        ));
+        let wt = base.join("wt");
+        let outside = base.join("outside");
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(wt.join("templates")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(wt.join("templates").join("Panel.jsx"), "export const Panel = () => null\n").unwrap();
+        fs::write(outside.join("secret.env"), "TOKEN=hunter2\n").unwrap();
+        (wt, outside)
+    }
+
+    fn read_within(roots: &[PathBuf], base: &str, file_path: &str) -> Result<String, McpError> {
+        tauri::async_runtime::block_on(read_file_within_roots(roots, base, file_path))
+    }
+
+    /// 相対パスは呼び出し元ワークツリーのルート基準で解決する。
+    #[test]
+    fn file_path_reads_relative_to_worktree_root() {
+        let (wt, _) = source_file_fixture("relative");
+        let roots = vec![wt.clone()];
+        let src = read_within(&roots, wt.to_str().unwrap(), "templates/Panel.jsx").unwrap();
+        assert_eq!(src, "export const Panel = () => null\n");
+    }
+
+    /// 許可ルート配下の絶対パスは通る。
+    #[test]
+    fn file_path_accepts_absolute_inside_root() {
+        let (wt, _) = source_file_fixture("absolute");
+        let roots = vec![wt.clone()];
+        let abs = wt.join("templates").join("Panel.jsx");
+        let src = read_within(&roots, wt.to_str().unwrap(), abs.to_str().unwrap()).unwrap();
+        assert!(src.starts_with("export const Panel"));
+    }
+
+    /// 許可ルートの外は絶対パスでも `..` でも読めない。ここが #229 の停止条件そのもの。
+    #[test]
+    fn file_path_rejects_paths_outside_allowed_roots() {
+        let (wt, outside) = source_file_fixture("outside");
+        let roots = vec![wt.clone()];
+        let secret = outside.join("secret.env");
+
+        let by_abs = read_within(&roots, wt.to_str().unwrap(), secret.to_str().unwrap());
+        assert!(by_abs.is_err(), "範囲外の絶対パスが読めてしまった");
+
+        // `..` は canonicalize で解決されるので、脱出できずに同じエラーになる
+        let by_dotdot = read_within(&roots, wt.to_str().unwrap(), "../outside/secret.env");
+        assert!(by_dotdot.is_err(), "`..` で許可ルートの外へ出られてしまった");
+    }
+
+    /// BOM 付き UTF-8 は先頭の U+FEFF を落とす（そのまま JSX にすると構文エラーになる）。
+    #[test]
+    fn file_path_strips_utf8_bom() {
+        let (wt, _) = source_file_fixture("bom");
+        let mut bytes = vec![0xEF, 0xBB, 0xBF];
+        bytes.extend_from_slice(b"export default function App() {}\n");
+        fs::write(wt.join("bom.jsx"), &bytes).unwrap();
+        let src = read_within(&vec![wt.clone()], wt.to_str().unwrap(), "bom.jsx").unwrap();
+        assert!(src.starts_with("export default"), "BOM が残っている: {:?}", &src[..4.min(src.len())]);
+    }
+
+    /// UTF-8 として読めないファイルは、握りつぶさずエラーにする。
+    #[test]
+    fn file_path_rejects_non_utf8() {
+        let (wt, _) = source_file_fixture("binary");
+        fs::write(wt.join("blob.bin"), [0xFF, 0xFE, 0x00, 0x41]).unwrap();
+        assert!(read_within(&vec![wt.clone()], wt.to_str().unwrap(), "blob.bin").is_err());
+    }
+
+    /// ディレクトリを渡されても中身を読もうとしない。
+    #[test]
+    fn file_path_rejects_directory() {
+        let (wt, _) = source_file_fixture("dir");
+        assert!(read_within(&vec![wt.clone()], wt.to_str().unwrap(), "templates").is_err());
+    }
+
+    /// content と file_path は排他。両方指定は黙ってどちらかを採らずエラーにする
+    /// （優先して片方を通すと、書いたつもりの content が無視されても気付けない）。
+    #[test]
+    fn content_and_file_path_are_mutually_exclusive() {
+        assert!(classify_source(Some("x".into()), Some("a.jsx".into()), "create").is_err());
+        assert!(classify_source(None, None, "create").is_err());
+        assert_eq!(
+            classify_source(Some("x".into()), None, "create").unwrap(),
+            SourceSpec::Inline("x".into())
+        );
+        assert_eq!(
+            classify_source(None, Some("a.jsx".into()), "create").unwrap(),
+            SourceSpec::File("a.jsx".into())
+        );
     }
 }

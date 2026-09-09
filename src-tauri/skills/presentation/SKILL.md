@@ -42,6 +42,10 @@ $ARGUMENTS: <artifact-id> [--repo <repo>] [--branch <branch>]
 | `templates/components--deck.jsx` | `components/deck` | `THEME` のみ変更（配色を変えない場合はそのまま） |
 | `templates/slides--slide.example.jsx` | ※スキーマ参照用 | 新規生成 |
 
+**そのまま登録するテンプレートは Read しない。** Step 6 で `artifact_module` に `file_path` を渡せば
+oretachi 側がファイルを読んで登録するので、読み込んだ内容を `content` へ書き戻す往復（同じテキストが
+2 回トークンを食う）が消える。`components/deck` は**配色を変えない場合**がこれに当たる。
+
 ### Step 3: 内容分析
 
 ユーザー要件（補足ヒアリング or コードベース調査）からアウトラインを組み立てる。
@@ -128,6 +132,12 @@ artifact(command: "create", id: "<artifact-id>", type: "application/vnd.ant.reac
 ```
 artifact_module(command: "create", module_name: "components/deck",
   content: <components--deck.jsx の内容。THEME を Step 4 の定義に変更>)
+```
+
+配色を変えない場合は Read せず `file_path` でそのまま登録する:
+```
+artifact_module(command: "create", module_name: "components/deck",
+  file_path: "<このスキルディレクトリの絶対パス>/templates/components--deck.jsx")
 ```
 
 **3. 各スライドモジュール作成**（スライド数分だけ繰り返す）

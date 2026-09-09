@@ -33,7 +33,7 @@ $ARGUMENTS: <artifact-id> [--repo <repo>] [--branch <branch>]
 
 ### Step 2: テンプレートを読み込む
 
-このスキルディレクトリ（`SKILL.md` と同じ場所）の `templates/` フォルダにある以下のファイルを Read で読み込む:
+このスキルディレクトリ（`SKILL.md` と同じ場所）の `templates/` フォルダにある以下のファイルを使う:
 
 | ファイル | アーティファクトモジュール | カスタマイズ要否 |
 |---|---|---|
@@ -42,6 +42,10 @@ $ARGUMENTS: <artifact-id> [--repo <repo>] [--branch <branch>]
 | `templates/components--RelationshipLine.jsx` | `components/RelationshipLine` | そのまま利用 |
 | `templates/data--entities.example.jsx` | ※スキーマ参照用 | 新規生成 |
 | `templates/data--relationships.example.jsx` | ※スキーマ参照用 | 新規生成 |
+
+**「そのまま利用」のテンプレートは Read しない。** Step 6 で `artifact_module` に `file_path` を渡せば
+oretachi 側がファイルを読んで登録するので、読み込んだ内容を `content` へ書き戻す往復（同じテキストが
+2 回トークンを食う）が消える。Read が要るのは**カスタマイズが必要なファイルだけ**。
 
 ### Step 3: ドメイン分析
 
@@ -101,8 +105,9 @@ artifact_module(command: "create", module_name: "components/EntityBox",
 **3. RelationshipLine モジュール作成**
 ```
 artifact_module(command: "create", module_name: "components/RelationshipLine",
-  content: <components--RelationshipLine.jsx をそのまま>)
+  file_path: "<このスキルディレクトリの絶対パス>/templates/components--RelationshipLine.jsx")
 ```
+そのまま登録するテンプレートは `content` ではなく `file_path` を渡す（Read も書き戻しも不要）。
 
 **4. entities モジュール作成**
 ```
