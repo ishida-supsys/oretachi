@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { useI18n } from "vue-i18n";
+import ArtifactLinkUrlText from "./ArtifactLinkUrlText.vue";
 import type { ArtifactLinkRect } from "../../utils/artifactFrameLink";
 
 /**
@@ -145,11 +146,31 @@ async function copy() {
   }
 }
 
+/**
+ * ウィンドウが非アクティブになったら閉じる。ポップアップは position: fixed で body へ
+ * teleport されるため、カーソルを動かさずフォーカスだけ他ウィンドウへ移す経路では
+ * mouseout が来ず、前面に浮いたまま残る (issue #248)。
+ *
+ * `document.hasFocus()` を見るのは、ページ内の iframe へフォーカスが移ったときにも
+ * window の blur が発火するため。html / react ビューのリンクは sandbox iframe の中に
+ * あり、そのポップアップまで閉じてしまう。iframe が持っている間は document 全体では
+ * フォーカスを失っていないので、ここで切り分けられる。
+ */
+function onWindowBlur() {
+  if (!document.hasFocus()) hideNow();
+}
+
 // リサイズするとリンクが動いて座標が合わなくなる。追従させるより閉じる方が素直
-onMounted(() => window.addEventListener("resize", hideNow));
+onMounted(() => {
+  window.addEventListener("resize", hideNow);
+  window.addEventListener("blur", onWindowBlur);
+  document.addEventListener("visibilitychange", hideNow);
+});
 
 onBeforeUnmount(() => {
   window.removeEventListener("resize", hideNow);
+  window.removeEventListener("blur", onWindowBlur);
+  document.removeEventListener("visibilitychange", hideNow);
   cancelHide();
   if (copyTimer) clearTimeout(copyTimer);
 });
@@ -167,7 +188,7 @@ defineExpose({ showFor, scheduleHide, cancelHide, hideNow });
       @mouseenter="onEnter"
       @mouseleave="onLeave"
     >
-      <span class="link-hover-url">{{ href }}</span>
+      <ArtifactLinkUrlText :href="href" />
       <!-- click.stop: リンク本体のクリック（開く / artifact: 遷移）へ伝播させない -->
       <button
         type="button"
@@ -199,16 +220,6 @@ defineExpose({ showFor, scheduleHide, cancelHide, hideNow });
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
   font-size: 12px;
   line-height: 1.5;
-}
-
-.link-hover-url {
-  /* URL は途中に区切りが無く伸びるので折り返す (省略すると確かめる用途に立たない)。
-     長すぎる場合だけ高さで打ち切る */
-  color: #cdd6f4;
-  font-family: monospace;
-  word-break: break-all;
-  max-height: 4.5em;
-  overflow: hidden;
 }
 
 .link-hover-copy {
