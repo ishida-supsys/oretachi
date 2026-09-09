@@ -6,6 +6,34 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.31.2] - 2026-09-09
+
+### Added
+- レポート上の全ての問いのパターンへ安全に回答できるようにした (#215)
+- notification-report で判断不要な購読イベントを報告カードとして載せるようにした (#228)
+- アーティファクト本文中のリンクにホバーで URL とコピーボタンを出すようにした (#237)
+- アーティファクトのモジュール/エントリポイント登録で `file_path` を指定できるようにした (#229)
+
+### Fixed
+- 自動承認で安全と判定した許可が偽陰性の再チェックで捨てられる問題を修正し、プラン承認の誤検出と fail-closed を緩和した (#252)
+- リンクホバーのツールチップが長い URL で打ち切られる / 消える / 過剰に出る問題を修正した (#247)
+- ワークグループの `autoReturnHomeAfterTask` が永続化されない問題を修正した (#250)
+- notification-report で 2 回目以降のレポートが生成されない問題を修正した (#220)
+- notification-report の生成対象を拾った時点の通知に固定し、送信済みカードを縮小表示するようにした (#219)
+- notification-report の宛先セッション解決を ID 基点にし、送信後にトレイ通知を落とすようにした (#218)
+- アーティファクトの `file_path` 許可ルートを呼び手が選べないようにした (#229)
+- 本文更新でリンクポップアップが残る問題と座標の丸め漏れを修正した (#237)
+- 無関係なアーティファクトの作成で表示中の画面が奪われないようにした (#222)
+- hook 経路の未読が「配送済みだが誰も見ていない」状態になるのを止めた (#221)
+- トレイ通知オフでも承認待ちを通すようにした (#225)
+- タスク完了時にフォーカス中でもホーム自動復帰を予約するようにし、予約に有効範囲を持たせた (#224)
+- codex 既定モデルによるタスク生成失敗を修正し、既定モデルを現行世代の `gpt-5.6-luna` に固定した上で失敗を人に届けるようにした (#223)
+- 計画フロースキルの pan/zoom をメモリー保存しリロード後に復元するようにした (#236)
+
+### Other
+- `automerge` ラベル付き PR の auto-merge を自動有効化する CI を追加し、運用ルールを CLAUDE.md に明記した (#226)
+- TrayPopupApp の再入シナリオを自動テストで保護した (#233)
+
 ## [0.31.1] - 2026-09-08
 
 ### Added
@@ -726,7 +754,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.31.1...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.31.2...HEAD
+[0.31.2]: https://github.com/ishida-supsys/oretachi/compare/0.31.1...0.31.2
 [0.31.1]: https://github.com/ishida-supsys/oretachi/compare/0.31.0...0.31.1
 [0.31.0]: https://github.com/ishida-supsys/oretachi/compare/0.30.0...0.31.0
 [0.30.0]: https://github.com/ishida-supsys/oretachi/compare/0.29.2...0.30.0
