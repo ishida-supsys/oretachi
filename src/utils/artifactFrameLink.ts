@@ -18,9 +18,34 @@ export interface ArtifactFrameNavigateMessage {
   href: string;
 }
 
+/** リンクのホバー通知（URL 表示 + コピーのポップアップ用）のマーカー */
+export const ARTIFACT_LINK_HOVER_MARKER = "__oretachiArtifactLinkHover";
+
+/** iframe 内のリンクの位置。iframe 自身のビューポート座標なので、親側で iframe の分だけずらす */
+export interface ArtifactLinkRect {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
+export interface ArtifactFrameLinkHoverMessage {
+  [ARTIFACT_LINK_HOVER_MARKER]: true;
+  /** null なら「リンクから離れた」= ポップアップを閉じる要求 */
+  href: string | null;
+  rect: ArtifactLinkRect | null;
+}
+
+/** ホバーの結果。href が null なら閉じる要求 */
+export interface ArtifactLinkHover {
+  href: string | null;
+  rect: ArtifactLinkRect | null;
+}
+
 /**
- * iframe 内に注入するクリック横取りスクリプト。
- * `artifact:` 以外のリンクには触れない（sandbox が外部遷移を既に塞いでいる）。
+ * iframe 内に注入するリンク横取りスクリプト。
+ * クリックを止めるのは `artifact:` リンクだけ（sandbox が外部遷移を既に塞いでいる）で、
+ * ホバー通知はどのリンクでも親へ送る（親が URL とコピーボタンを出す）。
  */
 export const ARTIFACT_LINK_INTERCEPT_JS =
   "(function(){" +
@@ -48,6 +73,33 @@ export const ARTIFACT_LINK_INTERCEPT_JS =
   // 中クリックは click ではなく auxclick で飛ぶ（ArtifactMarkdownView と同じ理由）
   "  document.addEventListener('click',onClick,true);" +
   "  document.addEventListener('auxclick',onClick,true);" +
+  // ここから下はリンクのホバー通知。sandbox 内では URL を確かめる手段が
+  // ステータスバーもタイトル属性も無く（外部遷移も塞がれている）、親側の
+  // ポップアップに URL とコピーボタンを出してもらうしかない
+  "  var hoveredHref=null;" +
+  "  function post(msg){try{parent.postMessage(msg,'*');}catch(err){}}" +
+  "  function hideHover(){" +
+  "    if(hoveredHref===null)return;" +
+  "    hoveredHref=null;" +
+  "    post({" + JSON.stringify(ARTIFACT_LINK_HOVER_MARKER) + ":true,href:null,rect:null});" +
+  "  }" +
+  "  function onOver(e){" +
+  "    var a=findAnchor(e);" +
+  "    if(!a){hideHover();return;}" +
+  "    var href=(a.getAttribute('href')||'').trim();" +
+  // ページ内アンカーは飛び先が同じ文書なので出さない（親側の markdown ビューと同じ扱い）
+  "    if(!href||href.charAt(0)==='#'){hideHover();return;}" +
+  "    var r=a.getBoundingClientRect();" +
+  "    hoveredHref=href;" +
+  "    post({" + JSON.stringify(ARTIFACT_LINK_HOVER_MARKER) + ":true,href:href," +
+  "      rect:{left:r.left,top:r.top,width:r.width,height:r.height}});" +
+  "  }" +
+  "  function onOut(e){if(findAnchor(e))hideHover();}" +
+  "  document.addEventListener('mouseover',onOver,true);" +
+  "  document.addEventListener('mouseout',onOut,true);" +
+  // 位置が動いた/フォーカスが外れたら座標が合わなくなるので閉じる
+  "  document.addEventListener('scroll',hideHover,true);" +
+  "  window.addEventListener('blur',hideHover);" +
   "})();";
 
 /**
@@ -61,4 +113,35 @@ export function readArtifactNavigateMessage(
   const data = event.data as Partial<ArtifactFrameNavigateMessage> | null;
   if (!data || typeof data !== "object" || data[ARTIFACT_NAVIGATE_MARKER] !== true) return null;
   return typeof data.href === "string" ? data.href : null;
+}
+
+/**
+ * `message` イベントが対象 iframe から来たリンクのホバー通知なら中身を返す。そうでなければ null。
+ * 座標は iframe 自身のビューポート基準なので、親側で iframe の位置を足すこと。
+ */
+export function readArtifactLinkHoverMessage(
+  event: MessageEvent,
+  frame: HTMLIFrameElement | null,
+): ArtifactLinkHover | null {
+  if (!frame || event.source !== frame.contentWindow) return null;
+  const data = event.data as Partial<ArtifactFrameLinkHoverMessage> | null;
+  if (!data || typeof data !== "object" || data[ARTIFACT_LINK_HOVER_MARKER] !== true) return null;
+  if (data.href === null || data.href === undefined) return { href: null, rect: null };
+  if (typeof data.href !== "string") return null;
+  const rect = readRect(data.rect);
+  // 座標が壊れている通知は「閉じる」として扱う（変な位置に出すより閉じる方が無害）
+  return rect ? { href: data.href, rect } : { href: null, rect: null };
+}
+
+function readRect(rect: unknown): ArtifactLinkRect | null {
+  if (!rect || typeof rect !== "object") return null;
+  const r = rect as Record<string, unknown>;
+  const values = [r.left, r.top, r.width, r.height];
+  if (!values.every((v) => typeof v === "number" && Number.isFinite(v))) return null;
+  return {
+    left: r.left as number,
+    top: r.top as number,
+    width: r.width as number,
+    height: r.height as number,
+  };
 }

@@ -1,8 +1,14 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import ArtifactCodeView from "./ArtifactCodeView.vue";
+import ArtifactLinkHoverPopup from "./ArtifactLinkHoverPopup.vue";
 import { buildVendorHead, buildReactSrcdoc } from "../../utils/reactArtifactSrcdoc";
-import { readArtifactNavigateMessage } from "../../utils/artifactFrameLink";
+import {
+  readArtifactLinkHoverMessage,
+  readArtifactNavigateMessage,
+  type ArtifactLinkHover,
+} from "../../utils/artifactFrameLink";
+import { applyFrameLinkHover } from "../../utils/artifactLinkHover";
 import {
   ARTIFACT_BRIDGE_METHOD_MEMORY_SET,
   ARTIFACT_BRIDGE_METHOD_MCP_CALL,
@@ -59,6 +65,7 @@ const emit = defineEmits<{
 }>();
 
 const frame = ref<HTMLIFrameElement | null>(null);
+const linkPopup = ref<InstanceType<typeof ArtifactLinkHoverPopup> | null>(null);
 
 type Mode = "preview" | "code";
 const mode = ref<Mode>("preview");
@@ -185,9 +192,22 @@ function onMessage(event: MessageEvent) {
     emit("navigate", href);
     return;
   }
+  const hover = readArtifactLinkHoverMessage(event, frame.value);
+  if (hover) {
+    onHover(hover);
+    return;
+  }
   const request = readArtifactBridgeRequest(event, frame.value);
   if (request) void handleBridgeRequest(request);
 }
+
+/** iframe 内の座標で来たホバー通知を、親のビューポート座標へ直してポップアップへ渡す */
+function onHover(hover: ArtifactLinkHover) {
+  applyFrameLinkHover(hover, frame.value, linkPopup.value);
+}
+
+// Code タブへ切り替えると iframe は v-show で隠れる。座標が残ったままになるので閉じる
+watch(mode, () => linkPopup.value?.hideNow());
 
 onMounted(() => window.addEventListener("message", onMessage));
 onBeforeUnmount(() => window.removeEventListener("message", onMessage));
@@ -280,6 +300,7 @@ const codeContent = computed(() =>
         allowfullscreen
         class="react-iframe"
       />
+      <ArtifactLinkHoverPopup ref="linkPopup" />
     </div>
 
     <div v-if="mode === 'code'" class="code-area">
