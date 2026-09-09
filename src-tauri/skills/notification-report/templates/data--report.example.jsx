@@ -11,9 +11,10 @@
 //
 // ── NOTIFICATIONS 配列フィールド仕様 ─────────────────────────────────────
 //   id            (string)   : カードの一意キー。inbox メッセージ ID をそのまま使ってよい
-//   inboxIds      (string[]) : この カードが束ねる inbox メッセージ ID。送信成功後に ack する
+//   inboxIds      (string[]) : このカードが束ねる inbox メッセージ ID。**生成時（Step 5.5）に
+//                              ack 済み**の記録で、レポート側からは ack しない（#219）
 //   worktreeName  (string)   : 発信元ワークツリー名（= 送信先）
-//   worktreeId    (string)   : 発信元ワークツリーID。**必須**。購読の突合と、送信成功後の
+//   worktreeId    (string)   : 発信元ワークツリーID。**必須**。購読の突合と、生成時の
 //                              トレイ通知クリア（oretachi_clear_worktree_notification）に使う。
 //                              oretachi_poll_inbox の sourceWorktreeId をそのまま入れる（表示はしない）
 //   sessionId     (number)   : 送信先の PTY セッションID。**null 可**（稼働中 AI 端末なし）

@@ -400,55 +400,22 @@ async function answerPrompt(n, draft) {
   };
 }
 
-/**
- * 返答を送り終えた宛先ワークツリーの未確認通知（トレイバッジ / ホームのカードの件数）を
- * クリアする（#218）。
- *
- * **inbox の ack とは別のストア。** `oretachi_ack_message` が触るのは sqlite の
- * event_db で、トレイバッジはフロントが持つ別の写し。ack だけではバッジが残り、
- * 返答済みのワークツリーがトレイポップアップの巡回に出続ける。
- *
- * 宛先の指定は `worktree_id` のみ（`worktree_name` はアーティファクト経由では
- * 落とされる。同名ワークツリーがあると、購読チェックを通した ID とは別の
- * ワークツリーの通知を消しうるため）。許可条件は `write_terminal` と同じ #211 の購読で、
- * 返答が送れた宛先なら必ず通る。
- *
- * **失敗は許容する。** バッジが残るだけで返答自体は届いているので、
- * ここで throw して送信フローを止める価値は無い。
- */
-async function clearNotifications(worktreeIds) {
-  const ids = Array.from(new Set((worktreeIds || []).filter(Boolean)));
-  const ok = [];
-  const failed = {};
-  for (const worktreeId of ids) {
-    try {
-      await callTool('oretachi_clear_worktree_notification', { worktree_id: worktreeId });
-      ok.push(worktreeId);
-    } catch (e) {
-      failed[worktreeId] = errText(e);
-    }
-  }
-  return { ok, failed };
-}
-
-/**
- * 返答した通知を既読化する。
- *
- * `oretachi_ack_message` は `terminal_id` を取らないので、レポートを置いた
- * ワークツリーで**走行中の AI 端末がちょうど 1 つ**でないと失敗する。
- * AI セッション終了後にユーザーがレポートを触る場合は失敗するので、
- * 失敗は許容して表示だけ出す（返答自体は届いている）。
- */
-async function ackInbox(inboxIds) {
-  const ids = (inboxIds || []).filter(Boolean);
-  if (ids.length === 0) return { state: 'skipped' };
-  try {
-    await callTool('oretachi_ack_message', { ids });
-    return { state: 'ok', count: ids.length };
-  } catch (e) {
-    return { state: 'failed', error: String((e && e.message) || e) };
-  }
-}
+// ── ack / トレイ通知クリアはここには無い（#219） ──────────────────────────
+//
+// どちらも**レポート生成時に生成側のセッションが済ませている**。カードに載った時点で
+// inbox から ack され、宛先のトレイバッジも落ちているので、レポートは「その時点で
+// 拾った通知のスナップショット」として閉じている（トレイポップアップと同じルール）。
+//
+// 送信時にやらない理由:
+//   - 送信は生成の何時間もあとになりうる。トレイ通知クリアはワークツリー単位でしか
+//     効かないため、そのタイミングで落とすと**生成後に届いた別の通知のバッジまで消える**
+//   - `oretachi_ack_message` は `terminal_id` を取るが、**アーティファクト経由だと
+//     `normalize_artifact_tool_params` がそれを落とす**ため、レポートを置いたワークツリーで
+//     走行中の AI 端末がちょうど 1 つでないと発信元を特定できずに失敗する。レポートを
+//     人が開くのは AI セッションが終わったあとが多く、実質いつも失敗していた
+//
+// 人がレポートの存在に気づく導線は、生成側のセッションが Step 6 で撃つ
+// `notify_worktree`（レポート置き場のワークツリー宛）が担う。
 
 /**
  * この通知へ「いま」返答を送れるか（下書きの妥当性まで含めた判定）。
@@ -511,5 +478,3 @@ exports.canSend = canSend;
 exports.sendOne = sendOne;
 exports.sendEnter = sendEnter;
 exports.answerPrompt = answerPrompt;
-exports.ackInbox = ackInbox;
-exports.clearNotifications = clearNotifications;
