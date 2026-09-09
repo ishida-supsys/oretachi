@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, reactive, onMounted, onUnmounted, nextTick, computed, watch } from "vue";
+import { ref, reactive, onMounted, onUnmounted, nextTick, computed } from "vue";
 import { emitTo, listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow, LogicalSize } from "@tauri-apps/api/window";
 import TerminalView from "./components/TerminalView.vue";
@@ -18,6 +18,7 @@ import { extractUrlArtifacts } from "./utils/artifactUrl";
 import type { UrlArtifactEntry } from "./types/artifact";
 import { invoke } from "@tauri-apps/api/core";
 import type { TrayWorktreeData } from "./composables/useTrayPopup";
+import { useTrayWorktreeNav } from "./composables/useTrayWorktreeNav";
 import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
 import { initTerminalUnread, terminalUnread } from "./composables/useEventSubscriptions";
 import { collectUnreadByTab } from "./utils/terminalUnread";
@@ -39,9 +40,6 @@ const footerRef = ref<HTMLDivElement | null>(null);
 // description 情報バー ref（ウィンドウサイズ補正用）
 const descBarRef = ref<HTMLDivElement | null>(null);
 
-// 全ワークツリーデータ
-const allWorktrees = ref<TrayWorktreeData[]>([]);
-const currentIndex = ref(0);
 const initialized = ref(false);
 
 // ターミナルエントリ（現在のワークツリーのみ）
@@ -60,11 +58,6 @@ const terminalUnreadByTab = computed(() =>
 
 // 閉鎖処理の再入防止フラグ（フッターボタンの disabled にも使うため ref）
 const closing = ref(false);
-// 遷移中フラグ（連打・ホットキー二重発火の抑止 + ボタンの disabled 用）
-const navigating = ref(false);
-// 遷移の世代。await の後で自分が最新でなければ以降の副作用を捨てる
-// （destroy 済みウィンドウへの setSize や、打ち切った遷移の描画を防ぐ）
-let navToken = 0;
 
 // destroy の二重実行防止（メイン経由と保険タイマーの両方から呼ばれる）
 let destroyed = false;
@@ -76,9 +69,51 @@ const menuOpen = ref(false);
 // アーカイブ確認ダイアログ
 const showArchiveConfirm = ref(false);
 const archiveDirtyCount = ref(0);
-// アーカイブ依頼の進行中フラグ。onArchiveConfirmed は await を挟んでから一覧を
-// splice するので、その間に外からの通知クリア（#218）で一覧を触られてはいけない
-const archiving = ref(false);
+// 自動承認ダイアログ状態
+const showAutoApprovalPromptDialog = ref(false);
+
+// IDE で開く
+const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect();
+
+/**
+ * ダイアログ表示中か。**表示中カードを差し替えてはいけない状態**を表す。
+ *
+ * ダイアログは `currentWorktree` にリアクティブ束縛されており、確定ハンドラも
+ * `currentWorktree.value` を読み直す。開いている間にカードを差し替えると
+ * **ダイアログを開いた対象と別のワークツリーがアーカイブされる**（`deleteBranch` 付きなら
+ * ブランチも消える）。ホットキーのナビゲーションを止めているのと同じ理由・同じ条件。
+ */
+const dialogOpen = computed(
+  () => showArchiveConfirm.value || showIdeDialog.value || showAutoApprovalPromptDialog.value,
+);
+
+// 一覧 + 現在位置の変異はすべてこの composable が直列化する（#218 / #233）。
+// 外からの通知クリアが goTo / ダイアログ確定の await に割り込むのを防ぐ
+const {
+  allWorktrees,
+  currentIndex,
+  navigating,
+  currentWorktree,
+  isFirst,
+  isLast,
+  cancelNavigation,
+  goNext,
+  goPrev,
+  archiveCurrent,
+  removeWorktreeFromList,
+} = useTrayWorktreeNav({
+  closing,
+  dialogOpen,
+  detachCurrentTerminals: () => detachCurrentTerminals(),
+  clearLeavingNotification: (worktreeId) =>
+    emitTo("main", "tray-clear-notification", { worktreeId }),
+  notifyEnteringWorktree: (worktreeId) =>
+    emitTo("main", "tray-current-worktree-changed", { worktreeId }),
+  showWorktree: (data) => showWorktree(data),
+  requestArchive: (worktreeId, deleteBranch) =>
+    emitTo("main", "tray-archive-worktree", { worktreeId, deleteBranch }),
+  closePopupWithoutClearing: () => closePopup({ clearCurrentNotification: false }),
+});
 
 // フレームレイアウト（useWorktreeFrameで共通化）
 const {
@@ -117,9 +152,6 @@ const {
     }
   },
 });
-
-// 自動承認ダイアログ状態
-const showAutoApprovalPromptDialog = ref(false);
 
 // ────────────────────────────────────────────────
 // 現在ワークツリーの表示
@@ -224,14 +256,8 @@ async function showWorktree(data: TrayWorktreeData) {
 // ナビゲーション
 // ────────────────────────────────────────────────
 
-const currentWorktree = computed(() => allWorktrees.value[currentIndex.value] ?? null);
-const isLast = computed(() => currentIndex.value >= allWorktrees.value.length - 1);
-const isFirst = computed(() => currentIndex.value <= 0);
 /** ナビゲーション系ボタンを止めるべき状態 */
 const navBusy = computed(() => navigating.value || closing.value);
-
-// IDE で開く
-const { showIdeDialog, detectedIdes, openInIde, onIdeSelected } = useIdeSelect();
 
 // アーティファクト
 const { openArtifactViewer } = useArtifactWindow();
@@ -283,64 +309,6 @@ async function detachCurrentTerminals() {
   await nextTick();
 }
 
-type GoToOptions = {
-  /**
-   * 離れる側の通知を既読にする（既定 true）。アーカイブ導線では main 側の
-   * archiveWorktree が内部で clearNotification するため false にする。
-   */
-  clearLeaving?: boolean;
-  /** 呼び出し側で detachCurrentTerminals() を済ませている場合 true */
-  alreadyDetached?: boolean;
-};
-
-/**
- * index のワークツリーを表示する。前へ / 次へ / アーカイブ後の再表示で共有する。
- * - 離れる側の副作用: detach（+ 任意で通知クリア）
- * - 入る側の副作用: tray-current-worktree-changed → showWorktree
- * アーカイブ後は splice 済みで index が据え置きになるため、同一 index への goTo も
- * 再表示として成立させる（同一 index を弾かない）。
- */
-async function goTo(index: number, options: GoToOptions = {}): Promise<void> {
-  const { clearLeaving = true, alreadyDetached = false } = options;
-  if (closing.value || navigating.value) return;
-  if (index < 0 || index >= allWorktrees.value.length) return;
-
-  const token = ++navToken;
-  navigating.value = true;
-  try {
-    const leaving = currentWorktree.value;
-    if (!alreadyDetached) await detachCurrentTerminals();
-    if (clearLeaving && leaving) {
-      await emitTo("main", "tray-clear-notification", { worktreeId: leaving.worktreeId });
-    }
-    // await 中に閉鎖 / 別遷移が始まっていたら以降は行わない
-    if (token !== navToken || closing.value) return;
-
-    // await を挟む間に一覧が縮んでいることがある（外からの通知クリアの取り込み /
-    // アーカイブ）。範囲外のまま進むと `entering` が undefined になり、
-    // `entering.worktreeId` で例外を投げて**ターミナルを手放したまま何も表示されない**
-    // 状態で固まる。末尾側へ丸めて必ず何か表示する
-    const target = Math.min(index, allWorktrees.value.length - 1);
-    if (target < 0) return;
-    currentIndex.value = target;
-    const entering = allWorktrees.value[target];
-    await emitTo("main", "tray-current-worktree-changed", { worktreeId: entering.worktreeId });
-    if (token !== navToken || closing.value) return;
-    await showWorktree(entering);
-  } finally {
-    if (token === navToken) navigating.value = false;
-  }
-}
-
-async function onNext() {
-  if (!isLast.value) await goTo(currentIndex.value + 1);
-}
-
-async function onPrev() {
-  // 「見終わった」の意味づけは方向に依らないので、前へでも離脱側は既読にする（冪等）
-  if (!isFirst.value) await goTo(currentIndex.value - 1);
-}
-
 /** tray-closing を出してこのウィンドウを破棄する。保険タイマーからも呼ぶので冪等にする */
 async function destroySelf(): Promise<void> {
   if (destroyed) return;
@@ -369,7 +337,7 @@ async function closePopup(options: {
 } = {}): Promise<void> {
   if (closing.value) return;
   closing.value = true;
-  navToken++; // 進行中の goTo の続きを打ち切る
+  cancelNavigation(); // 進行中の goTo の続きを打ち切る
   try {
     const wt = currentWorktree.value;
     await detachCurrentTerminals();
@@ -428,136 +396,8 @@ async function onClickArchive() {
 /** 確認ダイアログ確定 → main へアーカイブを依頼し、トレイ側は先に進む */
 async function onArchiveConfirmed(options: { deleteBranch: boolean }) {
   showArchiveConfirm.value = false;
-  const wt = currentWorktree.value;
-  if (!wt || closing.value) return;
-
-  // await を 2 回挟むので、その間に外からの通知クリア（#218）で一覧を触られないよう
-  // 印を立てる。触られると splice する index が別のワークツリーを指す
-  archiving.value = true;
-  try {
-    // main 側のターミナル kill / git worktree remove とトレイの attach が競合しないよう、
-    // アーカイブ依頼より前にトレイ側のターミナルを必ず切り離す
-    await detachCurrentTerminals();
-
-    // アーカイブは数秒〜数十秒かかり、失敗時のエラーダイアログは main 側に出る。
-    // トレイは完了を待たずに次へ進む。通知クリアも archiveWorktree 内の clearNotification
-    // が行うので tray-clear-notification は出さない。
-    await emitTo("main", "tray-archive-worktree", {
-      worktreeId: wt.worktreeId,
-      deleteBranch: options.deleteBranch,
-    });
-
-    // index は捕まえ直す（`archiving` で守ってはいるが、位置の根拠を
-    // 「await 前の currentIndex」ではなく worktreeId 一致に寄せておく）
-    const index = allWorktrees.value.findIndex((w) => w.worktreeId === wt.worktreeId);
-    const wasLast = index < 0 || index >= allWorktrees.value.length - 1;
-
-    if (wasLast) {
-      // 「アーカイブ化して完了」: 表示中が最後の1件 → ポップアップを閉じる
-      await closePopup({ clearCurrentNotification: false });
-      return;
-    }
-
-    // 「アーカイブ化して次へ」: 一覧から取り除くと後続が詰まるので、同じ index を再表示する。
-    // wasLast === false なので splice 後も index <= length - 1 が保証される。
-    allWorktrees.value.splice(index, 1);
-    await goTo(index, { clearLeaving: false, alreadyDetached: true });
-  } finally {
-    archiving.value = false;
-  }
+  await archiveCurrent(options);
 }
-
-/**
- * ダイアログ表示中か。**表示中カードを差し替えてはいけない状態**を表す。
- *
- * ダイアログは `currentWorktree` にリアクティブ束縛されており、確定ハンドラも
- * `currentWorktree.value` を読み直す。開いている間にカードを差し替えると
- * **ダイアログを開いた対象と別のワークツリーがアーカイブされる**（`deleteBranch` 付きなら
- * ブランチも消える）。ホットキーのナビゲーションを止めているのと同じ理由・同じ条件。
- */
-const dialogOpen = computed(
-  () => showArchiveConfirm.value || showIdeDialog.value || showAutoApprovalPromptDialog.value,
-);
-
-/**
- * 外からクリアされたが、まだ一覧から外せていないワークツリー（#218）。
- *
- * 取り除きは「遷移中でもダイアログ中でもアーカイブ依頼中でもない」瞬間にしかできない。
- * 割り込むと `goTo` が await の後で読む index / 配列長が変わり、確定待ちのダイアログが
- * 別のワークツリーを指す。**捨てずに溜めて後で流す**（捨てると #218 が直そうとした
- * 「捌き終わったカードが巡回に残る」に戻る）。
- */
-const pendingRemovals = new Set<string>();
-/** `flushRemovals` の再入防止。goTo / closePopup を await する間に watch から再入する */
-let flushing = false;
-
-/**
- * 表示中の一覧から、クリア済みのワークツリーを取り除く（#218）。
- *
- * トレイの一覧は開いた時点のスナップショットなので、開いている間に外から通知が
- * クリアされると（通知レポートから返答を送った宛先など）捌き終わったカードが
- * 巡回に残り続ける。離脱側の通知クリアは既に外で済んでいるため `clearLeaving` は立てない。
- *
- * 非表示のカードを先に全部抜いてから表示中カードを処理する。順序を逆にすると、
- * 表示中カードの `goTo` の await 中に残りを抜くことになり、`goTo` が読む index がずれる。
- */
-async function flushRemovals(): Promise<void> {
-  if (flushing) return;
-  if (closing.value || navigating.value || archiving.value || dialogOpen.value) return;
-  if (pendingRemovals.size === 0) return;
-
-  flushing = true;
-  try {
-    // 非表示のカードは表示中カードを動かさずに抜けるので同期的に片付ける
-    for (const worktreeId of Array.from(pendingRemovals)) {
-      const index = allWorktrees.value.findIndex((w) => w.worktreeId === worktreeId);
-      if (index < 0) {
-        // 既に一覧に無い（アーカイブ導線が抜いた等）。溜めておく意味が無い
-        pendingRemovals.delete(worktreeId);
-        continue;
-      }
-      if (index === currentIndex.value) continue; // 表示中は後回し
-      allWorktrees.value.splice(index, 1);
-      if (index < currentIndex.value) currentIndex.value -= 1;
-      pendingRemovals.delete(worktreeId);
-    }
-
-    const current = currentWorktree.value;
-    if (!current || !pendingRemovals.has(current.worktreeId)) return;
-    pendingRemovals.delete(current.worktreeId);
-
-    // 表示中のカードが消える。トレイが掴んでいるターミナルを先に手放す
-    const index = currentIndex.value;
-    await detachCurrentTerminals();
-    allWorktrees.value.splice(index, 1);
-    if (allWorktrees.value.length === 0) {
-      // 最後の1件だった。クリアは外で済んでいるので改めて出さない
-      await closePopup({ clearCurrentNotification: false });
-      return;
-    }
-    // splice で後続が詰まるので、末尾を消したときだけ1つ戻る
-    await goTo(Math.min(index, allWorktrees.value.length - 1), {
-      clearLeaving: false,
-      alreadyDetached: true,
-    });
-  } finally {
-    flushing = false;
-  }
-  // 表示中カードの処理中に溜まった分を続けて流す。1 周ごとに必ず 1 件以上
-  // `pendingRemovals` から落ちるので止まる
-  if (pendingRemovals.size > 0) void flushRemovals();
-}
-
-/** 外からクリアされたワークツリーを取り除き予約へ積む（実際に抜くのは `flushRemovals`） */
-function removeWorktreeFromList(worktreeId: string): void {
-  pendingRemovals.add(worktreeId);
-  void flushRemovals();
-}
-
-// 取り除きを見送った条件が解けたら流し直す。見送りっぱなしにするとカードが残る
-watch([navigating, archiving, dialogOpen], () => {
-  if (pendingRemovals.size > 0) void flushRemovals();
-});
 
 function onHeaderDrag(e: MouseEvent) {
   if ((e.target as HTMLElement).closest('button')) return
@@ -593,7 +433,7 @@ useHotkeyListener(() => {
   if (!hk || !initialized.value) return [];
   // ダイアログ表示中はナビゲーション系を止める。useHotkeyListener は window capture で
   // 登録されるため、ダイアログ側の stopPropagation より先に発火してしまう。
-  if (showArchiveConfirm.value || showIdeDialog.value || showAutoApprovalPromptDialog.value) return [];
+  if (dialogOpen.value) return [];
   return [
     {
       binding: hk.trayNext,
@@ -603,7 +443,7 @@ useHotkeyListener(() => {
         if (isLast.value) {
           onDone();
         } else {
-          onNext();
+          void goNext();
         }
       },
     },
@@ -833,7 +673,7 @@ onUnmounted(() => {
       <button
         class="shrink-0 px-3 py-1.5 text-sm rounded bg-[#313244] hover:bg-[#45475a] text-[#cdd6f4] transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-[#313244]"
         :disabled="isFirst || navBusy"
-        @click="onPrev"
+        @click="goPrev"
       >
         {{ t('prev') }}
       </button>
@@ -845,7 +685,7 @@ onUnmounted(() => {
         <button
           class="px-4 py-1.5 text-sm rounded-l bg-[#a6e3a1] hover:bg-[#89c98a] text-[#1e1e2e] font-semibold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           :disabled="isLast ? closing : navBusy"
-          @click="isLast ? onDone() : onNext()"
+          @click="isLast ? onDone() : goNext()"
         >
           {{ isLast ? t('done') : t('next') }}
         </button>
