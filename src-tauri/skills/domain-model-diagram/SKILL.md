@@ -47,6 +47,11 @@ $ARGUMENTS: <artifact-id> [--repo <repo>] [--branch <branch>]
 oretachi 側がファイルを読んで登録するので、読み込んだ内容を `content` へ書き戻す往復（同じテキストが
 2 回トークンを食う）が消える。Read が要るのは**カスタマイズが必要なファイルだけ**。
 
+`<SKILL_DIR>` は**スキル読み込み時に先頭へ注入される `Base directory for this skill:` の絶対パス**を
+そのまま使う（例: `C:\Users\<user>\AppData\Roaming\com.ia.oretachi\claude-plugins\oretachi\skills\<スキル名>`）。
+`${CLAUDE_PLUGIN_ROOT}` などの環境変数は展開されないので、素で渡してはいけない。
+相対パスはワークツリー追加先ディレクトリ基準で解決されるため、テンプレートには届かない。
+
 ### Step 3: ドメイン分析
 
 対象コードベースを調査 or ユーザーヒアリングで以下を特定する:
@@ -105,7 +110,7 @@ artifact_module(command: "create", module_name: "components/EntityBox",
 **3. RelationshipLine モジュール作成**
 ```
 artifact_module(command: "create", module_name: "components/RelationshipLine",
-  file_path: "<このスキルディレクトリの絶対パス>/templates/components--RelationshipLine.jsx")
+  file_path: "<SKILL_DIR>/templates/components--RelationshipLine.jsx")
 ```
 そのまま登録するテンプレートは `content` ではなく `file_path` を渡す（Read も書き戻しも不要）。
 
@@ -131,7 +136,7 @@ artifact(command: "outline")
 
 ## テンプレートファイルの位置
 
-このスキルファイル（`SKILL.md`）と同じディレクトリの `templates/` フォルダを Read で参照:
+このスキルファイル（`SKILL.md`）と同じディレクトリの `templates/` フォルダにある（カスタマイズが必要なものだけ Read し、そのまま登録するものは `file_path` に `<SKILL_DIR>/templates/...` を渡す）:
 - `templates/entry-point.jsx`
 - `templates/components--EntityBox.jsx`
 - `templates/components--RelationshipLine.jsx`

@@ -34,12 +34,17 @@ $ARGUMENTS: <artifact-id> [--repo <repo>] [--branch <branch>]
 
 ### Step 2: テンプレートを読み込む
 
-このスキルディレクトリの `templates/` フォルダにある以下のファイルを Read で読み込む:
+このスキルディレクトリの `templates/` フォルダにある以下のファイルを使う:
 
 | ファイル | アーティファクトモジュール | カスタマイズ要否 |
 |---|---|---|
 | `templates/entry-point.jsx` | エントリポイント（content）| `// CUSTOMIZE:` コメント箇所のみ変更 |
 | `templates/components--deck.jsx` | `components/deck` | `THEME` のみ変更（配色を変えない場合はそのまま） |
+
+`<SKILL_DIR>` は**スキル読み込み時に先頭へ注入される `Base directory for this skill:` の絶対パス**を
+そのまま使う（例: `C:\Users\<user>\AppData\Roaming\com.ia.oretachi\claude-plugins\oretachi\skills\<スキル名>`）。
+`${CLAUDE_PLUGIN_ROOT}` などの環境変数は展開されないので、素で渡してはいけない。
+相対パスはワークツリー追加先ディレクトリ基準で解決されるため、テンプレートには届かない。
 | `templates/slides--slide.example.jsx` | ※スキーマ参照用 | 新規生成 |
 
 **そのまま登録するテンプレートは Read しない。** Step 6 で `artifact_module` に `file_path` を渡せば
@@ -137,7 +142,7 @@ artifact_module(command: "create", module_name: "components/deck",
 配色を変えない場合は Read せず `file_path` でそのまま登録する:
 ```
 artifact_module(command: "create", module_name: "components/deck",
-  file_path: "<このスキルディレクトリの絶対パス>/templates/components--deck.jsx")
+  file_path: "<SKILL_DIR>/templates/components--deck.jsx")
 ```
 
 **3. 各スライドモジュール作成**（スライド数分だけ繰り返す）
@@ -162,7 +167,7 @@ artifact(command: "outline")
 
 ## テンプレートファイルの位置
 
-このスキルファイル（`SKILL.md`）と同じディレクトリの `templates/` フォルダを Read で参照:
+このスキルファイル（`SKILL.md`）と同じディレクトリの `templates/` フォルダにある（カスタマイズが必要なものだけ Read し、そのまま登録するものは `file_path` に `<SKILL_DIR>/templates/...` を渡す）:
 - `templates/entry-point.jsx`
 - `templates/components--deck.jsx`
 - `templates/slides--slide.example.jsx`（各スライド生成時のスキーマ参照用）

@@ -147,6 +147,11 @@ $ARGUMENTS: <artifact-id> [--repo <repo>] [--branch <branch>]
 書き戻す往復(同じテキストが2回トークンを食う)が消える。Readが要るのは`entry-point.jsx`(CUSTOMIZE箇所を変える)と
 `data--flow.example.jsx`(スキーマ参照)だけ。
 
+`<SKILL_DIR>` は**スキル読み込み時に先頭へ注入される `Base directory for this skill:` の絶対パス**を
+そのまま使う（例: `C:\Users\<user>\AppData\Roaming\com.ia.oretachi\claude-plugins\oretachi\skills\<スキル名>`）。
+`${CLAUDE_PLUGIN_ROOT}` などの環境変数は展開されないので、素で渡してはいけない。
+相対パスはワークツリー追加先ディレクトリ基準で解決されるため、テンプレートには届かない。
+
 **`data/flow`が計画フローの唯一のデータソース(TASKS/DEPENDENCIES/MESSAGESの3つをこの1ファイルにまとめる)。** Step2/Step3で進捗が変わるたびに、このモジュールを`artifact_module(command:"update", ...)`で直接更新する。専用の進捗管理マークダウン等は作らない。
 
 ## 表示操作
@@ -182,19 +187,19 @@ artifact(command: "create", id: "<artifact-id>", type: "application/vnd.ant.reac
 **2. `components/TaskNode` モジュール作成**
 ```
 artifact_module(command: "create", module_name: "components/TaskNode",
-  file_path: "<このスキルディレクトリの絶対パス>/templates/components--TaskNode.jsx")
+  file_path: "<SKILL_DIR>/templates/components--TaskNode.jsx")
 ```
 
 **3. `components/DependencyEdge` モジュール作成**
 ```
 artifact_module(command: "create", module_name: "components/DependencyEdge",
-  file_path: "<このスキルディレクトリの絶対パス>/templates/components--DependencyEdge.jsx")
+  file_path: "<SKILL_DIR>/templates/components--DependencyEdge.jsx")
 ```
 
 **4. `lib/stopConditions` モジュール作成**
 ```
 artifact_module(command: "create", module_name: "lib/stopConditions",
-  file_path: "<このスキルディレクトリの絶対パス>/templates/lib--stopConditions.jsx")
+  file_path: "<SKILL_DIR>/templates/lib--stopConditions.jsx")
 ```
 
 2〜4はテンプレートをそのまま登録するので`content`ではなく`file_path`を渡す(Readも書き戻しも不要)。

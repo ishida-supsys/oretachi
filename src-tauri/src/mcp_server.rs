@@ -89,28 +89,40 @@ const ARTIFACT_SOURCE_FILE_MAX_BYTES: u64 = 1024 * 1024;
 /// （同梱スキルの `templates/*.jsx` など）で AI がファイルを読んでから
 /// 同じテキストを書き戻す無駄を消す。
 ///
-/// 読み取り範囲は **呼び出し元ワークツリーのルート配下** と
+/// 読み取り範囲は **ワークツリー追加先ディレクトリ（`worktreeBaseDir`）配下** と
 /// **oretachi プラグインディレクトリ配下** に限定する（#229）。呼び手は既に
 /// ファイル読み取り権限を持つエージェントだが、無制限にすると Claude Code 側の
 /// permission / deny ルールを迂回して任意ファイルを吸い出す経路になるため。
 ///
-/// 相対パスはワークツリーのルート基準で解決する。判定は `canonicalize` 後に
-/// 行うので、`..` もシンボリックリンクも解決済みの実パスで比較される。
+/// **許可ルートを引数の `worktree_id` から導いてはいけない。** artifact 系ツールの
+/// 対象ワークツリーは呼び手が引数で選べる（`resolve_artifact_worktree` は
+/// `worktree_id` を settings から素引きするだけで、MCP には呼び出し元を特定する
+/// 機構が無い）。対象ワークツリーの `path` をルートにすると、`worktree_id: "home"`
+/// で全ワークツリーの祖先が、リポジトリ擬似エントリで無関係な別プロジェクトの
+/// リポジトリ全体が読めてしまう。ここでは settings 由来の**固定値**だけを使う。
+///
+/// 相対パスは `worktreeBaseDir` 基準で解決する。判定は `canonicalize` 後に
+/// 行うので、`..` もシンボリックリンクも解決済みの実パスで比較される
+/// （ハードリンクは解決されないので、これは境界ではなくソフトガード）。
 async fn read_artifact_source_file(
     app_handle: &AppHandle,
-    worktree_path: &str,
     file_path: &str,
 ) -> Result<String, McpError> {
+    let base_dir = app_handle
+        .state::<SettingsManager>()
+        .get()
+        .worktree_base_dir
+        .clone();
     // 許可ルート。プラグインディレクトリは dev などで未生成のことがあるので、
     // 存在しないものは呼び出し先で候補から落とされる。
     let roots = [
-        Some(PathBuf::from(worktree_path)),
+        Some(PathBuf::from(&base_dir)).filter(|_| !base_dir.trim().is_empty()),
         crate::claude_plugin::marketplace_dir(app_handle).ok(),
     ]
     .into_iter()
     .flatten()
     .collect::<Vec<_>>();
-    read_file_within_roots(&roots, worktree_path, file_path).await
+    read_file_within_roots(&roots, &base_dir, file_path).await
 }
 
 /// `read_artifact_source_file` の本体。許可ルートを引数で受けてテスト可能にしてある。
@@ -119,7 +131,38 @@ async fn read_file_within_roots(
     base_dir: &str,
     file_path: &str,
 ) -> Result<String, McpError> {
-    let raw = std::path::Path::new(file_path);
+    // Windows では `is_absolute()` が false でも `Path::join` がベースを捨てる形が
+    // いくつかある（ドライブ相対 `C:foo`、ルート相対 `\bar`、verbatim `\\?\C:\x`）。
+    // いずれもルート判定で fail-closed になるが、「相対パスは追加先ディレクトリ基準」
+    // という契約が崩れて分かりにくいエラーになるので入口で弾く。
+    // 空文字はディレクトリ自身へ解決されて「ファイルではありません」になるため同様。
+    let trimmed = file_path.trim();
+    if trimmed.is_empty() {
+        return Err(McpError::invalid_params("file_path が空です", None));
+    }
+    let raw = std::path::Path::new(trimmed);
+    let is_drive_relative = {
+        let b = trimmed.as_bytes();
+        b.len() >= 2 && b[1] == b':' && b[0].is_ascii_alphabetic() && !raw.is_absolute()
+    };
+    if is_drive_relative || (!raw.is_absolute() && trimmed.starts_with(['/', '\\'])) {
+        return Err(McpError::invalid_params(
+            format!(
+                "file_path '{}' はドライブ相対／ルート相対パスです。絶対パス、または追加先ディレクトリ基準の相対パスを指定してください",
+                file_path
+            ),
+            None,
+        ));
+    }
+    if !raw.is_absolute() && base_dir.trim().is_empty() {
+        return Err(McpError::invalid_params(
+            format!(
+                "file_path '{}' は相対パスですが、相対解決の基準になるワークツリー追加先ディレクトリが未設定です。絶対パスを指定してください",
+                file_path
+            ),
+            None,
+        ));
+    }
     let joined = if raw.is_absolute() {
         raw.to_path_buf()
     } else {
@@ -145,7 +188,7 @@ async fn read_file_within_roots(
     if !roots.iter().any(|r| resolved.starts_with(r)) {
         return Err(McpError::invalid_params(
             format!(
-                "file_path '{}' は読み取りを許可された範囲の外です。呼び出し元ワークツリーのルート配下、または oretachi プラグインディレクトリ配下のファイルだけを指定できます（許可ルート: {}）",
+                "file_path '{}' は読み取りを許可された範囲の外です。ワークツリー追加先ディレクトリ配下、または oretachi プラグインディレクトリ配下のファイルだけを指定できます（許可ルート: {}）",
                 file_path,
                 roots
                     .iter()
@@ -226,14 +269,13 @@ fn classify_source(
 /// `content` / `file_path` の排他を解いて実際のソース文字列を得る。
 async fn resolve_source_content(
     app_handle: &AppHandle,
-    worktree_path: &str,
     content: Option<String>,
     file_path: Option<String>,
     what: &str,
 ) -> Result<String, McpError> {
     match classify_source(content, file_path, what)? {
         SourceSpec::Inline(c) => Ok(c),
-        SourceSpec::File(p) => read_artifact_source_file(app_handle, worktree_path, &p).await,
+        SourceSpec::File(p) => read_artifact_source_file(app_handle, &p).await,
     }
 }
 
@@ -818,7 +860,7 @@ pub struct ArtifactParams {
     pub title: Option<String>,
     #[schemars(description = "アーティファクトの中身 (create/rewrite時は content か file_path のどちらかが必須)。markdown / html / react では `artifact:` リンクで他のアーティファクトへ遷移できる: 同一ワークツリー内は `artifact:<アーティファクトID>`、他ワークツリー宛は `artifact://worktree/<worktreeId>/<アーティファクトID>`、リポジトリ保管庫宛は `artifact://repository/<encodeURIComponent(リポジトリの絶対パス)>/<アーティファクトID>`。react ではメモリー（アーティファクトごとに永続化される JSON ストア）が使える: `import { useMemory } from 'oretachi'` して `const [value, setValue] = useMemory('key', 初期値)`。書き込みはデバウンスされ、ウィンドウを閉じて開き直しても・リポジトリへ転送しても復元される（合計 1MB まで。他に getMemory / setMemory / clearMemory / subscribeMemory がある）。さらに `import { callTool } from 'oretachi'` で oretachi の MCP ツールを呼べる: `await callTool('oretachi_write_terminal', { session_id: 12, text: 'echo hi' })`。呼べるのは oretachi_write_terminal / oretachi_add_task / notify_worktree / oretachi_poll_inbox / oretachi_ack_message / oretachi_read_terminal / oretachi_list_worktree_notifications / oretachi_inspect_prompt / oretachi_answer_prompt だけで、terminal_id / project_dir / notify_worktree の宛先 / add_task の追加先ワークグループはアーティファクトの置き場所のワークツリーへ強制される(session_id は同じワークツリーの稼働中端末、または**アーティファクトの置き場所ワークツリーが oretachi_subscribe_worktree で購読しているワークツリー**の稼働中端末に限る)。戻り値はツールの結果を JSON.parse したもの(パースできなければ文字列)。**制約**: アーティファクトからは oretachi_list_terminals が呼べないため、read/write_terminal に渡す session_id は生成時にコードへ埋め込むこと(アプリ再起動やタブ再作成で無効になる)。oretachi_poll_inbox / oretachi_ack_message / notify_worktree(kind: \"worktree.message\") はそのワークツリーで AI エージェント端末がちょうど1つ走行中でないとエラーになるので、AI セッション終了後も動かしたいボタンには使わないこと。他ワークツリーの端末へ read/write_terminal したい場合は、アーティファクトの置き場所ワークツリー側から宛先を購読しておくこと(逆向き＝宛先側が置き場所を購読しているだけでは通らない)。**宛先がダイアログ(ツール許可 / プラン承認 / AskUserQuestion)で止まっている場合に write_terminal で自由テキストを送ってはいけない**: テキストはダイアログに吸われ、末尾の CR が意図しない選択肢(既定は `1. Yes`)の確定として解釈される。先に oretachi_inspect_prompt(session_id) で画面の形状と実在する選択肢を取り、oretachi_answer_prompt(session_id, expect_fingerprint, kind, ...) で答えること")]
     pub content: Option<String>,
-    #[schemars(description = "create/rewrite時: content の代わりに、このパスのファイルを読んでそのまま中身として登録する。**テンプレートをそのまま登録する場合はこちらを使う** (スキル同梱の templates/*.jsx など)。ファイルを Read してから同じテキストを content に書き戻す往復が消えるので、生成が大幅に速く・安くなる。content とは排他。相対パスは呼び出し元ワークツリーのルート基準。読めるのは**呼び出し元ワークツリーのルート配下**と **oretachi プラグインディレクトリ (claude-plugins) 配下**のファイルだけで、それ以外の絶対パスはエラーになる。UTF-8 テキスト限定 (BOM は自動で除去)、1MB まで")]
+    #[schemars(description = "create/rewrite時: content の代わりに、このパスのファイルを読んでそのまま中身として登録する。**テンプレートをそのまま登録する場合はこちらを使う** (スキル同梱の templates/*.jsx など)。ファイルを Read してから同じテキストを content に書き戻す往復が消えるので、生成が大幅に速く・安くなる。content とは排他。相対パスはワークツリー追加先ディレクトリ基準。読めるのは**ワークツリー追加先ディレクトリ配下**と **oretachi プラグインディレクトリ (claude-plugins) 配下**のファイルだけで、それ以外の絶対パスはエラーになる (この範囲は設定由来の固定値で、対象ワークツリーの指定では変わらない)。UTF-8 テキスト限定 (BOM は自動で除去)、1MB まで")]
     pub file_path: Option<String>,
     #[schemars(description = "コード言語 (type=application/vnd.ant.code の時のみ)")]
     pub language: Option<String>,
@@ -919,7 +961,7 @@ pub struct ArtifactModuleParams {
     pub module_name: Option<String>,
     #[schemars(description = "モジュールのソースコード (create/rewrite時は content か file_path のどちらかが必須)")]
     pub content: Option<String>,
-    #[schemars(description = "create/rewrite時: content の代わりに、このパスのファイルを読んでそのままモジュールとして登録する。**テンプレートをそのまま登録する場合はこちらを使う** (スキル同梱の templates/*.jsx など)。ファイルを Read してから同じテキストを content に書き戻す往復が消えるので、生成が大幅に速く・安くなる。content とは排他。相対パスは呼び出し元ワークツリーのルート基準。読めるのは**呼び出し元ワークツリーのルート配下**と **oretachi プラグインディレクトリ (claude-plugins) 配下**のファイルだけで、それ以外の絶対パスはエラーになる。UTF-8 テキスト限定 (BOM は自動で除去)、1MB まで")]
+    #[schemars(description = "create/rewrite時: content の代わりに、このパスのファイルを読んでそのままモジュールとして登録する。**テンプレートをそのまま登録する場合はこちらを使う** (スキル同梱の templates/*.jsx など)。ファイルを Read してから同じテキストを content に書き戻す往復が消えるので、生成が大幅に速く・安くなる。content とは排他。相対パスはワークツリー追加先ディレクトリ基準。読めるのは**ワークツリー追加先ディレクトリ配下**と **oretachi プラグインディレクトリ (claude-plugins) 配下**のファイルだけで、それ以外の絶対パスはエラーになる (この範囲は設定由来の固定値で、対象ワークツリーの指定では変わらない)。UTF-8 テキスト限定 (BOM は自動で除去)、1MB まで")]
     pub file_path: Option<String>,
     #[schemars(description = "update時: 置き換え元の文字列 (モジュール内に1箇所だけ存在すること)")]
     pub old_str: Option<String>,
@@ -1363,8 +1405,6 @@ impl NotifyService {
             branch.as_deref(),
         )?;
         let worktree_id = wt.id.clone();
-        // file_path の相対解決と読み取り範囲の判定に使う（#229）
-        let worktree_path = wt.path.clone();
 
         validate_artifact_id(&id)?;
 
@@ -1502,7 +1542,7 @@ impl NotifyService {
                     McpError::invalid_params("create には title が必須です".to_string(), None)
                 })?;
                 let content = resolve_source_content(
-                    &self.app_handle, &worktree_path, content, file_path, "create",
+                    &self.app_handle, content, file_path, "create",
                 ).await?;
                 tokio_fs::create_dir_all(&artifacts_dir).await
                     .map_err(|e| McpError::internal_error(e.to_string(), None))?;
@@ -1533,7 +1573,7 @@ impl NotifyService {
             }
             "rewrite" => {
                 let content = resolve_source_content(
-                    &self.app_handle, &worktree_path, content, file_path, "rewrite",
+                    &self.app_handle, content, file_path, "rewrite",
                 ).await?;
                 let mut data = existing.clone()
                     .ok_or_else(|| McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None))?;
@@ -1608,8 +1648,6 @@ impl NotifyService {
             branch.as_deref(),
         )?;
         let worktree_id = wt.id.clone();
-        // file_path の相対解決と読み取り範囲の判定に使う（#229）
-        let worktree_path = wt.path.clone();
 
         validate_artifact_id(&id)?;
 
@@ -1701,7 +1739,7 @@ impl NotifyService {
                     ));
                 }
                 let src = resolve_source_content(
-                    &self.app_handle, &worktree_path, content, file_path, "create",
+                    &self.app_handle, content, file_path, "create",
                 ).await?;
                 data.modules.insert(name.to_string(), src);
                 data.updated_at = now;
@@ -1718,7 +1756,7 @@ impl NotifyService {
                     .ok_or_else(|| McpError::invalid_params("module_name が必要です", None))?;
                 validate_module_name(name)?;
                 let src = resolve_source_content(
-                    &self.app_handle, &worktree_path, content, file_path, "rewrite",
+                    &self.app_handle, content, file_path, "rewrite",
                 ).await?;
                 data.modules.insert(name.to_string(), src);
                 data.updated_at = now;
@@ -7969,7 +8007,7 @@ mod tests {
         tauri::async_runtime::block_on(read_file_within_roots(roots, base, file_path))
     }
 
-    /// 相対パスは呼び出し元ワークツリーのルート基準で解決する。
+    /// 相対パスはワークツリー追加先ディレクトリ基準で解決する。
     #[test]
     fn file_path_reads_relative_to_worktree_root() {
         let (wt, _) = source_file_fixture("relative");
@@ -8020,6 +8058,32 @@ mod tests {
         let (wt, _) = source_file_fixture("binary");
         fs::write(wt.join("blob.bin"), [0xFF, 0xFE, 0x00, 0x41]).unwrap();
         assert!(read_within(&vec![wt.clone()], wt.to_str().unwrap(), "blob.bin").is_err());
+    }
+
+    /// Windows で `Path::join` がベースを捨てる形（ドライブ相対 `C:foo`、
+    /// ルート相対 `\bar`、verbatim `\\?\C:\x`）と空文字は入口で弾く。
+    /// 素通しでもルート判定で fail-closed だが、契約が崩れて分かりにくいエラーになる。
+    #[test]
+    fn file_path_rejects_base_dropping_forms() {
+        let (wt, _) = source_file_fixture("basedrop");
+        let roots = vec![wt.clone()];
+        let base = wt.to_str().unwrap();
+        for bad in ["", "   ", "C:foo", "\\bar", "/bar", r"\\?\C:\x"] {
+            assert!(
+                read_within(&roots, base, bad).is_err(),
+                "弾かれるべき file_path が通った: {:?}",
+                bad
+            );
+        }
+    }
+
+    /// 追加先ディレクトリ未設定（空）のとき、相対パスをプロセスの cwd 基準で
+    /// 解決してしまわない。
+    #[test]
+    fn file_path_relative_requires_base_dir() {
+        let (wt, _) = source_file_fixture("nobase");
+        let roots = vec![wt.clone()];
+        assert!(read_within(&roots, "", "templates/Panel.jsx").is_err());
     }
 
     /// ディレクトリを渡されても中身を読もうとしない。

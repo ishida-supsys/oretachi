@@ -238,6 +238,11 @@ CR を送ると、3 番目の選択肢が確定した。`cursorIndex` から目�
 Step 5 で `artifact_module` に `file_path` を渡せば oretachi 側がファイルを読んで登録するので、
 読み込んだ内容を `content` へ書き戻す往復（同じテキストが 2 回トークンを食う）が消える。
 
+`<SKILL_DIR>` は**スキル読み込み時に先頭へ注入される `Base directory for this skill:` の絶対パス**を
+そのまま使う（例: `C:\Users\<user>\AppData\Roaming\com.ia.oretachi\claude-plugins\oretachi\skills\<スキル名>`）。
+`${CLAUDE_PLUGIN_ROOT}` などの環境変数は展開されないので、素で渡してはいけない。
+相対パスはワークツリー追加先ディレクトリ基準で解決されるため、テンプレートには届かない。
+
 ## Step 4: 候補ボタンを作る（`shape` が `text` のときだけ）
 
 **`shape` が `text` 以外のカードでは候補を創作してはいけない。** `prompt` を焼き込むだけで、
@@ -275,14 +280,14 @@ artifact(command: "create", id: "notif-report-<YYYYMMDD-HHMM>",
 ```
 artifact_module(command: "create", id: <同じID>, module_name: "lib/send",
   project_dir: <自分の作業ディレクトリ>,
-  file_path: "<このスキルディレクトリの絶対パス>/templates/lib--send.jsx")
+  file_path: "<SKILL_DIR>/templates/lib--send.jsx")
 ```
 
 **3. `components/NotificationCard` モジュール作成**（そのまま）
 ```
 artifact_module(command: "create", id: <同じID>, module_name: "components/NotificationCard",
   project_dir: <自分の作業ディレクトリ>,
-  file_path: "<このスキルディレクトリの絶対パス>/templates/components--NotificationCard.jsx")
+  file_path: "<SKILL_DIR>/templates/components--NotificationCard.jsx")
 ```
 
 2・3 はテンプレートをそのまま登録するので `content` ではなく `file_path` を渡す（Read も書き戻しも不要）。

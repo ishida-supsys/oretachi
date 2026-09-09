@@ -48,6 +48,11 @@ $ARGUMENTS: <artifact-id> [--repo <repo>] [--branch <branch>]
 oretachi 側がファイルを読んで登録するので、読み込んだ内容を `content` へ書き戻す往復（同じテキストが
 2 回トークンを食う）が消える。Read が要るのは**カスタマイズが必要なファイルだけ**。
 
+`<SKILL_DIR>` は**スキル読み込み時に先頭へ注入される `Base directory for this skill:` の絶対パス**を
+そのまま使う（例: `C:\Users\<user>\AppData\Roaming\com.ia.oretachi\claude-plugins\oretachi\skills\<スキル名>`）。
+`${CLAUDE_PLUGIN_ROOT}` などの環境変数は展開されないので、素で渡してはいけない。
+相対パスはワークツリー追加先ディレクトリ基準で解決されるため、テンプレートには届かない。
+
 ### Step 3: 画面・ドメイン分析
 
 ユーザー要件（補足ヒアリング or コードベース調査）から以下を特定する:
@@ -119,13 +124,13 @@ artifact_module(command: "create", module_name: "components/W",
 **3. `components/layout` モジュール作成**
 ```
 artifact_module(command: "create", module_name: "components/layout",
-  file_path: "<このスキルディレクトリの絶対パス>/templates/components--layout.jsx")
+  file_path: "<SKILL_DIR>/templates/components--layout.jsx")
 ```
 
 **4. `components/primitives` モジュール作成**
 ```
 artifact_module(command: "create", module_name: "components/primitives",
-  file_path: "<このスキルディレクトリの絶対パス>/templates/components--primitives.jsx")
+  file_path: "<SKILL_DIR>/templates/components--primitives.jsx")
 ```
 
 そのまま登録するテンプレート（3・4）は `content` ではなく `file_path` を渡す（Read も書き戻しも不要）。
@@ -154,7 +159,7 @@ artifact(command: "outline")
 
 ## テンプレートファイルの位置
 
-このスキルファイル（`SKILL.md`）と同じディレクトリの `templates/` フォルダを Read で参照:
+このスキルファイル（`SKILL.md`）と同じディレクトリの `templates/` フォルダにある（カスタマイズが必要なものだけ Read し、そのまま登録するものは `file_path` に `<SKILL_DIR>/templates/...` を渡す）:
 - `templates/entry-point.jsx`
 - `templates/components--W.jsx`
 - `templates/components--layout.jsx`
