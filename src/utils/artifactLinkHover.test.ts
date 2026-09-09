@@ -12,8 +12,10 @@ function fakePopup() {
   return { popup, calls };
 }
 
-function fakeFrame(left: number, top: number) {
-  return { getBoundingClientRect: () => ({ left, top }) } as unknown as HTMLIFrameElement;
+function fakeFrame(left: number, top: number, width = 800, height = 600) {
+  return {
+    getBoundingClientRect: () => ({ left, top, width, height }),
+  } as unknown as HTMLIFrameElement;
 }
 
 describe("applyFrameLinkHover", () => {
@@ -41,6 +43,37 @@ describe("applyFrameLinkHover", () => {
     const { popup, calls } = fakePopup();
     applyFrameLinkHover({ href: "https://example.com", rect: null }, fakeFrame(0, 0), popup);
     expect(calls).toEqual([{ kind: "scheduleHide" }]);
+  });
+
+  it("iframe の外を指す座標は矩形内へ丸める（本文が親アプリの UI 上に出せないようにする）", () => {
+    const { popup, calls } = fakePopup();
+    applyFrameLinkHover(
+      { href: "https://evil.example", rect: { left: -400, top: -300, width: 1, height: 1 } },
+      fakeFrame(40, 200, 800, 600),
+      popup,
+    );
+    // 左上へ丸められ、iframe の左上（40, 200）に貼り付く
+    expect(calls).toEqual([
+      { kind: "show", href: "https://evil.example", rect: { left: 40, top: 200, width: 1, height: 1 } },
+    ]);
+  });
+
+  it("iframe より大きい座標・サイズも矩形内で打ち切る", () => {
+    const { popup, calls } = fakePopup();
+    applyFrameLinkHover(
+      { href: "https://evil.example", rect: { left: 9000, top: 9000, width: 9000, height: 9000 } },
+      fakeFrame(40, 200, 800, 600),
+      popup,
+    );
+    expect(calls).toEqual([
+      { kind: "show", href: "https://evil.example", rect: { left: 840, top: 800, width: 0, height: 0 } },
+    ]);
+  });
+
+  it("iframe が非表示（幅・高さ 0）なら閉じる。teleport 先には display:none が効かない", () => {
+    const { popup, calls } = fakePopup();
+    applyFrameLinkHover({ href: "https://example.com", rect }, fakeFrame(0, 0, 0, 0), popup);
+    expect(calls).toEqual([{ kind: "hideNow" }]);
   });
 
   it("iframe / ポップアップが未マウントなら何もしない", () => {

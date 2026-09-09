@@ -206,9 +206,6 @@ function onHover(hover: ArtifactLinkHover) {
   applyFrameLinkHover(hover, frame.value, linkPopup.value);
 }
 
-// Code タブへ切り替えると iframe は v-show で隠れる。座標が残ったままになるので閉じる
-watch(mode, () => linkPopup.value?.hideNow());
-
 onMounted(() => window.addEventListener("message", onMessage));
 onBeforeUnmount(() => window.removeEventListener("message", onMessage));
 
@@ -241,6 +238,11 @@ const srcdocHtml = computed(() => {
   if (!vendorHead.value) return "";
   return buildReactSrcdoc(vendorHead.value, props.content, props.modules, initialMemory.value);
 });
+
+// Code タブへ切り替えると iframe は v-show で隠れる。座標が残ったままになるので閉じる。
+// srcdoc の差し替え（= 本文更新）でも閉じる: iframe は読み込み直しになり、新しい文書は
+// 「リンクに乗っていない」状態から始まるため、離れた通知が二度と来ず出しっぱなしになる
+watch([mode, srcdocHtml], () => linkPopup.value?.hideNow());
 
 const moduleNames = computed(() => Object.keys(props.modules ?? {}));
 

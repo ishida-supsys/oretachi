@@ -11,6 +11,12 @@ import type { ArtifactLinkRect } from "../../utils/artifactFrameLink";
  * 親ドキュメント、html / react は sandbox iframe の中で、どちらもリンクの飛び先を
  * 見る手段が無い）。
  *
+ * ただし「開く前に確かめる」が成立するのは markdown ビューだけ。ここが href を
+ * `<a>` から直接読み、実際に開くのも同じ値だからである。html / react ビューの URL は
+ * iframe 内のスクリプトが postMessage で申告した値で、アーティファクトの JS と同じ
+ * レルムで動くため任意の値を名乗れる（代わりに iframe のリンクはそもそも開けない。
+ * sandbox が外部遷移を塞いでいて、親へ渡るのは `artifact:` だけ）。
+ *
  * 座標は呼び出し側がリンクのビューポート座標で渡す。position: fixed で body へ
  * teleport するのは、markdown ビューの overflow や iframe の枠で切られないため。
  * 状態とタイマーはこのコンポーネントが持ち、呼び出し側は showFor / scheduleHide を
@@ -25,6 +31,12 @@ const GAP = 6;
 const MARGIN = 8;
 /** コピー完了フィードバックを戻すまで。ArtifactUrlView と同値 */
 const COPIED_MS = 1500;
+/**
+ * 出す URL の長さの上限。これを超える href はポップアップを出さない。
+ * 折り返し表示なので長さがそのままレイアウト計算量になり、本文（= 信用できない）が
+ * 巨大な href を書けば重くなる。この長さを超える URL は目で確かめる用途に立たない
+ */
+const MAX_HREF_LENGTH = 4096;
 
 const boxRef = ref<HTMLElement | null>(null);
 const href = ref("");
@@ -75,7 +87,7 @@ function scheduleHide() {
  */
 function showFor(rawHref: string, rect: ArtifactLinkRect) {
   const url = rawHref.trim();
-  if (!url) return;
+  if (!url || url.length > MAX_HREF_LENGTH) return;
   cancelHide();
   // 別のリンクへ移ったらコピー済み表示は持ち越さない（別 URL なのに「コピーしました」に見える）
   if (url !== href.value) {
@@ -98,12 +110,15 @@ function clampIntoViewport(rect: ArtifactLinkRect) {
   if (!box || !visible.value) return;
   const { offsetWidth: w, offsetHeight: h } = box;
   if (left.value + w > window.innerWidth - MARGIN) {
-    left.value = Math.max(MARGIN, window.innerWidth - MARGIN - w);
+    left.value = window.innerWidth - MARGIN - w;
   }
   if (top.value + h > window.innerHeight - MARGIN) {
     const above = rect.top - h - GAP;
-    top.value = above >= MARGIN ? above : Math.max(MARGIN, window.innerHeight - MARGIN - h);
+    top.value = above >= MARGIN ? above : window.innerHeight - MARGIN - h;
   }
+  // 上・左の外へ出さない（呼び出し側から負の座標が来ても画面内に留める）
+  left.value = Math.max(MARGIN, left.value);
+  top.value = Math.max(MARGIN, top.value);
 }
 
 function onEnter() {

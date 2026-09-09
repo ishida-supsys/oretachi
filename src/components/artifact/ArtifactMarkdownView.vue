@@ -200,7 +200,7 @@ function onLinkClick(e: MouseEvent) {
  * 本文中のリンクの生 href を返す。リンクでない / ポップアップの対象外なら null。
  * 見出しアンカー (`#...`) は同じ文書内へのジャンプなので出さない（onLinkClick と同じ扱い）。
  */
-function hoverTargetHref(e: MouseEvent): { anchor: Element; href: string } | null {
+function hoverTargetHref(e: Event): { anchor: Element; href: string } | null {
   const anchor = (e.target as Element | null)?.closest?.("a[href]");
   if (!anchor) return null;
   const href = (anchor.getAttribute("href") ?? "").trim();
@@ -208,7 +208,7 @@ function hoverTargetHref(e: MouseEvent): { anchor: Element; href: string } | nul
   return { anchor, href };
 }
 
-function onLinkOver(e: MouseEvent) {
+function onLinkOver(e: Event) {
   const target = hoverTargetHref(e);
   if (!target) return;
   const r = target.anchor.getBoundingClientRect();
@@ -220,7 +220,7 @@ function onLinkOver(e: MouseEvent) {
   });
 }
 
-function onLinkOut(e: MouseEvent) {
+function onLinkOut(e: Event) {
   if (!hoverTargetHref(e)) return;
   // 即閉じないのは、リンク → ポップアップへマウスを移す間に消さないため
   linkPopup.value?.scheduleHide();
@@ -259,6 +259,9 @@ onMounted(() => {
     root.value.addEventListener("auxclick", onLinkClick, true);
     root.value.addEventListener("mouseover", onLinkOver);
     root.value.addEventListener("mouseout", onLinkOut);
+    // Tab でリンクを辿る場合もマウスと同じように URL を見せる
+    root.value.addEventListener("focusin", onLinkOver);
+    root.value.addEventListener("focusout", onLinkOut);
     // コードブロックなど内側のスクロールも拾うため capture で取る（scroll はバブルしない）
     root.value.addEventListener("scroll", hideLinkPopup, true);
   }
@@ -272,6 +275,8 @@ onBeforeUnmount(() => {
   root.value?.removeEventListener("auxclick", onLinkClick, true);
   root.value?.removeEventListener("mouseover", onLinkOver);
   root.value?.removeEventListener("mouseout", onLinkOut);
+  root.value?.removeEventListener("focusin", onLinkOver);
+  root.value?.removeEventListener("focusout", onLinkOut);
   root.value?.removeEventListener("scroll", hideLinkPopup, true);
   window.removeEventListener("keydown", onKeydown);
   unpinAll();
