@@ -1,12 +1,18 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import ArtifactCodeView from "./ArtifactCodeView.vue";
+import ArtifactLinkHoverPopup from "./ArtifactLinkHoverPopup.vue";
 import {
   buildVendorHead,
   buildReactSrcdoc,
   artifactSrcdocSourceKey,
 } from "../../utils/reactArtifactSrcdoc";
-import { readArtifactNavigateMessage } from "../../utils/artifactFrameLink";
+import {
+  readArtifactLinkHoverMessage,
+  readArtifactNavigateMessage,
+  type ArtifactLinkHover,
+} from "../../utils/artifactFrameLink";
+import { applyFrameLinkHover } from "../../utils/artifactLinkHover";
 import {
   ARTIFACT_BRIDGE_METHOD_MEMORY_SET,
   ARTIFACT_BRIDGE_METHOD_MCP_CALL,
@@ -63,6 +69,7 @@ const emit = defineEmits<{
 }>();
 
 const frame = ref<HTMLIFrameElement | null>(null);
+const linkPopup = ref<InstanceType<typeof ArtifactLinkHoverPopup> | null>(null);
 
 type Mode = "preview" | "code";
 const mode = ref<Mode>("preview");
@@ -194,8 +201,18 @@ function onMessage(event: MessageEvent) {
     emit("navigate", href);
     return;
   }
+  const hover = readArtifactLinkHoverMessage(event, frame.value);
+  if (hover) {
+    onHover(hover);
+    return;
+  }
   const request = readArtifactBridgeRequest(event, frame.value);
   if (request) void handleBridgeRequest(request);
+}
+
+/** iframe 内の座標で来たホバー通知を、親のビューポート座標へ直してポップアップへ渡す */
+function onHover(hover: ArtifactLinkHover) {
+  applyFrameLinkHover(hover, frame.value, linkPopup.value);
 }
 
 onMounted(() => window.addEventListener("message", onMessage));
@@ -230,6 +247,12 @@ const srcdocHtml = computed(() => {
   if (!vendorHead.value) return "";
   return buildReactSrcdoc(vendorHead.value, props.content, props.modules, initialMemory.value);
 });
+
+// Code タブへ切り替えると iframe は v-show で隠れる。座標が残ったままになるので閉じる。
+// srcdoc の差し替え（content / modules の更新）でも閉じる: iframe は読み込み直しになり、
+// 新しい文書は「リンクに乗っていない」状態から始まるため、離れた通知が二度と来ず
+// 出しっぱなしになる。srcdocHtml を見れば iframe が作り直される条件を取りこぼさない
+watch([mode, srcdocHtml], () => linkPopup.value?.hideNow());
 
 const moduleNames = computed(() => Object.keys(props.modules ?? {}));
 
@@ -289,6 +312,7 @@ const codeContent = computed(() =>
         allowfullscreen
         class="react-iframe"
       />
+      <ArtifactLinkHoverPopup ref="linkPopup" />
     </div>
 
     <div v-if="mode === 'code'" class="code-area">

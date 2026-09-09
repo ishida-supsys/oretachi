@@ -1,7 +1,13 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from "vue";
 import { buildHtmlSrcdoc } from "../../utils/htmlArtifactSrcdoc";
-import { readArtifactNavigateMessage } from "../../utils/artifactFrameLink";
+import ArtifactLinkHoverPopup from "./ArtifactLinkHoverPopup.vue";
+import {
+  readArtifactLinkHoverMessage,
+  readArtifactNavigateMessage,
+  type ArtifactLinkHover,
+} from "../../utils/artifactFrameLink";
+import { applyFrameLinkHover } from "../../utils/artifactLinkHover";
 import {
   mergeCspViolations,
   readArtifactCspViolationMessage,
@@ -17,6 +23,7 @@ const emit = defineEmits<{
 }>();
 
 const frame = ref<HTMLIFrameElement | null>(null);
+const linkPopup = ref<InstanceType<typeof ArtifactLinkHoverPopup> | null>(null);
 const violations = ref<ArtifactCspViolation[]>([]);
 const truncated = ref(false);
 const detailsOpen = ref(false);
@@ -30,6 +37,8 @@ watch(frameDoc, () => {
   violations.value = [];
   truncated.value = false;
   detailsOpen.value = false;
+  // 読み込み直しでホバー中のリンクも消えるので、URL ポップアップも閉じる
+  linkPopup.value?.hideNow();
 });
 
 // sandbox の opaque origin では event.origin が "null" になり検証に使えないため、
@@ -38,6 +47,11 @@ function onMessage(event: MessageEvent) {
   const href = readArtifactNavigateMessage(event, frame.value);
   if (href) {
     emit("navigate", href);
+    return;
+  }
+  const hover = readArtifactLinkHoverMessage(event, frame.value);
+  if (hover) {
+    onHover(hover);
     return;
   }
   const report = readArtifactCspViolationMessage(event, frame.value, frameDoc.value.nonce);
@@ -49,6 +63,11 @@ function onMessage(event: MessageEvent) {
 function describe(v: ArtifactCspViolation): string {
   const uri = v.blockedUri || "(インライン)";
   return v.directive ? `${v.directive} — ${uri}` : uri;
+}
+
+/** iframe 内の座標で来たホバー通知を、親のビューポート座標へ直してポップアップへ渡す */
+function onHover(hover: ArtifactLinkHover) {
+  applyFrameLinkHover(hover, frame.value, linkPopup.value);
 }
 
 onMounted(() => window.addEventListener("message", onMessage));
@@ -79,6 +98,7 @@ onBeforeUnmount(() => window.removeEventListener("message", onMessage));
       sandbox="allow-scripts"
       class="html-iframe"
     />
+    <ArtifactLinkHoverPopup ref="linkPopup" />
   </div>
 </template>
 

@@ -7,6 +7,7 @@ import mermaid from "mermaid";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { ask } from "@tauri-apps/plugin-dialog";
 import PanZoomCanvas from "./PanZoomCanvas.vue";
+import ArtifactLinkHoverPopup from "./ArtifactLinkHoverPopup.vue";
 import { mermaidConfig, sanitizeMermaidSvg } from "../../utils/mermaidTheme";
 import { createPanZoom, type PanZoomController } from "../../utils/panZoom";
 import { resolveExternalLink } from "../../utils/externalLink";
@@ -38,6 +39,7 @@ config({
 
 const root = ref<HTMLElement | null>(null);
 const canvas = ref<InstanceType<typeof PanZoomCanvas> | null>(null);
+const linkPopup = ref<InstanceType<typeof ArtifactLinkHoverPopup> | null>(null);
 const overlaySvg = ref("");
 
 // 装飾済みの mermaid ブロックを示す目印 (MutationObserver の再入で二重付与しないため)
@@ -151,6 +153,7 @@ async function openOverlay(block: HTMLElement) {
   const clone = svg.cloneNode(true) as SVGElement;
   clone.style.transform = "";
   clone.style.transformOrigin = "";
+  hideLinkPopup(); // 全画面オーバーレイの下に取り残さない
   overlaySvg.value = sanitizeMermaidSvg(clone.outerHTML);
   await nextTick();
   canvas.value?.fitToView();
@@ -181,6 +184,7 @@ function onLinkClick(e: MouseEvent) {
   // ここから先は開く/開かないに関わらず webview を遷移させない
   e.preventDefault();
   e.stopPropagation();
+  hideLinkPopup();
   // artifact: リンクは外部ブラウザではなくビューア内（または別ビューアウィンドウ）で開く。
   // 解析できない artifact: リンクも上へ渡す（受け側が書き間違いとして知らせる）
   if (href && ARTIFACT_SCHEME_RE.test(href.trim())) {
@@ -190,6 +194,41 @@ function onLinkClick(e: MouseEvent) {
   const url = resolveExternalLink(href);
   if (!url) return; // 相対パス・ローカルパス・非 http スキームは何もしない
   void confirmAndOpen(url);
+}
+
+/**
+ * 本文中のリンクの生 href を返す。リンクでない / ポップアップの対象外なら null。
+ * 見出しアンカー (`#...`) は同じ文書内へのジャンプなので出さない（onLinkClick と同じ扱い）。
+ */
+function hoverTargetHref(e: Event): { anchor: Element; href: string } | null {
+  const anchor = (e.target as Element | null)?.closest?.("a[href]");
+  if (!anchor) return null;
+  const href = (anchor.getAttribute("href") ?? "").trim();
+  if (!href || href.startsWith("#")) return null;
+  return { anchor, href };
+}
+
+function onLinkOver(e: Event) {
+  const target = hoverTargetHref(e);
+  if (!target) return;
+  const r = target.anchor.getBoundingClientRect();
+  linkPopup.value?.showFor(target.href, {
+    left: r.left,
+    top: r.top,
+    width: r.width,
+    height: r.height,
+  });
+}
+
+function onLinkOut(e: Event) {
+  if (!hoverTargetHref(e)) return;
+  // 即閉じないのは、リンク → ポップアップへマウスを移す間に消さないため
+  linkPopup.value?.scheduleHide();
+}
+
+/** スクロールするとリンクが動いてポップアップの位置が合わなくなる */
+function hideLinkPopup() {
+  linkPopup.value?.hideNow();
 }
 
 async function confirmAndOpen(url: string) {
@@ -218,6 +257,13 @@ onMounted(() => {
     root.value.addEventListener("click", onLinkClick, true);
     // 中クリックは click ではなく auxclick で飛ぶ。塞がないとここだけ遷移が残る
     root.value.addEventListener("auxclick", onLinkClick, true);
+    root.value.addEventListener("mouseover", onLinkOver);
+    root.value.addEventListener("mouseout", onLinkOut);
+    // Tab でリンクを辿る場合もマウスと同じように URL を見せる
+    root.value.addEventListener("focusin", onLinkOver);
+    root.value.addEventListener("focusout", onLinkOut);
+    // コードブロックなど内側のスクロールも拾うため capture で取る（scroll はバブルしない）
+    root.value.addEventListener("scroll", hideLinkPopup, true);
   }
   window.addEventListener("keydown", onKeydown);
 });
@@ -227,6 +273,11 @@ onBeforeUnmount(() => {
   // capture 有無を揃えないと解除されない
   root.value?.removeEventListener("click", onLinkClick, true);
   root.value?.removeEventListener("auxclick", onLinkClick, true);
+  root.value?.removeEventListener("mouseover", onLinkOver);
+  root.value?.removeEventListener("mouseout", onLinkOut);
+  root.value?.removeEventListener("focusin", onLinkOver);
+  root.value?.removeEventListener("focusout", onLinkOut);
+  root.value?.removeEventListener("scroll", hideLinkPopup, true);
   window.removeEventListener("keydown", onKeydown);
   unpinAll();
 });
@@ -235,6 +286,7 @@ watch(locale, refreshTitles);
 
 watch(() => props.content, () => {
   closeOverlay();
+  hideLinkPopup();
   // 差し替えでブロック要素自体が入れ替わるため、古いピンの購読を解除しておく
   unpinAll();
   nextTick(decorate);
@@ -244,6 +296,8 @@ watch(() => props.content, () => {
 <template>
   <div ref="root" class="markdown-view">
     <MdPreview :modelValue="content" theme="dark" language="ja-JP" :style="{ padding: '1rem 1.5rem' }" />
+
+    <ArtifactLinkHoverPopup ref="linkPopup" />
 
     <!-- プレビュー内の stacking context / containing block から切り離すため body へ出す -->
     <Teleport to="body">
