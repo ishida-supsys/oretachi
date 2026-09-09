@@ -28,8 +28,9 @@ const VIEW_MEMORY_KEY = 'view';
 // ズームはホイール1回転で何度も変わるので、止まってからまとめて保存する
 const ZOOM_SAVE_DEBOUNCE_MS = 300;
 
-// メモリーから読み戻した表示状態を検証する。壊れた値・範囲外の値でキャンバスが
-// 画面外へ飛ぶと ⟲ すら押せなくなるので、少しでも怪しければ既定値へ落とす
+// メモリーから読み戻した表示状態を検証する。壊れた値が入るとキャンバスが真っ白に
+// 見えたり（NaN で transform ごと無効になる）、範囲外のズームで開いたりするので、
+// 少しでも怪しければ既定値へ落とす（復帰は ⟲ でできるが、まず出さない方がよい）
 function sanitizeView(saved) {
   if (!saved || typeof saved !== 'object') return DEFAULT_VIEW;
   const { pan, zoom } = saved;
@@ -162,13 +163,29 @@ function App() {
   // 停止条件ポップアップのホバー対象(ノード or エッジ)。同時に1つだけ
   const [hover, setHover] = useState(null);
   const lastPos = useRef(null);
-  const dragMoved = useRef(false); // ドラッグ中に移動が発生したか追跡
+  // クリックとドラッグの区別用。1イベントで 3px 以上動いたか＝「掴んで振った」かの判定で、
+  // ゆっくり動かすと最後まで false のままになる（＝クリック扱い）
+  const dragMoved = useRef(false);
+  // pan が 1px でも動いたか。保存するかどうかはこちらで判断する。
+  // dragMoved を使うと、ゆっくり丁寧に位置合わせしたパンほど保存されない
+  // （60fps では 100px を 1 秒かけて動かしても 1 イベントあたり約 1.7px にしかならない）
+  const panChanged = useRef(false);
   const containerRef = useRef(null);
 
   // 保存時に最新の pan/zoom を同期で読むための控え。pan はドラッグ中に毎フレーム
-  // 変わるので、state をそのままメモリーへ繋がず「確定したとき」だけここから書き出す
+  // 変わるので、state をそのままメモリーへ繋がず「確定したとき」だけここから書き出す。
+  //
+  // **表示状態の唯一の出所はこの ref。** effect で state から写すのではなく、
+  // applyView が ref と state を必ず同時に動かす。effect 経由にすると、
+  // mouseup(discrete) が直前のレンダーの passive effect より先に走ったときに
+  // 1 フレーム古い pan を保存してしまう
   const viewRef = useRef(initialView);
-  useEffect(() => { viewRef.current = { pan, zoom }; }, [pan, zoom]);
+
+  const applyView = useCallback(next => {
+    viewRef.current = next;
+    setPan(next.pan);
+    setZoom(next.zoom);
+  }, []);
 
   const zoomSaveTimer = useRef(null);
 
@@ -189,6 +206,7 @@ function App() {
     if (e.target.closest && e.target.closest('[data-ui]')) return;
     lastPos.current = { x: e.clientX, y: e.clientY };
     dragMoved.current = false;
+    panChanged.current = false;
   }, []);
 
   // 3px 以上移動した時点でドラッグ開始とみなし、dragging フラグをセット
@@ -201,32 +219,38 @@ function App() {
       setDragging(true);
       setHover(null); // ドラッグ中はポップアップを出さない
     }
-    setPan(p => ({ x: p.x + dx, y: p.y + dy }));
+    if (dx !== 0 || dy !== 0) {
+      panChanged.current = true;
+      const cur = viewRef.current;
+      applyView({ pan: { x: cur.pan.x + dx, y: cur.pan.y + dy }, zoom: cur.zoom });
+    }
     lastPos.current = { x: e.clientX, y: e.clientY };
-  }, []);
+  }, [applyView]);
 
   const handleMouseUp = useCallback(() => {
     // キャンバスを（パンせずに）クリックしたら開いている欄を閉じる
     if (lastPos.current && !dragMoved.current) setOpenPanel(null);
     // パンが確定したときだけ保存する（移動中に保存すると書き込みが多すぎる）
-    if (dragMoved.current) saveView();
+    if (panChanged.current) saveView();
     setDragging(false);
     lastPos.current = null;
     // 次のクリックが直前のドラッグを引きずらないように畳んでおく
     // （UI チップのクリックは mousedown で弾かれ、ここが再初期化の唯一の機会になる）
     dragMoved.current = false;
+    panChanged.current = false;
   }, [saveView]);
 
   const handleWheel = useCallback(e => {
     e.preventDefault();
     const factor = e.deltaY > 0 ? 0.9 : 1.1;
-    setZoom(z => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z * factor)));
+    const cur = viewRef.current;
+    applyView({ pan: cur.pan, zoom: Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, cur.zoom * factor)) });
     if (zoomSaveTimer.current !== null) clearTimeout(zoomSaveTimer.current);
     zoomSaveTimer.current = setTimeout(() => {
       zoomSaveTimer.current = null;
       saveView();
     }, ZOOM_SAVE_DEBOUNCE_MS);
-  }, [saveView]);
+  }, [applyView, saveView]);
 
   useEffect(() => {
     const el = containerRef.current;
@@ -248,9 +272,7 @@ function App() {
   }, []);
 
   const resetView = useCallback(() => {
-    setPan(DEFAULT_VIEW.pan);
-    setZoom(DEFAULT_VIEW.zoom);
-    viewRef.current = DEFAULT_VIEW;
+    applyView(DEFAULT_VIEW);
     // 保留中のズーム保存が後から古い値を書き戻さないように止める
     if (zoomSaveTimer.current !== null) {
       clearTimeout(zoomSaveTimer.current);
@@ -258,7 +280,7 @@ function App() {
     }
     // 保存値そのものを消す（次のリロードは既定の表示位置から始まる）
     Promise.resolve(setSavedView(undefined)).catch(() => {});
-  }, [setSavedView]);
+  }, [applyView, setSavedView]);
 
   const svgStyle = {
     position: 'absolute', left: 0, top: 0,
