@@ -20,10 +20,14 @@ name: enable-auto-merge
 #   後からこれを有効化する場合は auto-update または merge queue が別途必要。
 
 on:
+  # synchronize は意図的に拾わない。auto-merge の有効化は「最初の1回」だけで、
+  # 一度解除された状態は見逃す。人がレビュー中に auto-merge を手で切って
+  # 様子を見る、という逃げ道を push で潰さないため
+  # (コンフリクト解消時に GitHub 側が解除するケースも同様に放置する)。
+  # 再武装したいときは `automerge` ラベルを外して付け直すか、
+  # PR 画面の Enable auto-merge を手で押す。
   pull_request_target:
-    # synchronize も拾う: コンフリクトなどで GitHub 側が auto-merge を解除した場合、
-    # 修正を push した時点で再武装させるため。
-    types: [opened, reopened, ready_for_review, labeled, synchronize]
+    types: [opened, reopened, ready_for_review, labeled]
 
 permissions:
   contents: write
