@@ -67,22 +67,59 @@ export function hasApprovalPrompt(content: string): boolean {
  * `❯ Yes` だけでなく **`❯ 1. Yes`（現在の Claude Code の書式）**にも一致させる。
  * 番号付きに一致しなかった頃は、許可ダイアログで実質 `Do you want to` の 1 行だけが
  * 検出条件になっていて、その行がダイアログ上端寄りにあるため窓が狭いと落ちていた (#252)。
+ *
+ * **`Yes` の後ろを行末に固定しているのは意図的**。`❯ 1. Yes` にマッチさせるだけの
+ * つもりで `Yes` の後を開けると、**プラン承認ダイアログ**の
+ *
+ * ```
+ *  Claude has written up a plan and is ready to execute. Would you like to proceed?
+ *  ❯ 1. Yes, and use auto mode
+ * ```
+ *
+ * まで検出対象になる。プラン承認は `NotifyKind::Approval` で届き
+ * (`useAppAutoApproval.ts` の `kind === "approval"` を通る) 、`ai_judge.rs` の
+ * 判定プロンプトは **CLI コマンドの危険性しか問うていない**ので、読み取り中心のプランなら
+ * safe と返る。そこへ Enter を送ると `1. Yes, and use auto mode` が確定して
+ * auto mode に入り、以後の許可は Claude Code 側で素通しになる = 自動承認の
+ * AI 判定ゲートそのものが無効化される。AskUserQuestion の `❯ 1. Yes, use approach A`
+ * も同様。許可ダイアログの選択肢1は必ず素の `Yes` なので、行末固定で十分に拾える。
  */
 const APPROVAL_PROMPT_LINE =
-  /[❯►]\s*(?:\d+\.\s*)?Yes|\(Y\/n\)|\[Y\/n\]|Allow\s+\w|Do you want to/i;
+  /[❯►]\s*(?:\d+\.\s*)?Yes\s*$|\(Y\/n\)|\[Y\/n\]|Allow\s+\w|Do you want to/i;
 
 /** 承認プロンプトを探すときにバッファ末尾から見る行数 */
 export const APPROVAL_SCAN_LINES = 60;
 
+/** ダイアログ領域として承認プロンプト行の上下何行を見るか */
+const APPROVAL_REGION_LEAD = 8;
+const APPROVAL_REGION_TRAIL = 10;
+
 /**
- * 画面比較用の正規化。行末の空白と末尾の空行を落とす。
+ * バッファ末尾の窓から「ダイアログ領域」だけを切り出して正規化する。
  *
- * xterm のバッファはカーソル位置やパディングで行末の空白が揺れるため、
- * 生の文字列比較だと「変わっていないダイアログ」を変化とみなしてしまう。
+ * **末尾 N 行をそのまま比較してはいけない。** `getRecentLines` はバッファ末尾からの
+ * 相対窓なので、ダイアログの下に 1 行出力が増えるだけで窓の先頭がずれて全体が
+ * 不一致になる。それを変化とみなすと、`hasApprovalPrompt` が真なのに Enter を送らない
+ * = #252 と同じストールに戻る。
+ *
+ * そこで承認プロンプト行をアンカーにして、そこから上 `LEAD` 行・下 `TRAIL` 行だけを
+ * 比較対象にする。上を含めるのはツール名やファイル名がプロンプト行の上に出るため
+ * （含めないと「別ファイルに対する同じ形の Write ダイアログ」を同一と誤認する）。
+ * 下を打ち切るのはダイアログより後ろに出た出力を無視するため。
+ *
+ * アンカーは**最初の**マッチ行にする。許可ダイアログでは `Do you want to` が上端で、
+ * ここを起点にすると選択肢まで `TRAIL` 行に収まる。
+ *
+ * 行末の空白と末尾の空行も落とす（xterm はカーソル位置やパディングで揺れる）。
  */
-function normalizeScreen(content: string): string {
-  return content
-    .split("\n")
+function extractApprovalRegion(content: string): string | null {
+  const lines = content.split("\n");
+  const anchor = lines.findIndex((line) => APPROVAL_PROMPT_LINE.test(line));
+  if (anchor === -1) return null;
+  const start = Math.max(0, anchor - APPROVAL_REGION_LEAD);
+  const end = Math.min(lines.length, anchor + APPROVAL_REGION_TRAIL + 1);
+  return lines
+    .slice(start, end)
     .map((line) => line.replace(/\s+$/, ""))
     .join("\n")
     .replace(/\n+$/, "");
@@ -92,12 +129,19 @@ function normalizeScreen(content: string): string {
  * AI 判定の前後で同じ承認ダイアログが出続けているかを判定する。
  *
  * 判定には 20〜35 秒かかるため、その間に人が手でダイアログを消し、別のダイアログが
- * 出ている可能性がある。`hasApprovalPrompt` が真でも画面が別物なら、未判定の
- * ダイアログへ Enter を送ることになるので送らない (MCP 側の `expect_fingerprint`
- * 照合と同じ考え方を、IPC を挟まずフロントのバッファ比較で行う)。
+ * 出ている可能性がある。`hasApprovalPrompt` が真でも中身が別物なら、未判定の
+ * ダイアログへ Enter を送ることになるので送らない。
+ *
+ * MCP 側の `expect_fingerprint` (`prompt_parser::fingerprint_of`) と**同じ保証ではない**。
+ * あちらはパース済み構造だけをハッシュして `tail` を意図的に外している（スピナーの
+ * 1 コマで毎回変わって常に stale になるため）。こちらは画面テキストを見るので、
+ * 判定中にターミナルがリサイズされて折り返しが変わると不一致になりうる。
+ * 不一致は「Enter を送らない」で終わらせず次のターミナルの判定へ進める。
  */
 export function isSameApprovalScreen(before: string, after: string): boolean {
-  return normalizeScreen(before) === normalizeScreen(after);
+  const a = extractApprovalRegion(before);
+  const b = extractApprovalRegion(after);
+  return a !== null && a === b;
 }
 
 /**
@@ -149,7 +193,11 @@ export function detectOretachiToolPrompt(content: string): string | null {
   // 末尾側の承認プロンプト行を探す
   let promptIndex = -1;
   for (let i = lines.length - 1; i >= 0; i--) {
-    if (/[❯►]\s*(?:\d+\.\s*)?Yes|Do you want to/i.test(lines[i])) {
+    // ここは `APPROVAL_PROMPT_LINE` を使わない。MCP ツールの許可ダイアログは必ず
+    // `Do you want to` 行を持つので現状で足り、番号付き `❯ 1. Yes` を足すと
+    // アンカーが 1 行下がって `ORETACHI_PROMPT_WINDOW` の上方向カバーが 1 行減る
+    // （ツール名の行はプロンプト行の上に出る）。
+    if (/❯\s*Yes|►\s*Yes|Do you want to/i.test(lines[i])) {
       promptIndex = i;
       break;
     }
@@ -255,13 +303,17 @@ export async function runApprovalLoop(
       // ダイアログ上端寄りの `Do you want to` 行が窓から外れて偽陰性になり、
       // 安全と判定した許可を捨ててセッションが止まっていた (#252)。
       const freshContent = getRecentLines(terminal, APPROVAL_SCAN_LINES);
+      // 送らないと決めた場合は `break` ではなく `continue`。この経路には再試行が無く
+      // (`runApprovalLoop` はポーリングではなく notify-worktree イベント駆動)、
+      // ここで打ち切ると同じイベントで残りのターミナルの本物のダイアログが
+      // 一度も判定されないまま取りこぼされる。
       if (!hasApprovalPrompt(freshContent)) {
         logDebug(`[AutoApproval] tid=${termRef.id} → prompt disappeared, skip Enter`);
-        break;
+        continue;
       }
       if (!isSameApprovalScreen(quickContent, freshContent)) {
         logDebug(`[AutoApproval] tid=${termRef.id} → screen changed since judgment, skip Enter`);
-        break;
+        continue;
       }
       logDebug(`[AutoApproval] tid=${termRef.id} → approved, sending Enter`);
       await termRef.write("\r");

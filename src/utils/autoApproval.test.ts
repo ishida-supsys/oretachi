@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest'
+import { describe, it, expect, vi, beforeEach } from 'vitest'
 
 vi.mock('@tauri-apps/api/core', () => ({
   invoke: vi.fn(),
@@ -10,12 +10,23 @@ vi.mock('@tauri-apps/plugin-log', () => ({
   error: vi.fn(() => Promise.resolve()),
 }))
 
+import { invoke } from '@tauri-apps/api/core'
 import {
   hasApprovalPrompt,
   detectOretachiToolPrompt,
   isSameApprovalScreen,
+  runApprovalLoop,
   APPROVAL_SCAN_LINES,
 } from './autoApproval'
+
+/** ダイアログの上下にログ行・空行が並んだ、実機に近い画面を作る */
+function screenWithDialog(label: string, above = 12, below = 12): string {
+  return [
+    ...Array.from({ length: above }, (_, i) => `log ${i}`),
+    ccPrompt(label),
+    ...Array.from({ length: below }, () => ''),
+  ].join('\n')
+}
 
 describe('hasApprovalPrompt', () => {
   it('detects ❯ Yes', () => {
@@ -70,8 +81,34 @@ describe('hasApprovalPrompt', () => {
     expect(hasApprovalPrompt(' ❯ 1. Yes')).toBe(true)
   })
 
-  it('detects numbered ► 2. Yes', () => {
-    expect(hasApprovalPrompt('   ► 2. Yes, and switch to acceptEdits')).toBe(true)
+  it('detects numbered ► 1. Yes', () => {
+    expect(hasApprovalPrompt('   ► 1. Yes')).toBe(true)
+  })
+
+  // #252 レビュー指摘 (Critical): `Yes` の後ろを開けるとプラン承認ダイアログが
+  // 検出対象になり、AI 判定 (CLI コマンドの危険性しか見ない) が safe を返した瞬間に
+  // `1. Yes, and use auto mode` が確定して自動承認のゲート自体が無効化される
+  it('does NOT detect the plan approval dialog', () => {
+    const plan = [
+      ' Claude has written up a plan and is ready to execute. Would you like to proceed?',
+      '',
+      ' ❯ 1. Yes, and use auto mode',
+      '   2. Yes, manually approve edits',
+      '   3. Tell Claude what to change',
+    ].join('\n')
+    expect(hasApprovalPrompt(plan)).toBe(false)
+  })
+
+  it('does NOT detect an AskUserQuestion option that merely starts with Yes', () => {
+    expect(hasApprovalPrompt(' ❯ 1. Yes, use approach A')).toBe(false)
+  })
+
+  it('does NOT detect "Yes, and don\'t ask again" when the cursor sits on it', () => {
+    expect(hasApprovalPrompt("   ❯ 2. Yes, and don't ask again for Bash(rm:*) commands")).toBe(false)
+  })
+
+  it('does not match a numbered word merely starting with Yes', () => {
+    expect(hasApprovalPrompt(' ❯ 1. Yesterday の集計')).toBe(false)
   })
 
   it('detects the numbered dialog without relying on the "Do you want to" line', () => {
@@ -86,7 +123,7 @@ describe('hasApprovalPrompt', () => {
   })
 
   it('does not match a bare numbered list', () => {
-    expect(hasApprovalPrompt('  1. Yesterday の集計')).toBe(false)
+    expect(hasApprovalPrompt('  1. Yes')).toBe(false)
   })
 })
 
@@ -116,15 +153,45 @@ describe('isSameApprovalScreen', () => {
     const after = before.replace(' ❯ 1. Yes', '   1. Yes').replace('   3. No', ' ❯ 3. No')
     expect(isSameApprovalScreen(before, after)).toBe(false)
   })
+
+  // 比較は末尾 N 行の生比較ではなくプロンプト行アンカーのダイアログ領域。
+  // ダイアログの下に 1 行増えるだけで不一致になると #252 と同じストールに戻る
+  it('tolerates output appended below the dialog', () => {
+    const before = screenWithDialog('Write(a.txt)')
+    const after = `${before}\n✳ Thinking…`
+    expect(isSameApprovalScreen(before, after)).toBe(true)
+  })
+
+  // 出力が 1 行増えるとバッファ末尾からの窓がずれる。アンカー相対で切り出すので
+  // ダイアログ領域の中身は変わらない
+  it('tolerates the window having scrolled by a line', () => {
+    const before = screenWithDialog('Write(a.txt)')
+    const after = before.split('\n').slice(1).join('\n')
+    expect(isSameApprovalScreen(before, after)).toBe(true)
+  })
+
+  // 領域はプロンプト行の上も含める。含めないと「別ファイルに対する同じ形の
+  // Write ダイアログ」を同一と誤認して未判定のダイアログへ Enter を送る
+  it('detects a header change above the prompt line', () => {
+    const before = ccPrompt('Write(a.txt)').replace(
+      'Reactアーティファクトのモジュールを操作する',
+      'Write(a.txt)'
+    )
+    const after = ccPrompt('Write(a.txt)').replace(
+      'Reactアーティファクトのモジュールを操作する',
+      'Write(b.txt)'
+    )
+    expect(isSameApprovalScreen(before, after)).toBe(false)
+  })
+
+  it('is false when either side has no approval prompt at all', () => {
+    const screen = ccPrompt('Write(a.txt)')
+    expect(isSameApprovalScreen(screen, 'Running tests...')).toBe(false)
+    expect(isSameApprovalScreen('Running tests...', screen)).toBe(false)
+  })
 })
 
 describe('APPROVAL_SCAN_LINES', () => {
-  // #252 の本体: 検出 60 行 / 再チェック 10 行の非対称が偽陰性を生んでいた。
-  // 両方がこの定数を使うことで窓が揺れない
-  it('is wide enough to hold the dialog plus viewport padding', () => {
-    expect(APPROVAL_SCAN_LINES).toBe(60)
-  })
-
   it('keeps the "Do you want to" line inside the window even with viewport padding', () => {
     // 実機のビューポート (34 行) を空行で埋めた末尾から数えると
     // `Do you want to` は 6 行目より上に押し上げられる
@@ -255,5 +322,137 @@ describe('detectOretachiToolPrompt', () => {
       ccPrompt('plugin:oretachi:oretachi - search_artifact'),
     ].join('\n')
     expect(detectOretachiToolPrompt(content)).toBe('search_artifact')
+  })
+})
+
+/** xterm の Terminal を getRecentLines が触る範囲だけ模したフェイク */
+function fakeTerminal(getScreen: () => string) {
+  return {
+    get buffer() {
+      const lines = getScreen().split('\n')
+      return {
+        active: {
+          length: lines.length,
+          getLine: (i: number) => ({ translateToString: () => lines[i] }),
+        },
+      }
+    },
+  } as any
+}
+
+function fakeTermRef(id: number, getScreen: () => string) {
+  const writes: string[] = []
+  return {
+    ref: {
+      id,
+      getTerminal: () => fakeTerminal(getScreen),
+      write: async (d: string) => {
+        writes.push(d)
+      },
+    },
+    writes,
+  }
+}
+
+/** 実機のビューポート(34行)を空行で埋めた状態。#252 の再現形 */
+function paddedPrompt(label: string): string {
+  return `${ccPrompt(label)}\n${Array.from({ length: 20 }, () => '').join('\n')}`
+}
+
+describe('runApprovalLoop', () => {
+  beforeEach(() => {
+    vi.mocked(invoke).mockReset()
+  })
+
+  // #252 本体の回帰テスト。再チェックの窓が 10 行に戻ると、この画面では
+  // `Do you want to` が窓から外れて Enter が送られなくなる
+  it('sends Enter when the judged dialog is still on screen', async () => {
+    vi.mocked(invoke).mockResolvedValue({ safe: true, command: 'Write(a.txt)' })
+    const { ref, writes } = fakeTermRef(1, () => paddedPrompt('Write(a.txt)'))
+
+    const result = await runApprovalLoop([ref], 'wt-1', 'X:/devel/worktree/x')
+
+    expect(result.approved).toBe(true)
+    expect(writes).toEqual(['\r'])
+  })
+
+  it('does not send Enter when the prompt disappeared during judgment', async () => {
+    let screen = paddedPrompt('Write(a.txt)')
+    vi.mocked(invoke).mockImplementation(async () => {
+      screen = 'done\n\n> '
+      return { safe: true, command: 'Write(a.txt)' }
+    })
+    const { ref, writes } = fakeTermRef(1, () => screen)
+
+    const result = await runApprovalLoop([ref], 'wt-1', 'X:/devel/worktree/x')
+
+    expect(result.approved).toBe(false)
+    expect(writes).toEqual([])
+  })
+
+  // 判定に 20〜35 秒かかるので、その間に人が手で消して別のダイアログが出ていることがある。
+  // `hasApprovalPrompt` は真なので窓を広げただけでは防げない
+  it('does not send Enter when a different dialog replaced the judged one', async () => {
+    let screen = paddedPrompt('Write(a.txt)')
+    vi.mocked(invoke).mockImplementation(async () => {
+      screen = paddedPrompt('Bash(rm -rf /)')
+      return { safe: true, command: 'Write(a.txt)' }
+    })
+    const { ref, writes } = fakeTermRef(1, () => screen)
+
+    const result = await runApprovalLoop([ref], 'wt-1', 'X:/devel/worktree/x')
+
+    expect(result.approved).toBe(false)
+    expect(writes).toEqual([])
+  })
+
+  // skip を `break` にすると、この経路には再試行が無いので tid=2 の本物のダイアログが
+  // 一度も判定されないまま取りこぼされる
+  it('keeps checking the remaining terminals after a skip', async () => {
+    let first = paddedPrompt('Write(a.txt)')
+    const second = paddedPrompt('Write(b.txt)')
+    vi.mocked(invoke).mockImplementation(async () => {
+      first = 'done\n\n> '
+      return { safe: true, command: 'Write' }
+    })
+    const a = fakeTermRef(1, () => first)
+    const b = fakeTermRef(2, () => second)
+
+    const result = await runApprovalLoop([a.ref, b.ref], 'wt-1', 'X:/devel/worktree/x')
+
+    expect(a.writes).toEqual([])
+    expect(result.approved).toBe(true)
+    expect(b.writes).toEqual(['\r'])
+  })
+
+  it('does not send Enter when the judgment is unsafe', async () => {
+    vi.mocked(invoke).mockResolvedValue({ safe: false, command: 'Bash(rm -rf /)' })
+    const { ref, writes } = fakeTermRef(1, () => paddedPrompt('Bash(rm -rf /)'))
+
+    const result = await runApprovalLoop([ref], 'wt-1', 'X:/devel/worktree/x')
+
+    expect(result.approved).toBe(false)
+    expect(result.lastCommand).toBe('Bash(rm -rf /)')
+    expect(writes).toEqual([])
+  })
+
+  // プラン承認ダイアログは検出対象外。AI 判定 (CLI コマンドの危険性しか見ない) を
+  // 走らせてはいけない
+  it('never judges the plan approval dialog', async () => {
+    vi.mocked(invoke).mockResolvedValue({ safe: true, command: 'plan' })
+    const plan = [
+      ' Claude has written up a plan and is ready to execute. Would you like to proceed?',
+      '',
+      ' ❯ 1. Yes, and use auto mode',
+      '   2. Yes, manually approve edits',
+      '   3. Tell Claude what to change',
+    ].join('\n')
+    const { ref, writes } = fakeTermRef(1, () => plan)
+
+    const result = await runApprovalLoop([ref], 'wt-1', 'X:/devel/worktree/x')
+
+    expect(invoke).not.toHaveBeenCalled()
+    expect(result.approved).toBe(false)
+    expect(writes).toEqual([])
   })
 })
