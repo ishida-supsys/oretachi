@@ -87,8 +87,10 @@
 // （`lib/send` の `promptConflicts` が 2 枚目以降を機械的に塞ぐが、そもそも作らない）
 
 const META = {
-  reportId: 'notif-report-1788867120000', // 載せた通知の最大 createdAt をそのまま使う
-  generatedAtMs: 1788867120000,           // = その最大 createdAt（epoch ms）
+  // 載せた通知の最大 createdAt（= 下の NOTIFICATIONS で最も新しい at: '14:21'）を
+  // そのまま ID と基準時刻に使う。両者は必ず同じ通知を指す
+  reportId: 'notif-report-1788844860000',
+  generatedAtMs: 1788844860000,           // JST 2026-09-08 14:21
   callerWorktree: 'oretachi-vy7f',
 };
 

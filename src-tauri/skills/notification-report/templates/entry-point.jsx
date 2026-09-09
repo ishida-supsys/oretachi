@@ -29,8 +29,12 @@ function nowLabel() {
 // `createdAt`（epoch ms）で、`oretachi_poll_inbox` の返り値からそのまま取れる。
 // `generatedAt`（文字列）が入っているレポートは旧形式なのでそちらを使う。
 function generatedLabel(meta) {
-  if (typeof meta.generatedAtMs === 'number' && Number.isFinite(meta.generatedAtMs)) {
-    const d = new Date(meta.generatedAtMs);
+  // Number() を通すのは、生成側が epoch ms を文字列で入れても 1970 年や
+  // 「(時刻不明)」へ黙って落ちないようにするため。`0` / 負値 / NaN は
+  // 「入っていない」と同じ扱いにする（1970-01-01 を出すより無害）
+  const ms = Number(meta.generatedAtMs);
+  if (Number.isFinite(ms) && ms > 0) {
+    const d = new Date(ms);
     const p = v => String(v).padStart(2, '0');
     return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
   }
