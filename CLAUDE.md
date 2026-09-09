@@ -1,7 +1,5 @@
 # oretachi — リポジトリ共通の作業ルール
 
-このファイルはリポジトリに追跡されており、すべてのワークツリー / クローンで共有されます。
-
 ## auto-merge (`automerge` ラベル)
 
 **`automerge` ラベルの付いた PR は、CI (`type-check` / `cargo-check`) が通り次第、
