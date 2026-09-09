@@ -182,13 +182,19 @@ body {
   white-space: pre-line;
 }
 
-/* アーティファクトのリンクホバーポップアップ (ArtifactLinkHoverPopup.vue) で、
+/* アーティファクトのリンクホバーポップアップ (ArtifactLinkUrlText.vue) で、
    3 行に打ち切られた URL の全文を出すツールチップ (issue #247) */
 .artifact-link-url-tooltip.p-tooltip {
   /* ポップアップ本体 (z-index: 10000) より上へ。PrimeVue が inline style で
      z-index を振るため !important でないと下に潜る */
   z-index: 10002 !important;
-  max-width: min(720px, 92vw);
+  /* 幅は fit-content なので短い URL はこれより狭くなる。広めに取るのは高さを
+     稼ぐため: 900px なら 1 行 130 文字前後で、MAX_HREF_LENGTH (4096) の URL でも
+     30 行強に収まる。
+     高さの上限は置かない。PrimeVue の autoHide 既定は true でツールチップに
+     pointer-events: none が付き、スクロールできないので、max-height を付けると
+     #247 の「黙って切られる」を作り直すことになる */
+  max-width: min(900px, 92vw);
 }
 
 .artifact-link-url-tooltip.p-tooltip .p-tooltip-text {
@@ -198,8 +204,4 @@ body {
   /* URL は途中に区切りが無いので折り返す (ツールチップの既定は折り返さない) */
   white-space: normal;
   word-break: break-all;
-  /* MAX_HREF_LENGTH (4096) 級の URL で画面を覆わないための上限。720px 幅なら
-     1 行 100 文字前後なので、通常の画面では 4096 文字でもこの中に収まる */
-  max-height: 70vh;
-  overflow-y: auto;
 }
