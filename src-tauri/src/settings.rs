@@ -1154,6 +1154,11 @@ mod tests {
         }"##;
         let group: Workgroup = serde_json::from_str(json).unwrap();
         let raw = serde_json::to_value(&group).unwrap();
+        // 見たい症状は「キーが消えた」ことなので `contains_key` で直に見る。
+        // `raw[key]` は object でなくてもキー不在でも `Null` を返すため、
+        // 「キー欠落」と「値が null」を区別できない（将来 null を正当に取る
+        // フィールドが増えたときに誤って落ちる）。
+        let obj = raw.as_object().expect("Workgroup は JSON object にシリアライズされる");
         for key in [
             "name",
             "color",
@@ -1165,7 +1170,7 @@ mod tests {
             "systemPrompt",
             "trayNotification",
         ] {
-            assert!(!raw[key].is_null(), "{key} が往復で失われた");
+            assert!(obj.contains_key(key), "{key} が往復で失われた");
         }
         assert_eq!(group.auto_return_home_after_task, Some(true));
     }
