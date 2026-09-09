@@ -9,6 +9,8 @@ const {
   SHAPE_LABEL,
   shapeOf,
   isDialog,
+  isReportOnly,
+  bodyText,
   questionOf,
   optionsOf,
   previewKeys,
@@ -49,12 +51,23 @@ const STATUS_LABEL = {
   unverified: '送信したが未確認',
 };
 
-// 通知種別（notify_worktree の kind）
+// 通知種別（notify_worktree の kind）。
+// `worktree.created` / `worktree.closed` は oretachi が自動発行する報告のみの種別で、
+// 返答 UI を持たない（#228）。他と混ざらないよう寒色寄りの落ち着いた色にする
 const KIND_COLOR = {
   general: '#6c7086',
   approval: '#fab387',
   completed: '#a6e3a1',
   hook: '#cba6f7',
+  'worktree.message': '#89b4fa',
+  'worktree.created': '#94e2d5',
+  'worktree.closed': '#7f849c',
+};
+
+// 報告カードの種別ラベル。生の kind よりも「何が起きたか」が読み取れる
+const REPORT_KIND_LABEL = {
+  'worktree.created': 'ワークツリー作成',
+  'worktree.closed': 'ワークツリークローズ',
 };
 
 // 問いの形状。ダイアログ系は目立たせる（何を操作するのか分かるように）
@@ -244,6 +257,62 @@ function OptionRadios({ n, draft, disabled, onPickOption }) {
 }
 
 /**
+ * 報告カード（#228）。人の判断を必要としない購読イベントを「読むだけ」で出す。
+ *
+ * **送信 UI を一切持たない。** 選択肢・補足欄・再送ボタン・キー列プレビューを
+ * 出さないのは、これらが「押さないと片付かない」という圧を作るため。判断が不要な
+ * イベントに返答欄を出すと、人は全カードを捌こうとして無い判断を探すことになる。
+ *
+ * 参照するフィールドは `kind` / `worktreeName` / `branchName` / `at` / `body` /
+ * `link` だけ。`sessionId` / `subscribed` / `prompt` / `desc` / `phase` は
+ * **報告カードでは収集していない**ので触らない（`worktree.closed` は発信元が
+ * 既に削除済みで、`get_worktree_status` も `read_terminal` も引けない）。
+ */
+function ReportCard({ n }) {
+  const accent = KIND_COLOR[n.kind] || '#7f849c';
+  return (
+    <div style={{
+      border: '1px solid #262637', borderLeft: `4px solid ${accent}`,
+      borderRadius: 8, background: '#16161f',
+      padding: '11px 16px', display: 'flex', flexDirection: 'column', gap: 8,
+    }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+        <span style={{ color: accent, fontSize: 12 }}>ℹ</span>
+        <span style={{ fontSize: 12.5, fontWeight: 700, color: '#bac2de', fontFamily: FONT }}>
+          {n.worktreeName || '(名前不明)'}
+        </span>
+        {n.branchName && (
+          <span style={{ fontSize: 11, color: '#7f849c', fontFamily: MONO }}>{n.branchName}</span>
+        )}
+        {n.issueRef && (
+          <span style={{ fontSize: 11.5, color: '#7f849c', fontFamily: MONO }}>{n.issueRef}</span>
+        )}
+        <span style={{ fontSize: 10.5, color: '#585b70', fontFamily: MONO }}>{n.at}</span>
+        <Badge label={REPORT_KIND_LABEL[n.kind] || n.kind} color={accent} />
+        <div style={{ flex: 1 }} />
+        <Badge
+          label="報告のみ"
+          color="#6c7086"
+          title="人の判断を必要としないイベントなので、返答欄はありません（読むだけで完結します）" />
+      </div>
+      <div style={{
+        fontSize: 12.5, color: '#a6adc8', fontFamily: FONT,
+        lineHeight: 1.7, whiteSpace: 'pre-wrap',
+      }}>{bodyText(n)}</div>
+      {n.link && (
+        <a href={n.link} style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6, alignSelf: 'flex-start',
+          fontSize: 11.5, fontFamily: FONT, color: '#89b4fa', textDecoration: 'none',
+        }}>
+          <span>🔗</span>
+          <span style={{ textDecoration: 'underline' }}>{n.linkLabel || 'アーティファクトを開く'}</span>
+        </a>
+      )}
+    </div>
+  );
+}
+
+/**
  * Props:
  *   n        通知データ（data/report の 1 要素）
  *   answer   送信済みの記録（サイドカー）。未送信なら null
@@ -257,6 +326,13 @@ function OptionRadios({ n, draft, disabled, onPickOption }) {
  *   onPick / onNote / onDraft / onRetry
  */
 function NotificationCard({ n, answer, draft, blocked, canSend, inflight, busy, onPick, onNote, onDraft, onRetry }) {
+  // 報告のみのカードは別コンポーネントへ振る（#228）。
+  //
+  // **フックより前で返して問題ないのは `n.kind` が不変だから。** カードは
+  // `key={n.id}` でマウントされ、`data/report` はスナップショットなので、同じ
+  // インスタンスでこの分岐が反転することがない（フックの呼び出し順は保たれる）。
+  if (isReportOnly(n)) return <ReportCard n={n} />;
+
   const d = draft || {};
   const status = answer ? answer.status : 'pending';
   const accent = ACCENT[status] || ACCENT.pending;
@@ -376,7 +452,7 @@ function NotificationCard({ n, answer, draft, blocked, canSend, inflight, busy, 
 
       {/* 通知本文（人の判断に必要十分な全文） */}
       <div style={{ fontSize: 13, color: '#cdd6f4', fontFamily: FONT, lineHeight: 1.8, whiteSpace: 'pre-wrap' }}>
-        {n.body}
+        {bodyText(n)}
       </div>
 
       {/* 子ワークツリーのアーティファクトへの artifact:// リンク */}
@@ -694,7 +770,10 @@ function describeSent(n, answer) {
 }
 
 exports.default = NotificationCard;
+exports.ReportCard = ReportCard;
 exports.ACCENT = ACCENT;
 exports.PHASE_COLOR = PHASE_COLOR;
 exports.SHAPE_COLOR = SHAPE_COLOR;
+exports.KIND_COLOR = KIND_COLOR;
+exports.REPORT_KIND_LABEL = REPORT_KIND_LABEL;
 exports.Badge = Badge;

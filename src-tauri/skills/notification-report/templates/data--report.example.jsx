@@ -13,24 +13,61 @@
 //   callerWorktree (string) : レポートを置いたワークツリー名（購読の主体）
 //
 // ── NOTIFICATIONS 配列フィールド仕様 ─────────────────────────────────────
+// ── カードは 2 種類ある（#228） ──────────────────────────────────────────
+//
+// `kind` が `worktree.created` / `worktree.closed` のカードは**報告カード**で、
+// 人の判断を必要としない（返答 UI が出ない）。判定は `lib/send` の `isReportOnly`
+// が `kind` から機械的にやるので、**この配列にフラグを足す必要は無い**。
+// 報告カードで埋めるのは次の 6 つだけで、残りは省略してよい:
+//
+//   id / inboxIds / worktreeName / kind / at / body （+ 任意で branchName / worktreeId /
+//   issueRef / link / linkLabel）
+//
+// `body` は `oretachi_poll_inbox` の **`text`**（`format_inbox_line` の出力）をそのまま。
+// `body` フィールドの方はパース済みオブジェクトなので入れてはいけない（下の `body` の項参照）。
+//
+// **報告カードでは `sessionId` / `subscribed` / `prompt` / `desc` / `descFallback` /
+// `phase` / `phaseSummary` / `readAt` / `choices` を集めない。** 送信経路が無いので
+// 使われないうえ、`worktree.closed` は発信元ワークツリーが既に削除済みで
+// `oretachi_get_worktree_status` も `oretachi_read_terminal` も引けない。
+// `worktreeName` / `branchName` は**通知本文（`WorktreeClosedBody` /
+// `WorktreeCreatedBody`）に焼き付いている値**を使う。
+//
+// 配列は「要返答カード → 報告カード」の順に置く（`entry-point.jsx` が描画時にも
+// 同じ並べ替えをするが、同じ session への 2 枚目を塞ぐ `promptConflicts` は
+// **この配列の順**で先頭を生かすので、要返答カードの相対順序は崩さない）。
+//
 //   id            (string)   : カードの一意キー。inbox メッセージ ID をそのまま使ってよい
 //   inboxIds      (string[]) : このカードが束ねる inbox メッセージ ID。**生成時（Step 5.5）に
 //                              ack 済み**の記録で、レポート側からは ack しない（#219）
 //   worktreeName  (string)   : 発信元ワークツリー名（= 送信先）
-//   worktreeId    (string)   : 発信元ワークツリーID。**必須**。購読の突合と、生成時の
-//                              トレイ通知クリア（oretachi_clear_worktree_notification）に使う。
-//                              oretachi_poll_inbox の sourceWorktreeId をそのまま入れる（表示はしない）
+//   worktreeId    (string)   : 発信元ワークツリーID。**要返答カードでは必須**。購読の突合と、
+//                              生成時のトレイ通知クリア（oretachi_clear_worktree_notification）
+//                              に使う。oretachi_poll_inbox の sourceWorktreeId を
+//                              そのまま入れる（表示はしない）。
+//                              **報告カードでは任意**（#228）。購読の突合もトレイクリアも
+//                              しないので使い道が無い（`worktree.*` は showsBadge が false で
+//                              バッジを積まないため、クリアすると無関係なバッジだけが落ちる）
 //   sessionId     (number)   : 送信先の PTY セッションID。**null 可**（稼働中 AI 端末なし）
 //   subscribed    (boolean)  : callerWorktree がこの宛先を購読しているか。false なら送信不可表示
 //   issueRef      (string)   : `#187` など。無ければ省略可
 //   at            (string)   : 通知の到着時刻（`HH:MM`）
-//   kind          (string)   : general / approval / completed / hook
+//   kind          (string)   : general / approval / completed / hook / worktree.message
+//                              / worktree.created / worktree.closed。
+//                              **後ろ 2 つは報告カードになる**（返答 UI が出ない。#228）
+//   branchName    (string)   : 報告カード専用。通知本文の `branchName`。無ければ省略可
 //   desc          (string)   : ワークツリーの description。**未設定なら null**
 //   descFallback  (string)   : desc が null のとき、ターミナルから推定したミッション
 //   phase         (string)   : 設計中 / 実装中 / 実装完了 / レビュー対応中 / 停止条件待ち / 不明
 //   phaseSummary  (string)   : 現況の 1 行要約（ターミナル読み取りから）
 //   readAt        (string)   : ターミナルを読んだ時刻（`HH:MM`）
-//   body          (string)   : 通知本文。**要約せず全文を入れる**（人の判断材料）
+//   body          (string)   : 通知本文。**要約せず全文を入れる**（人の判断材料）。
+//                              **必ず文字列。** `oretachi_poll_inbox` の `body` は
+//                              パース済みの JSON オブジェクトで、人が読める 1 行は
+//                              別フィールドの `text` にある。オブジェクトを入れると
+//                              カードの `{n.body}` で React が throw し、エラー
+//                              バウンダリが無いのでレポート全体が描画不能になる。
+//                              報告カードでは `text` をそのまま入れる（#228）
 //   link          (string)   : 子アーティファクトへの `artifact://` リンク。無ければ null
 //   linkLabel     (string)   : リンクの表示名
 //   choices       (string[]) : 候補ボタン。**`prompt.shape` が `"text"` のときだけ使う。**
@@ -299,6 +336,39 @@ const NOTIFICATIONS = [
       fingerprint: 'd41128ba6c07e395',
       tail: ' ❯ 1. Yes\n\n Esc to cancel · Tab to amend',
     },
+  },
+  {
+    // ── 報告カード: ワークツリークローズ（#228）────────────────────────────
+    // **発信元がもう存在しない。** `oretachi_poll_inbox` の `sourceWorktreeName` /
+    // `sourceWorktreePath` は `null` になるので、名前とブランチは通知本文
+    // （`WorktreeClosedBody`）に焼き付いている値から取る。
+    // `sessionId` / `subscribed` / `prompt` / `desc` / `phase` は**集めない**
+    id: 'inbox-9a6',
+    inboxIds: ['inbox-9a6'],
+    worktreeName: 'oretachi-htlz',
+    worktreeId: '1788690000000-htlz',
+    branchName: 'worktree/issue-214',
+    at: '13:12',
+    kind: 'worktree.closed',
+    // `format_inbox_line` の出力そのまま（`oretachi_poll_inbox` の `text`）
+    body: "ワークツリー 'oretachi-htlz' （ブランチ: worktree/issue-214） がクローズされました",
+    link: null,
+    linkLabel: null,
+  },
+  {
+    // ── 報告カード: ワークツリー作成（#228）────────────────────────────────
+    // 作成直後なので description 未設定・AI 端末未起動が普通。現況は集めない
+    id: 'inbox-9a7',
+    inboxIds: ['inbox-9a7'],
+    worktreeName: 'oretachi-wnqd',
+    worktreeId: '1788750000000-wnqd',
+    branchName: 'worktree/issue-228',
+    at: '13:05',
+    kind: 'worktree.created',
+    // 先頭の `[oretachi] ` はリポジトリ名。`format_inbox_line` が付ける
+    body: "[oretachi] ワークツリー 'oretachi-wnqd' （ブランチ: worktree/issue-228） が作成されました",
+    link: null,
+    linkLabel: null,
   },
 ];
 
