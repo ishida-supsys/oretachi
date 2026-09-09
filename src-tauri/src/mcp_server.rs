@@ -7987,7 +7987,22 @@ mod tests {
     // ─── artifact / artifact_module の file_path（#229） ──────────────────
 
     /// `wt/` を許可ルート、`outside/` を範囲外として一組作る。
-    fn source_file_fixture(tag: &str) -> (PathBuf, PathBuf) {
+    /// `Drop` で `%TEMP%` の一式を消す。手で消さないと `oretachi-artifact-src-*` が
+    /// テスト実行ごとに溜まり続ける。**範囲外側にも本物の秘密っぽい中身は置かない**
+    /// （残留したときに実害のある文字列を temp へ書かないため）。
+    struct SourceFixture {
+        base: PathBuf,
+        wt: PathBuf,
+        outside: PathBuf,
+    }
+
+    impl Drop for SourceFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.base);
+        }
+    }
+
+    fn source_file_fixture(tag: &str) -> SourceFixture {
         let base = std::env::temp_dir().join(format!(
             "oretachi-artifact-src-{}-{}",
             std::process::id(),
@@ -7999,8 +8014,8 @@ mod tests {
         fs::create_dir_all(wt.join("templates")).unwrap();
         fs::create_dir_all(&outside).unwrap();
         fs::write(wt.join("templates").join("Panel.jsx"), "export const Panel = () => null\n").unwrap();
-        fs::write(outside.join("secret.env"), "TOKEN=hunter2\n").unwrap();
-        (wt, outside)
+        fs::write(outside.join("out-of-range.txt"), "out of range\n").unwrap();
+        SourceFixture { base, wt, outside }
     }
 
     fn read_within(roots: &[PathBuf], base: &str, file_path: &str) -> Result<String, McpError> {
@@ -8010,7 +8025,8 @@ mod tests {
     /// 相対パスはワークツリー追加先ディレクトリ基準で解決する。
     #[test]
     fn file_path_reads_relative_to_worktree_root() {
-        let (wt, _) = source_file_fixture("relative");
+        let fx = source_file_fixture("relative");
+        let wt = fx.wt.clone();
         let roots = vec![wt.clone()];
         let src = read_within(&roots, wt.to_str().unwrap(), "templates/Panel.jsx").unwrap();
         assert_eq!(src, "export const Panel = () => null\n");
@@ -8019,7 +8035,8 @@ mod tests {
     /// 許可ルート配下の絶対パスは通る。
     #[test]
     fn file_path_accepts_absolute_inside_root() {
-        let (wt, _) = source_file_fixture("absolute");
+        let fx = source_file_fixture("absolute");
+        let wt = fx.wt.clone();
         let roots = vec![wt.clone()];
         let abs = wt.join("templates").join("Panel.jsx");
         let src = read_within(&roots, wt.to_str().unwrap(), abs.to_str().unwrap()).unwrap();
@@ -8029,22 +8046,24 @@ mod tests {
     /// 許可ルートの外は絶対パスでも `..` でも読めない。ここが #229 の停止条件そのもの。
     #[test]
     fn file_path_rejects_paths_outside_allowed_roots() {
-        let (wt, outside) = source_file_fixture("outside");
+        let fx = source_file_fixture("outside");
+        let (wt, outside) = (fx.wt.clone(), fx.outside.clone());
         let roots = vec![wt.clone()];
-        let secret = outside.join("secret.env");
+        let outside_file = outside.join("out-of-range.txt");
 
-        let by_abs = read_within(&roots, wt.to_str().unwrap(), secret.to_str().unwrap());
+        let by_abs = read_within(&roots, wt.to_str().unwrap(), outside_file.to_str().unwrap());
         assert!(by_abs.is_err(), "範囲外の絶対パスが読めてしまった");
 
         // `..` は canonicalize で解決されるので、脱出できずに同じエラーになる
-        let by_dotdot = read_within(&roots, wt.to_str().unwrap(), "../outside/secret.env");
+        let by_dotdot = read_within(&roots, wt.to_str().unwrap(), "../outside/out-of-range.txt");
         assert!(by_dotdot.is_err(), "`..` で許可ルートの外へ出られてしまった");
     }
 
     /// BOM 付き UTF-8 は先頭の U+FEFF を落とす（そのまま JSX にすると構文エラーになる）。
     #[test]
     fn file_path_strips_utf8_bom() {
-        let (wt, _) = source_file_fixture("bom");
+        let fx = source_file_fixture("bom");
+        let wt = fx.wt.clone();
         let mut bytes = vec![0xEF, 0xBB, 0xBF];
         bytes.extend_from_slice(b"export default function App() {}\n");
         fs::write(wt.join("bom.jsx"), &bytes).unwrap();
@@ -8055,7 +8074,8 @@ mod tests {
     /// UTF-8 として読めないファイルは、握りつぶさずエラーにする。
     #[test]
     fn file_path_rejects_non_utf8() {
-        let (wt, _) = source_file_fixture("binary");
+        let fx = source_file_fixture("binary");
+        let wt = fx.wt.clone();
         fs::write(wt.join("blob.bin"), [0xFF, 0xFE, 0x00, 0x41]).unwrap();
         assert!(read_within(&vec![wt.clone()], wt.to_str().unwrap(), "blob.bin").is_err());
     }
@@ -8065,7 +8085,8 @@ mod tests {
     /// 素通しでもルート判定で fail-closed だが、契約が崩れて分かりにくいエラーになる。
     #[test]
     fn file_path_rejects_base_dropping_forms() {
-        let (wt, _) = source_file_fixture("basedrop");
+        let fx = source_file_fixture("basedrop");
+        let wt = fx.wt.clone();
         let roots = vec![wt.clone()];
         let base = wt.to_str().unwrap();
         for bad in ["", "   ", "C:foo", "\\bar", "/bar", r"\\?\C:\x"] {
@@ -8081,15 +8102,56 @@ mod tests {
     /// 解決してしまわない。
     #[test]
     fn file_path_relative_requires_base_dir() {
-        let (wt, _) = source_file_fixture("nobase");
+        let fx = source_file_fixture("nobase");
+        let wt = fx.wt.clone();
         let roots = vec![wt.clone()];
         assert!(read_within(&roots, "", "templates/Panel.jsx").is_err());
+    }
+
+    /// 上限を超えるファイルは読まない（巨大ファイルをアーティファクト JSON へ
+    /// 丸ごと埋め込む事故を防ぐ）。境界値の直下は通ること込みで確かめる。
+    #[test]
+    fn file_path_enforces_size_limit() {
+        let fx = source_file_fixture("size");
+        let wt = fx.wt.clone();
+        let roots = vec![wt.clone()];
+        let base = wt.to_str().unwrap();
+
+        let at_limit = vec![b'a'; ARTIFACT_SOURCE_FILE_MAX_BYTES as usize];
+        fs::write(wt.join("at-limit.txt"), &at_limit).unwrap();
+        assert!(read_within(&roots, base, "at-limit.txt").is_ok(), "上限ちょうどが弾かれた");
+
+        let over = vec![b'a'; ARTIFACT_SOURCE_FILE_MAX_BYTES as usize + 1];
+        fs::write(wt.join("over-limit.txt"), &over).unwrap();
+        assert!(read_within(&roots, base, "over-limit.txt").is_err(), "上限超えが通った");
+    }
+
+    /// 許可ルートが1つも解決できないときは fail-closed になる。
+    /// `worktreeBaseDir` 未設定 + プラグインディレクトリ未生成の dev 環境で、
+    /// 「ルートが空 = 無制限」に倒れると全ファイルが読めてしまう。
+    #[test]
+    fn file_path_fails_closed_when_no_root_resolves() {
+        let fx = source_file_fixture("noroot");
+        let wt = fx.wt.clone();
+        let abs = wt.join("templates").join("Panel.jsx");
+        // ルート候補はどれも存在しない → canonicalize に全部失敗する
+        let roots = vec![
+            wt.join("does-not-exist-a"),
+            wt.join("does-not-exist-b"),
+        ];
+        assert!(
+            read_within(&roots, wt.to_str().unwrap(), abs.to_str().unwrap()).is_err(),
+            "許可ルートが空のとき無制限に倒れた"
+        );
+        // 空スライスでも同じ
+        assert!(read_within(&[], wt.to_str().unwrap(), abs.to_str().unwrap()).is_err());
     }
 
     /// ディレクトリを渡されても中身を読もうとしない。
     #[test]
     fn file_path_rejects_directory() {
-        let (wt, _) = source_file_fixture("dir");
+        let fx = source_file_fixture("dir");
+        let wt = fx.wt.clone();
         assert!(read_within(&vec![wt.clone()], wt.to_str().unwrap(), "templates").is_err());
     }
 
