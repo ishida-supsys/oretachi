@@ -632,9 +632,17 @@ onMounted(async () => {
   ));
 
   // 自動承認チェック（notify-worktree トリガー）
-  collect(await appWindow.listen<{ additionalPrompt?: string; tray?: boolean }>("sub-try-auto-approve", async (event) => {
+  collect(await appWindow.listen<{ additionalPrompt?: string; tray?: boolean; autoApproval?: boolean }>("sub-try-auto-approve", async (event) => {
     if (event.payload.additionalPrompt !== undefined) {
       additionalPrompt.value = event.payload.additionalPrompt;
+    }
+    // **メインが載せてきた自動承認フラグを正とする（#263）。** メインは自動承認 ON の
+    // ワークツリーにしか投げてこないので、ローカルの写し（`sub-init` /
+    // `sub-set-auto-approval` 由来）がずれていてもここで復旧できる。写しがずれると
+    // 「メインでは ON なのにサブでは即 approved=false」という無言の停止になり、
+    // #256 で実際に踏んだ。ヘッダのバッジ表示もこれで実態に揃う。
+    if (event.payload.autoApproval !== undefined) {
+      autoApproval.value = event.payload.autoApproval;
     }
     // tray はイベント単位の属性。メイン側の通知判定へそのまま返す（#168）
     const tray = trayOf(event.payload);
@@ -659,7 +667,11 @@ onMounted(async () => {
       const terminalForApproval: TerminalForApproval[] = Array.from(terminalEntries.keys()).flatMap((tid) => {
         const ref = terminalRefs.get(tid);
         if (!ref) return [];
-        return [{ id: tid, getTerminal: () => ref.getTerminal(), write: (d: string) => ref.write(d) }];
+        // 承認の Enter は `writeLocked` で送る（#215）。メイン側（`useAppAutoApproval`）と
+        // 同じ理由で、`oretachi_answer_prompt` の「fingerprint 照合 → 矢印 → CR」区間や
+        // 配送の押し込みに素の write で CR を割り込ませると、移動途中の ❯ が指す選択肢を
+        // 確定させてしまう。ロックはサブウィンドウでも同じ session_id で共有される。
+        return [{ id: tid, getTerminal: () => ref.getTerminal(), write: (d: string) => ref.writeLocked(d) }];
       });
       loopResult = await runApprovalLoop(terminalForApproval, worktreeId, worktreePath, additionalPrompt.value);
     } finally {

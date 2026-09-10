@@ -285,6 +285,17 @@ describe("useAppAutoApproval: サブウィンドウ経由", () => {
     );
   });
 
+  it("sub-try-auto-approve に自動承認フラグを載せて渡す（サブ側の写しのずれを毎回上書きする・#263）", async () => {
+    const h = await setup();
+    h.detached.value = true;
+    await h.notify({ tray: true });
+    expect(emitToMock).toHaveBeenLastCalledWith(
+      `sub-${WT_ID}`,
+      "sub-try-auto-approve",
+      expect.objectContaining({ autoApproval: true }),
+    );
+  });
+
   it("sub-auto-approve-result はイベント単位の tray で判定する", async () => {
     const h = await setup();
     await h.subResult({ approved: false, tray: true });
