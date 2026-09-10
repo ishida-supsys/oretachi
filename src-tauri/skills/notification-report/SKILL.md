@@ -1,7 +1,7 @@
 ---
 name: notification-report
 description: 購読しているワークツリーから通知が溜まったときに、関連する通知の一覧を読んでレポートアーティファクトを作成する。人はレポートを見るだけで、ターミナルを1つずつ開かずに溜まった通知へ一括でクイックに返答できる。ホームタブや teamwork-parent の親ワークツリーからの利用を想定。ユーザーが「通知をまとめて確認したい」「溜まった通知にまとめて返したい」等と言ったときに使う。
-allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__plugin_oretachi_oretachi__oretachi_subscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_worktree_notifications, mcp__plugin_oretachi_oretachi__oretachi_poll_inbox, mcp__plugin_oretachi_oretachi__oretachi_ack_message, mcp__plugin_oretachi_oretachi__oretachi_clear_worktree_notification, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp__plugin_oretachi_oretachi__oretachi_list_terminals, mcp__plugin_oretachi_oretachi__oretachi_read_terminal, mcp__plugin_oretachi_oretachi__oretachi_inspect_prompt, mcp__plugin_oretachi_oretachi__notify_worktree, mcp__plugin_oretachi_oretachi__artifact, mcp__plugin_oretachi_oretachi__artifact_module, mcp__plugin_oretachi_oretachi__artifact_store, mcp__plugin_oretachi_oretachi__search_artifact, Read, Glob, Grep, Bash(gh issue view:*), Bash(gh pr view:*), Bash(gh repo view:*), Bash(git log:*), Bash(git diff:*), Bash(git show:*)
+allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__plugin_oretachi_oretachi__oretachi_subscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_worktree_notifications, mcp__plugin_oretachi_oretachi__oretachi_poll_inbox, mcp__plugin_oretachi_oretachi__oretachi_ack_message, mcp__plugin_oretachi_oretachi__oretachi_clear_worktree_notification, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp__plugin_oretachi_oretachi__oretachi_list_terminals, mcp__plugin_oretachi_oretachi__oretachi_read_terminal, mcp__plugin_oretachi_oretachi__oretachi_inspect_prompt, mcp__plugin_oretachi_oretachi__notify_worktree, mcp__plugin_oretachi_oretachi__artifact, mcp__plugin_oretachi_oretachi__artifact_module, mcp__plugin_oretachi_oretachi__artifact_store, mcp__plugin_oretachi_oretachi__search_artifact, Read, Glob, Grep, Bash(gh issue view:*), Bash(gh pr view:*), Bash(gh repo view:*)
 ---
 
 # notification-report スキル
@@ -15,11 +15,14 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__
   `fields` / `links` / `request` へ入れ、カードが HTML として組む。折りたたみで生データを
   残すのもやらない（畳んであっても「読めないものが置いてある」ことに変わりはない）。
 - **整形の材料が足りなければ取りに行く（#264）。** ①ターミナルを読む（1-4b/1-4c）→
-  ②それでも足りなければ**このセッションから該当ワークツリーを直接見に行く**
-  （`gh issue view`、そのワークツリーの `git log` / `git diff`、ファイル、`search_artifact`）。
+  ②それでも足りなければ**このセッションから該当ワークツリーを直接見に行く**。
+  見に行ってよいのは **issue（`gh issue view` / `gh pr view`）・ファイル（`Read` /
+  `Glob` / `Grep`）・アーティファクト（`search_artifact`）の 3 つだけ**。
   それでも分からない項目は「不明」と明示する。**推測で埋めない。**
-  使える shell は読み取り専用のものだけに絞ってある（`allowed-tools` 参照）
-  —— **調べに行くのであって、他のワークツリーに手を入れるのではない。**
+- **git は使わない。** `Bash` の権限は前方一致でしか絞れないので、他ワークツリーを
+  見るのに要る `git -C` を許すと `git -C <path> push --force` まで無確認で通る。
+  自分のワークツリーに閉じた `git log` を許しても**発信元の状況は分からない**ので、
+  用途も無い。差分の規模が要るなら `gh pr view`、無ければ「不明」と書く。
 - **`approval` の通知本文には聞かれていることが全部入っている（#264）。** `PermissionRequest`
   フックの JSON なので `tool_name` と `tool_input` が丸ごと来る。`AskUserQuestion` なら
   **全設問・全選択肢・`description`・`preview` まで**。一方ターミナルの画面は 1 問ずつしか
@@ -368,15 +371,17 @@ request: {
 
 **(c) 埋まらない項目は「不明」と書く**
 
-フック JSON からもターミナルからも取れないときは、このセッションから `gh issue view <番号>` / `gh pr view <番号>`、`search_artifact`、
-そして**発信元ワークツリーのファイルを直接読む**（`Read` / `Glob` / `Grep` に
+フック JSON からもターミナルからも取れないときは、このセッションから
+`gh issue view <番号>` / `gh pr view <番号>`、`search_artifact`、そして
+**発信元ワークツリーのファイルを直接読む**（`Read` / `Glob` / `Grep` に
 `sourceWorktreePath` 配下のパスを渡す。`sourceWorktreePath` は 1-2 の
 `oretachi_poll_inbox` が返している）。
 
-**他ワークツリーの git 履歴は shell からは引かない。** `allowed-tools` の `Bash` は
-前方一致でしか絞れず、他ワークツリーを見るのに要る `git -C` を許すと
-`git -C <path> push --force` まで無確認で通ってしまう。履歴が要るときは
-`gh pr view` とアーティファクト、ターミナル出力で補う。それでも分からなければ**推測せず**「不明」と明示する。
+**発信元ワークツリーへ触れてよいのはこの 3 つだけ。** git は使わない（`Bash` の
+権限は前方一致でしか絞れず、他ワークツリーを見るのに要る `git -C` を許すと
+`git -C <path> push --force` まで無確認で通る）。差分の規模のような git 由来の
+情報が要るときは `gh pr view` で足り、それでも分からなければ**推測せず**
+「不明」と明示する。
 
 ### 1-5. 送信先の session_id を決める
 
@@ -733,7 +738,7 @@ await callTool('oretachi_write_terminal', { session_id, text: '\r', submit: fals
 - **`locked_while_open` の拒否で新規レポートの作成を諦めない。** ロックは ID 単位なので、ID を変えれば必ず通る。「リトライしても成功しない」は同じ ID への再試行の話（#220）。
 - **`include_acked: true` の結果をそのまま全件カード化しない。** 30 日ぶんの履歴が返るので、返答済みの通知が再びカードになり、同じ返答を宛先へ二重送信しうる。作り直しの対象は前回レポートの `data/report` の `inboxIds` に限る（#220）。
 - **購読していないワークツリーをレポートに載せない。** 返答を送れないカードになる。ユーザーの指示なしに購読を張って範囲を広げるのもしない。
-- **生データ（hook JSON / 画面のダンプ）をカードに載せない（#264）。** 折りたたんで残すのも駄目。読めないからレポートを作っている。整形の材料が足りなければ、ターミナル → 該当ワークツリーの issue / git / アーティファクトの順に取りに行き、それでも分からない項目は「不明」と書く。
+- **生データ（hook JSON / 画面のダンプ）をカードに載せない（#264）。** 折りたたんで残すのも駄目。読めないからレポートを作っている。整形の材料が足りなければ、ターミナル → 該当ワークツリーの issue / ファイル（`Read`）/ アーティファクトの順に取りに行き、それでも分からない項目は「不明」と書く。**git は使わない。**
 - **人の判断に要る情報を落とさない。** 「整形する」は「削る」ではない。承認対象のコマンド全文、設問文、選択肢の `description` と `preview` は**全文**を入れる。削ってよいのは `session_id` / `transcript_path` のような人が使わないフック内部の値だけ。
 - **`AskUserQuestion` で `request.questions` を入れ忘れない（#264）。** 画面から読めた 1 問だけのカードになり、2 問目以降に答えられなくなる。
 - **`request.questions` の選択肢を並べ替えない・間引かない（#264）。** カードは i 番目を画面の i+1 番として送るので、順番が崩れると別の選択肢を確定する。
