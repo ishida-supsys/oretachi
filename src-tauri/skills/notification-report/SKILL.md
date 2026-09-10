@@ -1,7 +1,7 @@
 ---
 name: notification-report
 description: 購読しているワークツリーから通知が溜まったときに、関連する通知の一覧を読んでレポートアーティファクトを作成する。人はレポートを見るだけで、ターミナルを1つずつ開かずに溜まった通知へ一括でクイックに返答できる。ホームタブや teamwork-parent の親ワークツリーからの利用を想定。ユーザーが「通知をまとめて確認したい」「溜まった通知にまとめて返したい」等と言ったときに使う。
-allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__plugin_oretachi_oretachi__oretachi_subscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_worktree_notifications, mcp__plugin_oretachi_oretachi__oretachi_poll_inbox, mcp__plugin_oretachi_oretachi__oretachi_ack_message, mcp__plugin_oretachi_oretachi__oretachi_clear_worktree_notification, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp__plugin_oretachi_oretachi__oretachi_list_terminals, mcp__plugin_oretachi_oretachi__oretachi_read_terminal, mcp__plugin_oretachi_oretachi__oretachi_inspect_prompt, mcp__plugin_oretachi_oretachi__notify_worktree, mcp__plugin_oretachi_oretachi__artifact, mcp__plugin_oretachi_oretachi__artifact_module, mcp__plugin_oretachi_oretachi__artifact_store, mcp__plugin_oretachi_oretachi__search_artifact, Read, Glob, Grep, Bash(gh issue view:*), Bash(gh pr view:*), Bash(gh repo view:*), Bash(git log:*), Bash(git diff:*), Bash(git show:*)
+allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__plugin_oretachi_oretachi__oretachi_subscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_worktree_notifications, mcp__plugin_oretachi_oretachi__oretachi_poll_inbox, mcp__plugin_oretachi_oretachi__oretachi_ack_message, mcp__plugin_oretachi_oretachi__oretachi_clear_worktree_notification, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp__plugin_oretachi_oretachi__oretachi_list_terminals, mcp__plugin_oretachi_oretachi__oretachi_read_terminal, mcp__plugin_oretachi_oretachi__oretachi_inspect_prompt, mcp__plugin_oretachi_oretachi__notify_worktree, mcp__plugin_oretachi_oretachi__artifact, mcp__plugin_oretachi_oretachi__artifact_module, mcp__plugin_oretachi_oretachi__artifact_store, mcp__plugin_oretachi_oretachi__search_artifact, Read, Glob, Grep, Bash(gh issue view:*), Bash(gh pr view:*), Bash(gh repo view:*), Bash(git -C:*), Bash(git log:*), Bash(git diff:*), Bash(git show:*)
 ---
 
 # notification-report スキル
@@ -369,8 +369,10 @@ request: {
 **(c) 埋まらない項目は「不明」と書く**
 
 フック JSON からもターミナルからも取れないときは、このセッションから
-`gh issue view <番号>`、そのワークツリーの `git log --oneline -5` / `git diff --stat`、
-`search_artifact` を直接叩いて補う。それでも分からなければ**推測せず**「不明」と明示する。
+`gh issue view <番号>`、`search_artifact`、そして**発信元ワークツリーの git**を
+直接叩いて補う。git は自分のワークツリーではないので `-C` が要る
+（`git -C <sourceWorktreePath> log --oneline -5` / `git -C <path> diff --stat`）。
+`sourceWorktreePath` は 1-2 の `oretachi_poll_inbox` が返している。それでも分からなければ**推測せず**「不明」と明示する。
 
 ### 1-5. 送信先の session_id を決める
 

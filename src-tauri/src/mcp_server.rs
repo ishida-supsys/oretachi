@@ -3939,6 +3939,34 @@ impl NotifyService {
         self.settle_until(session_id, |p| p.fingerprint != before).await
     }
 
+    /// **描き終わった**画面を読む（#264）。
+    ///
+    /// 1 回読んだだけでは、再描画の途中（上半分だけ新しい）を掴みうる。
+    /// キー列は「画面の選択肢の並び」と「`❯` の位置」から組み立てるので、
+    /// 破れたフレームで組むと**前の設問の並びから矢印の回数を出す**ことになる。
+    /// fingerprint が 2 回続けて同じになるまで待つ。
+    ///
+    /// 待ちきれなかった場合は最後に読めたものを返す（呼び出し側の fingerprint
+    /// 照合と「同じ設問へ 2 回送らない」ガードが最後の防波堤になる）。
+    async fn inspect_stable(
+        &self,
+        session_id: u32,
+    ) -> Result<crate::prompt_parser::ParsedPrompt, McpError> {
+        let deadline = tokio::time::Instant::now() + ANSWER_SETTLE_MAX;
+        let mut prev = self.inspect_screen(session_id)?.0;
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(prev);
+            }
+            tokio::time::sleep(ANSWER_POLL_INTERVAL).await;
+            let now = self.inspect_screen(session_id)?.0;
+            if now.fingerprint == prev.fingerprint {
+                return Ok(now);
+            }
+            prev = now;
+        }
+    }
+
     /// `done` が真になるまで画面を読み直す（#264）。
     ///
     /// [`settle_after_keys`] は「fingerprint が変わったか」で待つが、複数設問の
@@ -3960,13 +3988,23 @@ impl NotifyService {
             tokio::time::sleep(ANSWER_POLL_INTERVAL).await;
             let now = self.inspect_screen(session_id).ok().map(|t| t.0);
             if let Some(p) = &now {
-                if done(p) {
+                // **描き終わるまで返さない。** ターミナルの再描画は上から順なので、
+                // 「タブバー（上）は次の設問なのに選択肢一覧（下）はまだ前の設問」
+                // という破れフレームを掴みうる。しかも**タブが進んだ直後の正常な
+                // 画面には `❯` が描かれない**（実測）ため、破れフレームの方だけが
+                // `❯` を持ち、`plan_keys` はそちらでこそ成功して**前の設問の並びと
+                // カーソルから矢印の回数を組み立てる**（6 回目のセルフレビューで検出）。
+                //
+                // fingerprint が 2 回続けて同じなら描き終わっているとみなす。
+                let stable = last.as_ref().is_some_and(|l| l.fingerprint == p.fingerprint);
+                if done(p) && stable {
                     return (now, true);
                 }
             }
             last = now.or(last);
             if tokio::time::Instant::now() >= deadline {
-                return (last, false);
+                let ok = last.as_ref().is_some_and(|p| done(p));
+                return (last, ok);
             }
         }
     }
@@ -4057,8 +4095,10 @@ impl NotifyService {
         let mut last_qidx: Option<usize> = None;
 
         for step in 0..SELECT_ALL_MAX_STEPS {
-            let parsed = match self.inspect_screen(session_id) {
-                Ok((p, ..)) => p,
+            // **描き終わった画面で判断する。** 破れフレームで選択肢の並びと `❯` を
+            // 読むと、前の設問の並びから矢印の回数を組み立てることになる（#264）
+            let parsed = match self.inspect_stable(session_id).await {
+                Ok(p) => p,
                 Err(e) => {
                     // 既にキーを送ったあとで読めなくなった場合、`?` で投げると
                     // 「何問目まで確定したか」が呼び出し元へ返らない

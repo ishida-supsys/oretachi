@@ -372,7 +372,24 @@ pub fn select_all_progressed(before: &ParsedPrompt, after: &ParsedPrompt) -> boo
     if after.shape == PromptShape::Text {
         return true;
     }
+    // **確認画面へ着いたのも「進んだ」。** タブバーが解析窓の外へ流れた確認画面では
+    // `tabs` が空になるので `☒` の数では進捗を測れず、最終設問に答えた直後に
+    // 3 秒待って `unverified` になっていた（6 回目のセルフレビューで検出）。
+    // 宛先は確認画面で止まったまま、カードは読み取り専用で再送もできない
+    if is_submit_review_screen(after) {
+        return true;
+    }
     answered_tabs(after) > answered_tabs(before)
+}
+
+/// 全問回答後の確認画面か（タブバーが読めていてもいなくても判定できる形）。
+fn is_submit_review_screen(parsed: &ParsedPrompt) -> bool {
+    if parsed.tabs.iter().any(|t| t.is_submit)
+        && parsed.tabs.iter().all(|t| t.is_submit || t.answered)
+    {
+        return true;
+    }
+    contains_ci(&parsed.header, SUBMIT_REVIEW_HEADING) && has_submit_option(parsed)
 }
 
 /// 回答済み（`☒`）のタブ数。`✔ Submit` は数えない。
@@ -425,22 +442,13 @@ pub fn plan_select_all_step(
 
     // タブバーを読めなくても、見出しと `Submit answers` の並びで確認画面と分かる
     // （#264。タブバーが画面外へ流れると `tabs` が空になる）
-    let review_without_tabs = parsed.tabs.is_empty()
-        && contains_ci(&parsed.header, SUBMIT_REVIEW_HEADING)
-        && parsed
-            .questions
-            .first()
-            .is_some_and(|q| q.options.iter().any(|o| o.label.to_lowercase().starts_with("submit")));
-    let on_review = review_without_tabs
-        || (parsed.tabs.iter().any(|t| t.is_submit)
-            && parsed.tabs.iter().all(|t| t.is_submit || t.answered));
+    let on_review = is_submit_review_screen(parsed);
     if on_review {
         // **見出しでも裏取りする。** 「Submit タブがあって全部 ☒」だけを条件に
         // `submit` を含むラベルを探すと、人がタブを戻して回答済みの設問を表示していて
         // その設問に `Submit for review` のような選択肢があったときに別のものを確定する。
         // 確認画面の見出しは `Ready to submit your answers?`（実測）
         let heading_ok = contains_ci(&parsed.header, "submit");
-        debug_assert!(!review_without_tabs || heading_ok);
         let submit = parsed
             .questions
             .first()
@@ -747,9 +755,17 @@ fn strip_cursor_marker(s: &str) -> (&str, bool) {
 /// 押すと CR が入力欄へ入って**下書きがそのまま宛先へ送信される**。
 /// そこで行単体ではなく**罫線で挟まれた箱**として見て、箱の最初の非空行が
 /// 入力欄の記号で始まっていれば箱の中の行を全部除外する。
-fn is_input_box_line(lines: &[&str], i: usize) -> bool {
+fn is_input_box_line(lines: &[&str], i: usize, screen_has_dialog_footer: bool) -> bool {
     /// 入力欄の箱として許す高さ（罫線までの行数）。長すぎるとダイアログを巻き込む
     const INPUT_BOX_MAX_LINES: usize = 8;
+
+    // **ダイアログのフッタが出ている画面では入力欄扱いにしない。**
+    // 見出しの無い枠付きダイアログ（枠のすぐ下が `❯ 1. Yes`）を丸ごと落として
+    // しまうため（6 回目のセルフレビューで検出）。入力欄しか出ていない画面の
+    // フッタは `esc to interrupt` などで、ここで見る語とは重ならない
+    if screen_has_dialog_footer {
+        return false;
+    }
 
     let rule_at = |j: usize| -> bool {
         let (b, _) = strip_frame(lines[j]);
@@ -878,7 +894,11 @@ fn split_heading_and_context(above: &[String]) -> (String, String) {
 /// - タブが 1 つだけ（単一設問）のときは、**呼び出し側が
 ///   「`AskUserQuestion` のフッタが出ている」「選択肢のすぐ上にある」を追加で確かめる**
 fn is_strong_tab_bar(tabs: &[QuestionTab], body: &str) -> bool {
-    tabs.len() >= 2 || body.contains('←') || body.contains('→') || tabs.iter().any(|t| t.is_submit)
+    // **「チェックボックスが 2 つ以上」を強い印にしない。** 行頭がチェックボックスの
+    // 散文（`☒ A と ☐ B のどちらか`）が強い候補に化けて、ラベル長の条件を
+    // すり抜ける（6 回目のセルフレビューで検出）。本物の複数設問タブバーには
+    // 必ず送り記号（`←` / `→`）か `✔ Submit` が付く（実測）
+    body.contains('←') || body.contains('→') || tabs.iter().any(|t| t.is_submit)
 }
 
 /// タブのラベルとして許す最大文字数。
@@ -908,11 +928,14 @@ fn looks_like_tab_bar_line(tabs: &[QuestionTab], body: &str) -> bool {
 }
 
 /// 画面に `Submit answers` の選択肢があるか（確認画面が残っている印）。
+///
+/// **`submit` の前方一致では広すぎる。** 素の番号リストの `1. Submit for review` で
+/// 発火して、全問確定できているのに `unverified` になる（6 回目のセルフレビュー）。
 fn has_submit_option(parsed: &ParsedPrompt) -> bool {
     parsed
         .questions
         .first()
-        .is_some_and(|q| q.options.iter().any(|o| o.label.to_lowercase().starts_with("submit")))
+        .is_some_and(|q| q.options.iter().any(|o| contains_ci(&o.label, "submit answers")))
 }
 
 fn push_tab(tabs: &mut Vec<QuestionTab>, answered: bool, is_submit: bool, label: String) {
@@ -1137,6 +1160,7 @@ fn find_last_option_run(lines: &[&str]) -> Option<OptionRun> {
 /// `preview_col` が `Some` なら各行をその表示桁で切ってから解析する
 /// （横並びのプレビュー枠を切り離す）。
 fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<OptionRun> {
+    let screen_has_dialog_footer = has_dialog_footer(lines);
     let cut = |line: &str| -> String {
         match preview_col {
             Some(col) => cut_at_column(line, col),
@@ -1148,7 +1172,7 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
     let mut i = 0usize;
     while i < lines.len() {
         // 入力欄に `1. …` と打ち込んだ行を選択肢として拾わない（`is_input_box_line` 参照）
-        if is_input_box_line(lines, i) {
+        if is_input_box_line(lines, i, screen_has_dialog_footer) {
             i += 1;
             continue;
         }
@@ -1301,6 +1325,24 @@ fn find_unnumbered_escape(
     None
 }
 
+/// 画面のどこかに Claude Code の**ダイアログ**のフッタがあるか。
+///
+/// 入力欄だけの画面のフッタ（`esc to interrupt` / `auto mode on`）とは語が重ならない。
+fn has_dialog_footer(lines: &[&str]) -> bool {
+    let tail_start = lines.len().saturating_sub(TAIL_WINDOW);
+    let joined = lines[tail_start..]
+        .iter()
+        .map(|l| strip_frame(l).0)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    is_ask_user_question_footer(&joined)
+        || contains_ci(&joined, "tab to amend")
+        || contains_ci(&joined, "esc to cancel")
+}
+
 /// `AskUserQuestion` のフッタ（実測: `Enter to select · Tab/Arrow keys to navigate · Esc to cancel`）。
 fn is_ask_user_question_footer(s: &str) -> bool {
     contains_ci(s, "enter to select") && contains_ci(s, "to navigate")
@@ -1391,7 +1433,9 @@ fn looks_like_free_input(tail: &[&str]) -> Option<FreeInputKind> {
         }
         // **入力欄の判定を選択肢判定より先に行う。** 実機の入力欄は `❯1. …` のように
         // 選択肢行と同じ形になりうるので、位置（上下が罫線）で先に確定させる
-        if is_input_box_line(tail, i) {
+        // ここは `tail`（画面末尾）だけを見ている場面なので、ダイアログの
+        // フッタ判定も同じ範囲で取る
+        if is_input_box_line(tail, i, has_dialog_footer(tail)) {
             return Some(FreeInputKind::ClaudeCodeBox);
         }
         // 選択肢行は入力欄ではない（上の不変条件）。ここで打ち切って `Unknown` へ倒す
@@ -2732,6 +2776,69 @@ mod tests {
         // カーソルが要るのは矢印で答える画面だけ。ここは `❯` もフッタも無いので
         // 素の番号リスト（数字 + CR）として扱われ、そちらは影響を受けない
         assert_eq!(p.navigation, Navigation::Digits);
+    }
+
+    /// タブバーが解析窓の外へ流れた確認画面への遷移を「進んだ」と読む
+    /// （6 回目のセルフレビューで検出）。
+    ///
+    /// 読めないと、最終設問に答えた直後に 3 秒待って `unverified` になり、
+    /// 宛先は確認画面で止まったまま、カードは読み取り専用で再送もできない。
+    #[test]
+    fn reaching_a_tabless_review_screen_counts_as_progress() {
+        let before = parse_prompt(&multi_question_second_screen());
+        let after = parse_prompt(
+            "Review your answers\n\n ● Which color?\n   → Red\n\nReady to submit your answers?\n\n❯ 1. Submit answers\n  2. Cancel",
+        );
+        assert!(after.tabs.is_empty(), "タブバーは画面に無い");
+        assert_eq!(answered_tabs(&after), 0, "`☒` の数では進捗を測れない");
+        assert!(select_all_progressed(&before, &after));
+        assert_eq!(
+            plan_select_all_step(&after, &[1, 1], Some(1)),
+            SelectAllStep::Submit { option_index: 1 }
+        );
+    }
+
+    /// 見出しの無い枠付きダイアログを入力欄と誤認しない（6 回目のセルフレビュー）。
+    ///
+    /// 誤認すると選択肢もタブバーも丸ごと落ちて `unknown` になり、答えられなくなる。
+    #[test]
+    fn a_framed_dialog_without_a_heading_is_not_an_input_box() {
+        let screen = [
+            "╭─────────────────────────────╮",
+            "❯ 1. Yes",
+            "  2. No, and tell Claude what to do differently (esc)",
+            "╰─────────────────────────────╯",
+            "  Esc to cancel · Tab to amend",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.questions.first().map(|q| q.options.len()), Some(2), "shape={:?}", p.shape);
+        assert_eq!(p.navigation, Navigation::Arrows);
+    }
+
+    /// 行頭がチェックボックスの散文はタブバーに化けない（6 回目のセルフレビュー）。
+    #[test]
+    fn prose_starting_with_a_checkbox_is_not_a_strong_tab_bar() {
+        let screen = [
+            "☒ 完了したもの と ☐ 未完了 のどちらを先に片付けますか",
+            "",
+            "  1) staging",
+            "  2) production",
+            "Selection: ",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert!(p.tabs.is_empty(), "tabs={:?}", p.tabs);
+        assert_eq!(p.navigation, Navigation::Digits);
+    }
+
+    /// 素の番号リストの `Submit for review` で誤って `Refuse` しない
+    /// （6 回目のセルフレビュー）。
+    #[test]
+    fn a_submit_lookalike_in_a_bare_list_does_not_block_completion() {
+        let p = parse_prompt("Pick:\n  1) Submit for review\n  2) Merge directly\nSelection: ");
+        assert_ne!(p.shape, PromptShape::AskUserQuestion);
+        assert_eq!(plan_select_all_step(&p, &[1], Some(0)), SelectAllStep::Done);
     }
 
     #[test]
