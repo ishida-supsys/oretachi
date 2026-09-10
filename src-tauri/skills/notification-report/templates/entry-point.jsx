@@ -11,7 +11,9 @@ const {
   sendOne,
   sendEnter,
   answerPrompt,
+  answerAll,
   isDialog,
+  isQuestionForm,
   isReportOnly,
   promptConflicts,
 } = require('./lib/send');
@@ -120,15 +122,22 @@ function App() {
         let rec;
         if (isDialog(n)) {
           // ダイアログ経路。**キー列は Rust 側が送信直前の画面から組み立て直す。**
-          // ここで組み立てて渡すと「読んだ画面」と「キーが届く画面」がずれる
-          result = await answerPrompt(n, d);
+          // ここで組み立てて渡すと「読んだ画面」と「キーが届く画面」がずれる。
+          //
+          // 通知由来の設問フォーム（複数設問の AskUserQuestion）は
+          // `answerAll` が 1 回の呼び出しで全問 + Submit まで面倒を見る（#264）。
+          // ESC で抜ける下書きだけは設問フォームでも従来の経路を使う
+          const useAll = isQuestionForm(n) && d.mode !== 'escapeThenText';
+          result = useAll ? await answerAll(n, d) : await answerPrompt(n, d);
           rec = {
-            mode: d.mode || 'select',
+            mode: useAll ? 'selectAll' : (d.mode || 'select'),
             optionIndex: typeof d.optionIndex === 'number' ? d.optionIndex : null,
+            picks: useAll ? { ...(d.picks || {}) } : null,
             value: d.value || null,
             note: (d.note || '').trim(),
             status: result.status,
             keysSent: result.keysSent || [],
+            answeredCount: typeof result.answeredCount === 'number' ? result.answeredCount : null,
             afterShape: result.afterShape || null,
             at: nowLabel(),
           };
@@ -238,10 +247,11 @@ function App() {
           }}>
             <b>ダイアログで止まっている宛先が {dialogCount} 件あります。</b>
             これらのカードは自由テキストではなく<b>キー操作</b>で回答します（テキストを送るとダイアログに吸われ、
-            末尾の Enter が意図しない選択肢の確定として解釈されるため）。選択肢は<b>宛先の画面に実在するものだけ</b>を
-            出しており、送信前にキー列をプレビューできます。送信直前に画面が変わっていた場合は
-            <b>何も送らず「画面が変わった」と表示</b>されます（そのときは AI にレポートの作り直しを頼んでください。
-            既読化済みの通知も拾い直せるようになっています）。
+            末尾の Enter が意図しない選択肢の確定として解釈されるため）。選択肢は<b>宛先が実際に提示しているものだけ</b>で、
+            レポート側で候補を創作することはありません。複数設問の設問カードは<b>全問まとめて答えられ</b>、
+            送信すると 1 問ずつ画面を読み直しながら最後の確定まで進めます。
+            送信直前に画面が変わっていた場合は<b>何も送らず「画面が変わった」と表示</b>されます
+            （そのときは AI にレポートの作り直しを頼んでください。既読化済みの通知も拾い直せるようになっています）。
           </div>
         )}
 
@@ -267,6 +277,7 @@ function App() {
           <NotificationCard
             key={n.id}
             n={n}
+            meta={META}
             answer={answers[n.id] || null}
             draft={drafts[n.id]}
             blocked={blockedFor(n)}

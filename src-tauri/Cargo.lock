@@ -3675,6 +3675,7 @@ dependencies = [
  "tauri-plugin-updater",
  "tauri-plugin-window-state",
  "tokio",
+ "unicode-width",
  "uuid",
  "vt100",
  "webview2-com",

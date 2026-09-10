@@ -71,6 +71,9 @@ sysinfo = "0.38"
 tauri-plugin-prevent-default = "4"
 tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp" }
 vt100 = "0.16"
+# 画面の「桁」を数えるのに使う（prompt_parser）。CJK は 1 文字 2 桁なので
+# 文字数で数えると横並びのプレビュー枠の桁が行ごとにずれる
+unicode-width = "0.2"
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 libc = "0.2"

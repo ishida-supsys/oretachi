@@ -4,6 +4,19 @@
 // 通知・ワークツリー情報から新規生成する。**レポートの唯一のデータソース**で、
 // レポートを開いている間は表示中ロックで更新できない（スナップショット）。
 //
+// ══ 大原則: カードは画面の写しではなくフォーム（#264）════════════════════
+//
+// **生データ（hook JSON / 画面のダンプ）をカードに載せない。** それが読めないから
+// レポートを作っている。折りたたみで残すのもやらない。生成側が構造化して入れる:
+//
+//   paragraphs / bullets / fields / links   ← 人が読む本文
+//   request                                  ← 「何を聞かれているか」（通知の hook JSON 由来）
+//   prompt                                   ← 送信直前の照合用（表示には使わない）
+//
+// 材料が足りないときは **①ターミナルを読む → ②該当ワークツリーの issue / git /
+// アーティファクトを直接見に行く** で埋める。それでも分からない項目は「不明」と
+// 明示する（推測を書かない）。
+//
 // ── META フィールド仕様 ──────────────────────────────────────────────────
 //   reportId       (string) : アーティファクトID と同じ値。送信テキストの先頭に入る
 //   generatedAtMs  (number) : レポートの基準時刻（epoch ms）。**載せた通知のうち最大の
@@ -11,6 +24,10 @@
 //                             （このセッションには時刻が渡っていない。#220）。
 //                             表示用の整形は entry-point 側の `generatedLabel` がやる
 //   callerWorktree (string) : レポートを置いたワークツリー名（購読の主体）
+//   repoUrl        (string) : リポジトリの URL（`https://github.com/<owner>/<repo>`）。
+//                             本文中の `#203` と `issueRef` をこれでリンクにする。
+//                             **分からなければ省略する**（当てずっぽうのリンクは張らない。
+//                             省略すると `#203` はコード表記のまま出る）。#264
 //
 // ── NOTIFICATIONS 配列フィールド仕様 ─────────────────────────────────────
 // ── カードは 2 種類ある（#228） ──────────────────────────────────────────
@@ -18,18 +35,15 @@
 // `kind` が `worktree.created` / `worktree.closed` のカードは**報告カード**で、
 // 人の判断を必要としない（返答 UI が出ない）。判定は `lib/send` の `isReportOnly`
 // が `kind` から機械的にやるので、**この配列にフラグを足す必要は無い**。
-// 報告カードで埋めるのは次の 6 つだけで、残りは省略してよい:
+// 報告カードで埋めるのは次の 6 つだけ:
 //
-//   id / inboxIds / worktreeName / kind / at / body （+ 任意で branchName / worktreeId /
-//   issueRef / link / linkLabel）
+//   id / inboxIds / worktreeName / kind / at / paragraphs
+//   （+ 任意で branchName / worktreeId / issueRef / links）
 //
-// `body` は `oretachi_poll_inbox` の **`text`**（`format_inbox_line` の出力）をそのまま。
-// `body` フィールドの方はパース済みオブジェクトなので入れてはいけない（下の `body` の項参照）。
-//
-// **報告カードでは `sessionId` / `subscribed` / `prompt` / `desc` / `descFallback` /
-// `phase` / `phaseSummary` / `readAt` / `choices` を集めない。** 送信経路が無いので
-// 使われないうえ、`worktree.closed` は発信元ワークツリーが既に削除済みで
-// `oretachi_get_worktree_status` も `oretachi_read_terminal` も引けない。
+// **報告カードでは `sessionId` / `subscribed` / `prompt` / `request` / `desc` /
+// `descFallback` / `phase` / `phaseSummary` / `readAt` / `choices` を集めない。**
+// 送信経路が無いので使われないうえ、`worktree.closed` は発信元ワークツリーが
+// 既に削除済みで `oretachi_get_worktree_status` も `oretachi_read_terminal` も引けない。
 // `worktreeName` / `branchName` は**通知本文（`WorktreeClosedBody` /
 // `WorktreeCreatedBody`）に焼き付いている値**を使う。
 //
@@ -44,13 +58,12 @@
 //   worktreeId    (string)   : 発信元ワークツリーID。**要返答カードでは必須**。購読の突合と、
 //                              生成時のトレイ通知クリア（oretachi_clear_worktree_notification）
 //                              に使う。oretachi_poll_inbox の sourceWorktreeId を
-//                              そのまま入れる（表示はしない）。
-//                              **報告カードでは任意**（#228）。購読の突合もトレイクリアも
-//                              しないので使い道が無い（`worktree.*` は showsBadge が false で
-//                              バッジを積まないため、クリアすると無関係なバッジだけが落ちる）
-//   sessionId     (number)   : 送信先の PTY セッションID。**null 可**（稼働中 AI 端末なし）
+//                              そのまま入れる（表示はしない）。**報告カードでは任意**
+//   sessionId     (number)   : 送信先の PTY セッションID。**null 可**（稼働中 AI 端末なし）。
+//                              （このサンプルの `99xxx` は実在しない値。**例をそのまま
+//                              動かしても本物の端末へ書き込まないため**にわざと外してある）
 //   subscribed    (boolean)  : callerWorktree がこの宛先を購読しているか。false なら送信不可表示
-//   issueRef      (string)   : `#187` など。無ければ省略可
+//   issueRef      (string)   : `#187` など。`META.repoUrl` があればリンクになる
 //   at            (string)   : 通知の到着時刻（`HH:MM`）
 //   kind          (string)   : general / approval / completed / hook / worktree.message
 //                              / worktree.created / worktree.closed。
@@ -61,60 +74,75 @@
 //   phase         (string)   : 設計中 / 実装中 / 実装完了 / レビュー対応中 / 停止条件待ち / 不明
 //   phaseSummary  (string)   : 現況の 1 行要約（ターミナル読み取りから）
 //   readAt        (string)   : ターミナルを読んだ時刻（`HH:MM`）
-//   body          (string)   : 通知本文。**要約せず全文を入れる**（人の判断材料）。
-//                              **必ず文字列。** `oretachi_poll_inbox` の `body` は
-//                              パース済みの JSON オブジェクトで、人が読める 1 行は
-//                              別フィールドの `text` にある。オブジェクトを入れると
-//                              カードの `{n.body}` で React が throw し、エラー
-//                              バウンダリが無いのでレポート全体が描画不能になる。
-//                              報告カードでは `text` をそのまま入れる（#228）
-//   link          (string)   : 子アーティファクトへの `artifact://` リンク。無ければ null
-//   linkLabel     (string)   : リンクの表示名
 //   choices       (string[]) : 候補ボタン。**`prompt.shape` が `"text"` のときだけ使う。**
 //                              通知内容から作る。`その他（補足で指示）` はコード側で
 //                              常に足されるので**ここに入れない**
-//   prompt        (object)   : `oretachi_inspect_prompt(session_id)` の戻り値を**そのまま**。
-//                              `null` / 省略なら従来の自由入力扱い（= shape "text" と同じ）
+//
+// ── 本文（#264）─────────────────────────────────────────────────────────
+//
+//   paragraphs (string[]) : 段落。**人が読める整形済みの文**を入れる。
+//                           `**強調**` / `` `コード` `` / `#203` / URL は
+//                           カードがリンクや装飾に組む（Markdown が素で出ることはない）。
+//                           **生 JSON も画面のダンプもここに入れない**
+//   bullets    (string[]) : 箇条書き（任意）。同じ記法が使える
+//   fields     ([{label, value, code}]) : 明細表（任意）。ツール許可の `tool_input` や
+//                           「設問 2 問」のような要約に使う。`code: true` で等幅表示
+//   links      ([{kind, label, href}])  : 関連リンク（任意）。
+//                           `kind` は `artifact` / `pr` / `issue` / `url`。
+//                           **アーティファクトは `artifact://worktree/<worktreeId>/<id>` 形式**。
+//                           発信元が作ったアーティファクトは `search_artifact` で探して入れる
+//                           （実測で一度も出ていなかった。#264）
+//   body       (string)   : **旧形式。** `paragraphs` があれば使われない。
+//                           `oretachi_poll_inbox` の `body` は**パース済みの JSON
+//                           オブジェクト**なので、ここへ入れてはいけない
+//                           （人が読める 1 行は別フィールドの `text`）
+//
+// ── request（何を聞かれているか。#264）───────────────────────────────────
+//
+// `approval` の通知本文は `PermissionRequest` フックの JSON で、`tool_name` と
+// `tool_input` が丸ごと入っている。**AskUserQuestion なら全設問・全選択肢・
+// `description`・`preview` まで全部そこにある。**
+// 一方ターミナルの画面は 1 問ずつしか出さず、preview は `✂ N lines hidden` で
+// 切られる（実測）。**通知の方が情報量が多い**ので、設問はそちらから起こす。
+//
+//   request.tool      (string) : `tool_name` そのまま（`Bash` / `AskUserQuestion` / `Edit` …）
+//   request.questions (array)  : **`AskUserQuestion` のときだけ。**
+//                                `tool_input.questions` を写す:
+//                                `[{ header, question, options: [{ label, description, preview }] }]`
+//                                **選択肢の順番を変えない。** カードは i 番目を画面の
+//                                i+1 番として送る（Claude Code は通知の選択肢をその順で
+//                                `1.` から並べ、後ろに `Type something.` /
+//                                `Chat about this` を足す）。並べ替えると別の選択肢を確定する
+//
+// **`request.questions` を入れると、カードは全設問を 1 枚のフォームに出し、
+// 送信は `kind: "selectAll"` の 1 回で最後の確定（Submit）まで進む。**
+// 入れないと画面から読めた 1 問だけの表示になり、2 問目以降に答えられない。
+//
+// ツール許可（`Bash` など）は `request.questions` を作らない。承認の選択肢
+// （`Yes` / `Yes, and don't ask again` / `No, ...`）は画面にしか無いので `prompt`
+// から出す。`tool_input` の中身は `fields` に整形して入れる。
 //
 // ── prompt フィールド（#215） ────────────────────────────────────────────
 //
 // **`oretachi_inspect_prompt` の戻り値を編集せずそのまま焼き込む。** 要約したり
-// ラベルを言い換えたりしてはいけない（宛先の画面に実在しない選択肢を人へ見せると
-// 判断を誤らせる。fingerprint を書き換えると照合が必ず外れて何も送れなくなる）。
+// ラベルを言い換えたりしてはいけない（fingerprint を書き換えると照合が必ず外れて
+// 何も送れなくなる）。**表示には使わない**（表示は上の本文と `request` から組む）。
 //
 //   shape        (string)  : "text" / "permission" / "plan" / "askUserQuestion" /
 //                            "yesno" / "numbered" / "unknown"
-//   navigation   (string)  : "arrows"(矢印で ❯ を動かして CR = Claude Code のダイアログ) /
-//                            "digits"(数字 + CR = 素の TUI の番号リスト) / "none"(選択肢なし)。
-//                            **`shape` とは独立**。見出しが折り返して形状の推定が外れても
-//                            キーの種類だけは Claude Code のフッタから決まる
-//   header       (string)  : 問いの見出し（`Do you want to proceed?` など）
-//   context      (string)  : 承認対象の全文（Bash コマンド / ツール名 / cwd / 設問文）。
-//                            カードに全文表示される
+//   navigation   (string)  : "arrows" / "digits" / "none"
+//   header       (string)  : 問いの見出し
+//   context      (string)  : 承認対象。`shape` が "text" 以外のとき画面から取れる範囲
 //   questions    (array)   : [{ header, question, multiSelect, options: [{ index, label }],
 //                              allowOther, cursorIndex }]
-//                            `options[].label` が**画面に実在する選択肢**。
-//                            `cursorIndex` はいま `❯` が当たっている番号
-//   escapeHatch  (string)  : "esc" なら ESC で自由入力へ抜けられる。ただし ESC 経路が
-//                            実際に使えるのは permission / plan / askUserQuestion のみ
-//                            （`lib/send` の `canEscape`）
-//   truncated    (boolean) : **必須。落とさないこと。** true なら「ダイアログが宛先の画面に
-//                            収まっておらず、選択肢を全部読めていない」。カードは選択 UI を
-//                            出さず警告と画面末尾を表示する。**落とすと「読めた選択肢だけ」を
-//                            完全な一覧として提示し、拒否の選択肢を見ないまま承認させる**
-//                            （Rust の `plan_keys` が送信自体は止めるが、その後カードは
-//                            読み取り専用になり警告も出ないまま死ぬ）
-//   fingerprint  (string)  : 画面の同一性キー。`oretachi_answer_prompt` の
-//                            `expect_fingerprint` にそのまま渡る。**書き換えない**
-//   tail         (string)  : 画面末尾。`shape` が "unknown" / `truncated` のとき人に見せる
-//   detectedAtMs (number)  : 解析した時刻（epoch ms）。表示の補助にのみ使う
-//
-// ── shape ごとの choices / prompt の使い分け ─────────────────────────────
-//
-//   shape "text"     … `choices` を通知本文から作ってよい（従来どおり）
-//   それ以外          … **候補を創作してはいけない。`prompt` を入れるだけ**でカードが
-//                       画面の選択肢をそのまま出す。`choices` は無視されるので `[]` にする
-//   shape "unknown"  … 送信ボタンが無効になり、`tail` を見せて手動操作へ誘導する
+//                            **画面から読めた 1 問ぶんだけ**（複数設問でも 1 問しか入らない）
+//   tabs         (array)   : [{ label, answered, isSubmit }]。複数設問のタブバー（#264）。
+//                            `☐` が未回答 / `☒` が回答済み / `✔ Submit` が確定タブ
+//   escapeHatch  (string)  : "esc" なら ESC で自由入力へ抜けられる
+//   truncated    (boolean) : **必須。落とさないこと。** 画面に収まっていない
+//   fingerprint  (string)  : 画面の同一性キー。**書き換えない**
+//   tail         (string)  : 画面末尾。`shape` が "unknown" のとき人に見せる
+//   detectedAtMs (number)  : 解析した時刻（epoch ms）
 //
 // ── 1 セッションにつきキー操作カードは 1 枚だけ ──────────────────────────
 //
@@ -129,17 +157,19 @@ const META = {
   reportId: 'notif-report-1788844860000',
   generatedAtMs: 1788844860000,           // JST 2026-09-08 14:21
   callerWorktree: 'oretachi-vy7f',
+  repoUrl: 'https://github.com/ishida-supsys/oretachi',
 };
 
 const NOTIFICATIONS = [
   {
-    // ── パターン 2: ツール許可ダイアログ（PermissionRequest）で止まっている ──
-    // `choices` は空。候補を創作せず、画面の選択肢をそのまま出す
+    // ── パターン 1: ツール許可（PermissionRequest / Bash）──────────────────
+    // hook JSON の `tool_input` を `fields` へ整形する。**生 JSON は載せない。**
+    // 選択肢は画面にしか無いので `prompt` から出す（`request.questions` は作らない）
     id: 'inbox-9a1',
     inboxIds: ['inbox-9a1'],
     worktreeName: 'oretachi-xaoe',
     worktreeId: '1788700000000-xaoe',
-    sessionId: 14,
+    sessionId: 99014,
     subscribed: true,
     issueRef: '#187',
     at: '14:21',
@@ -147,12 +177,18 @@ const NOTIFICATIONS = [
     desc: 'アーティファクトのリポジトリ保管庫への転送 (#187)',
     descFallback: null,
     phase: '停止条件待ち',
-    phaseSummary: 'Bash の許可待ちで停止中',
+    phaseSummary: 'マイグレーション適用の許可待ちで停止中',
     readAt: '14:30',
-    body: 'ツールの許可を待っています: マイグレーションの適用コマンドを実行してよいか判断が欲しい',
-    link: null,
-    linkLabel: null,
+    paragraphs: ['`oretachi-xaoe` がツールの許可を待って止まっています。'],
+    fields: [
+      { label: 'ツール', value: 'Bash' },
+      { label: 'コマンド', value: 'sqlx migrate run --source ./migrations', code: true },
+      { label: '説明', value: 'Apply pending migrations' },
+      { label: '作業ディレクトリ', value: 'X:\\devel\\worktree\\oretachi-xaoe', code: true },
+    ],
+    links: null,
     choices: [],
+    request: { tool: 'Bash' },
     prompt: {
       shape: 'permission',
       navigation: 'arrows',
@@ -172,6 +208,7 @@ const NOTIFICATIONS = [
           cursorIndex: 1,
         },
       ],
+      tabs: [],
       escapeHatch: 'esc',
       truncated: false,
       fingerprint: '3f9c1a0b7d2e4856',
@@ -179,78 +216,99 @@ const NOTIFICATIONS = [
     },
   },
   {
-    // ── パターン 1: 自由入力（ダイアログ無し）。従来どおり候補を作ってよい ──
-    id: 'inbox-9a2',
-    inboxIds: ['inbox-9a2'],
-    worktreeName: 'oretachi-xqle',
-    worktreeId: '1788710000000-xqle',
-    sessionId: 21,
-    subscribed: true,
-    issueRef: '#195',
-    at: '14:08',
-    kind: 'approval',
-    desc: '通知レポート機能の親issue進行管理 (#195)',
-    descFallback: null,
-    phase: '実装完了',
-    phaseSummary: '実装完了・未 commit。セルフレビュー待ち。差分 12 ファイル / 約 900 行',
-    readAt: '14:30',
-    body: 'PR を分割すべきか判断が欲しい。#201 のリンク実装と #203 のロック実装を 1 本にまとめると差分が約 900 行になる。',
-    link: null,
-    linkLabel: null,
-    choices: ['分割して', '1 本でよい', '詳細を教えて', '保留'],
-    prompt: {
-      shape: 'text',
-      navigation: 'none',
-      // `text` では受け手の種類が入る（`[Claude Code の入力欄]` /
-      // `[シェルのプロンプト] PS X:\...>`）。fingerprint に効くので**書き換えない**
-      header: '[Claude Code の入力欄]',
-      context: '',
-      questions: [],
-      escapeHatch: null,
-      truncated: false,
-      fingerprint: '8b21d5e0c47a9f31',
-      tail: '╭───────────╮\n│ >         │\n╰───────────╯',
-    },
-  },
-  {
-    // ── パターン 4: AskUserQuestion。末尾の逃げ道は画面上 `Chat about this` ──
+    // ── パターン 2: AskUserQuestion 複数設問（#264）────────────────────────
+    // **`request.questions` に通知の全設問を写す。** 画面には 1 問ずつしか出ないが、
+    // 通知には全部入っているので、カードは全問を 1 枚のフォームで出せる。
+    // `preview` はターミナルでは `✂ N lines hidden` で切られていて読めない
     id: 'inbox-9a3',
     inboxIds: ['inbox-9a3'],
     worktreeName: 'oretachi-orqn',
     worktreeId: '1788720000000-orqn',
-    sessionId: 33,
+    sessionId: 99033,
     subscribed: true,
-    issueRef: '#120',
-    at: '13:55',
+    issueRef: '#217',
+    at: '14:08',
     kind: 'approval',
     desc: null,
-    descFallback: 'ワークツリー購読と inbox の実装（ターミナルから推定）',
+    descFallback: 'リンクホバーポップアップの URL 表示（ターミナルから推定）',
     phase: '設計中',
-    phaseSummary: '配送戦略の選択で設問待ち。実装は未着手',
+    phaseSummary: '表示方針の設問で停止中。実装は未着手',
     readAt: '14:31',
-    body: '配送戦略をどれにするか確認したい（AskUserQuestion で設問を出して停止中）。',
-    link: 'artifact://worktree/1788720000000-orqn/teamwork-plan-120',
-    linkLabel: '計画フロー図を開く',
+    paragraphs: [
+      '`oretachi-orqn` が **2 問**の設問で止まっています。' +
+        '現状は `max-height: 4.5em` + `overflow: hidden` で長い URL が黙って 3 行に切断されています。',
+    ],
+    fields: [{ label: '設問', value: '2 問（URL表示 / コピー）' }],
+    links: [
+      {
+        kind: 'artifact',
+        label: '検討メモを開く',
+        href: 'artifact://worktree/1788720000000-orqn/url-popup-notes',
+      },
+    ],
     choices: [],
+    request: {
+      tool: 'AskUserQuestion',
+      // `tool_input.questions` をそのまま写す。**並べ替えない**
+      questions: [
+        {
+          header: 'URL表示',
+          question: 'リンクホバーポップアップで長い URL をどう見せますか？',
+          options: [
+            {
+              label: '上限を広げて + スクロール',
+              description:
+                'max-height を 4.5em → 12em に広げ overflow: auto にする。実用的な長さの URL はほぼ全文が読め、極端に長いものだけスクロールになる。',
+              preview:
+                '┌────────────────────────────────────┐\n' +
+                '│ https://github.com/ishida-supsys/  │\n' +
+                '│ oretachi/issues/217?utm_source=x   │\n' +
+                '└────────────────────────────────────┘',
+            },
+            {
+              label: '中略して 1 行に畳む',
+              description: 'ホスト名と末尾だけ残して中間を … にする。高さは固定のままだが全体像は掴みにくい。',
+              preview:
+                '┌────────────────────────────────────┐\n' +
+                '│ github.com/…/issues/217?utm_sour…  │\n' +
+                '└────────────────────────────────────┘',
+            },
+          ],
+        },
+        {
+          header: 'コピー',
+          question: 'ポップアップに URL のコピーボタンを付けますか？',
+          options: [
+            { label: '付ける', description: 'クリップボードへコピーするボタンを右上に置く。' },
+            { label: '付けない', description: '今回のスコープ外にする。' },
+          ],
+        },
+      ],
+    },
     prompt: {
       shape: 'askUserQuestion',
       navigation: 'arrows',
-      header: 'Which delivery strategy should be the default?',
-      context: '配送戦略の既定値',
+      header: 'リンクホバーポップアップで長い URL をどう見せますか？',
+      context: '',
+      // 画面から読めるのは**いま開いているタブの 1 問だけ**。送信の照合に使う
       questions: [
         {
-          header: '',
-          question: '配送戦略の既定値\nWhich delivery strategy should be the default?',
+          header: 'URL表示',
+          question: 'リンクホバーポップアップで長い URL をどう見せますか？',
           multiSelect: false,
           options: [
-            { index: 1, label: 'turn_end (待機中なら押し込み、走行中はターン境界を待つ)' },
-            { index: 2, label: 'interrupt (走行中でも即割り込む)' },
-            { index: 3, label: 'passive (押し込まない)' },
-            { index: 4, label: 'Chat about this' },
+            { index: 1, label: '上限を広げて + スクロール' },
+            { index: 2, label: '中略して 1 行に畳む' },
+            { index: 3, label: 'Chat about this' },
           ],
           allowOther: true,
           cursorIndex: 1,
         },
+      ],
+      tabs: [
+        { label: 'URL表示', answered: false, isSubmit: false },
+        { label: 'コピー', answered: false, isSubmit: false },
+        { label: 'Submit', answered: false, isSubmit: true },
       ],
       escapeHatch: 'esc',
       truncated: false,
@@ -259,13 +317,66 @@ const NOTIFICATIONS = [
     },
   },
   {
-    // ── パターン 11: 分類不能。**送信ボタンは無効**で tail を見せるだけ ──
-    // 稼働中 AI 端末が無いケース（sessionId が null）も同じく送信不可になる
+    // ── パターン 3: 自由入力（ダイアログ無し）。候補ボタンを作ってよい ──────
+    // エージェントが書いた Markdown はそのまま入れてよい（カードが組んで出す）。
+    // issue 番号 / URL / アーティファクトはリンクになる
+    id: 'inbox-9a2',
+    inboxIds: ['inbox-9a2'],
+    worktreeName: 'oretachi-xqle',
+    worktreeId: '1788710000000-xqle',
+    sessionId: 99021,
+    subscribed: true,
+    issueRef: '#195',
+    at: '14:05',
+    kind: 'worktree.message',
+    desc: '通知レポート機能の親issue進行管理 (#195)',
+    descFallback: null,
+    phase: '実装完了',
+    phaseSummary: '実装完了・未 commit。セルフレビュー待ち。差分 12 ファイル / 約 900 行',
+    readAt: '14:30',
+    paragraphs: [
+      'PR を分割すべきか判断が欲しいです。#201 のリンク実装と #203 のロック実装を' +
+        '**1 本にまとめると差分が約 900 行**になります。',
+    ],
+    bullets: [
+      '分割する場合、`artifact_lock.rs` の変更が両方に跨るので先に #203 を出す必要があります',
+      'まとめる場合はレビューが重くなりますが、`automerge` で一度に片付きます',
+    ],
+    links: [
+      {
+        kind: 'artifact',
+        label: '計画フロー図を開く',
+        href: 'artifact://worktree/1788710000000-xqle/teamwork-plan-195',
+      },
+      { kind: 'pr', label: 'PR #204', href: 'https://github.com/ishida-supsys/oretachi/pull/204' },
+    ],
+    choices: ['分割して', '1 本でよい', '詳細を教えて', '保留'],
+    request: null,
+    prompt: {
+      shape: 'text',
+      navigation: 'none',
+      // `text` では受け手の種類が入る（`[Claude Code の入力欄]` /
+      // `[シェルのプロンプト] PS X:\...>`）。fingerprint に効くので**書き換えない**
+      header: '[Claude Code の入力欄]',
+      context: '',
+      questions: [],
+      tabs: [],
+      escapeHatch: null,
+      truncated: false,
+      fingerprint: '8b21d5e0c47a9f31',
+      tail: '╭───────────╮\n│ >         │\n╰───────────╯',
+    },
+  },
+  {
+    // ── パターン 4: 分類不能。**送信ボタンは無効**で tail を見せるだけ ──────
+    // 稼働中 AI 端末が無いケース（sessionId が null）も同じく送信不可になる。
+    // **ここだけは画面のテキストを出す** — 何を出せばいいのか分からない画面なので、
+    // 人がターミナルで何を見ることになるかを示すしかない
     id: 'inbox-9a4',
     inboxIds: ['inbox-9a4'],
     worktreeName: 'oretachi-zlvc',
     worktreeId: '1788730000000-zlvc',
-    sessionId: 41,
+    sessionId: 99041,
     subscribed: true,
     issueRef: '#208',
     at: '13:40',
@@ -275,66 +386,21 @@ const NOTIFICATIONS = [
     phase: '不明',
     phaseSummary: '画面を読み取れなかった',
     readAt: '14:31',
-    body: '何かの入力待ちで止まっているように見える。',
-    link: null,
-    linkLabel: null,
+    paragraphs: ['`oretachi-zlvc` が何かの入力待ちで止まっているように見えますが、画面の形状を判別できませんでした。'],
+    links: null,
     choices: [],
+    request: null,
     prompt: {
       shape: 'unknown',
       navigation: 'none',
       header: '',
       context: '',
       questions: [],
+      tabs: [],
       escapeHatch: null,
       truncated: false,
       fingerprint: '5a7e2c9014bd63f8',
       tail: 'Select a profile to continue\n  [use the mouse to pick one]\n',
-    },
-  },
-  {
-    // ── 画面に収まっていない許可ダイアログ（`truncated: true`）──────────────
-    // 宛先のタブが狭く、見出しと `2.` 以降が画面外へ流れて `1. Yes` しか読めていない。
-    // **読めたぶんだけを選択肢として出してはいけない**（人が「Yes しか無い」と誤認して、
-    // 拒否の選択肢を見ないまま承認する）。カードは選択 UI を出さず、警告と `tail` を表示し、
-    // ESC で抜けて指示を書く経路だけを残す
-    id: 'inbox-9a5',
-    inboxIds: ['inbox-9a5'],
-    worktreeName: 'oretachi-kqtr',
-    worktreeId: '1788740000000-kqtr',
-    sessionId: 52,
-    subscribed: true,
-    issueRef: '#212',
-    at: '13:20',
-    kind: 'approval',
-    desc: 'リリーススクリプトの整理 (#212)',
-    descFallback: null,
-    phase: '停止条件待ち',
-    phaseSummary: 'ツール許可待ちで停止中（タブが狭くダイアログが画面に収まっていない）',
-    readAt: '14:31',
-    body: 'ツールの許可を待っています。',
-    link: null,
-    linkLabel: null,
-    choices: [],
-    prompt: {
-      shape: 'permission',
-      navigation: 'arrows',
-      header: '',
-      context: '',
-      questions: [
-        {
-          header: '',
-          question: '',
-          multiSelect: false,
-          // 画面から読めたのはこれだけ。**完全な一覧ではない**
-          options: [{ index: 1, label: 'Yes' }],
-          allowOther: false,
-          cursorIndex: 1,
-        },
-      ],
-      escapeHatch: 'esc',
-      truncated: true,
-      fingerprint: 'd41128ba6c07e395',
-      tail: ' ❯ 1. Yes\n\n Esc to cancel · Tab to amend',
     },
   },
   {
@@ -350,10 +416,7 @@ const NOTIFICATIONS = [
     branchName: 'worktree/issue-214',
     at: '13:12',
     kind: 'worktree.closed',
-    // `format_inbox_line` の出力そのまま（`oretachi_poll_inbox` の `text`）
-    body: "ワークツリー 'oretachi-htlz' （ブランチ: worktree/issue-214） がクローズされました",
-    link: null,
-    linkLabel: null,
+    paragraphs: ["ワークツリー `oretachi-htlz`（ブランチ: `worktree/issue-214`）がクローズされました。"],
   },
   {
     // ── 報告カード: ワークツリー作成（#228）────────────────────────────────
@@ -365,10 +428,7 @@ const NOTIFICATIONS = [
     branchName: 'worktree/issue-228',
     at: '13:05',
     kind: 'worktree.created',
-    // 先頭の `[oretachi] ` はリポジトリ名。`format_inbox_line` が付ける
-    body: "[oretachi] ワークツリー 'oretachi-wnqd' （ブランチ: worktree/issue-228） が作成されました",
-    link: null,
-    linkLabel: null,
+    paragraphs: ["`oretachi` にワークツリー `oretachi-wnqd`（ブランチ: `worktree/issue-228`）が作成されました。"],
   },
 ];
 
