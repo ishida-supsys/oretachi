@@ -1030,6 +1030,10 @@ struct OptionRun {
     end: usize,
     options: Vec<PromptOption>,
     cursor_index: Option<u32>,
+    /// `❯` が**実際に描かれていた**か。`cursor_index` は描かれていないときの
+    /// 桁ズレからの復元も含むので、「Claude Code のダイアログである」という
+    /// 判断にはこちらを使う（復元の誤爆でキーの種類まで変えないため）
+    has_marker: bool,
     /// 横並びのプレビュー枠を切り離した表示桁。**この run を解析したときの値**で、
     /// run の外（`find_unnumbered_escape`）でも同じ桁を使うために持ち回る。
     /// 画面全体から探し直すと別のダイアログの残骸の桁を拾う（#264）
@@ -1102,6 +1106,7 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
         let mut options = vec![PromptOption { index, label }];
         let mut num_cols = vec![num_col];
         let mut cursor_index = if has_cursor { Some(index) } else { None };
+        let mut has_marker = has_cursor;
         let mut expected = 2u32;
         let mut current_label_col = label_col;
         let mut end = i;
@@ -1116,6 +1121,7 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
                 }
                 if has_cursor {
                     cursor_index = Some(idx);
+                    has_marker = true;
                 }
                 options.push(PromptOption { index: idx, label });
                 num_cols.push(ncol);
@@ -1181,7 +1187,7 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
                 }
             }
         }
-        runs.push(OptionRun { start, end, options, cursor_index, preview_col });
+        runs.push(OptionRun { start, end, options, cursor_index, has_marker, preview_col });
         i = end + 1;
     }
     runs.pop()
@@ -1648,8 +1654,24 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
         PromptShape::Numbered
     };
     // ここが要点: キーの種類は見出しの一致ではなく Claude Code のフッタで決める。
-    // 見出しが折り返して形状の推定を外しても、キーの種類までは間違えない
-    let navigation = if has_cc_footer {
+    // 見出しが折り返して形状の推定を外しても、キーの種類までは間違えない。
+    //
+    // ── `❯` があれば矢印（#264。4 回のセルフレビューを経ての構造的な手当て）──
+    //
+    // フッタ / タブバー / 見出しはどれも**その画面に出ていれば**効く手がかりで、
+    // 出ていない画面（確認画面）や折り返した画面では順に外れてきた。外れると
+    // `digits` に落ち、`plan_keys` が数字 + CR を送る。**数字は Claude Code の
+    // 確定キーではない**ので、数字は無視されて CR だけが効き、`❯` の当たっている
+    // 別の選択肢が確定する（＝押していない方が通る）。この形で 2 回続けて
+    // critical を出した。
+    //
+    // そこで手がかりを 1 つ足す: **選択肢に `❯` が描かれていたら矢印**。
+    // 素の TUI の番号リスト（`1) staging`）はカーソルを描かないので落ちないし、
+    // `❯` を描く TUI（inquirer 系）はそもそも矢印 + Enter で選ぶ作りなので、
+    // こちらの方が正しい。**見出しの文言に依存しないのが要点**で、
+    // 上の個別の手がかりが全部外れてもここで止まる。
+    let has_cursor_marker = run.has_marker;
+    let navigation = if has_cc_footer || has_cursor_marker {
         Navigation::Arrows
     } else {
         Navigation::Digits
@@ -2530,6 +2552,27 @@ mod tests {
         let p = parse_prompt(&lines.join("\n"));
         assert_eq!(p.questions[0].options.len(), 10);
         assert_eq!(p.questions[0].cursor_index, Some(3));
+    }
+
+    /// **`❯` が描かれていれば矢印。** 見出し・フッタ・タブバーが全部読めなくても、
+    /// 数字キーを送る側へは落ちない（4 ラウンドのセルフレビューを経ての構造的な手当て）。
+    ///
+    /// 数字は Claude Code の確定キーではないので、`digits` に落ちると数字が無視され、
+    /// 続く CR が `❯` の当たっている別の選択肢を確定してしまう。
+    #[test]
+    fn a_drawn_cursor_forces_arrow_navigation() {
+        // フッタもタブバーも見出しの手がかりも無い、素の選択肢の並び
+        let p = parse_prompt("何かの選択:\n\n❯ 1. これ\n  2. あれ\n");
+        assert_eq!(p.navigation, Navigation::Arrows, "数字を送ってはいけない");
+        let keys = plan_keys(&p, &Answer::Select { option_index: 2 }).expect("select");
+        assert_eq!(keys_preview(&keys), vec!["Down", "CR"]);
+    }
+
+    /// 逆に、カーソルを描かない素の番号リストは今までどおり数字 + CR。
+    #[test]
+    fn a_bare_numbered_list_without_a_cursor_still_uses_digits() {
+        let p = parse_prompt("Pick a target:\n  1) staging\n  2) production\nSelection: ");
+        assert_eq!(p.navigation, Navigation::Digits);
     }
 
     #[test]
