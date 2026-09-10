@@ -161,13 +161,26 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
     await notifyApproval(wt.id, wt.name, count);
   }
 
-  async function init() {
-    // 保存された自動承認状態を復元
+  /**
+   * 保存された自動承認状態を `autoApprovalMap` へ復元する。
+   *
+   * **`init()` とは別に呼べるようにしてある（#256）。** サブウィンドウの復元は
+   * `moveToSubWindow` に `autoApprovalMap.get(id)` を渡して初期値を焼き込むが、
+   * これが `init()` より前に走るとホームを含む全ワークツリーが `autoApproval=false`
+   * でサブウィンドウ側に入り、以後 `sub-try-auto-approve` を受けても
+   * 「自動承認 OFF」として即 `approved=false` を返す（トグルし直すまで戻らない）。
+   * 呼び出し側は復元処理より前にこれを呼ぶこと。冪等。
+   */
+  function restoreFromSettings() {
     for (const wt of deps.settings.value.worktrees) {
       if (wt.autoApproval === true) {
         autoApprovalMap.set(wt.id, true);
       }
     }
+  }
+
+  async function init() {
+    restoreFromSettings();
 
     // notify-worktree → 自動承認チェック
     await listen<NotifyWorktreeEvent>("notify-worktree", async (event) => {
@@ -237,5 +250,5 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
     });
   }
 
-  return { autoApprovalMap, aiJudgingWorktrees, onToggleAutoApproval, onCancelAiJudging, init };
+  return { autoApprovalMap, aiJudgingWorktrees, onToggleAutoApproval, onCancelAiJudging, restoreFromSettings, init };
 }
