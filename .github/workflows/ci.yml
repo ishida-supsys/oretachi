@@ -45,6 +45,12 @@ jobs:
       - name: Type check
         run: pnpm run type-check
 
+      # vitest は jsdom も Tauri も要らない純粋なユニットテストなので、
+      # 依存を増やさずに type-check ジョブへ相乗りさせる（#261）。
+      # ここに置くことで required status check (type-check) にテストが含まれる。
+      - name: Unit tests
+        run: pnpm test
+
   cargo-check:
     runs-on: windows-latest
     steps:

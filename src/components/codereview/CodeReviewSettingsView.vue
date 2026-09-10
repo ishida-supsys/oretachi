@@ -7,6 +7,9 @@ import { useI18n } from "vue-i18n";
 const { t } = useI18n();
 const { resolved, update } = useCodeReviewSettings();
 
+// `update` は即時保存（= 全ウィンドウへ settings-changed をブロードキャスト）なので、
+// フォントサイズだけは `.lazy` で確定時（change）にまとめる。1キーストロークごとに
+// 保存とリロードを走らせないため。
 const fontSize = computed({
   get: () => resolved.value.monacoFontSize,
   set: (v) => update("monacoFontSize", v),
@@ -49,7 +52,7 @@ const autoOpenReview = computed({
         <div class="flex items-center gap-4">
           <label class="w-40 text-sm text-surface-300 shrink-0">{{ t("monaco.fontSize") }}</label>
           <input
-            v-model.number="fontSize"
+            v-model.lazy.number="fontSize"
             type="number"
             min="8"
             max="32"

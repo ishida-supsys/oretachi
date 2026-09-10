@@ -7,7 +7,7 @@ import { i18n } from "../i18n";
 import { isPseudoWorktree } from "../utils/repositoryWorktree";
 import type { Workgroup } from "../types/settings";
 
-const { settings, scheduleSave } = useSettings();
+const { settings, scheduleSave, flushSave } = useSettings();
 const { worktrees } = useWorktrees();
 const { notifications } = useNotifications();
 const { listMode } = useHomePanel();
@@ -104,26 +104,36 @@ function addWorkgroup(): Workgroup {
   };
   settings.value.workgroups.push(group);
   settings.value.activeWorkgroupId = group.id;
-  scheduleSave();
+  void flushSave();
   return group;
 }
 
-/** グループの属性を更新する */
+/**
+ * グループの属性を更新する。
+ *
+ * `scheduleSave`（500ms デバウンス）ではなく `flushSave`（即時書き込み）を使う。
+ * 編集ダイアログの「保存」は明示的な確定操作なので、押した直後にアプリが落ちたり
+ * 強制終了されたりしても失われてはいけない（「設定したのに保存されていない」の一因、#261）。
+ * デバウンスは D&D 並べ替えやチップ選択のような高頻度の変更のためのもので、ここには要らない。
+ */
 function updateWorkgroup(id: string, patch: Partial<Workgroup>): void {
   const group = settings.value.workgroups?.find((g) => g.id === id);
   if (!group) return;
   Object.assign(group, patch);
-  scheduleSave();
+  void flushSave();
 }
 
-/** グループレコードを削除する（所属ワークツリーの削除は呼び出し側で済ませておくこと） */
+/**
+ * グループレコードを削除する（所属ワークツリーの削除は呼び出し側で済ませておくこと）。
+ * `updateWorkgroup` と同じく削除確認ダイアログを経た明示的な確定操作なので即時書き込む。
+ */
 function deleteWorkgroupRecord(id: string): void {
   if (!settings.value.workgroups) return;
   settings.value.workgroups = settings.value.workgroups.filter((g) => g.id !== id);
   if (settings.value.activeWorkgroupId === id) {
     settings.value.activeWorkgroupId = settings.value.workgroups[0]?.id;
   }
-  scheduleSave();
+  void flushSave();
 }
 
 /** グループの並び替え（fromId を toId の位置へ） */
