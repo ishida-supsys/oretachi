@@ -33,6 +33,7 @@ const {
   previewKeys,
   isTruncated,
   canEscape,
+  cursorReadable,
 } = require('../lib/send');
 
 // 返答状態ごとのアクセント色（Catppuccin Mocha）。
@@ -587,6 +588,9 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
   // **通知由来の設問フォームは影響を受けない**（選択肢を画面から読んでいない。#264）
   const truncated = isTruncated(n) && !questionForm;
   const questions = questionForm ? askQuestions(n) : [];
+  // `❯` の位置が読めない画面では選べない（Rust が移動量を決められない）。
+  // ESC で抜ける経路だけが残るので、そう見えるようにする
+  const cannotSelect = dialog && !cursorReadable(n);
 
   // 縮小表示は `sent` のときだけ。`failed` / `stale` / `unverified` / `pastedOnly` は
   // 人が次の手を決める必要がある（何が起きたかを畳むと気づかれない）ので畳まない。
@@ -898,9 +902,23 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
             </div>
           )}
 
+          {cannotSelect && !locked && (
+            <div style={{
+              fontSize: 11.5, color: '#f9e2af',
+              background: '#f9e2af12', border: '1px solid #f9e2af44', borderRadius: 6,
+              padding: '8px 12px', lineHeight: 1.7,
+            }}>
+              <b>宛先の画面でいまどの選択肢が選ばれているか（❯）を読み取れませんでした。</b>
+              矢印の移動量を決められないため<b>選択肢は送れません</b>。
+              {escapeAvailable
+                ? '下の「ESC で抜けて指示を書く」を使うか、ターミナルを開いて直接操作してください。'
+                : 'ターミナルを開いて直接操作してください。'}
+            </div>
+          )}
+
           <KeyPreview keys={keys} />
 
-          {questionForm && d.mode !== 'escapeThenText' && !locked && (
+          {questionForm && !cannotSelect && d.mode !== 'escapeThenText' && !locked && (
             <div style={{ fontSize: 11, color: '#6c7086', fontFamily: FONT, lineHeight: 1.7 }}>
               送信すると、宛先の画面を 1 問ずつ読み直しながら
               {askQuestions(n).length > 1 ? ' 全設問を順に確定し、最後の Submit まで進めます' : ' 回答を確定します'}。

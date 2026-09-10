@@ -66,6 +66,12 @@ const TAIL_WINDOW: usize = 12;
 /// 選択肢の上にある「何を承認するのか」を拾う最大行数。
 const CONTEXT_WINDOW: usize = 24;
 
+/// タブバーが選択肢からどれだけ離れていてよいか（行数）。
+///
+/// タブが 1 つだけの単一設問では、TodoWrite パネルの `☒`/`☐` と形が同じで
+/// 区別できない。本物は設問文を挟んで選択肢のすぐ上にあるので、距離で絞る。
+const TAB_BAR_MAX_GAP: usize = 4;
+
 /// 見出しが折り返しているとみなして繋げる最大行数。
 ///
 /// 実測（13 桁のターミナル）では `Do you want to proceed?` が 3 行に割れた。
@@ -407,21 +413,32 @@ pub fn plan_select_all_step(
     let on_review = parsed.tabs.iter().any(|t| t.is_submit)
         && parsed.tabs.iter().all(|t| t.is_submit || t.answered);
     if on_review {
+        // **見出しでも裏取りする。** 「Submit タブがあって全部 ☒」だけを条件に
+        // `submit` を含むラベルを探すと、人がタブを戻して回答済みの設問を表示していて
+        // その設問に `Submit for review` のような選択肢があったときに別のものを確定する。
+        // 確認画面の見出しは `Ready to submit your answers?`（実測）
+        let heading_ok = contains_ci(&parsed.header, "submit");
         let submit = parsed
             .questions
             .first()
-            .and_then(|q| q.options.iter().find(|o| o.label.to_lowercase().contains("submit")));
-        return match submit {
-            Some(o) => SelectAllStep::Submit { option_index: o.index },
-            None => SelectAllStep::Refuse(
-                "全問の回答は送りましたが、確認画面に『Submit answers』が見つからず確定できませんでした。ターミナルを開いて確定してください".to_string(),
+            .and_then(|q| q.options.iter().find(|o| o.label.to_lowercase().starts_with("submit")));
+        return match (heading_ok, submit) {
+            (true, Some(o)) => SelectAllStep::Submit { option_index: o.index },
+            _ => SelectAllStep::Refuse(
+                "全問の回答は送りましたが、確認画面の『Submit answers』を確かめられませんでした（見出しと選択肢が想定と違います）。取り違えを避けるため何も送っていません。ターミナルを開いて確定してください".to_string(),
             ),
         };
     }
 
     let qidx = match parsed.tabs.iter().position(|t| !t.answered && !t.is_submit) {
         Some(i) => i,
-        // タブが読めない画面（単一設問でタブバーが出ないケースなど）は先頭から順に
+        // **「タブが読めない」と「全部答え終わった」を混ぜない。**
+        // 単一設問には `✔ Submit` タブが無いので、答え終わった画面は
+        // 「未回答タブなし・Submit タブなし」になる。ここを先送りの分岐に落とすと
+        // 存在しない 2 問目を探して `Refuse` になり、**成功しているのに
+        // `unverified` でカードが読み取り専用になる**（セルフレビューで検出）
+        None if !parsed.tabs.is_empty() => return SelectAllStep::Done,
+        // タブバーそのものを読めなかった画面だけ、送った回数で先へ進める
         None => last_qidx.map(|i| i + 1).unwrap_or(0),
     };
     if Some(qidx) == last_qidx {
@@ -749,6 +766,26 @@ fn parse_tab_bar(body: &str) -> Option<Vec<QuestionTab>> {
     }
 }
 
+/// タブバーとして採ってよいだけの形をしているか（#264。セルフレビューで検出）。
+///
+/// **`☐` / `☒` が 1 個あるだけでは足りない。** Claude Code の TodoWrite パネルは
+/// `☒ テストを書く` / `☐ 実装する` を 1 行ずつ描くので、選択肢の上に todo が出ている
+/// だけでその行がタブバーとして採られる。そうなると:
+///
+/// - `has_cc_footer` が立って `navigation` が Digits → Arrows へ反転し、
+///   **素の TUI の番号リストへ矢印 + CR を送りうる**
+/// - 偽のタブが `question_tabs` / `answered_tabs` に流れ込み、一括回答の件数照合が狂う
+/// - `above` をそこで切るので承認対象（context）が落ちる
+///
+/// 本物のタブバーは 1 行にタブが並ぶので、次のどちらかで見分ける:
+///
+/// - タブが 2 つ以上ある、または `←` / `→` / `✔ Submit` を伴う（複数設問・確認画面）
+/// - タブが 1 つだけ（単一設問）のときは、**呼び出し側が
+///   「`AskUserQuestion` のフッタが出ている」「選択肢のすぐ上にある」を追加で確かめる**
+fn is_strong_tab_bar(tabs: &[QuestionTab], body: &str) -> bool {
+    tabs.len() >= 2 || body.contains('←') || body.contains('→') || tabs.iter().any(|t| t.is_submit)
+}
+
 fn push_tab(tabs: &mut Vec<QuestionTab>, answered: bool, is_submit: bool, label: String) {
     let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
     if label.is_empty() {
@@ -773,29 +810,33 @@ fn push_tab(tabs: &mut Vec<QuestionTab>, answered: bool, is_submit: bool, label:
 ///
 /// # 誤検出は「選択肢のラベルを黙って切る」ので危険（セルフレビューで検出）
 ///
-/// 「同じ桁に縦枠が 3 行以上」だけを条件にすると、承認対象に混ざったツリー図
-/// （`┌── src` / `├── lib` …）をプレビュー枠と取り違える。そのとき
-/// `Yes, and don't ask again for tree commands` が `Yes, and do` へ切り詰められ、
-/// **「以後無条件で承認」であることが隠れたまま人に承認させる。**
+/// 「同じ桁に縦枠が 3 行以上」だけを条件にすると、次のどちらでも取り違える:
+///
+/// - 承認対象に混ざったツリー図（`┌── src` / `├── lib` …）
+/// - 画面の上の方に残っている**別のダイアログの残骸**のプレビュー枠
+///
+/// どちらでも `Yes, and don't ask again for tree commands` が `Yes, and do` へ
+/// 切り詰められ、**「以後無条件で承認」であることが隠れたまま人に承認させる。**
 /// `truncated` は立たないので安全弁も効かない。
 ///
-/// 決め手は「**枠の左に選択肢の本体がある**」こと。本物の横並びレイアウトでは
-/// 枠の開始（`┌`）が 1 番目の選択肢と同じ行にあり、その桁で切っても
-/// `❯ 1. Grid` として読める。ツリー図では枠の左は空白しかないので、切ると何も残らない。
-/// この差で切り分ける。
+/// そこで 2 つで絞る:
+///
+/// 1. **探すのはいま解析している選択肢の並びの行だけ**（呼び出し側が範囲を渡す）。
+///    画面上部の残骸もツリー図も選択肢の外なので、これで落ちる
+/// 2. **枠の左に中身がある**こと。本物の横並びレイアウトでは枠の左に選択肢の
+///    ラベルがある。ツリー図では枠の左は空白しかないので、切ると何も残らない
+///
+/// 桁は**表示幅**で数える。CJK は 1 文字 2 桁なので、文字数で数えるとラベルに
+/// 日本語が混ざった行だけ桁がずれて候補が揃わない。
 fn find_preview_column(lines: &[&str]) -> Option<usize> {
     const MIN_PREVIEW_COL: usize = 16;
     const MIN_PREVIEW_ROWS: usize = 3;
+    const MIN_ROWS_WITH_CONTENT_LEFT: usize = 2;
+
     let mut counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
     for line in lines {
-        for (col, c) in line.chars().enumerate() {
-            if col < MIN_PREVIEW_COL {
-                continue;
-            }
-            if matches!(c, '┌' | '│' | '├' | '└' | '┃' | '╭' | '╰') {
-                *counts.entry(col).or_insert(0) += 1;
-                break; // 行の**最初の**枠だけを見る（右端の閉じ枠は候補にしない）
-            }
+        if let Some(col) = first_box_column(line, MIN_PREVIEW_COL) {
+            *counts.entry(col).or_insert(0) += 1;
         }
     }
     let mut candidates: Vec<usize> = counts
@@ -806,20 +847,53 @@ fn find_preview_column(lines: &[&str]) -> Option<usize> {
     candidates.sort_unstable();
 
     candidates.into_iter().find(|&col| {
-        lines.iter().any(|line| {
-            // 枠の開始行であること（`│` の途中行だけが揃っていても採らない）
-            let starts_box = line.chars().nth(col).is_some_and(|c| matches!(c, '┌' | '╭'));
-            // かつ、その桁で切った左側が選択肢の 1 番目として読めること
-            starts_box
-                && parse_option_line(&cut_at_column(line, col))
-                    .is_some_and(|(index, ..)| index == 1)
-        })
+        let with_content_left = lines
+            .iter()
+            .filter(|line| first_box_column(line, MIN_PREVIEW_COL) == Some(col))
+            .filter(|line| {
+                let (body, _) = strip_frame(&cut_at_column(line, col));
+                !body.is_empty() && !is_rule_line(&body)
+            })
+            .count();
+        with_content_left >= MIN_ROWS_WITH_CONTENT_LEFT
     })
 }
 
-/// 桁 `col` より右を落とす（プレビュー枠を切り離す）。
+/// その行で**最初に**縦枠が現れる表示桁（`min_col` より左は見ない）。
+///
+/// 行の最初の枠だけを見るのは、右端の閉じ枠を候補にしないため。
+fn first_box_column(line: &str, min_col: usize) -> Option<usize> {
+    let mut col = 0usize;
+    for c in line.chars() {
+        if col >= min_col && matches!(c, '┌' | '│' | '├' | '└' | '┃' | '╭' | '╰') {
+            return Some(col);
+        }
+        col += char_width(c);
+    }
+    None
+}
+
+/// 表示幅（桁数）。制御文字や結合文字は 0 桁として扱う。
+fn char_width(c: char) -> usize {
+    unicode_width::UnicodeWidthChar::width(c).unwrap_or(0)
+}
+
+/// 表示桁 `col` より右を落とす（プレビュー枠を切り離す）。
+///
+/// **文字数ではなく表示幅で切る。** CJK を含む行を文字数で切ると、枠の桁が
+/// 揃っていても切り口が行ごとにずれる。
 fn cut_at_column(line: &str, col: usize) -> String {
-    line.chars().take(col).collect()
+    let mut out = String::new();
+    let mut w = 0usize;
+    for c in line.chars() {
+        let cw = char_width(c);
+        if w + cw > col {
+            break;
+        }
+        out.push(c);
+        w += cw;
+    }
+    out
 }
 
 /// 選択肢行（`❯ 1. Yes` / `  2) foo`）を解析する。
@@ -871,6 +945,10 @@ struct OptionRun {
     end: usize,
     options: Vec<PromptOption>,
     cursor_index: Option<u32>,
+    /// 横並びのプレビュー枠を切り離した表示桁。**この run を解析したときの値**で、
+    /// run の外（`find_unnumbered_escape`）でも同じ桁を使うために持ち回る。
+    /// 画面全体から探し直すと別のダイアログの残骸の桁を拾う（#264）
+    preview_col: Option<usize>,
 }
 
 /// 画面の**最後の**選択肢の並びを取り出す。
@@ -878,8 +956,37 @@ struct OptionRun {
 /// 再描画の残骸で同じダイアログが複数回現れることは画面グリッドでは起きないが、
 /// 画面内に過去のダイアログのログが残っていることはある。**最後のものを採る。**
 fn find_last_option_run(lines: &[&str]) -> Option<OptionRun> {
-    // プレビュー枠の桁。見つかったら選択肢行をそこで切って解析する（#264）
-    let preview_col = find_preview_column(lines);
+    // ── 2 パスで解く（#264）──────────────────────────────────────────────
+    //
+    // プレビュー枠の桁を**画面全体**から探すと、画面上部に残っている別の
+    // ダイアログの残骸の桁を拾い、いま出ているダイアログの選択肢をそこで切って
+    // しまう（セルフレビューで検出。`Yes, and don't ask again for …` が
+    // `Yes, and do` になり、`truncated` も立たないので安全弁が効かない）。
+    //
+    // そこで一度**切らずに**選択肢の並びを取り、**その行範囲の中でだけ**桁を探す。
+    // 枠なしで解析すると枠の続き行がラベルへ吸われて `end` が下へ伸びるので、
+    // 枠の行はこの範囲に収まる。
+    //
+    // 探す範囲は run の下へ少しだけ伸ばす。枠の閉じ行（`└───┘`）は罫線だけの行なので
+    // 継続行として吸われず run の外に出るが、桁を数えるには要る。**上へは伸ばさない**
+    // （上にあるのが残骸なので、伸ばしたら塞いだ意味が無くなる）
+    const PREVIEW_LOOKAHEAD: usize = 4;
+    let plain = scan_option_runs(lines, None);
+    let preview_col = plain.as_ref().and_then(|run| {
+        let end = (run.end + 1 + PREVIEW_LOOKAHEAD).min(lines.len());
+        find_preview_column(&lines[run.start..end])
+    });
+    match preview_col {
+        Some(_) => scan_option_runs(lines, preview_col),
+        None => plain,
+    }
+}
+
+/// 選択肢の並びを走査して**最後のもの**を返す。
+///
+/// `preview_col` が `Some` なら各行をその表示桁で切ってから解析する
+/// （横並びのプレビュー枠を切り離す）。
+fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<OptionRun> {
     let cut = |line: &str| -> String {
         match preview_col {
             Some(col) => cut_at_column(line, col),
@@ -974,7 +1081,7 @@ fn find_last_option_run(lines: &[&str]) -> Option<OptionRun> {
                 cursor_index = Some(options[outliers[0]].index);
             }
         }
-        runs.push(OptionRun { start, end, options, cursor_index });
+        runs.push(OptionRun { start, end, options, cursor_index, preview_col });
         i = end + 1;
     }
     runs.pop()
@@ -1000,10 +1107,14 @@ fn contains_ci(haystack: &str, needle: &str) -> bool {
 /// 拾わないと**画面に実在する選択肢を人へ見せられない**。文言を決め打ちにしてあるのは、
 /// 「番号の無い行を選択肢として足す」を一般化すると、本文の断片を選択肢に化けさせて
 /// しまうため（そのまま矢印を送れば別の選択肢を確定しうる）。
-fn find_unnumbered_escape(lines: &[&str], run_end: usize) -> Option<String> {
+fn find_unnumbered_escape(
+    lines: &[&str],
+    run_end: usize,
+    preview_col: Option<usize>,
+) -> Option<String> {
     // 選択肢より下にもプレビュー枠が続くので、ここでも同じ桁で切る。
-    // 切らないと枠の行が「別の内容」に見えて、その先の `Chat about this` に届かない
-    let preview_col = find_preview_column(lines);
+    // 切らないと枠の行が「別の内容」に見えて、その先の `Chat about this` に届かない。
+    // **桁を探し直さず run のものを使う** — 探し直すと画面上部の残骸を拾う（#264）
     const LOOKAHEAD: usize = 10;
     for line in lines.iter().skip(run_end + 1).take(LOOKAHEAD) {
         let cut = match preview_col {
@@ -1239,6 +1350,27 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
         });
     };
 
+    // **フッタも折り返す。** 行ごとに照合すると、13 桁のターミナルでは
+    // `Esc to` / `cancel ·` / `Tab to` / `amend` に割れてどのパターンにも当たらず、
+    // Claude Code のダイアログを素の番号リスト扱い（数字キー）に落としてしまう。
+    // 選択肢より下をまとめて 1 つの文字列にしてから照合する
+    // **`run.end` は inclusive なので +1 する。** 含めると最後の選択肢ラベル自身が
+    // フッタ判定に混ざり、`Esc to cancel` を含むラベルを持つ素の番号リストが
+    // Claude Code のダイアログに化けて矢印キーを送ってしまう（セルフレビューで検出）
+    let below_text = lines[(run.end + 1).min(lines.len())..]
+        .iter()
+        .take(TAIL_WINDOW)
+        .map(|l| strip_frame(l).0)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let below_has_aq_footer = is_ask_user_question_footer(&below_text);
+    // `Tab to amend` は許可ダイアログ固有のフッタ。`Esc to cancel` は Claude Code の
+    // ダイアログ全般に出る。**どちらかがあれば矢印で答える**（数字ではない）
+    let has_amend_footer = contains_ci(&below_text, "tab to amend");
+
     // 選択肢の上にある見出しと承認対象を拾う
     let ctx_start = run.start.saturating_sub(CONTEXT_WINDOW);
     let mut above: Vec<String> = lines[ctx_start..run.start]
@@ -1251,11 +1383,28 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     // タブバーが見つかったら**そこで切る**。切らないと、その上に残っている
     // ユーザーのプロンプトのエコーや直前のツール出力まで `context` に入り、
     // カードが画面のダンプになる（実測。#264）。
+    //
+    // **`☐` / `☒` を含む行なら何でもタブバー、にはしない（→ `is_strong_tab_bar`）。**
+    // TodoWrite パネルが同じ記号を使うため、選択肢の上に todo が出ているだけで
+    // 素の番号リストが `AskUserQuestion` に化け、矢印キーを送ることになる。
+    // タブが 1 つだけの形（単一設問）は強い形と区別できないので、
+    // **`AskUserQuestion` のフッタが出ていて、かつ選択肢のすぐ上にある**ことも求める。
     let tabs: Vec<QuestionTab> = above
         .iter()
-        .rposition(|b| parse_tab_bar(b).is_some())
-        .map(|row| {
-            let parsed = parse_tab_bar(&above[row]).unwrap_or_default();
+        .enumerate()
+        .rev()
+        .find_map(|(row, body)| {
+            let parsed = parse_tab_bar(body)?;
+            let close_enough = above.len() - 1 - row <= TAB_BAR_MAX_GAP;
+            let acceptable = is_strong_tab_bar(&parsed, body)
+                || (below_has_aq_footer && close_enough);
+            if acceptable {
+                Some((row, parsed))
+            } else {
+                None
+            }
+        })
+        .map(|(row, parsed)| {
             above.drain(..=row);
             parsed
         })
@@ -1305,26 +1454,6 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
         }
     };
 
-    // **フッタも折り返す。** 行ごとに照合すると、13 桁のターミナルでは
-    // `Esc to` / `cancel ·` / `Tab to` / `amend` に割れてどのパターンにも当たらず、
-    // Claude Code のダイアログを素の番号リスト扱い（数字キー）に落としてしまう。
-    // 選択肢より下をまとめて 1 つの文字列にしてから照合する
-    // **`run.end` は inclusive なので +1 する。** 含めると最後の選択肢ラベル自身が
-    // フッタ判定に混ざり、`Esc to cancel` を含むラベルを持つ素の番号リストが
-    // Claude Code のダイアログに化けて矢印キーを送ってしまう（セルフレビューで検出）
-    let below_text = lines[(run.end + 1).min(lines.len())..]
-        .iter()
-        .take(TAIL_WINDOW)
-        .map(|l| strip_frame(l).0)
-        .collect::<Vec<_>>()
-        .join(" ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    let below_has_aq_footer = is_ask_user_question_footer(&below_text);
-    // `Tab to amend` は許可ダイアログ固有のフッタ。`Esc to cancel` は Claude Code の
-    // ダイアログ全般に出る。**どちらかがあれば矢印で答える**（数字ではない）
-    let has_amend_footer = contains_ci(&below_text, "tab to amend");
     let footer_says_cc =
         below_has_aq_footer || has_amend_footer || contains_ci(&below_text, "esc to cancel");
     // **タブバーもフッタと同格の印**（#264）。全問答えたあとの確認画面
@@ -1339,7 +1468,7 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     // そのまま選べる。Claude Code のダイアログだと分かっているときだけ足す
     let mut options = run.options;
     if has_cc_footer {
-        if let Some(label) = find_unnumbered_escape(&lines, run.end) {
+        if let Some(label) = find_unnumbered_escape(&lines, run.end, run.preview_col) {
             let next = options.last().map(|o| o.index + 1).unwrap_or(1);
             options.push(PromptOption { index: next, label });
         }
@@ -1934,6 +2063,196 @@ mod tests {
 
         let after = parse_prompt(&multi_question_second_screen());
         assert!(select_all_progressed(&before, &after), "☒ が増えたら進んだ");
+    }
+
+    /// 画面上部に残った**別のダイアログのプレビュー枠**の桁で、いま出ている
+    /// ダイアログの選択肢を切らない（2 回目のセルフレビューで検出）。
+    ///
+    /// 切ると `Yes, and don't ask again for tree commands in X:\…` が
+    /// `Yes, and don't ask again for tree` になり、`truncated` も立たないので
+    /// **「以後無条件で承認」であることが隠れたまま承認させる。**
+    #[test]
+    fn a_stale_preview_panel_above_does_not_cut_the_current_dialog() {
+        let screen = [
+            "  Which layout?",
+            "❯ 1. Grid                         ┌──────────────────────────────┐",
+            "  2. List                         │ ┌───┬───┬───┐                │",
+            "                                  ├──────────────────────────────┤",
+            "                                  └──────────────────────────────┘",
+            "",
+            "● Bash(tree -L 2 src)",
+            "",
+            "Do you want to proceed?",
+            "",
+            "❯ 1. Yes",
+            "  2. Yes, and don't ask again for tree commands in X:\\devel\\worktree\\oretachi-34yd",
+            "  3. No, and tell Claude what to do differently (esc)",
+            "",
+            "  Esc to cancel · Tab to amend",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Permission);
+        assert_eq!(
+            p.questions[0].options[1].label,
+            "Yes, and don't ask again for tree commands in X:\\devel\\worktree\\oretachi-34yd",
+            "上の残骸の桁でラベルが切られている"
+        );
+        assert_eq!(p.questions[0].options.len(), 3);
+    }
+
+    /// TodoWrite パネルの `☒` / `☐` をタブバーと取り違えない
+    /// （2 回目のセルフレビューで検出）。
+    ///
+    /// 取り違えると `navigation` が Digits → Arrows へ反転し、
+    /// **素の TUI の番号リストへ矢印 + CR を送る**ことになる。
+    #[test]
+    fn a_todo_panel_is_not_a_question_tab_bar() {
+        let screen = [
+            "● Update Todos",
+            "  ⎿  ☒ テストを書く",
+            "     ☐ 実装する",
+            "     ☐ レビューする",
+            "",
+            "Pick a target:",
+            "  1) staging",
+            "  2) production",
+            "Selection: ",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert!(p.tabs.is_empty(), "tabs={:?}", p.tabs);
+        assert_eq!(p.shape, PromptShape::Numbered);
+        assert_eq!(p.navigation, Navigation::Digits, "素の番号リストへ矢印を送ってはいけない");
+    }
+
+    /// todo が上にあっても、許可ダイアログは許可ダイアログのまま。
+    #[test]
+    fn a_todo_panel_above_a_permission_dialog_changes_nothing() {
+        let screen = [
+            "  ⎿  ☒ テストを書く",
+            "     ☐ 実装する",
+            "",
+            "Bash command",
+            "cargo test",
+            "",
+            "Do you want to proceed?",
+            "",
+            "❯ 1. Yes",
+            "  2. No, and tell Claude what to do differently (esc)",
+            "",
+            "  Esc to cancel · Tab to amend",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert!(p.tabs.is_empty(), "tabs={:?}", p.tabs);
+        assert_eq!(p.shape, PromptShape::Permission);
+        assert!(p.context.contains("cargo test"), "context={:?}", p.context);
+    }
+
+    /// 単一設問のタブバー（`☐ Color` の 1 つだけ）は、`AskUserQuestion` の
+    /// フッタが出ていて選択肢のすぐ上にあるときだけ採る。
+    #[test]
+    fn a_single_question_tab_bar_is_accepted_next_to_its_options() {
+        let screen = [
+            "❯ 直前のプロンプトのエコー",
+            "☐ Color",
+            "Which color?",
+            "",
+            "❯ 1. Red",
+            "  2. Blue",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.tabs.len(), 1);
+        assert_eq!(p.tabs[0].label, "Color");
+        assert_eq!(p.header, "Which color?");
+        assert_eq!(p.context, "", "エコーを混ぜない");
+    }
+
+    /// 単一設問（`✔ Submit` タブが無い）で全問答え終えた画面は `Done`。
+    ///
+    /// ここを「2 問目を探す」経路へ落とすと、成功しているのに
+    /// `Refuse` になってカードが読み取り専用になる（2 回目のセルフレビューで検出）。
+    #[test]
+    fn select_all_is_done_when_every_tab_is_answered_without_a_submit_tab() {
+        let screen = [
+            "☒ Color",
+            "Which color?",
+            "",
+            "❯ 1. Red",
+            "  2. Blue",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.tabs.len(), 1);
+        assert!(p.tabs[0].answered);
+        assert_eq!(plan_select_all_step(&p, &[1], Some(0)), SelectAllStep::Done);
+    }
+
+    /// 確認画面は見出しでも裏取りする（回答済みタブを表示中の設問と取り違えない）。
+    #[test]
+    fn select_all_refuses_a_submit_lookalike_without_the_review_heading() {
+        let screen = [
+            "←  ☒ Color  ☒ Size  ✔ Submit  →",
+            "Which workflow should we use?",
+            "",
+            "❯ 1. Submit for review",
+            "  2. Merge directly",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        match plan_select_all_step(&p, &[1, 1], Some(1)) {
+            SelectAllStep::Refuse(reason) => assert!(reason.contains("確かめられませんでした")),
+            other => panic!("確定してはいけない: {:?}", other),
+        }
+    }
+
+    /// CJK が混ざっても横並びのプレビュー枠を切り離せる（桁は表示幅で数える）。
+    #[test]
+    fn the_preview_column_is_measured_in_display_width() {
+        let screen = [
+            "☐ Layout",
+            "Which layout?",
+            "",
+            "❯ 1. グリッド表示                 ┌──────────────────┐",
+            "  2. リスト                       │ preview line 1   │",
+            "                                  ├──────────────────┤",
+            "                                  └──────────────────┘",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        let labels: Vec<&str> = p.questions[0].options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, vec!["グリッド表示", "リスト"], "labels={:?}", labels);
+    }
+
+    /// プレビュー枠の上辺が 1 番目の選択肢と揃っていなくても切り離せる。
+    ///
+    /// 「`┌` の行の左が 1 番目の選択肢として読めること」を要求していた時期は
+    /// ここを取り逃していた（枠文字がラベルへ混ざる）。
+    #[test]
+    fn the_preview_panel_is_found_when_its_top_is_above_the_first_option() {
+        let screen = [
+            "☐ Layout",
+            "Which layout?                     ┌──────────────────┐",
+            "❯ 1. Grid                         │ preview line 1   │",
+            "  2. List                         │ preview line 2   │",
+            "                                  └──────────────────┘",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        let labels: Vec<&str> = p.questions[0].options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, vec!["Grid", "List"], "labels={:?}", labels);
     }
 
     #[test]

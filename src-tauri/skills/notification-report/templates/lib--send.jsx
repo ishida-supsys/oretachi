@@ -403,6 +403,20 @@ function blockedReason(n, conflicts) {
       'ターミナルを開いて直接操作してください'
     );
   }
+  // `request.questions` はあるのに 1 問も使えない（全部 options 空）。黙って
+  // 「画面から読めた 1 問だけ」のカードへ劣化させると、人は全設問に答えたつもりで
+  // 1 問しか答えられていないことに気づけない
+  if (
+    n.request &&
+    Array.isArray(n.request.questions) &&
+    n.request.questions.length > 0 &&
+    askQuestions(n).length === 0
+  ) {
+    return (
+      `'${n.worktreeName}' の設問に選択肢が 1 つも入っていません（レポートの生成が不完全）。` +
+      'レポートを作り直してください'
+    );
+  }
   if (hasPrompt(n) && !n.prompt.fingerprint) {
     return (
       `'${n.worktreeName}' の画面の fingerprint がレポートに入っていません。` +
@@ -427,16 +441,6 @@ function blockedReason(n, conflicts) {
       return (
         `'${n.worktreeName}' のダイアログが画面に収まっていません（タブが狭い）。` +
         'この状態では宛先へキーを送れないため、ターミナルを広げるか直接操作してください'
-      );
-    }
-    // **矢印の移動量が決まらない画面では送らせない。** 選択肢は通知から出して
-    // いても、キーを送るのは画面に対してなので `❯` の位置は要る。塞がないと
-    // 押した瞬間 Rust が `unsupported` を返し、カードが読み取り専用になって死ぬ
-    // （非設問フォームの経路と同じ理由。セルフレビューで検出）
-    if (!cursorReadable(n) && !canEscape(n)) {
-      return (
-        `'${n.worktreeName}' の画面でいまどの選択肢が選ばれているか（❯）が読み取れず、` +
-        '矢印の移動量を決められないため送信できません。ターミナルを開いて直接操作してください'
       );
     }
     const conflictQ = conflicts && conflicts[n.id];
@@ -737,6 +741,15 @@ function canSend(n, answer, draft, conflicts) {
     // キーが 1 つでも出ている可能性がある結果は再送させない
     if (answer && answer.status && answer.status !== 'failed') return false;
     if (d.mode === 'escapeThenText') return canEscape(n) && !!flatten(d.note);
+    // **`❯` の位置が読めない画面では「選ぶ」を許さない。** Rust の `plan_keys` が
+    // 移動量を決められず `unsupported` を返し、そのカードは読み取り専用になって
+    // 選び直せず死ぬ。
+    //
+    // これを `blockedReason` 側（`!cursorReadable && !canEscape`）でやると
+    // **永久に塞がらない**: `askUserQuestion` のフッタには常に `Esc to cancel` が
+    // 出るので `canEscape` がほぼ常に true になる（セルフレビューで検出）。
+    // ここで「選ぶ」だけを止めれば、ESC で抜ける経路は上の分岐で残る
+    if (!cursorReadable(n)) return false;
     // 通知由来の設問フォームは**全問埋まってから**送る。途中で送ると、残りの設問へ
     // 何も答えないまま画面が進み、宛先が答えの無い設問で止まる
     if (isQuestionForm(n)) return selectAllIndices(n, d) !== null;

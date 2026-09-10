@@ -4099,10 +4099,11 @@ impl NotifyService {
                             Vec::new(),
                             Some(&parsed),
                             Some(format!(
-                                "画面の形状は '{}' です。kind=\"selectAll\" は複数設問の askUserQuestion にだけ使えます",
-                                parsed.shape.as_str()
+                                "答えるものが残っていません（画面の形状は '{}'、回答済みの設問 {} 問）。kind=\"selectAll\" は未回答の設問が残っている askUserQuestion に使ってください",
+                                parsed.shape.as_str(),
+                                answered
                             )),
-                            0,
+                            answered,
                         );
                     }
                     // ダイアログが閉じた = 全問の回答が宛先へ渡った
