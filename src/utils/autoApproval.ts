@@ -175,6 +175,28 @@ export const ORETACHI_AUTO_APPROVE_TOOLS = [
   "oretachi_inspect_prompt",
 ] as const;
 
+/**
+ * 無条件承認から外す「破壊的な command」。ツール名は自動承認対象でも、この
+ * command が画面に見えている呼び出しだけは AI 判定 / 手動承認へ落とす。
+ *
+ * `artifact(command: "delete")` はアーティファクト本体・モジュール・ストア
+ * (useMemory の中身) をまとめて消し、ゴミ箱もバックアップも無い。UI からの削除は
+ * 確認ダイアログ必須 (`ArtifactViewerApp.vue`) なので、MCP 経路だけを素通しにしない。
+ * `artifact_module` の delete は 1 モジュール単位なので従来どおり対象外。
+ *
+ * ダイアログにパラメータが出ていない (折り返しで窓の外へ出た / CC が省略した) 場合は
+ * 検出できず従来どおり承認される。**ここはフェイルオープンなので単独の防波堤にしない**
+ * (同梱スキルの `allowed-tools` で許可されている場合はそもそもダイアログが出ず、
+ * この判定も走らない)。削除の本命のゲートは MCP 側の `confirm_delete` 必須化で、
+ * これはその手前の追加の網。
+ *
+ * キーのクォート有無は CC の描画に依存するので両方許す (`command: "delete"` /
+ * `"command": "delete"`)。
+ */
+const ORETACHI_DESTRUCTIVE_COMMANDS: Record<string, RegExp> = {
+  artifact: /["']?command["']?\s*:\s*["']?delete\b/i,
+};
+
 /** 承認プロンプト行を探すときに前後何行を対象にするか */
 const ORETACHI_PROMPT_WINDOW = 8;
 
@@ -222,7 +244,11 @@ export function detectOretachiToolPrompt(content: string): string | null {
       "im"
     )
   );
-  return match ? match[1] : null;
+  if (!match) return null;
+  const tool = match[1];
+  // 破壊的な command が見えている呼び出しは即承認しない (AI 判定 / 手動へ回す)
+  if (ORETACHI_DESTRUCTIVE_COMMANDS[tool]?.test(window)) return null;
+  return tool;
 }
 
 /** ターミナル内容を解析し自動承認すべきか判定 */

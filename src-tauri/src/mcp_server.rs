@@ -841,7 +841,7 @@ pub struct NotifyWorktreeEvent {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ArtifactParams {
-    #[schemars(description = "操作の種類: \"create\"(新規作成) / \"update\"(差分更新) / \"rewrite\"(全置換) / \"get\"(1件取得) / \"outline\"(構造概要取得。contentを除く)")]
+    #[schemars(description = "操作の種類: \"create\"(新規作成) / \"update\"(差分更新) / \"rewrite\"(全置換) / \"get\"(1件取得) / \"outline\"(構造概要取得。contentを除く) / \"delete\"(アーティファクトごと削除。**復元できない**)")]
     pub command: String,
     #[schemars(description = "アーティファクトを識別する一意なID")]
     pub id: String,
@@ -872,6 +872,8 @@ pub struct ArtifactParams {
     pub offset: Option<u32>,
     #[schemars(description = "get時: 取得する行数 (省略時は全行)")]
     pub limit: Option<u32>,
+    #[schemars(description = "delete時必須: 削除するアーティファクトの id と**同じ文字列**を渡す。一致しない・省略した delete はエラーになる。allowed-tools / permissions.allow / 「don't ask again」で許可ダイアログが出ない環境でも、意図しない削除 (id を取り違えた一括削除など) を1件ずつの明示操作にするためのゲート")]
+    pub confirm_delete: Option<String>,
     #[schemars(description = "true にすると、このアーティファクトが oretachi のビューアで開かれている間 MCP 由来の書き込み (update / rewrite / artifact_module / artifact_store command=write,delete) を拒否する。ユーザーが操作中のアーティファクトを裏から書き換えないためのフラグで、読み取りは常に許可される。create / update / rewrite のいずれでも設定でき、省略時は既存アーティファクトの設定を引き継ぐ (明示的に false を渡すと解除)。ロック中は解除もできないので、外したい場合はユーザーにウィンドウを閉じてもらう。**守られるのはビューアが「いま表示している」1件だけ**で、ウィンドウが開いたままでもユーザーが別のアーティファクトへ切り替えている間は書き込める点に注意 (裏で入力を消したくないレポートは、ユーザーがそのページに留まっている前提になる)")]
     pub locked_while_open: Option<bool>,
 }
@@ -960,6 +962,216 @@ fn ensure_artifact_unlocked(
     ))
 }
 
+/// 年月日から UNIX エポック（1970-01-01）までの日数を求める（Howard Hinnant の days_from_civil）。
+/// chrono を足さずに `YYYY-MM-DD` を秒へ直すためだけの最小実装。
+fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
+    let y = if m <= 2 { y - 1 } else { y };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400;
+    let mp = if m > 2 { m as i64 - 3 } else { m as i64 + 9 };
+    let doy = (153 * mp + 2) / 5 + d as i64 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    era * 146097 + doe - 719468
+}
+
+fn days_in_month(y: i64, m: u32) -> u32 {
+    match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+            if leap { 29 } else { 28 }
+        }
+        _ => 0,
+    }
+}
+
+/// `search_artifact` の日時フィルタ文字列を UNIX 秒（UTC）へ直す。
+///
+/// 受け付ける形は3種類。エージェントが「昨日作ったもの」を絞れるように、
+/// 絶対日時だけでなく相対指定 (`-1d`) も通す。
+/// - UNIX 秒そのまま: `1757462400`
+/// - 相対（現在からの遡り）: `-30m` / `-12h` / `-7d` / `-90s`
+/// - ISO 8601: `2026-09-10` / `2026-09-10T12:34` / `2026-09-10T12:34:56`
+///   （末尾に `Z` か `+09:00` を付けられる。**オフセットを省略した場合は UTC 扱い**）
+///
+/// 期間の指定は `after` が以上（含む）、`before` が未満（含まない）。
+/// `created_after: "2026-09-09", created_before: "2026-09-10"` で 9/9 の1日分になる。
+fn parse_artifact_time(input: &str, now: u64) -> Result<u64, String> {
+    let s = input.trim();
+    if s.is_empty() {
+        return Err("日時が空です".to_string());
+    }
+    let invalid = || {
+        format!(
+            "日時 '{}' を解釈できません。UNIX秒 (1757462400) / 相対指定 (-1d, -12h, -30m, -90s) / ISO 8601 (2026-09-10, 2026-09-10T12:34:56, 2026-09-10T12:34:56+09:00) のいずれかで指定してください",
+            input
+        )
+    };
+
+    // UNIX 秒。ただし ISO 8601 basic 形式 (`20260910`) は UNIX 秒として黙って
+    // 受けると 1970-08-23 になり、絞り込み結果が静かに全件 / 0 件へ化ける。弾く。
+    if s.chars().all(|c| c.is_ascii_digit()) {
+        if s.len() == 8 && (s.starts_with("19") || s.starts_with("20")) {
+            return Err(format!(
+                "日時 '{}' は UNIX 秒か日付か判別できません。日付なら '{}-{}-{}' のようにハイフンで区切ってください",
+                input, &s[0..4], &s[4..6], &s[6..8]
+            ));
+        }
+        return s.parse::<u64>().map_err(|_| invalid());
+    }
+
+    // 相対指定（現在から遡る）
+    if let Some(rest) = s.strip_prefix('-') {
+        // マルチバイト文字 (`-1日`) をバイト位置で割ると char 境界違反で panic する
+        let split = rest.char_indices().next_back().map(|(i, _)| i).ok_or_else(invalid)?;
+        let (num, unit) = rest.split_at(split);
+        let n: u64 = num.parse().map_err(|_| invalid())?;
+        let secs = match unit {
+            "s" => n,
+            "m" => n.saturating_mul(60),
+            "h" => n.saturating_mul(3600),
+            "d" => n.saturating_mul(86400),
+            _ => return Err(invalid()),
+        };
+        return Ok(now.saturating_sub(secs));
+    }
+
+    // ISO 8601（日付のみ / 日付+時刻、任意のタイムゾーンオフセット）
+    let (body, offset_secs) = split_timezone(s).ok_or_else(invalid)?;
+    let (date_part, time_part) = match body.split_once(['T', 't', ' ']) {
+        Some((d, t)) => (d, Some(t)),
+        None => (body, None),
+    };
+    let mut date_iter = date_part.split('-');
+    let y: i64 = date_iter.next().ok_or_else(invalid)?.parse().map_err(|_| invalid())?;
+    let m: u32 = date_iter.next().ok_or_else(invalid)?.parse().map_err(|_| invalid())?;
+    let d: u32 = date_iter.next().ok_or_else(invalid)?.parse().map_err(|_| invalid())?;
+    // 年の上限を切らないと days_from_civil の乗算が i64 でオーバーフローする
+    // （debug ビルドは panic、release は黙ってラップする）
+    if date_iter.next().is_some()
+        || !(1970..=9999).contains(&y)
+        || !(1..=12).contains(&m)
+        || d < 1
+        || d > days_in_month(y, m)
+    {
+        return Err(invalid());
+    }
+
+    let (mut hh, mut mm, mut ss) = (0i64, 0i64, 0i64);
+    if let Some(t) = time_part {
+        let mut it = t.split(':');
+        hh = it.next().ok_or_else(invalid)?.parse().map_err(|_| invalid())?;
+        mm = it.next().ok_or_else(invalid)?.parse().map_err(|_| invalid())?;
+        // 秒は小数（`12:34:56.789`）を許して切り捨てる
+        if let Some(sec) = it.next() {
+            let sec = sec.split_once('.').map(|(int, _)| int).unwrap_or(sec);
+            ss = sec.parse().map_err(|_| invalid())?;
+        }
+        if it.next().is_some() || !(0..=23).contains(&hh) || !(0..=59).contains(&mm) || !(0..=60).contains(&ss) {
+            return Err(invalid());
+        }
+        // 閏秒 (`:60`) は次の分へ繰り上げず 59 秒に丸める。繰り上げると
+        // `00:00:60` が `00:01:00` へ化けて、指定より後ろの境界になる
+        ss = ss.min(59);
+    }
+
+    let secs = days_from_civil(y, m, d) * 86400 + hh * 3600 + mm * 60 + ss - offset_secs;
+    if secs < 0 {
+        return Err(format!("日時 '{}' は 1970-01-01 より前です", input));
+    }
+    Ok(secs as u64)
+}
+
+/// ISO 8601 文字列を「タイムゾーンを除いた本体」と「オフセット秒」に割る。
+/// オフセットが無い場合は UTC (0 秒) 扱い。
+fn split_timezone(s: &str) -> Option<(&str, i64)> {
+    if let Some(body) = s.strip_suffix('Z').or_else(|| s.strip_suffix('z')) {
+        return Some((body, 0));
+    }
+    // 日付部の区切り `-` と衝突するので、オフセットは「時刻部より後ろの符号」だけを見る。
+    // 時刻部が無い (`2026-09-10`) / 符号が無い (`2026-09-10T12:34`) 場合はオフセット無し = UTC。
+    let Some(time_start) = s.find(['T', 't', ' ']).map(|i| i + 1) else {
+        return Some((s, 0));
+    };
+    let tail = &s[time_start..];
+    let Some(sign_pos) = tail.rfind(['+', '-']) else {
+        return Some((s, 0));
+    };
+    let sign = if tail.as_bytes()[sign_pos] == b'+' { 1 } else { -1 };
+    let off = &tail[sign_pos + 1..];
+    // 桁で割るので ASCII 以外は先に弾く（`+あa` をバイト位置で割ると panic する）
+    if !off.is_ascii() {
+        return None;
+    }
+    let (h, m) = match off.split_once(':') {
+        Some((h, m)) => (h, m),
+        None => match off.len() {
+            4 => off.split_at(2),
+            2 => (off, "0"),
+            _ => return None,
+        },
+    };
+    let h: i64 = h.parse().ok()?;
+    let m: i64 = m.parse().ok()?;
+    if h > 23 || m > 59 {
+        return None;
+    }
+    Some((&s[..time_start + sign_pos], sign * (h * 3600 + m * 60)))
+}
+
+/// 日時フィルタの範囲。`after` は以上、`before` は未満。
+struct ArtifactTimeRange {
+    created_after: Option<u64>,
+    created_before: Option<u64>,
+    updated_after: Option<u64>,
+    updated_before: Option<u64>,
+}
+
+impl ArtifactTimeRange {
+    fn is_empty(&self) -> bool {
+        self.created_after.is_none()
+            && self.created_before.is_none()
+            && self.updated_after.is_none()
+            && self.updated_before.is_none()
+    }
+
+    /// `after` が `before` 以降だと半開区間が空になり、必ず 0 件になる。
+    /// 指定ミスなので黙って空を返さずエラーにする。
+    fn validate(&self) -> Result<(), String> {
+        for (label, after, before) in [
+            ("created", self.created_after, self.created_before),
+            ("updated", self.updated_after, self.updated_before),
+        ] {
+            if let (Some(a), Some(b)) = (after, before) {
+                if a >= b {
+                    return Err(format!(
+                        "{0}_after ({1}) が {0}_before ({2}) 以降なので条件を満たすものはありません。{0}_before は「未満」で扱われるため、after < before になるよう指定してください",
+                        label, a, b
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn matches(&self, created_at: u64, updated_at: u64) -> bool {
+        if self.created_after.is_some_and(|t| created_at < t) {
+            return false;
+        }
+        if self.created_before.is_some_and(|t| created_at >= t) {
+            return false;
+        }
+        if self.updated_after.is_some_and(|t| updated_at < t) {
+            return false;
+        }
+        if self.updated_before.is_some_and(|t| updated_at >= t) {
+            return false;
+        }
+        true
+    }
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SearchArtifactParams {
     #[schemars(description = "現在の作業ディレクトリ。これを渡すのが最も確実。HOMEタブやリポジトリルートで作業している場合は repository/branch では特定できないため必須")]
@@ -972,6 +1184,14 @@ pub struct SearchArtifactParams {
     pub branch: Option<String>,
     #[schemars(description = "検索キーワード (省略時は全件返却)。title, content, type, language を対象に部分一致検索")]
     pub query: Option<String>,
+    #[schemars(description = "作成日時がこれ以降 (この時刻を含む) のものだけ返す。UNIX秒 (1757462400) / 現在からの相対 (-1d, -12h, -30m, -90s) / ISO 8601 (2026-09-10, 2026-09-10T12:34:56, 2026-09-10T12:34:56+09:00) で指定する。**オフセットを省略した ISO 8601 は UTC 扱い**なので、ローカル時刻で切りたい場合はオフセットを付けること")]
+    pub created_after: Option<String>,
+    #[schemars(description = "作成日時がこれより前 (この時刻を含まない) のものだけ返す。書式は created_after と同じ。created_after: \"2026-09-09\" と created_before: \"2026-09-10\" で 9/9 の1日分になる")]
+    pub created_before: Option<String>,
+    #[schemars(description = "更新日時がこれ以降 (この時刻を含む) のものだけ返す。書式は created_after と同じ")]
+    pub updated_after: Option<String>,
+    #[schemars(description = "更新日時がこれより前 (この時刻を含まない) のものだけ返す。書式は created_after と同じ")]
+    pub updated_before: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1404,7 +1624,7 @@ impl NotifyService {
         }
     }
 
-    #[tool(description = "アーティファクトを操作する。create: 新規作成, update: 差分更新(old_str→new_str), rewrite: 全置換, get: 1件取得(offset/limitで行範囲指定可)。**テンプレートやファイルの中身をそのまま中身として登録する場合は content ではなく file_path を使うこと** (ファイルを Read して同じテキストを content へ書き戻す往復が消え、生成が大幅に速く・安くなる)。create / update / rewrite の戻り値は書き込み結果の**要約**(行数・モジュール一覧)だけで、中身は返さない。中身の確認が要るときは get / outline を使うこと。保存先は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は repository/branch では特定できないため project_dir が必須", annotations(read_only_hint = true))]
+    #[tool(description = "アーティファクトを操作する。create: 新規作成, update: 差分更新(old_str→new_str), rewrite: 全置換, get: 1件取得(offset/limitで行範囲指定可), delete: アーティファクトごと削除(本体・モジュール・ストアがまとめて消え、**復元はできない**。誤爆防止に confirm_delete へ id と同じ文字列を渡すことが必須。ユーザーの指示なしに消さないこと。何を消すのかは search_artifact で日時などから絞ってから確認する)。**テンプレートやファイルの中身をそのまま中身として登録する場合は content ではなく file_path を使うこと** (ファイルを Read して同じテキストを content へ書き戻す往復が消え、生成が大幅に速く・安くなる)。create / update / rewrite の戻り値は書き込み結果の**要約**(行数・モジュール一覧)だけで、中身は返さない。中身の確認が要るときは get / outline を使うこと。保存先は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は repository/branch では特定できないため project_dir が必須", annotations(read_only_hint = true))]
     async fn artifact(
         &self,
         Parameters(ArtifactParams {
@@ -1423,6 +1643,7 @@ impl NotifyService {
             new_str,
             offset,
             limit,
+            confirm_delete,
             locked_while_open,
         }): Parameters<ArtifactParams>,
     ) -> Result<CallToolResult, McpError> {
@@ -1537,6 +1758,73 @@ impl NotifyService {
             return Ok(CallToolResult::success(vec![Content::text(json)]));
         }
 
+        if command == "delete" {
+            // 承認ダイアログのテキスト解析に頼らない削除ゲート。
+            // MCP の許可ルールは引数単位の粒度を持たないため、同梱スキルの
+            // `allowed-tools: mcp__plugin_oretachi_oretachi__artifact` や
+            // `permissions.allow`・「don't ask again」で許可された環境では
+            // 許可ダイアログも自動承認判定も一切走らない。`create` / `rewrite` と
+            // 同じ経路で復元不能な削除が通らないよう、Rust 側で明示の意思表示を要求する。
+            if confirm_delete.as_deref() != Some(id.as_str()) {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "delete には confirm_delete に削除対象の id '{}' と同じ文字列を渡してください（渡された値: {:?}）。復元できない操作なので、1件ずつ明示的に指定させています",
+                        id, confirm_delete
+                    ),
+                    None,
+                ));
+            }
+            // 本体 JSON が壊れていても削除だけは通す。ここで parse を必須にすると、
+            // 壊れたアーティファクトが MCP からは片付けられない置き土産になる
+            // （UI 側の `delete_artifact` は中身を読まずに消せる）。
+            // 解析できない場合は `locked_while_open` も読めないので非ロック扱いになる。
+            let raw = tokio_fs::read_to_string(&artifact_path).await.map_err(|_| {
+                McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None)
+            })?;
+            let parsed: Option<ArtifactData> = serde_json::from_str(&raw).ok();
+            if parsed.is_none() {
+                log::warn!("[mcp] artifact command=delete id={} は JSON を解析できないまま削除します", id);
+            }
+            ensure_artifact_unlocked(
+                &self.app_handle,
+                "worktree",
+                &worktree_id,
+                &id,
+                parsed.as_ref().and_then(|d| d.locked_while_open),
+            )?;
+            // 状態サイドカー（`<id>.state`。ストア＝useMemory の中身とピン止め）は本体に従属する。
+            // 残すと本体の無い孤児になり、以後どこからも消せない（`delete_artifact` と同じ扱い）。
+            let state_path = crate::artifact_state_path(&artifacts_dir, &id);
+            tokio_fs::remove_file(&artifact_path).await.map_err(|e| {
+                McpError::internal_error(
+                    format!("アーティファクト '{}' を削除できません: {}", id, e),
+                    None,
+                )
+            })?;
+            // サイドカーは無くても正常なので、消せなくても本体の削除は成功として扱う
+            let _ = tokio_fs::remove_file(&state_path).await;
+            log::info!("[mcp] artifact command=delete id={} worktree_id={}", id, worktree_id);
+            if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
+                "worktreeId": worktree_id,
+                "artifactId": id,
+                "command": "delete",
+            })) {
+                log::warn!("Failed to emit artifact-changed: {}", e);
+            }
+            if let Some(pool) = self.app_handle.try_state::<crate::report_db::ReportPool>() {
+                let _ = crate::report_db::insert(&pool.inner().0, "artifact_change:delete", &id).await;
+            }
+            let json = serde_json::to_string_pretty(&serde_json::json!({
+                "ok": true,
+                "command": "delete",
+                "id": id,
+                "title": parsed.as_ref().map(|d| d.title.clone()),
+                "deleted": true,
+            }))
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+            return Ok(CallToolResult::success(vec![Content::text(json)]));
+        }
+
         // ここから先は create / update / rewrite。既存の永続フラグを見て表示中ロックを判定する
         // （create も既存を丸ごと上書きするので対象に含める）。
         // read 失敗（＝未作成）と parse 失敗を分ける。まとめて `None` に潰すと、
@@ -1613,7 +1901,7 @@ impl NotifyService {
                 data
             }
             other => return Err(McpError::invalid_params(
-                format!("不明なコマンド '{}'. create / update / rewrite / get / outline のいずれかを指定してください", other),
+                format!("不明なコマンド '{}'. create / update / rewrite / get / outline / delete のいずれかを指定してください", other),
                 None,
             )),
         };
@@ -2747,7 +3035,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "アーティファクトを検索する。queryを省略すると全件返却。title/content/type/languageを対象に部分一致検索。結果はcontentを除いたメタデータのみ。検索対象は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は project_dir が必須", annotations(read_only_hint = true))]
+    #[tool(description = "アーティファクトを検索する。queryを省略すると全件返却。title/content/type/languageを対象に部分一致検索。created_after / created_before / updated_after / updated_before で作成日時・更新日時での絞り込みもできる (UNIX秒 / 相対指定 -1d / ISO 8601。after は以上、before は未満)。「昨日作ったものを消す」のように日時で絞ってから artifact(command: \"delete\") へ渡せる。結果はcontentを除いたメタデータのみ。検索対象は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は project_dir が必須", annotations(read_only_hint = true))]
     async fn search_artifact(
         &self,
         Parameters(SearchArtifactParams {
@@ -2756,8 +3044,39 @@ impl NotifyService {
             repository,
             branch,
             query,
+            created_after,
+            created_before,
+            updated_after,
+            updated_before,
         }): Parameters<SearchArtifactParams>,
     ) -> Result<CallToolResult, McpError> {
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let parse = |v: &Option<String>| -> Result<Option<u64>, McpError> {
+            v.as_deref()
+                .map(|s| parse_artifact_time(s, now))
+                .transpose()
+                .map_err(|e| McpError::invalid_params(e, None))
+        };
+        let range = ArtifactTimeRange {
+            created_after: parse(&created_after)?,
+            created_before: parse(&created_before)?,
+            updated_after: parse(&updated_after)?,
+            updated_before: parse(&updated_before)?,
+        };
+        // after >= before は絶対に 0 件。黙って空を返すと「その期間には無い」と読めてしまう
+        range.validate().map_err(|e| McpError::invalid_params(e, None))?;
+        let range_log = if range.is_empty() {
+            None
+        } else {
+            Some(format!(
+                "created=[{:?},{:?}) updated=[{:?},{:?})",
+                range.created_after, range.created_before, range.updated_after, range.updated_before
+            ))
+        };
+
         let settings_manager = self.app_handle.state::<SettingsManager>();
         let settings = settings_manager.get();
         let wt = resolve_artifact_worktree(
@@ -2797,6 +3116,9 @@ impl NotifyService {
                         Ok(d) => d,
                         Err(_) => continue,
                     };
+                    if !range.matches(data.created_at, data.updated_at) {
+                        continue;
+                    }
                     if let Some(ref q) = query {
                         let q_lower = q.to_lowercase();
                         let matches = data.title.to_lowercase().contains(&q_lower)
@@ -2835,8 +3157,8 @@ impl NotifyService {
         let json = serde_json::to_string_pretty(&results)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         log::info!(
-            "[mcp] search_artifact query={:?} worktree_id={} count={}",
-            query_log, worktree_id, results.len()
+            "[mcp] search_artifact query={:?} range={:?} worktree_id={} count={}",
+            query_log, range_log, worktree_id, results.len()
         );
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
@@ -6860,6 +7182,154 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_artifact_time_accepts_unix_seconds() {
+        assert_eq!(parse_artifact_time("1757462400", 0).unwrap(), 1_757_462_400);
+        assert_eq!(parse_artifact_time("  0 ", 0).unwrap(), 0);
+    }
+
+    #[test]
+    fn parse_artifact_time_accepts_relative() {
+        let now = 1_757_462_400;
+        assert_eq!(parse_artifact_time("-1d", now).unwrap(), now - 86_400);
+        assert_eq!(parse_artifact_time("-12h", now).unwrap(), now - 43_200);
+        assert_eq!(parse_artifact_time("-30m", now).unwrap(), now - 1_800);
+        assert_eq!(parse_artifact_time("-90s", now).unwrap(), now - 90);
+        // 現在より前に行き過ぎても負にはせず 0 で止める
+        assert_eq!(parse_artifact_time("-9999d", 100).unwrap(), 0);
+        assert!(parse_artifact_time("-1w", now).is_err());
+        assert!(parse_artifact_time("-d", now).is_err());
+    }
+
+    #[test]
+    fn parse_artifact_time_accepts_iso8601() {
+        // 1970-01-01T00:00:00Z からの秒。うるう年・世紀の境目を含めて確認する
+        assert_eq!(parse_artifact_time("1970-01-01", 0).unwrap(), 0);
+        assert_eq!(parse_artifact_time("1970-01-02", 0).unwrap(), 86_400);
+        assert_eq!(parse_artifact_time("2000-03-01", 0).unwrap(), 951_868_800);
+        assert_eq!(parse_artifact_time("2026-09-10", 0).unwrap(), 1_788_998_400);
+        assert_eq!(
+            parse_artifact_time("2026-09-10T12:34:56", 0).unwrap(),
+            1_788_998_400 + 12 * 3600 + 34 * 60 + 56
+        );
+        // 空白区切り・小文字 t・秒の小数も同じ結果になる
+        assert_eq!(
+            parse_artifact_time("2026-09-10 12:34", 0).unwrap(),
+            parse_artifact_time("2026-09-10t12:34:00.500", 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn parse_artifact_time_applies_timezone_offset() {
+        let utc_midnight = parse_artifact_time("2026-09-10T00:00:00Z", 0).unwrap();
+        // +09:00 の 09:00 は UTC の 00:00
+        assert_eq!(parse_artifact_time("2026-09-10T09:00:00+09:00", 0).unwrap(), utc_midnight);
+        assert_eq!(parse_artifact_time("2026-09-10T09:00:00+0900", 0).unwrap(), utc_midnight);
+        assert_eq!(parse_artifact_time("2026-09-10T09:00:00+09", 0).unwrap(), utc_midnight);
+        // -05:00 の前日 19:00 も同じ瞬間
+        assert_eq!(parse_artifact_time("2026-09-09T19:00:00-05:00", 0).unwrap(), utc_midnight);
+        // 日付部の `-` をオフセットと誤読しない
+        assert_eq!(parse_artifact_time("2026-09-10", 0).unwrap(), utc_midnight);
+    }
+
+    #[test]
+    fn parse_artifact_time_rejects_garbage() {
+        for bad in [
+            "", "yesterday", "2026-13-01", "2026-02-30", "2026-09-10T25:00", "2026-09",
+            "2026-09-10T12:34:56+99:00",
+            // マルチバイト文字。バイト位置で割ると char 境界違反で panic する
+            // (= MCP レスポンスが返らず無応答ハングになる)
+            "-1日", "2026-09-10T12:34+あa",
+            // 年が巨大だと days_from_civil の乗算が i64 でオーバーフローする
+            "300000000000-01-01", "9223372036854775807-01-01", "99999-01-01",
+            // 1970 より前は UNIX 秒 (u64) で表せない
+            "1969-12-31",
+            // ISO 8601 basic 形式は UNIX 秒と区別できないので弾く (1970-08-23 に化ける)
+            "20260910",
+        ] {
+            assert!(parse_artifact_time(bad, 0).is_err(), "'{}' は不正として弾くこと", bad);
+        }
+        // 8桁でも 19xx/20xx で始まらなければ UNIX 秒として通す
+        assert_eq!(parse_artifact_time("12345678", 0).unwrap(), 12_345_678);
+    }
+
+    #[test]
+    fn parse_artifact_time_clamps_leap_second() {
+        // `:60` を次の分へ繰り上げると、指定より後ろの境界になってしまう
+        assert_eq!(
+            parse_artifact_time("2026-09-10T00:00:60", 0).unwrap(),
+            parse_artifact_time("2026-09-10T00:00:59", 0).unwrap()
+        );
+    }
+
+    #[test]
+    fn artifact_time_range_rejects_empty_interval() {
+        let mk = |a: &str, b: &str| ArtifactTimeRange {
+            created_after: Some(parse_artifact_time(a, 0).unwrap()),
+            created_before: Some(parse_artifact_time(b, 0).unwrap()),
+            updated_after: None,
+            updated_before: None,
+        };
+        assert!(mk("2026-09-09", "2026-09-10").validate().is_ok());
+        assert!(mk("2026-09-10", "2026-09-10").validate().is_err());
+        assert!(mk("2026-09-11", "2026-09-10").validate().is_err());
+        // updated 側も同じく検証される
+        let range = ArtifactTimeRange {
+            created_after: None,
+            created_before: None,
+            updated_after: Some(100),
+            updated_before: Some(100),
+        };
+        assert!(range.validate().is_err());
+        // 片側だけの指定は常に有効
+        let range = ArtifactTimeRange {
+            created_after: Some(100),
+            created_before: None,
+            updated_after: None,
+            updated_before: Some(1),
+        };
+        assert!(range.validate().is_ok());
+    }
+
+    #[test]
+    fn artifact_time_range_is_half_open() {
+        // created_after: 9/9, created_before: 9/10 で「9/9 の1日分」になること
+        let range = ArtifactTimeRange {
+            created_after: Some(parse_artifact_time("2026-09-09", 0).unwrap()),
+            created_before: Some(parse_artifact_time("2026-09-10", 0).unwrap()),
+            updated_after: None,
+            updated_before: None,
+        };
+        assert!(!range.is_empty());
+        let day = 86_400;
+        let sep9 = parse_artifact_time("2026-09-09", 0).unwrap();
+        assert!(range.matches(sep9, 0), "境界の 9/9 00:00:00 は含む");
+        assert!(range.matches(sep9 + day - 1, 0));
+        assert!(!range.matches(sep9 + day, 0), "境界の 9/10 00:00:00 は含まない");
+        assert!(!range.matches(sep9 - 1, 0));
+
+        // updated 側は独立に効き、両方指定すると AND になる
+        let range = ArtifactTimeRange {
+            created_after: Some(sep9),
+            created_before: None,
+            updated_after: None,
+            updated_before: Some(sep9 + day),
+        };
+        assert!(range.matches(sep9, sep9));
+        assert!(!range.matches(sep9, sep9 + day));
+        assert!(!range.matches(sep9 - 1, sep9));
+
+        // 未指定なら全件通る
+        let empty = ArtifactTimeRange {
+            created_after: None,
+            created_before: None,
+            updated_after: None,
+            updated_before: None,
+        };
+        assert!(empty.is_empty());
+        assert!(empty.matches(0, 0));
+    }
 
     /// Phase 0 (#121) で実測した Stop payload そのもの（CC 2.1.227 / Windows 10）。
     /// #120 本文は「`stop_hook_active` 相当のフラグは現行ドキュメントに見当たらない」と
