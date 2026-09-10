@@ -112,9 +112,17 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
     if (deps.isDetached(wt.id)) {
       logDebug(`[AutoApproval] delegating to sub-window ${wt.id}`);
       // tray はサブウィンドウ経由で sub-auto-approve-result に載って戻ってくる
+      //
+      // **自動承認フラグを毎回同送する（#263）。** ここへ来るのは
+      // `autoApprovalMap.get(wt.id) === true` のワークツリーだけなので、この値が正。
+      // サブ側は `sub-init` / `sub-set-auto-approval` で受け取った写しを持つが、
+      // 写しは一度ずれると誰も直さない（#256 は復元順序でずれた。受信者ゼロの emit や
+      // webview のロード遅延でも同じことが起きうる）。ずれた側は「自動承認 ON に見えるのに
+      // 何も承認されない」という気づきにくい停止になるため、判定のたびに正しい値を運ぶ。
       await emitTo(`sub-${wt.id}`, "sub-try-auto-approve", {
         additionalPrompt: deps.autoApprovalPromptMap.get(wt.id) ?? "",
         tray,
+        autoApproval: autoApprovalMap.get(wt.id) === true,
       });
       return;
     }
