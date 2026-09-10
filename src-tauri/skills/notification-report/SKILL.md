@@ -1,7 +1,7 @@
 ---
 name: notification-report
 description: 購読しているワークツリーから通知が溜まったときに、関連する通知の一覧を読んでレポートアーティファクトを作成する。人はレポートを見るだけで、ターミナルを1つずつ開かずに溜まった通知へ一括でクイックに返答できる。ホームタブや teamwork-parent の親ワークツリーからの利用を想定。ユーザーが「通知をまとめて確認したい」「溜まった通知にまとめて返したい」等と言ったときに使う。
-allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__plugin_oretachi_oretachi__oretachi_subscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_worktree_notifications, mcp__plugin_oretachi_oretachi__oretachi_poll_inbox, mcp__plugin_oretachi_oretachi__oretachi_ack_message, mcp__plugin_oretachi_oretachi__oretachi_clear_worktree_notification, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp__plugin_oretachi_oretachi__oretachi_list_terminals, mcp__plugin_oretachi_oretachi__oretachi_read_terminal, mcp__plugin_oretachi_oretachi__oretachi_inspect_prompt, mcp__plugin_oretachi_oretachi__notify_worktree, mcp__plugin_oretachi_oretachi__artifact, mcp__plugin_oretachi_oretachi__artifact_module, mcp__plugin_oretachi_oretachi__artifact_store, mcp__plugin_oretachi_oretachi__search_artifact, Read, Glob, Grep
+allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__plugin_oretachi_oretachi__oretachi_subscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_worktree_notifications, mcp__plugin_oretachi_oretachi__oretachi_poll_inbox, mcp__plugin_oretachi_oretachi__oretachi_ack_message, mcp__plugin_oretachi_oretachi__oretachi_clear_worktree_notification, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp__plugin_oretachi_oretachi__oretachi_list_terminals, mcp__plugin_oretachi_oretachi__oretachi_read_terminal, mcp__plugin_oretachi_oretachi__oretachi_inspect_prompt, mcp__plugin_oretachi_oretachi__notify_worktree, mcp__plugin_oretachi_oretachi__artifact, mcp__plugin_oretachi_oretachi__artifact_module, mcp__plugin_oretachi_oretachi__artifact_store, mcp__plugin_oretachi_oretachi__search_artifact, Read, Glob, Grep, Bash
 ---
 
 # notification-report スキル
@@ -10,6 +10,20 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__
 
 ## 前提
 
+- **カードは画面の写しではなくフォーム（#264）。** 生の hook JSON も画面のダンプも載せない
+  —— それが読めないからレポートを作っている。生成側が構造化して `paragraphs` / `bullets` /
+  `fields` / `links` / `request` へ入れ、カードが HTML として組む。折りたたみで生データを
+  残すのもやらない（畳んであっても「読めないものが置いてある」ことに変わりはない）。
+- **整形の材料が足りなければ取りに行く（#264）。** ①ターミナルを読む（1-4b/1-4c）→
+  ②それでも足りなければ**このセッションから該当ワークツリーを直接見に行く**
+  （`gh issue view`、そのワークツリーの `git log` / `git diff`、ファイル、`search_artifact`）。
+  それでも分からない項目は「不明」と明示する。**推測で埋めない。**
+- **`approval` の通知本文には聞かれていることが全部入っている（#264）。** `PermissionRequest`
+  フックの JSON なので `tool_name` と `tool_input` が丸ごと来る。`AskUserQuestion` なら
+  **全設問・全選択肢・`description`・`preview` まで**。一方ターミナルの画面は 1 問ずつしか
+  出さず `preview` は `✂ N lines hidden` で切られるので、**通知の方が情報量が多い**。
+  設問は通知から起こし、画面（`oretachi_inspect_prompt`）は**送信直前の照合（fingerprint）**
+  のために取る。
 - **カードは「要返答」と「報告のみ」の 2 種類（#228）。** `kind` が `worktree.created` / `worktree.closed` の通知は人の判断が要らないので、返答 UI を出さない**報告カード**として載せる。判定は `lib/send` の `isReportOnly` が `kind` から機械的にやるので、`data/report` にフラグを足す必要は無い（→ 1-2c）。
 - **返答の宛先は各通知の発信元ワークツリーの AI 端末。** アーティファクトの JS から `oretachi_write_terminal` を他ワークツリー宛に呼べるが、許可条件は**レポートを置いたワークツリーがその宛先ワークツリーを購読していること**（#211）。向きは購読者側が呼び出し元で、宛先側が自分を購読しているだけでは通らない。
 - **レポートはスナップショット。** 母集合は Step 1-2 の `oretachi_poll_inbox` **1 回ぶん**で、開いている間に届いた通知はそのレポートに足さず、次のレポートへ回す。表示中に本体を書き換えて人が見ている画面を動かす方が有害。
@@ -118,10 +132,10 @@ artifact_module(command: "read", id: <前回レポートID>, module_name: "data/
 報告カードで埋めるフィールドは 6 つだけ:
 
 ```
-id / inboxIds / worktreeName / kind / at / body   （+ 任意で branchName / worktreeId / issueRef / link）
+id / inboxIds / worktreeName / kind / at / paragraphs   （+ 任意で branchName / worktreeId / issueRef / links）
 ```
 
-- **`body` には `oretachi_poll_inbox` の `text` をそのまま入れる。** `oretachi_poll_inbox` の `body` は**パース済みの JSON オブジェクト**（`worktree.closed` なら `{worktreeId, worktreeName, branchName}`）で、人が読める 1 行は別フィールドの `text`（`format_inbox_line` の出力）にある。オブジェクトをそのまま `body` へ入れるとカードの `{n.body}` で React が throw し、**エラーバウンダリが無いのでレポート全体が描画不能になる**。実際の `text` はこの形:
+- **`paragraphs` には 1 行の定型文を入れる。** `oretachi_poll_inbox` の `body` は**パース済みの JSON オブジェクト**（`worktree.closed` なら `{worktreeId, worktreeName, branchName}`）で、人が読める 1 行は別フィールドの `text`（`format_inbox_line` の出力）にある。**オブジェクトを本文へ入れない**（`lib/send` の `paragraphsOf` が保険で弾くが、そこへ落ちると「本文を整形できませんでした」としか出ない）。実際の `text` はこの形:
   - `worktree.closed` → `ワークツリー 'oretachi-htlz' （ブランチ: worktree/issue-214） がクローズされました`
   - `worktree.created` → `[oretachi] ワークツリー 'oretachi-wnqd' （ブランチ: worktree/issue-228） が作成されました`（先頭の `[...]` はリポジトリ名。無ければ付かない）
 - **1-4 / 1-5 を回さない。** `oretachi_get_worktree_status` / `oretachi_list_terminals` / `oretachi_read_terminal` / `oretachi_inspect_prompt` を報告カードのために呼ばないこと。返答を送らないので使われず、`worktree.closed` は発信元ワークツリーが既に削除済みでそもそも引けない。`worktree.created` も作成直後なので description 未設定・AI 端末未起動が普通で、読めるものが無い。
@@ -211,6 +225,12 @@ oretachi_inspect_prompt(session_id: <1-4(b) と同じ値>)
 
 **戻り値をそのまま `prompt` フィールドへ焼き込む。** 要約・言い換え・整形をしてはいけない。
 
+**`prompt` は原則「送信直前の照合（fingerprint）」のためのもので、表示には使わない（#264）。**
+カードに出す設問・選択肢は 1-4(g) で通知の hook JSON から起こす。画面から取った
+`prompt.questions` を表示に使うのは、hook JSON が無い経路
+（`completed` / `worktree.message` など）と、選択肢が画面にしか無い**ツール許可 /
+プラン承認**だけ。
+
 - `options[].label` は**宛先の画面に実在する選択肢そのもの**。言い換えると人が「画面に無い選択肢」を選ぶことになる
 - `fingerprint` は送信直前の照合キー。書き換えると照合が必ず外れて何も送れなくなる
 - `cursorIndex` はいま `❯` が当たっている番号。キー列（矢印の回数）がここから決まる
@@ -244,7 +264,7 @@ oretachi_inspect_prompt(session_id: <1-4(b) と同じ値>)
 | `text` | 入力欄だけ（ダイアログ無し） | 候補ボタン + 補足プロンプト（従来どおり） | 本文 → 150ms → CR |
 | `permission` | `Do you want to proceed?` + 番号付き選択肢 | **画面の選択肢そのまま**のラジオ + 承認対象の全文 | 矢印で `❯` を動かして CR |
 | `plan` | `Would you like to proceed?` + `No, keep planning` | 同上 | 同上 |
-| `askUserQuestion` | 設問 + 番号付き選択肢 + `Chat about this`、フッタ `Enter to select · Tab/Arrow keys to navigate` | 同上 | 同上 |
+| `askUserQuestion` | タブバー（`←  ☒ Color  ☐ Size  ✔ Submit  →`）+ 設問 + 番号付き選択肢、フッタ `Enter to select · …` | **通知から起こした全設問のフォーム**（→ 1-4g） | 1 問ずつ矢印 + CR。最後に Submit |
 | `yesno` | `(y/N)` / `[Y/n]`（シェル側の gh / npm / git など） | `y` / `n` ボタン | `y` or `n` → CR |
 | `numbered` | 素の TUI の `1) foo` | 画面の選択肢そのままのラジオ | 数字 → CR |
 | `unknown` | 分類できないが入力待ちらしい | **送信ボタン無効。** 画面末尾を読み取り専用で表示 | 送らない |
@@ -275,11 +295,64 @@ CR を送ると、3 番目の選択肢が確定した。`cursorIndex` から目�
 
 - **`multiSelect` は画面から判別できない**（単一選択との差が画面に出ない）。`questions[].multiSelect`
   は常に `false` で、カードも単一選択のラジオになる。**複数選ばせたい設問は人がターミナルで操作する**
-- **複数設問の 2 問目以降はそのレポートでは答えられない。** 1 問答えると画面が次の設問へ変わるので、
-  `answer_prompt` の `afterShape` が `askUserQuestion` のままなら「まだ設問が残っている」と
-  カードに出る（このカードは縮小表示に畳まれない）。続きは次のレポートで答えるが、**その通知は
-  もう ack 済みなので普通の `oretachi_poll_inbox` には返ってこない。** 後述の
-  「レポートを作り直すとき」の手順（`include_acked: true`）で拾い直すこと
+- **複数設問は 1 枚のカードで全問答えられる（#264）。** 1-4(g) で通知の hook JSON から
+  全設問を `request.questions` へ写しておけば、カードが全問のフォームを出し、送信は
+  `oretachi_answer_prompt(kind: "selectAll")` の 1 回で「1 問選ぶ → 画面が次の設問へ進むのを待つ」を
+  繰り返して**最後の確定（Submit）まで**進む。
+  **`request.questions` を入れ忘れると画面から読めた 1 問だけのカードになり、
+  2 問目以降に答えられなくなる。**
+
+### 1-4(g). 通知の中身を「読める形」に起こす（**必須**。#264）
+
+`oretachi_poll_inbox` が返す `text` は `'<ワークツリー名>' の通知[approval]: <本文>` で、
+`approval` / `hook` / `completed` / `general` の `<本文>` は
+**Claude Code のフック JSON がそのまま**入っている（実測）:
+
+```
+'oretachi-xaoe' の通知[approval]: {"session_id":"…","transcript_path":"…","cwd":"…",
+"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"sqlx migrate run …",
+"description":"Apply pending migrations"}}
+```
+
+**これをそのままカードへ貼らない。** JSON をパースして次へ振り分ける。
+
+**(a) 本文 → `paragraphs` / `bullets` / `fields` / `links`**
+
+- `paragraphs` は「誰が / 何を待っているか」を人の言葉で 1〜2 段落。
+  `**強調**` / `` `コード` `` / `#203` / URL はカードが装飾とリンクに組むので、そのまま書いてよい
+- `tool_input` の中身は `fields`（ラベルと値の表）へ。`Bash` なら
+  `コマンド`（`code: true`）/ `説明` / `作業ディレクトリ`、`Edit` / `Write` なら `ファイル` など、
+  **そのツールで人が判断に使う項目だけ**を選ぶ（`session_id` / `transcript_path` は要らない）
+- `links` に**発信元が作ったアーティファクト**（`search_artifact` で探す）と、
+  本文に出てくる PR / issue の URL を入れる。アーティファクトは
+  `artifact://worktree/<worktreeId>/<アーティファクトID>` 形式
+- `worktree.message` のような自由文の通知は、本文をそのまま `paragraphs` に入れてよい
+  （Markdown はカードが組む）。ただし**長い出力の貼り付けやログの断片が混ざっていたら、
+  人が判断に使う部分だけを残す**
+
+**(b) `tool_name` が `AskUserQuestion` なら `request.questions` へ写す**
+
+`tool_input.questions` を**並べ替えずそのまま**写す:
+
+```
+request: {
+  tool: "AskUserQuestion",
+  questions: [{ header, question, options: [{ label, description, preview }] }, …]
+}
+```
+
+**順番を変えてはいけない。** カードは i 番目の選択肢を画面の i+1 番として送る
+（Claude Code は通知の選択肢をその順で `1.` から並べ、後ろに `Type something.` /
+`Chat about this` を足す）。並べ替えると別の選択肢を確定する。
+
+`preview` は**ターミナルでは `✂ N lines hidden` で切られて読めない**ものなので、
+省略せず全文を入れる（レポートの価値がいちばん出るところ）。
+
+**(c) 埋まらない項目は「不明」と書く**
+
+フック JSON からもターミナルからも取れないときは、このセッションから
+`gh issue view <番号>`、そのワークツリーの `git log --oneline -5` / `git diff --stat`、
+`search_artifact` を直接叩いて補う。それでも分からなければ**推測せず**「不明」と明示する。
 
 ### 1-5. 送信先の session_id を決める
 
@@ -422,7 +495,9 @@ artifact_module(command: "create", id: <同じID>, module_name: "data/report",
 ```
 
 `META.reportId` は上で決めた ID、`META.generatedAtMs` は**その ID の元になった最大 `createdAt`（epoch ms）**
-をそのまま入れる。**`META` に時刻の文字列を組み立てて入れない** — 整形は `entry-point.jsx` の
+をそのまま入れる。`META.repoUrl` には `gh repo view --json url -q .url` で取ったリポジトリ URL を入れる
+（本文中の `#203` と `issueRef` がリンクになる。**分からなければ省略する** —— 当てずっぽうの
+リンクを張るより、コード表記のまま出す方がよい。#264）。**`META` に時刻の文字列を組み立てて入れない** — 整形は `entry-point.jsx` の
 `generatedLabel` がブラウザ側でやる（#220）。カードの `at` / `readAt` は従来どおり `HH:MM` の文字列
 （`at` は対応する通知の `createdAt` から、`readAt` はターミナルを読んだ時点のもの）。
 
@@ -471,7 +546,7 @@ oretachi_poll_inbox(terminal_id: <自分の terminal_id>, include_acked: true)
 
 `include_acked: true` は ack 済みも含めて返す。ここから**作り直す対象のカードに対応する inbox メッセージだけ**を拾い、通常どおり Step 1-4 以降を回す（`prompt` は画面が変わっているので必ず取り直す）。
 
-前のレポートの `data/report` を `artifact_module(command: "read", ...)` で読んで、`body` / `worktreeId` / `inboxIds` を流用してもよい（本文は要約せず全文が入っているので、そのまま使える）。
+前のレポートの `data/report` を `artifact_module(command: "read", ...)` で読んで、`paragraphs` / `fields` / `request` / `worktreeId` / `inboxIds` を流用してもよい（整形済みの内容がそのまま入っている）。**`prompt` だけは流用せず取り直す** —— 画面が変わっているので fingerprint も `❯` の位置も別物になっている。
 
 **再ack は不要**（`oretachi_ack_message` は ack 済みへの再 ack を 0 件更新で成功扱いにする冪等な操作なので、呼んでも害は無い）。トレイクリアも既に済んでいる。
 
@@ -511,6 +586,9 @@ ack / トレイクリアに失敗したものがあれば、ここの本文に�
 1. ユーザーが選択肢（または候補ボタン + 補足）を選び、「選択した N 件へ送信」を押す
 2. **通知 1 件ごとに**、形状に応じた経路で送る
    - `shape` が `text` … `oretachi_write_terminal` を 2 回（本文 → 150ms → CR）
+   - 通知から起こした設問フォーム … `oretachi_answer_prompt(kind: "selectAll", option_indices)` を 1 回。
+     Rust 側が「1 問選ぶ → 画面が次の設問へ進むのを待つ」を繰り返し、確認画面の
+     `Submit answers` まで確定する（#264）
    - それ以外 … `oretachi_answer_prompt(session_id, expect_fingerprint, kind, ...)` を 1 回
 3. 1 件ごとにサイドカーへ結果を書く（途中で閉じても「どこまで届いたか」が残る）
 4. 送信済みのカードは**縮小表示**に畳まれる（`✓` / 宛先 / 送信内容の 1 行。「展開」で戻せる）。
@@ -614,7 +692,9 @@ await callTool('oretachi_write_terminal', { session_id, text: '\r', submit: fals
 - **`oretachi_ack_message` / `oretachi_poll_inbox` / `notify_worktree`（`kind: "worktree.message"` 指定）はアーティファクトからは AI セッション稼働中しか使えない。** これらのツール自体は `terminal_id` を取るが、**アーティファクト経由の呼び出しでは `normalize_artifact_tool_params` が `terminal_id` を落として `project_dir` を置き場所へ固定する**ため、そのワークツリーで走行中の AI エージェント端末が**ちょうど 1 つ**でないと発信元を特定できずに失敗する。**だからレポート側からは呼ばない**（ack は Step 5.5 で生成側のセッションがやる。#219）。`oretachi_write_terminal` / `oretachi_answer_prompt` / `oretachi_clear_worktree_notification` は宛先を明示するのでこの制約を受けない。
 - **レポートは生成時点のスナップショットで、母集合は Step 1-2 の `oretachi_poll_inbox` 1 回ぶん。** 開いている間に届いた通知は次のレポートへ回る。レポート同士で扱う通知は重ならない（#219）。
 - **表示中ロックが守るのは「そのウィンドウでいま表示している 1 件」だけ。** ウィンドウが開いたままでもユーザーが別のアーティファクトへ切り替えるとロックは外れる。レポートはユーザーがそのページに留まっている前提で扱う。
-- **`multiSelect` の設問と複数設問の 2 問目以降はレポートから答えられない（#215）。** 複数選択は画面から単一選択と判別できず、トグルキーを推測して送ると意図しない選択を確定しうるため、単一選択の 1 つ選んで CR だけを提供する。複数設問は 1 問答えると画面が次へ変わるので、続きは次のレポートに回る（カードに「まだ設問が残っています」と出る）。どちらも人がターミナルを開いて操作するのが確実。
+- **`multiSelect` の設問はレポートから答えられない（#215）。** 複数選択は画面から単一選択と判別できず、トグルキーを推測して送ると意図しない選択を確定しうるため、単一選択の 1 つ選んで CR だけを提供する。人がターミナルを開いて操作するのが確実。
+- **複数設問は 1 枚のカードで全問答えられる（#264）。** 1-4(g) で `request.questions` を入れておけば、送信は `kind: "selectAll"` の 1 回で最後の確定（Submit）まで進む。途中で止まった場合（`unverified` / `pastedOnly`）は「何問目まで確定したか」がカードに出るので、残りはターミナルで答える。**途中まで送った状態からの再送はできない**（同じ番号をもう一度送ると別の設問へ入る）。
+- **カードは生データを出さない（#264）。** 例外は `shape` が `unknown` のときの画面末尾（`tail`）だけ —— 何を出せばよいか分からない画面なので、人がターミナルで何を見ることになるかを示すしかない。
 - **`shape` の判定はレポート生成時点のスナップショット。** 生成後に宛先が進んでダイアログが消えていれば、送信時に `stale` になって何も送られない（安全側に倒れる）。
 - **報告カードは返答経路を一切持たない（#228）。** `worktree.created` / `worktree.closed` は判断が不要なので送信 UI が出ない。「そのワークツリーへ何か言いたくなった」場合はレポートからではなく、ターミナルを開くか `notify_worktree` で送る（`worktree.closed` は宛先がもう存在しない）。
 - **ホーム / リポジトリ擬似ワークツリー宛はワイルドカード購読からしか許可が出ない。** 名前指定の購読ができないため、これらからの通知に返答したい場合は `*` / `repo:` 購読が必要。
@@ -629,7 +709,10 @@ await callTool('oretachi_write_terminal', { session_id, text: '\r', submit: fals
 - **`locked_while_open` の拒否で新規レポートの作成を諦めない。** ロックは ID 単位なので、ID を変えれば必ず通る。「リトライしても成功しない」は同じ ID への再試行の話（#220）。
 - **`include_acked: true` の結果をそのまま全件カード化しない。** 30 日ぶんの履歴が返るので、返答済みの通知が再びカードになり、同じ返答を宛先へ二重送信しうる。作り直しの対象は前回レポートの `data/report` の `inboxIds` に限る（#220）。
 - **購読していないワークツリーをレポートに載せない。** 返答を送れないカードになる。ユーザーの指示なしに購読を張って範囲を広げるのもしない。
-- **通知本文を要約してカードに載せない。** 人の判断材料なので全文を入れる（カードは全文をそのまま表示する。折りたたみは無い）。
+- **生データ（hook JSON / 画面のダンプ）をカードに載せない（#264）。** 折りたたんで残すのも駄目。読めないからレポートを作っている。整形の材料が足りなければ、ターミナル → 該当ワークツリーの issue / git / アーティファクトの順に取りに行き、それでも分からない項目は「不明」と書く。
+- **人の判断に要る情報を落とさない。** 「整形する」は「削る」ではない。承認対象のコマンド全文、設問文、選択肢の `description` と `preview` は**全文**を入れる。削ってよいのは `session_id` / `transcript_path` のような人が使わないフック内部の値だけ。
+- **`AskUserQuestion` で `request.questions` を入れ忘れない（#264）。** 画面から読めた 1 問だけのカードになり、2 問目以降に答えられなくなる。
+- **`request.questions` の選択肢を並べ替えない・間引かない（#264）。** カードは i 番目を画面の i+1 番として送るので、順番が崩れると別の選択肢を確定する。
 - **`その他（補足で指示）` を `choices` に入れない。** コード側が足すので二重になる。
 - **送信テキストに改行を入れない。** 行ごとに送信されて宛先のエージェントへプロンプトが分割して飛ぶ。
 - **本文と Enter を 1 回の `write_terminal` でまとめない。** テキストは届くのにターンが始まらない。
@@ -645,7 +728,7 @@ await callTool('oretachi_write_terminal', { session_id, text: '\r', submit: fals
 - **報告カードのために 1-4 / 1-5 を回さない。** `get_worktree_status` / `list_terminals` / `read_terminal` / `inspect_prompt` は呼ばない。返答を送らないので使われず、`worktree.closed` は発信元が削除済みで引けない。
 - **`data/report` に「報告カードです」というフラグを足さない。** 判定は `lib/send` の `isReportOnly` が `kind` からやる。フラグにすると生成側の付け忘れで、判断不要の通知が返答待ちとして並ぶ（あるいは逆に返答待ちが読むだけのカードになる）。
 - **`worktree.closed` を「発信元がクローズ済み」として落とさない。** 1-2 の除外フィルタは報告カードには適用しない（そうしないと `worktree.closed` は 1 件もレポートに載らない）。購読の突合も同じ理由で免除する。
-- **報告カードの `body` にオブジェクトを入れない。** `oretachi_poll_inbox` の `body` はパース済みの JSON オブジェクトで、人が読める 1 行は `text`。オブジェクトを入れると React が throw してレポート全体が描画不能になる（エラーバウンダリが無い）。
+- **報告カードの本文にオブジェクトを入れない。** `oretachi_poll_inbox` の `body` はパース済みの JSON オブジェクトで、人が読める 1 行は `text`。`paragraphs` には文字列だけを入れる（`lib/send` の `paragraphsOf` が保険で弾くが、そこへ落ちると本文が「整形できませんでした」になる）。
 - **報告カードの発信元へトレイクリアを撃たない。** `worktree.*` は `showsBadge` が false なのでバッジを積んでおらず、落とすものが無い。撃つとワークツリー単位のクリアで無関係な `approval`（#225 で救済した人待ちの通知）まで消える。
 - **報告カードを「未返答」の件数に数えない。** 押すものが無いカードを残件に数えると、人が無い判断を探すことになる。
 

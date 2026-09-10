@@ -25,9 +25,26 @@
 //! - **`multiSelect` の判別。** 画面に単一選択との差が見当たらず、判別根拠が無い。
 //!   トグルキーを推測して送ると意図しない選択を確定しうるので、複数選択は
 //!   「1 つ選んで CR」だけを提供する（残りは人がターミナルで操作する）。
-//! - **複数設問の確認画面。** レイアウトの根拠が無いため事前に組み立てない。
-//!   1 問答えたあと呼び出し側が再解析し、まだ問いが残っていればそれを提示する
-//!   （`answer_prompt` の `afterShape` / `afterFingerprint`）。
+//! # 複数設問の `AskUserQuestion`（実測。#264）
+//!
+//! 複数設問はタブ UI で描かれ、**画面には常に 1 問ぶんしか出ない**:
+//!
+//! ```text
+//! ←  ☒ Color  ☐ Size  ✔ Submit  →     ☐ 未回答 / ☒ 回答済み
+//! Which size?
+//!  1. Large            ← タブが自動で進んだ直後は ❯ が描かれない
+//!      大きいサイズを選択します。
+//!   2. Small
+//! ```
+//!
+//! 全問答えると確認画面（`Review your answers` / `❯ 1. Submit answers` / `2. Cancel`）
+//! へ進む。**この画面には Claude Code のフッタが出ない**ので、フッタだけを手がかりに
+//! すると素の番号リスト扱い（数字キー）へ落ちて、確定できないまま止まる。
+//! そこで**タブバー行もフッタと同格の「Claude Code のダイアログである」印**として扱う。
+//!
+//! 選択肢に `preview` が付くと**右へプレビュー枠が並ぶ横並びレイアウト**になり、
+//! ラベルの右に枠線が食い込む（実測: `"Grid    ┌────────┐"`）。
+//! プレビュー枠の桁を見つけてラベルを切る（[`find_preview_column`]）。
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -152,6 +169,25 @@ pub enum Navigation {
     None,
 }
 
+/// 複数設問 `AskUserQuestion` のタブバーの 1 タブ（#264）。
+///
+/// 画面の `←  ☒ Color  ☐ Size  ✔ Submit  →` から起こす。**設問文と選択肢は
+/// いま開いているタブのぶんしか画面に無い**ので、ここから取れるのは
+/// 「何問あって、どこまで答えたか」だけ。それでも十分に価値がある:
+/// カードが進捗を出せるうえ、この行の存在自体が
+/// 「Claude Code のダイアログである」という決定的な印になる（確認画面には
+/// フッタが無く、これが無いと素の番号リストへ誤分類される）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QuestionTab {
+    /// タブの見出し（`AskUserQuestion` の `questions[].header`）
+    pub label: String,
+    /// `☒` なら回答済み、`☐` なら未回答
+    pub answered: bool,
+    /// 末尾の `✔ Submit`（回答を確定するタブ）
+    pub is_submit: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ParsedPrompt {
@@ -164,6 +200,9 @@ pub struct ParsedPrompt {
     /// **何を承認するのか分からないまま `Yes` を押させないためにカードへ全文出す**
     pub context: String,
     pub questions: Vec<PromptQuestion>,
+    /// 複数設問 `AskUserQuestion` のタブバー（#264）。単一設問なら 1 要素、
+    /// タブバーが無い画面（許可ダイアログなど）では空。
+    pub tabs: Vec<QuestionTab>,
     /// `Some("esc")` なら ESC で自由入力へ抜けられる
     pub escape_hatch: Option<String>,
     /// **ダイアログが画面に収まっておらず、選択肢を全部読めていない疑いがある。**
@@ -559,10 +598,101 @@ fn is_input_box_line(lines: &[&str], i: usize) -> bool {
     above && below
 }
 
+/// タブバー行（`←  ☒ Color  ☐ Size  ✔ Submit  →`）を解析する（#264）。
+///
+/// **`☐` / `☒` が 1 つも無い行はタブバーではない。** `✔` だけを手がかりにすると
+/// 本文中のチェックマークを拾う。単一設問では `☐ Color` の 1 タブだけで、
+/// `←` `→` と `✔ Submit` は描かれない（実測）。
+fn parse_tab_bar(body: &str) -> Option<Vec<QuestionTab>> {
+    if !body.contains('☐') && !body.contains('☒') {
+        return None;
+    }
+    let mut tabs: Vec<QuestionTab> = Vec::new();
+    let mut current: Option<(bool, bool, String)> = None; // (answered, is_submit, label)
+    for c in body.chars() {
+        match c {
+            '☐' | '☑' | '☒' | '✔' | '✓' => {
+                if let Some((answered, is_submit, label)) = current.take() {
+                    push_tab(&mut tabs, answered, is_submit, label);
+                }
+                current = Some((matches!(c, '☑' | '☒'), matches!(c, '✔' | '✓'), String::new()));
+            }
+            // タブバーの左右送り記号はラベルではない
+            '←' | '→' => {}
+            _ => {
+                if let Some((_, _, label)) = current.as_mut() {
+                    label.push(c);
+                }
+            }
+        }
+    }
+    if let Some((answered, is_submit, label)) = current.take() {
+        push_tab(&mut tabs, answered, is_submit, label);
+    }
+    if tabs.is_empty() {
+        None
+    } else {
+        Some(tabs)
+    }
+}
+
+fn push_tab(tabs: &mut Vec<QuestionTab>, answered: bool, is_submit: bool, label: String) {
+    let label = label.split_whitespace().collect::<Vec<_>>().join(" ");
+    if label.is_empty() {
+        return;
+    }
+    tabs.push(QuestionTab { label, answered, is_submit });
+}
+
+/// プレビュー枠が始まる桁を探す（#264）。
+///
+/// 選択肢に `preview` が付くと、選択肢リストの**右側**へ枠が並ぶ:
+///
+/// ```text
+/// ❯ 1. Grid                         ┌──────────────────────────┐
+///   2. List                         │ ┌───┬───┬───┐            │
+///                                   ├─── ✂ ─── 2 lines hidden ─┤
+/// ```
+///
+/// 桁を見つけずに解析すると、枠がラベルへ食い込んだうえ
+/// （`"Grid    ┌────────┐"`）、枠の続き行が「折り返した続き行」として
+/// 直前の選択肢のラベルへ吸い込まれる（実測）。
+///
+/// 手がかりは「同じ桁に縦枠の文字が 3 行以上ある」こと。ダイアログ自身の外枠
+/// （左端の `│`）を拾わないよう、左に十分寄った桁は候補にしない。
+fn find_preview_column(lines: &[&str]) -> Option<usize> {
+    const MIN_PREVIEW_COL: usize = 16;
+    const MIN_PREVIEW_ROWS: usize = 3;
+    let mut counts: std::collections::HashMap<usize, usize> = std::collections::HashMap::new();
+    for line in lines {
+        for (col, c) in line.chars().enumerate() {
+            if col < MIN_PREVIEW_COL {
+                continue;
+            }
+            if matches!(c, '┌' | '│' | '├' | '└' | '┃' | '╭' | '╰') {
+                *counts.entry(col).or_insert(0) += 1;
+                break; // 行の**最初の**枠だけを見る（右端の閉じ枠は候補にしない）
+            }
+        }
+    }
+    counts
+        .into_iter()
+        .filter(|&(_, n)| n >= MIN_PREVIEW_ROWS)
+        .min_by_key(|&(col, _)| col)
+        .map(|(col, _)| col)
+}
+
+/// 桁 `col` より右を落とす（プレビュー枠を切り離す）。
+fn cut_at_column(line: &str, col: usize) -> String {
+    line.chars().take(col).collect()
+}
+
 /// 選択肢行（`❯ 1. Yes` / `  2) foo`）を解析する。
 ///
-/// 返すのは `(番号, ラベル, ❯ が付いているか, ラベルが始まる桁)`。
-fn parse_option_line(line: &str) -> Option<(u32, String, bool, usize)> {
+/// 返すのは `(番号, ラベル, ❯ が付いているか, ラベルが始まる桁, 番号が始まる桁)`。
+/// 最後の「番号が始まる桁」は `❯` が描かれなかったときのカーソル推定に使う
+/// （[`find_last_option_run`] 参照。#264）。
+fn parse_option_line(line: &str) -> Option<(u32, String, bool, usize, usize)> {
     let (body, frame_offset) = strip_frame(line);
     if body.is_empty() {
         return None;
@@ -595,7 +725,7 @@ fn parse_option_line(line: &str) -> Option<(u32, String, bool, usize)> {
         + 1
         + (after_sep.chars().count() - after_sep.trim_start().chars().count());
     let index = digits.parse::<u32>().ok()?;
-    Some((index, label, has_cursor, label_col))
+    Some((index, label, has_cursor, label_col, frame_offset + consumed_by_marker))
 }
 
 /// 番号の連番として成立している選択肢の並び。
@@ -613,6 +743,15 @@ struct OptionRun {
 /// 再描画の残骸で同じダイアログが複数回現れることは画面グリッドでは起きないが、
 /// 画面内に過去のダイアログのログが残っていることはある。**最後のものを採る。**
 fn find_last_option_run(lines: &[&str]) -> Option<OptionRun> {
+    // プレビュー枠の桁。見つかったら選択肢行をそこで切って解析する（#264）
+    let preview_col = find_preview_column(lines);
+    let cut = |line: &str| -> String {
+        match preview_col {
+            Some(col) => cut_at_column(line, col),
+            None => line.to_string(),
+        }
+    };
+
     let mut runs: Vec<OptionRun> = Vec::new();
     let mut i = 0usize;
     while i < lines.len() {
@@ -621,7 +760,8 @@ fn find_last_option_run(lines: &[&str]) -> Option<OptionRun> {
             i += 1;
             continue;
         }
-        let Some((index, label, has_cursor, label_col)) = parse_option_line(lines[i]) else {
+        let Some((index, label, has_cursor, label_col, num_col)) = parse_option_line(&cut(lines[i]))
+        else {
             i += 1;
             continue;
         };
@@ -633,13 +773,17 @@ fn find_last_option_run(lines: &[&str]) -> Option<OptionRun> {
         }
         let start = i;
         let mut options = vec![PromptOption { index, label }];
+        let mut num_cols = vec![num_col];
         let mut cursor_index = if has_cursor { Some(index) } else { None };
         let mut expected = 2u32;
         let mut current_label_col = label_col;
         let mut end = i;
         let mut j = i + 1;
+        // 罫線をまたいで連番が続くことがある（実測: `3. Type something.` の下に
+        // 罫線が引かれ、その下に `4. Chat about this` が来る）。またげるのは 1 回だけ
+        let mut skipped_rule = false;
         while j < lines.len() {
-            if let Some((idx, label, has_cursor, col)) = parse_option_line(lines[j]) {
+            if let Some((idx, label, has_cursor, col, ncol)) = parse_option_line(&cut(lines[j])) {
                 if idx != expected {
                     break;
                 }
@@ -647,14 +791,16 @@ fn find_last_option_run(lines: &[&str]) -> Option<OptionRun> {
                     cursor_index = Some(idx);
                 }
                 options.push(PromptOption { index: idx, label });
+                num_cols.push(ncol);
                 expected += 1;
                 current_label_col = col;
                 end = j;
                 j += 1;
+                skipped_rule = false;
                 continue;
             }
+            let (body, offset) = strip_frame(&cut(lines[j]));
             // 折り返された続き行: ラベルの桁位置以上に字下げされた非空行
-            let (body, offset) = strip_frame(lines[j]);
             if !body.is_empty() && !is_rule_line(&body) && offset >= current_label_col {
                 if let Some(last) = options.last_mut() {
                     last.label.push(' ');
@@ -664,7 +810,34 @@ fn find_last_option_run(lines: &[&str]) -> Option<OptionRun> {
                 j += 1;
                 continue;
             }
+            // 罫線 / 空行を 1 回だけまたいで連番の続きを探す（#264）。
+            // **`end` は進めない** — 続きが見つからなければ run はここで終わる
+            if !skipped_rule && (body.is_empty() || is_rule_line(&body)) {
+                skipped_rule = true;
+                j += 1;
+                continue;
+            }
             break;
+        }
+        // `❯` が 1 つも描かれていないとき、選択中の行だけマーカーぶん左へ寄っている
+        // ことを手がかりにする（#264）。複数設問でタブが自動で進んだ直後、Claude Code は
+        // `❯` を描き直さないが、行頭のスペースは 1 つぶん詰まったまま残る（実測）:
+        //
+        // ```text
+        //  1. Large      ← 選択中（マーカーの桁が空白で埋まっている）
+        //   2. Small
+        // ```
+        //
+        // これを拾わないと `cursor_index` が `None` になり、矢印の移動量を決められず
+        // **2 問目以降が一切答えられなくなる**。誤爆を避けるため
+        // 「1 行だけが他より左」という形にきっちり当てはまるときしか採らない
+        if cursor_index.is_none() && options.len() >= 2 {
+            let base = *num_cols.iter().max().unwrap_or(&0);
+            let outliers: Vec<usize> =
+                (0..num_cols.len()).filter(|&k| num_cols[k] < base).collect();
+            if outliers.len() == 1 {
+                cursor_index = Some(options[outliers[0]].index);
+            }
         }
         runs.push(OptionRun { start, end, options, cursor_index });
         i = end + 1;
@@ -676,6 +849,46 @@ fn find_last_option_run(lines: &[&str]) -> Option<OptionRun> {
 
 fn contains_ci(haystack: &str, needle: &str) -> bool {
     haystack.to_lowercase().contains(needle)
+}
+
+/// 選択肢の並びの直後に**番号なし**で置かれた逃げ道を探す（#264）。
+///
+/// 実測: 選択肢に `preview` が付くレイアウトでは、`Chat about this` が番号を持たず
+/// 罫線の下へ出る。
+///
+/// ```text
+///   3. Type something.
+/// ────────────────────────────────
+///   Chat about this
+/// ```
+///
+/// 拾わないと**画面に実在する選択肢を人へ見せられない**。文言を決め打ちにしてあるのは、
+/// 「番号の無い行を選択肢として足す」を一般化すると、本文の断片を選択肢に化けさせて
+/// しまうため（そのまま矢印を送れば別の選択肢を確定しうる）。
+fn find_unnumbered_escape(lines: &[&str], run_end: usize) -> Option<String> {
+    // 選択肢より下にもプレビュー枠が続くので、ここでも同じ桁で切る。
+    // 切らないと枠の行が「別の内容」に見えて、その先の `Chat about this` に届かない
+    let preview_col = find_preview_column(lines);
+    const LOOKAHEAD: usize = 10;
+    for line in lines.iter().skip(run_end + 1).take(LOOKAHEAD) {
+        let cut = match preview_col {
+            Some(col) => cut_at_column(line, col),
+            None => (*line).to_string(),
+        };
+        let (body, _) = strip_frame(&cut);
+        if body.is_empty() || is_rule_line(&body) {
+            continue;
+        }
+        // 既に番号付きなら run 側で拾えているはず。ここでは番号なしだけを見る
+        if parse_option_line(&cut).is_some() {
+            return None;
+        }
+        if contains_ci(&body, "chat about this") {
+            return Some(body);
+        }
+        return None;
+    }
+    None
 }
 
 /// `AskUserQuestion` のフッタ（実測: `Enter to select · Tab/Arrow keys to navigate · Esc to cancel`）。
@@ -855,6 +1068,7 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
                     allow_other: false,
                     cursor_index: None,
                 }],
+                tabs: Vec::new(),
                 escape_hatch,
                 truncated: false,
                 fingerprint: String::new(),
@@ -869,6 +1083,7 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
                 header: kind.as_header(),
                 context: String::new(),
                 questions: Vec::new(),
+                tabs: Vec::new(),
                 escape_hatch,
                 truncated: false,
                 fingerprint: String::new(),
@@ -881,6 +1096,7 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
             header: String::new(),
             context: String::new(),
             questions: Vec::new(),
+            tabs: Vec::new(),
             escape_hatch,
             truncated: false,
             fingerprint: String::new(),
@@ -890,10 +1106,26 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
 
     // 選択肢の上にある見出しと承認対象を拾う
     let ctx_start = run.start.saturating_sub(CONTEXT_WINDOW);
-    let above: Vec<String> = lines[ctx_start..run.start]
+    let mut above: Vec<String> = lines[ctx_start..run.start]
         .iter()
         .map(|l| strip_frame(l).0)
         .collect();
+
+    // ── タブバーより上はダイアログの外（＝スクロールバック）────────────────
+    //
+    // タブバーが見つかったら**そこで切る**。切らないと、その上に残っている
+    // ユーザーのプロンプトのエコーや直前のツール出力まで `context` に入り、
+    // カードが画面のダンプになる（実測。#264）。
+    let tabs: Vec<QuestionTab> = above
+        .iter()
+        .rposition(|b| parse_tab_bar(b).is_some())
+        .map(|row| {
+            let parsed = parse_tab_bar(&above[row]).unwrap_or_default();
+            above.drain(..=row);
+            parsed
+        })
+        .unwrap_or_default();
+
     // **見出しは折り返しうる。** 選択肢の直上にある連続した非空行をまとめて 1 つの
     // 見出しとして扱う（実測: 13 桁のターミナルでは `Do you want to proceed?` が
     // `Do you want` / `to` / `proceed?` の 3 行に割れた）。1 行だけ拾うと `proceed?` に
@@ -906,21 +1138,37 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     {
         block_start -= 1;
     }
-    let header = above[block_start..]
-        .iter()
-        .map(|b| b.as_str())
-        .collect::<Vec<_>>()
-        .join(" ")
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ");
-    // 見出しより上の非空行が「何を承認するのか」。全文をカードへ出す
-    let context = above[..block_start]
-        .iter()
-        .filter(|b| !b.is_empty() && !is_rule_line(b))
-        .cloned()
-        .collect::<Vec<_>>()
-        .join("\n");
+    let (header, context) = if tabs.is_empty() {
+        let header = above[block_start..]
+            .iter()
+            .map(|b| b.as_str())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        // 見出しより上の非空行が「何を承認するのか」。全文をカードへ出す
+        let context = above[..block_start]
+            .iter()
+            .filter(|b| !b.is_empty() && !is_rule_line(b))
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        (header, context)
+    } else {
+        // タブバーがある画面（`AskUserQuestion`）では、タブバーと選択肢に挟まれた
+        // 非空行がそのまま設問。**最後の 1 行が設問文**で、その上は補足
+        // （確認画面の `Review your answers` / `● Which color? → Red` など）。
+        let body: Vec<&String> =
+            above.iter().filter(|b| !b.is_empty() && !is_rule_line(b)).collect();
+        match body.split_last() {
+            Some((last, rest)) => (
+                (*last).clone(),
+                rest.iter().map(|b| b.as_str()).collect::<Vec<_>>().join("\n"),
+            ),
+            None => (String::new(), String::new()),
+        }
+    };
 
     // **フッタも折り返す。** 行ごとに照合すると、13 桁のターミナルでは
     // `Esc to` / `cancel ·` / `Tab to` / `amend` に割れてどのパターンにも当たらず、
@@ -942,9 +1190,26 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     // `Tab to amend` は許可ダイアログ固有のフッタ。`Esc to cancel` は Claude Code の
     // ダイアログ全般に出る。**どちらかがあれば矢印で答える**（数字ではない）
     let has_amend_footer = contains_ci(&below_text, "tab to amend");
-    let has_cc_footer =
+    let footer_says_cc =
         below_has_aq_footer || has_amend_footer || contains_ci(&below_text, "esc to cancel");
-    let last_label = run.options.last().map(|o| o.label.as_str()).unwrap_or("");
+    // **タブバーもフッタと同格の印**（#264）。全問答えたあとの確認画面
+    // （`Review your answers` / `❯ 1. Submit answers`）には Claude Code のフッタが
+    // 出ないため、フッタだけを見ると素の番号リストへ落ちて数字キーを送ってしまい、
+    // **確定できないまま止まる**（実測）。
+    let has_cc_footer = footer_says_cc || !tabs.is_empty();
+
+    // 罫線の下に番号なしで置かれた逃げ道を拾う（#264）。実測: 選択肢に preview が
+    // 付くレイアウトでは `Chat about this` が番号を持たずに罫線の下へ出る。
+    // **矢印の移動量は画面の並び順で決まる**ので、続きの番号を振っておけば
+    // そのまま選べる。Claude Code のダイアログだと分かっているときだけ足す
+    let mut options = run.options;
+    if has_cc_footer {
+        if let Some(label) = find_unnumbered_escape(&lines, run.end) {
+            let next = options.last().map(|o| o.index + 1).unwrap_or(1);
+            options.push(PromptOption { index: next, label });
+        }
+    }
+    let last_label = options.last().map(|o| o.label.as_str()).unwrap_or("");
     // 実測: `AskUserQuestion` の逃げ道は `Other` ではなく `Chat about this`
     let has_chat_about_this = contains_ci(last_label, "chat about this");
 
@@ -964,6 +1229,7 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
                 header: kind.as_header(),
                 context: String::new(),
                 questions: Vec::new(),
+                tabs: Vec::new(),
                 escape_hatch,
                 truncated: false,
                 fingerprint: String::new(),
@@ -972,7 +1238,7 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
         }
     }
 
-    let shape = if below_has_aq_footer || has_chat_about_this {
+    let shape = if below_has_aq_footer || has_chat_about_this || !tabs.is_empty() {
         PromptShape::AskUserQuestion
     } else if has_amend_footer || header.to_lowercase().starts_with("do you want to") {
         PromptShape::Permission
@@ -1008,7 +1274,7 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     // - Claude Code のダイアログなのに選択肢が 1 つしか無い（実物は必ず 2 つ以上ある。
     //   `Yes` だけの許可ダイアログは存在しない）
     let clipped_at_top = run.start == 0;
-    let implausibly_few = has_cc_footer && run.options.len() < 2;
+    let implausibly_few = has_cc_footer && options.len() < 2;
     let truncated = clipped_at_top || implausibly_few;
 
     let allow_other = has_chat_about_this
@@ -1029,13 +1295,21 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
         header,
         context,
         questions: vec![PromptQuestion {
-            header: String::new(),
+            // タブバーがあれば、いま開いているタブの見出しがそのまま設問の見出し。
+            // どれが「いま」かは画面の色でしか区別できないので、**未回答の先頭**を採る
+            // （1 問答えると自動で次の未回答タブへ進む挙動に一致する。#264）
+            header: tabs
+                .iter()
+                .find(|t| !t.answered && !t.is_submit)
+                .map(|t| t.label.clone())
+                .unwrap_or_default(),
             question,
             multi_select: false,
-            options: run.options,
+            options,
             allow_other,
             cursor_index: run.cursor_index,
         }],
+        tabs,
         escape_hatch,
         truncated,
         fingerprint: String::new(),
@@ -1072,6 +1346,14 @@ fn fingerprint_of(parsed: &ParsedPrompt) -> String {
     hasher.update(parsed.header.as_bytes());
     hasher.update([0x1f]);
     hasher.update(parsed.context.as_bytes());
+    // タブの回答状況が変われば「次に答える設問」が変わる。1 問答えた直後の画面を
+    // 前の fingerprint で撃たせないために混ぜる（#264）
+    for t in &parsed.tabs {
+        hasher.update([0x1c]);
+        hasher.update(t.label.as_bytes());
+        hasher.update([b':']);
+        hasher.update(if t.answered { b"x" as &[u8] } else { b"-" });
+    }
     for q in &parsed.questions {
         hasher.update([0x1e]);
         hasher.update(q.question.as_bytes());
@@ -1216,6 +1498,195 @@ mod tests {
     fn detects_free_input() {
         let p = parse_prompt(&free_input_screen());
         assert_eq!(p.shape, PromptShape::Text);
+    }
+
+    // ── 複数設問の AskUserQuestion（#264。すべて実機の画面から採った）──────────
+
+    /// 1 問目。タブバーの上にはユーザーのプロンプトのエコーが残っている。
+    fn multi_question_first_screen() -> String {
+        [
+            "❯ AskUserQuestion ツールを1回だけ呼んで、questions に2問まとめて入れてください。1問目: header 'Color'",
+            "'Red'/'Blue'。2問目: header 'Size' question 'Which size?' options 'Large'/'Small'。",
+            "←  ☐ Color  ☐ Size  ✔ Submit  →",
+            "Which color?",
+            "",
+            "❯ 1. Red",
+            "     赤を選択します。",
+            "  2. Blue",
+            "     青を選択します。",
+            "  3. Type something.",
+            "────────────────────────────────────────",
+            "  4. Chat about this",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]
+        .join("\n")
+    }
+
+    /// 1 問答えて自動でタブが進んだ直後。**`❯` が描き直されていない。**
+    fn multi_question_second_screen() -> String {
+        [
+            "←  ☒ Color  ☐ Size  ✔ Submit  →",
+            "Which size?",
+            "",
+            " 1. Large",
+            "     大きいサイズを選択します。",
+            "  2. Small",
+            "     小さいサイズを選択します。",
+            "  3. Type something.",
+            "────────────────────────────────────────",
+            "  4. Chat about this",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]
+        .join("\n")
+    }
+
+    /// 全問答えたあとの確認画面。**Claude Code のフッタが出ない。**
+    fn submit_review_screen() -> String {
+        [
+            "←  ☒ Color  ☒ Size  ✔ Submit  →",
+            "Review your answers",
+            "",
+            " ● Which color?",
+            "   → Red",
+            " ● Which size?",
+            "   → Large",
+            "",
+            "Ready to submit your answers?",
+            "",
+            "❯ 1. Submit answers",
+            "  2. Cancel",
+        ]
+        .join("\n")
+    }
+
+    /// 選択肢に preview が付くと、右へプレビュー枠が並ぶ横並びレイアウトになる。
+    /// `Chat about this` は罫線の下に**番号なし**で置かれる。
+    fn preview_question_screen() -> String {
+        [
+            "←  ☐ Layout  ☐ Theme  ✔ Submit  →",
+            "Which layout?",
+            "",
+            "❯ 1. Grid                         ┌──────────────────────────────────────────┐",
+            "  2. List                         │ ┌───┬───┬───┐                            │",
+            "                                  ├─── ✂ ─── 2 lines hidden ─────────────────┤",
+            "                                  └──────────────────────────────────────────┘",
+            "",
+            "                                  Notes: press n to add notes",
+            "",
+            "────────────────────────────────────────",
+            "  Chat about this",
+            "",
+            "Enter to select · ↑/↓ to navigate · n to add notes · Tab to switch questions · Esc to cancel",
+        ]
+        .join("\n")
+    }
+
+    #[test]
+    fn reads_the_question_tab_bar() {
+        let p = parse_prompt(&multi_question_first_screen());
+        assert_eq!(p.shape, PromptShape::AskUserQuestion);
+        assert_eq!(p.navigation, Navigation::Arrows);
+        let labels: Vec<&str> = p.tabs.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(labels, vec!["Color", "Size", "Submit"]);
+        assert!(!p.tabs[0].answered);
+        assert!(p.tabs[2].is_submit);
+        // いま開いているタブ（未回答の先頭）の見出しが設問の見出しになる
+        assert_eq!(p.questions[0].header, "Color");
+    }
+
+    /// タブバーの上に残ったスクロールバックを設問に混ぜない（#264）。
+    ///
+    /// 混ぜるとカードが画面のダンプになり、人が何を聞かれているのか読めなくなる。
+    #[test]
+    fn keeps_scrollback_out_of_the_question() {
+        let p = parse_prompt(&multi_question_first_screen());
+        assert_eq!(p.header, "Which color?");
+        assert_eq!(p.context, "");
+        assert!(
+            !p.questions[0].question.contains("AskUserQuestion ツールを"),
+            "question={:?}",
+            p.questions[0].question
+        );
+    }
+
+    /// 罫線の下に続く番号付きの選択肢を落とさない（#264）。
+    #[test]
+    fn picks_up_a_numbered_option_below_a_rule() {
+        let p = parse_prompt(&multi_question_first_screen());
+        let labels: Vec<&str> = p.questions[0].options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels.len(), 4, "options={:?}", labels);
+        assert_eq!(labels[3], "Chat about this");
+        assert!(p.questions[0].allow_other);
+        assert_eq!(p.questions[0].cursor_index, Some(1));
+    }
+
+    /// `❯` が描き直されていない画面でもカーソルを復元する（#264）。
+    ///
+    /// 復元できないと矢印の移動量が決まらず、**2 問目以降が一切答えられない**。
+    /// 手がかりは「選択中の行だけマーカーぶん左に寄っている」こと。
+    #[test]
+    fn recovers_the_cursor_when_the_marker_is_not_drawn() {
+        let p = parse_prompt(&multi_question_second_screen());
+        assert_eq!(p.shape, PromptShape::AskUserQuestion);
+        assert_eq!(p.questions[0].cursor_index, Some(1));
+        assert!(p.tabs[0].answered, "1 問目は ☒ になっている");
+        assert!(!p.tabs[1].answered);
+        assert_eq!(p.questions[0].header, "Size");
+        // 復元できていれば矢印の移動量が組める
+        let keys = plan_keys(&p, &Answer::Select { option_index: 2 }).expect("select");
+        assert_eq!(keys_preview(&keys), vec!["Down", "CR"]);
+    }
+
+    /// マーカーが 1 つも無く、字下げも揃っている画面ではカーソルを推測しない。
+    #[test]
+    fn does_not_guess_a_cursor_when_every_option_is_aligned() {
+        let p = parse_prompt(
+            "Pick a target:\n  1) staging\n  2) production\nSelection: ",
+        );
+        assert_eq!(p.questions[0].cursor_index, None);
+    }
+
+    /// 確認画面は Claude Code のフッタを出さない。**タブバーで見分ける。**
+    ///
+    /// 見分けられないと素の番号リスト扱いになって数字キーを送り、
+    /// Claude Code では確定しないので回答が宛先へ渡らない（実測）。
+    #[test]
+    fn the_submit_review_screen_is_a_claude_code_dialog() {
+        let p = parse_prompt(&submit_review_screen());
+        assert_eq!(p.shape, PromptShape::AskUserQuestion);
+        assert_eq!(p.navigation, Navigation::Arrows, "数字キーでは確定しない");
+        assert_eq!(p.header, "Ready to submit your answers?");
+        assert!(p.context.contains("Which color?"), "context={:?}", p.context);
+        assert!(p.tabs.iter().all(|t| t.is_submit || t.answered));
+        assert_eq!(p.questions[0].options[0].label, "Submit answers");
+        let keys = plan_keys(&p, &Answer::Select { option_index: 1 }).expect("submit");
+        assert_eq!(keys_preview(&keys), vec!["CR"]);
+    }
+
+    /// 横並びのプレビュー枠を選択肢のラベルから切り離す（#264）。
+    ///
+    /// 切らないと `"Grid    ┌────────┐"` のようなラベルになり、枠の続き行まで
+    /// 直前の選択肢へ吸い込まれる。
+    #[test]
+    fn strips_the_preview_panel_from_option_labels() {
+        let p = parse_prompt(&preview_question_screen());
+        assert_eq!(p.shape, PromptShape::AskUserQuestion);
+        let labels: Vec<&str> = p.questions[0].options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, vec!["Grid", "List", "Chat about this"]);
+        assert_eq!(p.questions[0].cursor_index, Some(1));
+        assert!(p.questions[0].allow_other);
+        assert_eq!(p.header, "Which layout?");
+    }
+
+    /// プレビューの無い普通のダイアログを preview 判定に巻き込まない。
+    #[test]
+    fn a_plain_permission_dialog_has_no_preview_column() {
+        let p = parse_prompt(&permission_screen("echo probe-264", "Print a probe"));
+        assert_eq!(p.shape, PromptShape::Permission);
+        assert!(p.tabs.is_empty());
+        assert_eq!(p.questions[0].options.len(), 3);
     }
 
     #[test]

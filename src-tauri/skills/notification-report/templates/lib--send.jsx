@@ -1,16 +1,18 @@
 
-// レポートからの送信ロジック。
+// レポートからの送信ロジックと、カードが使う読み取りヘルパー。
 //
 // 宛先は各通知の発信元ワークツリーで走っている AI 端末で、許可条件は
 // **レポートを置いたワークツリーがその宛先ワークツリーを購読していること**（#211）。
 // 向きは購読者側が呼び出し元で、宛先側が呼び出し元を購読しているだけでは通らない。
 //
-// ── 2 つの送信経路（#215） ──────────────────────────────────────────────────
+// ── 3 つの送信経路 ──────────────────────────────────────────────────────────
 //
 // 1. **自由入力** — 宛先がダイアログ無しで入力待ち。`sendOne` が本文 → CR を送る
-// 2. **ダイアログ** — 宛先がツール許可 / プラン承認 / AskUserQuestion で止まっている。
-//    `answerPrompt` が `oretachi_answer_prompt` を呼び、Rust 側が画面を再解析して
-//    fingerprint を照合してからキー列を送る
+// 2. **ダイアログ（1 択）** — ツール許可 / プラン承認 / y-n / 番号選択。
+//    `answerPrompt` が `oretachi_answer_prompt(kind: "select")` を 1 回呼ぶ
+// 3. **複数設問の AskUserQuestion** — `answerAll` が
+//    `oretachi_answer_prompt(kind: "selectAll")` を 1 回呼び、Rust 側が
+//    「1 問選ぶ → 画面が次の設問へ進むのを待つ」を繰り返して最後の Submit まで確定する（#264）
 //
 // **ダイアログで止まっている宛先へ自由テキストを送ってはいけない。** テキストは
 // ダイアログに吸われ、末尾の CR が意図しない選択肢（許可ダイアログの既定は `1. Yes`）の
@@ -108,27 +110,76 @@ function flatten(s) {
     .trim();
 }
 
+// ── 本文の読み取り（#264）─────────────────────────────────────────────────────
+//
+// カードは**生データを一切出さない。** 生の hook JSON が読めないからレポートを
+// 作っているので、それをそのまま貼り直したら意味が無い（折りたたみで残すのも
+// やらない）。生成側が `paragraphs` / `bullets` / `fields` / `links` へ
+// 人が読める形で入れる。材料が足りなければ生成側がターミダルを読み、
+// それでも足りなければ該当ワークツリーの issue / git / アーティファクトを見に行く。
+
 /**
- * カードに表示する本文。**必ず文字列を返す。**
+ * 段落の配列。**必ず文字列の配列を返す。**
  *
- * `data/report` の `body` は文字列である前提だが、`oretachi_poll_inbox` の `body` は
- * **パース済みの JSON オブジェクト**（人が読める 1 行は別フィールドの `text`）なので、
- * 生成側がそちらを取り違えるとオブジェクトが入る。React はオブジェクトを子として
- * 描画できず throw し、**アーティファクトにエラーバウンダリが無いためレポート全体が
- * 描画不能になる**（1 枚のカードの取り違えで、他の通知への返答窓口まで失われる）。
- *
- * 生成側の指示（`SKILL.md` の 1-2c）で `text` を入れさせるのが本筋で、ここは
- * 「取り違えてもレポートは開ける」ための保険。
+ * 旧形式（`body` の 1 本の文字列）も受ける。`oretachi_poll_inbox` の `body` は
+ * **パース済みの JSON オブジェクト**なので、生成側が取り違えるとオブジェクトが入る。
+ * React はオブジェクトを子として描画できず throw し、**アーティファクトに
+ * エラーバウンダリが無いためレポート全体が描画不能になる**（1 枚のカードの
+ * 取り違えで、他の通知への返答窓口まで失われる）。ここはその保険。
  */
-function bodyText(n) {
-  const b = n && n.body;
-  if (typeof b === 'string') return b;
-  if (b == null) return '(本文がありません)';
-  try {
-    return JSON.stringify(b, null, 2);
-  } catch (e) {
-    return String(b);
+function paragraphsOf(n) {
+  if (n && Array.isArray(n.paragraphs)) {
+    return n.paragraphs.filter(p => typeof p === 'string' && p.trim()).map(p => p.trim());
   }
+  const b = n && n.body;
+  if (typeof b === 'string' && b.trim()) return [b.trim()];
+  if (b == null) return [];
+  // ここへ来るのは生成側が `text` ではなく `body`（オブジェクト）を入れた事故。
+  // 生 JSON を人へ見せる意味は無いので、事故だと分かる 1 行だけ出す
+  return ['（本文を整形できませんでした。ターミナルを開いて確認してください）'];
+}
+
+/** 送信テキストへ埋める用の 1 行本文 */
+function bodyText(n) {
+  const ps = paragraphsOf(n);
+  return ps.length > 0 ? ps.join(' / ') : '(本文がありません)';
+}
+
+/**
+ * 本文中の記法をリッチテキストの断片へ割る（#264）。
+ *
+ * エージェントは `notify_worktree` の本文に Markdown を書く。素で出すと
+ * `**分割して**` のような記号がそのまま並んで読みにくく、`#203` も
+ * `https://…` もただの文字列のままでリンクにならない。
+ *
+ * 返すのは `[{ type, text, href }]`。`type` は `text` / `bold` / `code` / `link`。
+ * **描画側で `href` 以外を URL として扱わないこと**（本文はエージェントが書いた
+ * 文字列なので、リンク先はここで組み立てたものだけに限る）。
+ */
+function richSegments(text, repoUrl) {
+  const out = [];
+  const re = /(\*\*[^*\n]+\*\*|`[^`\n]+`|https?:\/\/[^\s<>"'）)、。]+|#\d+)/g;
+  let last = 0;
+  let m;
+  const src = String(text == null ? '' : text);
+  while ((m = re.exec(src)) !== null) {
+    if (m.index > last) out.push({ type: 'text', text: src.slice(last, m.index) });
+    const t = m[0];
+    if (t.slice(0, 2) === '**') {
+      out.push({ type: 'bold', text: t.slice(2, -2) });
+    } else if (t[0] === '`') {
+      out.push({ type: 'code', text: t.slice(1, -1) });
+    } else if (t[0] === '#') {
+      // リポジトリが分からなければただの文字として出す（当てずっぽうのリンクは張らない）
+      if (repoUrl) out.push({ type: 'link', text: t, href: `${repoUrl}/issues/${t.slice(1)}` });
+      else out.push({ type: 'code', text: t });
+    } else {
+      out.push({ type: 'link', text: t, href: t });
+    }
+    last = m.index + t.length;
+  }
+  if (last < src.length) out.push({ type: 'text', text: src.slice(last) });
+  return out;
 }
 
 /**
@@ -152,8 +203,6 @@ function buildReplyText(meta, n, answer) {
   if (answer.note) {
     parts.push(`${answer.choice === OTHER ? '指示' : '補足'}: ${flatten(answer.note)}`);
   }
-  // `bodyText` を通すのは、`body` にオブジェクトが入っていたときに
-  // `flatten` が `[object Object]` を宛先へ送ってしまうのを避けるため
   parts.push(`対象の通知(${n.at} / ${n.kind}): ${flatten(bodyText(n))}`);
   return flatten(parts.join(' '));
 }
@@ -181,9 +230,12 @@ function isDialog(n) {
 /**
  * ダイアログが宛先の画面に収まっておらず、選択肢を全部読めていないか。
  *
- * `true` のとき**選択させない**。読めたぶんだけを見せると「`1. Yes` しか無い」と
- * 誤認させ、拒否の選択肢を見ないまま承認させてしまう（実測: 7 行のタブで起きた）。
- * ESC で抜ける経路は画面に何が見えていても成立するので残す。
+ * `true` のとき**画面由来の選択肢では選ばせない**。読めたぶんだけを見せると
+ * 「`1. Yes` しか無い」と誤認させ、拒否の選択肢を見ないまま承認させてしまう
+ * （実測: 7 行のタブで起きた）。ESC で抜ける経路は画面に何が見えていても成立するので残す。
+ *
+ * **`request.questions`（通知の hook JSON 由来）で答えるカードはこの影響を受けない。**
+ * 選択肢を画面から読んでいないので、画面が狭くて切れていても一覧は完全（#264）。
  */
 function isTruncated(n) {
   return !!(hasPrompt(n) && n.prompt.truncated);
@@ -202,7 +254,7 @@ function canEscape(n) {
   );
 }
 
-/** 1 問目。`permission` / `plan` / `askUserQuestion` / `numbered` は選択肢がここに入る */
+/** 1 問目。`permission` / `plan` / `numbered` は画面の選択肢がここに入る */
 function questionOf(n) {
   if (!hasPrompt(n)) return null;
   const qs = n.prompt.questions;
@@ -213,6 +265,66 @@ function questionOf(n) {
 function optionsOf(n) {
   const q = questionOf(n);
   return q && Array.isArray(q.options) ? q.options : [];
+}
+
+// ── 通知に入っている「聞かれていること」（#264）───────────────────────────────
+//
+// `approval` の通知本文は `PermissionRequest` フックの JSON で、`tool_name` と
+// `tool_input` が丸ごと入っている。AskUserQuestion なら**全設問・全選択肢・
+// description・preview まで**そこにある。一方ターミナルの画面は 1 問ずつしか
+// 出さず、preview は `✂ N lines hidden` で切られる。**通知の方が情報量が多い**ので、
+// 設問はそちらから組み立てる。生成側が `request` へ写す。
+
+/** 通知から起こした設問一覧（複数設問の AskUserQuestion）。無ければ空配列 */
+function askQuestions(n) {
+  const r = n && n.request;
+  if (!r || !Array.isArray(r.questions)) return [];
+  return r.questions.filter(q => q && Array.isArray(q.options) && q.options.length > 0);
+}
+
+/**
+ * このカードが「通知由来の設問フォーム」で答えるか。
+ *
+ * 画面が `askUserQuestion` で止まっていて、通知から設問を起こせているときだけ。
+ * 画面が別の形状（人が先に進めた等）なら fingerprint 照合で `stale` になるので、
+ * ここで先に弾いておく。
+ */
+function isQuestionForm(n) {
+  return !isReportOnly(n) && shapeOf(n) === 'askUserQuestion' && askQuestions(n).length > 0;
+}
+
+/**
+ * 設問 `qi` の選択肢 `oi`（0 始まり）に対応する**画面上の選択肢番号**。
+ *
+ * Claude Code は通知に入っている選択肢をそのままの順で `1.` から並べ、その後ろに
+ * 画面固有の逃げ道（`Type something.` / `Chat about this`）を足す（実測）。
+ * つまり通知の i 番目は画面の i+1 番。**この対応が崩れると別の選択肢を確定する**ので、
+ * 番号を作る場所をここ 1 か所に閉じておく。
+ */
+function screenIndexFor(oi) {
+  return oi + 1;
+}
+
+/** 一括回答で送る画面上の番号の並び。未回答があれば `null` */
+function selectAllIndices(n, draft) {
+  const qs = askQuestions(n);
+  const picks = (draft && draft.picks) || {};
+  const out = [];
+  for (let i = 0; i < qs.length; i++) {
+    const oi = picks[i];
+    if (typeof oi !== 'number') return null;
+    out.push(screenIndexFor(oi));
+  }
+  return out;
+}
+
+/** 何問中何問に答えたか */
+function answeredCount(n, draft) {
+  const qs = askQuestions(n);
+  const picks = (draft && draft.picks) || {};
+  let c = 0;
+  for (let i = 0; i < qs.length; i++) if (typeof picks[i] === 'number') c++;
+  return c;
 }
 
 /**
@@ -267,6 +379,22 @@ function blockedReason(n, conflicts) {
       '照合できないまま送るのは危険なので送信できません（レポートを作り直してください）'
     );
   }
+  // 通知から設問を起こせているカードは、以降の「画面から選択肢を読めたか」系の
+  // 判定を受けない（選択肢を画面から読んでいないため。#264）
+  if (isQuestionForm(n)) {
+    // 選択肢は通知から出しているので画面が切れていても一覧は完全だが、
+    // **Rust 側の `plan_keys` は `truncated` な画面への選択を拒否する**
+    // （読めていない選択肢がある画面で矢印を送らせない安全弁）。ここで塞がないと
+    // 押した瞬間 `unsupported` が返り、カードが読み取り専用になって死ぬ
+    if (isTruncated(n)) {
+      return (
+        `'${n.worktreeName}' のダイアログが画面に収まっていません（タブが狭い）。` +
+        'この状態では宛先へキーを送れないため、ターミナルを広げるか直接操作してください'
+      );
+    }
+    const conflictQ = conflicts && conflicts[n.id];
+    return conflictQ || null;
+  }
   if (isDialog(n) && shapeOf(n) !== 'yesno' && optionsOf(n).length === 0) {
     return `'${n.worktreeName}' の選択肢を読み取れませんでした。ターミナルを開いて直接操作してください`;
   }
@@ -311,6 +439,10 @@ const errText = e => String((e && e.message) || e);
  * 人へ見せるためのもので、レポート生成時の画面に基づく。
  *
  * 送信直前の画面がここと違えば `oretachi_answer_prompt` は `stale` を返して**何も送らない**。
+ *
+ * **複数設問の一括回答ではキー列を出さない。** 2 問目以降の `❯` の位置は
+ * その設問へ進むまで分からず、キー列は Rust 側が 1 問ずつ画面を読み直して
+ * 組み立てる（#264）。カード側は「何を確定するか」を文章で出す。
  */
 function previewKeys(n, draft) {
   const d = draft || {};
@@ -320,6 +452,7 @@ function previewKeys(n, draft) {
     if (!canEscape(n)) return null;
     return d.note ? ['Esc', `text(${flatten(d.note).length}文字)`, 'CR'] : null;
   }
+  if (isQuestionForm(n)) return null;
   if (shape === 'yesno') {
     return d.value ? [d.value, 'CR'] : null;
   }
@@ -409,8 +542,22 @@ async function sendOne(meta, n, answer) {
   return sendEnter(n);
 }
 
+/** `oretachi_answer_prompt` の返り値を共通の形へ均す */
+function normalizeAnswerResult(raw) {
+  if (!raw || typeof raw !== 'object' || !raw.status) {
+    return { status: 'failed', error: `oretachi_answer_prompt の応答を解釈できません: ${String(raw)}` };
+  }
+  return {
+    status: raw.status,
+    keysSent: raw.keysSent || [],
+    afterShape: raw.afterShape || null,
+    answeredCount: typeof raw.answeredCount === 'number' ? raw.answeredCount : null,
+    error: raw.reason || null,
+  };
+}
+
 /**
- * ダイアログで止まっている宛先へ回答する。
+ * ダイアログで止まっている宛先へ回答する（1 択）。
  *
  * `expect_fingerprint` にレポート生成時の画面の fingerprint を渡す。Rust 側は
  * **送信直前に画面を読み直して照合し、一致しなければ何も送らず `stale` を返す**。
@@ -453,15 +600,35 @@ async function answerPrompt(n, draft) {
     // この経路ではキーを 1 つも送っていない
     return { status: 'failed', error: errText(e) };
   }
-  if (!raw || typeof raw !== 'object' || !raw.status) {
-    return { status: 'failed', error: `oretachi_answer_prompt の応答を解釈できません: ${String(raw)}` };
+  return normalizeAnswerResult(raw);
+}
+
+/**
+ * 複数設問の AskUserQuestion へ**全問まとめて**答える（#264）。
+ *
+ * 宛先の画面には 1 問ぶんしか出ないので、Rust 側（`kind: "selectAll"`）が
+ * 「1 問選ぶ → 画面が次の設問へ進むのを待つ」を繰り返し、最後の確認画面で
+ * `Submit answers` まで確定する。**ここで 1 問ずつ呼び分けないのは、
+ * 呼び出しの合間に人がターミナルを触ると中途半端な状態で止まるため。**
+ *
+ * `answeredCount` に「何問ぶん確定したか」が返る。途中で止まった場合は
+ * `pastedOnly` / `unverified` になり、カードはそこを人へ見せて手動操作へ誘導する。
+ */
+async function answerAll(n, draft) {
+  const indices = selectAllIndices(n, draft);
+  if (!indices) return { status: 'failed', error: '未回答の設問があります' };
+  let raw;
+  try {
+    raw = await callTool('oretachi_answer_prompt', {
+      session_id: n.sessionId,
+      expect_fingerprint: n.prompt.fingerprint,
+      kind: 'selectAll',
+      option_indices: indices,
+    });
+  } catch (e) {
+    return { status: 'failed', error: errText(e) };
   }
-  return {
-    status: raw.status,
-    keysSent: raw.keysSent || [],
-    afterShape: raw.afterShape || null,
-    error: raw.reason || null,
-  };
+  return normalizeAnswerResult(raw);
 }
 
 // ── ack / トレイ通知クリアはここには無い（#219） ──────────────────────────
@@ -480,13 +647,6 @@ async function answerPrompt(n, draft) {
 //
 // 人がレポートの存在に気づく導線は、生成側のセッションが Step 6 で撃つ
 // `notify_worktree`（レポート置き場のワークツリー宛）が担う。
-//
-// **報告カード（#228）も同じ扱い。** 返答しないカードだが ack のタイミングは
-// 要返答カードと揃える（Step 5.5 で一括）。報告カードだけ収集直後に ack すると
-// 「Step 5 の検証より前に ack しない」という原則が種別ごとに分岐し、生成が途中で
-// 落ちたときにどのレポートにも載っていない報告が inbox から消える。揃えておけば、
-// 生成失敗時は報告カードも次のレポートに再掲されるだけで済む（読むだけなので
-// 再掲は無害）。
 
 /**
  * この通知へ「いま」返答を送れるか（下書きの妥当性まで含めた判定）。
@@ -517,6 +677,9 @@ function canSend(n, answer, draft, conflicts) {
     // キーが 1 つでも出ている可能性がある結果は再送させない
     if (answer && answer.status && answer.status !== 'failed') return false;
     if (d.mode === 'escapeThenText') return canEscape(n) && !!flatten(d.note);
+    // 通知由来の設問フォームは**全問埋まってから**送る。途中で送ると、残りの設問へ
+    // 何も答えないまま画面が進み、宛先が答えの無い設問で止まる
+    if (isQuestionForm(n)) return selectAllIndices(n, d) !== null;
     // 切れている画面では選択を許さない（ESC 経路だけ）
     if (isTruncated(n)) return false;
     if (shapeOf(n) === 'yesno') return d.value === 'y' || d.value === 'n';
@@ -538,7 +701,9 @@ exports.REPORT_KINDS = REPORT_KINDS;
 exports.isReportOnly = isReportOnly;
 exports.SHAPE_LABEL = SHAPE_LABEL;
 exports.flatten = flatten;
+exports.paragraphsOf = paragraphsOf;
 exports.bodyText = bodyText;
+exports.richSegments = richSegments;
 exports.buildReplyText = buildReplyText;
 exports.hasPrompt = hasPrompt;
 exports.shapeOf = shapeOf;
@@ -548,6 +713,11 @@ exports.canEscape = canEscape;
 exports.ESCAPABLE_SHAPES = ESCAPABLE_SHAPES;
 exports.questionOf = questionOf;
 exports.optionsOf = optionsOf;
+exports.askQuestions = askQuestions;
+exports.isQuestionForm = isQuestionForm;
+exports.screenIndexFor = screenIndexFor;
+exports.selectAllIndices = selectAllIndices;
+exports.answeredCount = answeredCount;
 exports.promptConflicts = promptConflicts;
 exports.blockedReason = blockedReason;
 exports.previewKeys = previewKeys;
@@ -555,3 +725,4 @@ exports.canSend = canSend;
 exports.sendOne = sendOne;
 exports.sendEnter = sendEnter;
 exports.answerPrompt = answerPrompt;
+exports.answerAll = answerAll;
