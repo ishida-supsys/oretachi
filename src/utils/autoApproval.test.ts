@@ -240,6 +240,62 @@ describe('detectOretachiToolPrompt', () => {
       .toBe('oretachi_list_workgroups')
   })
 
+  it('returns null for artifact delete (destructive command)', () => {
+    // ツール名は自動承認対象だが、command: "delete" は復元できないので即承認しない
+    const screen = [
+      'plugin:oretachi:oretachi - artifact (MCP)',
+      '  command: "delete"',
+      '  id: "report-2026-09-10"',
+      '',
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      "   2. Yes, and don't ask again for plugin:oretachi:oretachi - artifact commands in X:\\devel\\worktree\\oretachi-zlvc",
+      '   3. No',
+    ].join('\n')
+    expect(detectOretachiToolPrompt(screen)).toBeNull()
+  })
+
+  it('returns null for artifact delete with a quoted param key', () => {
+    // params の描画形は CC のバージョン依存なので、キーがクォートされていても拾う
+    const screen = [
+      'plugin:oretachi:oretachi - artifact (MCP)',
+      '  { "command": "delete", "id": "report-2026-09-10" }',
+      '',
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      '   3. No',
+    ].join('\n')
+    expect(detectOretachiToolPrompt(screen)).toBeNull()
+  })
+
+  it('still approves artifact with non-destructive commands', () => {
+    for (const command of ['create', 'update', 'rewrite', 'get', 'outline']) {
+      const screen = [
+        'plugin:oretachi:oretachi - artifact (MCP)',
+        `  command: "${command}"`,
+        '  id: "report-2026-09-10"',
+        '',
+        ' Do you want to proceed?',
+        ' ❯ 1. Yes',
+        '   3. No',
+      ].join('\n')
+      expect(detectOretachiToolPrompt(screen)).toBe('artifact')
+    }
+  })
+
+  it('keeps approving artifact_module delete (single module only)', () => {
+    const screen = [
+      'plugin:oretachi:oretachi - artifact_module (MCP)',
+      '  command: "delete"',
+      '  module_name: "components/Header"',
+      '',
+      ' Do you want to proceed?',
+      ' ❯ 1. Yes',
+      '   3. No',
+    ].join('\n')
+    expect(detectOretachiToolPrompt(screen)).toBe('artifact_module')
+  })
+
   it('returns null for destructive close_worktree', () => {
     expect(detectOretachiToolPrompt(ccPrompt('plugin:oretachi:oretachi - oretachi_close_worktree')))
       .toBeNull()
