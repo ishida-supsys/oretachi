@@ -32,7 +32,9 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["macos-private-api"] }
+# image-png: クリップボードへ画像を書くとき、フロントから渡す PNG バイト列を
+# Rust 側でデコードするのに要る（無いと "expected RGBA image data, found raw bytes" になる）
+tauri = { version = "2", features = ["macos-private-api", "image-png"] }
 tauri-plugin-liquid-glass = "0.1.6"
 tauri-plugin-window-state = "2"
 tauri-plugin-opener = "2"
@@ -59,6 +61,8 @@ glob = "0.3"
 dotenvy = "0.15"
 base64 = "0.22"
 sha2 = "0.10"
+# アーティファクトの zip エクスポート / インポート用（暗号化・追加圧縮方式は使わない）
+zip = { version = "4", default-features = false, features = ["deflate"] }
 rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
 subtle = "2"

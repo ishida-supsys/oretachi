@@ -5,7 +5,8 @@ import { useToast } from "primevue/usetoast";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ask, message } from "@tauri-apps/plugin-dialog";
+import { ask, message, open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
+import { writeImage } from "@tauri-apps/plugin-clipboard-manager";
 import Toast from "primevue/toast";
 import type { ToastMessageOptions } from "primevue/toast";
 import Popover from "primevue/popover";
@@ -18,6 +19,8 @@ import ArtifactReactView from "./components/artifact/ArtifactReactView.vue";
 import ArtifactTableView from "./components/artifact/ArtifactTableView.vue";
 import ArtifactUrlView from "./components/artifact/ArtifactUrlView.vue";
 import { isTableContentType } from "./utils/csvArtifact";
+import { buildExportViewHtml, exportFileName, hasStandaloneView } from "./utils/artifactExport";
+import { svgToPngBytes } from "./utils/svgToPng";
 import { sortArtifacts, filterArtifacts } from "./utils/artifactList";
 import { parseArtifactLink } from "./utils/artifactLink";
 import {
@@ -65,6 +68,11 @@ const selectedId = ref<string | null>(null);
 const selectedArtifact = ref<ArtifactData | null>(null);
 const loading = ref(false);
 const transferring = ref(false);
+/** エクスポート / インポート実行中（二重起動と、ダイアログ連打での多重書き込みを防ぐ） */
+const exporting = ref(false);
+const importing = ref(false);
+/** PNG コピー実行中（mermaid では 1 回ごとに描画が走るので連打を止める） */
+const copyingPng = ref(false);
 const menuRef = ref<InstanceType<typeof Popover> | null>(null);
 /** ピン止め更新が飛んでいる最中の ID（連打による UI とディスクの食い違いを防ぐ） */
 const pinningIds = ref<Set<string>>(new Set());
@@ -554,6 +562,129 @@ async function transferToRepository() {
   }
 }
 
+// ─── エクスポート / インポート ────────────────────────────────────────────────
+//
+// 用途は「レポートの出力に不備があったとき、それを issue へ添付して報告する」こと。
+// GitHub の issue 添付は .html を弾くため、レンダリング結果（view.html）と再現材料
+// （本体 JSON / メモリー）をまとめた zip を成果物にする。zip の組み立てと取り込みは
+// Rust 側（artifact_export.rs）で、ここはレンダリング結果を作って渡すだけ。
+
+/** mermaid のレンダリング。mermaid 本体は重いので、押されたときに初めて読む */
+async function renderMermaidSvg(source: string): Promise<string> {
+  const [{ default: mermaid }, { mermaidConfig, sanitizeMermaidSvg }] = await Promise.all([
+    import("mermaid"),
+    import("./utils/mermaidTheme"),
+  ]);
+  mermaid.initialize(mermaidConfig);
+  const { svg } = await mermaid.render(`export-${Date.now()}`, source);
+  return sanitizeMermaidSvg(svg);
+}
+
+/** 表示中のアーティファクトを zip として書き出す */
+async function exportArtifact() {
+  const artifact = selectedArtifact.value;
+  if (!artifact || exporting.value) return;
+
+  exporting.value = true;
+  try {
+    // 保存先を先に聞く。React の view.html は数 MB になるので、
+    // キャンセルされる可能性のある操作の前に組み立てない
+    const destPath = await saveFileDialog({
+      defaultPath: exportFileName(artifact.title, artifact.id),
+      filters: [{ name: "zip", extensions: ["zip"] }],
+    });
+    if (!destPath) return;
+
+    // レンダリングに失敗しても再現材料だけは渡せるようにする（view.html 無しで続行）
+    let viewHtml: string | null = null;
+    try {
+      viewHtml = await buildExportViewHtml(artifact, selectedMemory.value, renderMermaidSvg);
+    } catch (e) {
+      console.error("build export view failed", e);
+      toast.add({ severity: "warn", summary: t("export.viewFailed"), life: 5000 });
+    }
+
+    const result = await invoke<{ path: string; bytes: number }>("export_artifact", {
+      scope,
+      scopeId,
+      artifactId: artifact.id,
+      destPath,
+      viewHtml,
+    });
+    toast.add({
+      severity: "success",
+      summary: t("export.done"),
+      detail: result.path,
+      life: 5000,
+    });
+  } catch (e) {
+    console.error("export_artifact failed", e);
+    await message(String(e), { title: t("export.failed"), kind: "error" });
+  } finally {
+    exporting.value = false;
+  }
+}
+
+/** エクスポートした zip をこのスコープへ取り込む */
+async function importArtifact() {
+  if (importing.value) return;
+
+  importing.value = true;
+  try {
+    const zipPath = await openFileDialog({
+      multiple: false,
+      filters: [{ name: "zip", extensions: ["zip"] }],
+    });
+    if (typeof zipPath !== "string") return;
+
+    const result = await invoke<{ artifactId: string; title: string; renamedFrom: string | null }>(
+      "import_artifact",
+      { scope, scopeId, zipPath },
+    );
+    // 一覧の更新と「開く」導線は artifact-changed(command=create) の既存ハンドラに任せる
+    toast.add({
+      severity: "success",
+      summary: t("import.done"),
+      detail: result.renamedFrom
+        ? t("import.renamed", { from: result.renamedFrom, to: result.artifactId })
+        : result.title,
+      life: 5000,
+    });
+  } catch (e) {
+    console.error("import_artifact failed", e);
+    await message(String(e), { title: t("import.failed"), kind: "error" });
+  } finally {
+    importing.value = false;
+  }
+}
+
+/** PNG をクリップボードへ。issue の本文へそのまま貼れる（SVG / mermaid のみ） */
+const canCopyPng = computed(() => {
+  const contentType = selectedArtifact.value?.content_type;
+  return contentType === "image/svg+xml" || contentType === "application/vnd.ant.mermaid";
+});
+
+async function copyPngToClipboard() {
+  const artifact = selectedArtifact.value;
+  // 連打のたびに mermaid の描画が走らないよう、他の導線と同じくガードする
+  if (!artifact || !canCopyPng.value || copyingPng.value) return;
+
+  copyingPng.value = true;
+  try {
+    const svg =
+      artifact.content_type === "application/vnd.ant.mermaid"
+        ? await renderMermaidSvg(artifact.content)
+        : artifact.content;
+    await writeImage(await svgToPngBytes(svg));
+    toast.add({ severity: "success", summary: t("copyPng.done"), life: 3000 });
+  } catch (e) {
+    console.error("copy png failed", e);
+    await message(String(e), { title: t("copyPng.failed"), kind: "error" });
+  } finally {
+    copyingPng.value = false;
+  }
+}
+
 /** リポジトリスコープでのみ使う、恒久保存アーティファクトの個別削除 */
 async function deleteRepoArtifact() {
   const artifactId = selectedId.value;
@@ -733,6 +864,14 @@ onUnmounted(() => {
       <div class="sidebar-header">
         <span :class="isRepositoryScope ? 'pi pi-folder sidebar-icon' : 'pi pi-box sidebar-icon'" />
         <span class="sidebar-title">{{ headerTitle }}</span>
+        <button
+          class="sidebar-import"
+          :disabled="importing"
+          :title="t('import.tooltip')"
+          @click="importArtifact"
+        >
+          <i :class="importing ? 'pi pi-spin pi-spinner' : 'pi pi-download'" />
+        </button>
       </div>
       <div class="sidebar-search">
         <span class="pi pi-search search-icon" />
@@ -845,6 +984,32 @@ onUnmounted(() => {
               <i class="pi pi-eraser" />
               <span>{{ t("memory.resetLabel") }}</span>
             </button>
+            <!-- リポジトリスコープにはメニューが無いので、エクスポートもヘッダーへ直接出す
+                 （保管庫のアーティファクトこそ社外への共有・報告の対象になる） -->
+            <button
+              v-if="isRepositoryScope"
+              class="btn-header"
+              :disabled="exporting"
+              :title="
+                hasStandaloneView(selectedArtifact.content_type)
+                  ? t('export.tooltip')
+                  : t('export.tooltipSourceOnly')
+              "
+              @click="exportArtifact"
+            >
+              <i :class="exporting ? 'pi pi-spin pi-spinner' : 'pi pi-file-export'" />
+              <span>{{ t("export.label") }}</span>
+            </button>
+            <button
+              v-if="isRepositoryScope && canCopyPng"
+              class="btn-header"
+              :disabled="copyingPng"
+              :title="t('copyPng.tooltip')"
+              @click="copyPngToClipboard"
+            >
+              <i :class="copyingPng ? 'pi pi-spin pi-spinner' : 'pi pi-image'" />
+              <span>{{ t("copyPng.label") }}</span>
+            </button>
             <button
               v-if="!isRepositoryScope"
               class="btn-header"
@@ -868,6 +1033,30 @@ onUnmounted(() => {
 
         <Popover v-if="!isRepositoryScope" ref="menuRef">
           <div class="popup-menu">
+            <button
+              class="popup-item"
+              :disabled="exporting"
+              :title="
+                hasStandaloneView(selectedArtifact.content_type)
+                  ? t('export.tooltip')
+                  : t('export.tooltipSourceOnly')
+              "
+              @click="withMenuHidden(exportArtifact)"
+            >
+              <span class="pi pi-file-export" />
+              {{ t("export.label") }}
+            </button>
+            <button
+              v-if="canCopyPng"
+              class="popup-item"
+              :disabled="copyingPng"
+              :title="t('copyPng.tooltip')"
+              @click="withMenuHidden(copyPngToClipboard)"
+            >
+              <span class="pi pi-image" />
+              {{ t("copyPng.label") }}
+            </button>
+            <div class="popup-divider" />
             <button
               class="popup-item"
               :disabled="transferring"
@@ -997,6 +1186,29 @@ onUnmounted(() => {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: #cdd6f4;
+}
+
+/* タイトルが長くても押せるよう、右端に寄せて固定する */
+.sidebar-import {
+  margin-left: auto;
+  flex: none;
+  padding: 3px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: #a6adc8;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.sidebar-import:hover:not(:disabled) {
+  background: #313244;
+  color: #cdd6f4;
+}
+
+.sidebar-import:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .sidebar-search {
@@ -1418,6 +1630,26 @@ onUnmounted(() => {
       "invalidLink": "Invalid artifact link",
       "openFailed": "Failed to open the linked artifact"
     },
+    "export": {
+      "label": "Export as zip",
+      "tooltip": "Save a zip you can attach to an issue (rendered view + source + memory)",
+      "tooltipSourceOnly": "Save a zip you can attach to an issue (source + memory; this type has no standalone view)",
+      "done": "Exported",
+      "viewFailed": "Could not render the view; exporting the source only",
+      "failed": "Export failed"
+    },
+    "import": {
+      "tooltip": "Import an exported artifact zip",
+      "done": "Imported",
+      "renamed": "The ID {from} was taken, so it was imported as {to}",
+      "failed": "Import failed"
+    },
+    "copyPng": {
+      "label": "Copy as PNG",
+      "tooltip": "Copy as a PNG image so you can paste it straight into an issue",
+      "done": "Copied to the clipboard as PNG",
+      "failed": "Failed to copy as PNG"
+    },
     "transfer": {
       "label": "Transfer to repository",
       "labelNamed": "Transfer to {repository}",
@@ -1477,6 +1709,26 @@ onUnmounted(() => {
       "notFound": "アーティファクトが見つかりません",
       "invalidLink": "アーティファクトリンクの書式が不正です",
       "openFailed": "リンク先のアーティファクトを開けませんでした"
+    },
+    "export": {
+      "label": "zip でエクスポート",
+      "tooltip": "issue へ添付できる zip を保存します（表示結果 + ソース + メモリー）",
+      "tooltipSourceOnly": "issue へ添付できる zip を保存します（ソース + メモリー。この種類は単体の表示ファイルを含みません）",
+      "done": "エクスポートしました",
+      "viewFailed": "表示結果を作れませんでした。ソースだけをエクスポートします",
+      "failed": "エクスポートに失敗しました"
+    },
+    "import": {
+      "tooltip": "エクスポートしたアーティファクト zip を取り込む",
+      "done": "取り込みました",
+      "renamed": "ID {from} は使用中だったため {to} として取り込みました",
+      "failed": "取り込みに失敗しました"
+    },
+    "copyPng": {
+      "label": "PNG でコピー",
+      "tooltip": "PNG 画像としてコピーします。issue の本文へそのまま貼れます",
+      "done": "PNG をクリップボードへコピーしました",
+      "failed": "PNG のコピーに失敗しました"
     },
     "transfer": {
       "label": "リポジトリへ転送",

@@ -3,6 +3,7 @@ mod ai_description;
 mod ai_judge;
 mod ai_provider;
 mod archive_db;
+mod artifact_export;
 mod artifact_lock;
 mod artifact_url;
 mod claude_plugin;
@@ -42,7 +43,7 @@ use tauri::{Emitter, Listener, Manager, State};
 use tauri_plugin_log::{RotationStrategy, Target, TargetKind, TimezoneStrategy};
 
 /// パスコンポーネントに `..`、絶対パス区切り文字、NULバイトが含まれていないか検証する
-fn validate_path_component(s: &str) -> Result<(), String> {
+pub(crate) fn validate_path_component(s: &str) -> Result<(), String> {
     if s.contains("..") || s.contains('/') || s.contains('\\') || s.contains('\0') || s.contains(':') {
         return Err(format!("不正なパス文字が含まれています: {}", s));
     }
@@ -819,12 +820,12 @@ static ARTIFACT_STATE_WRITE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::c
 /// pid だけだと同一プロセス内の並行更新で同名になり、片方の rename が NotFound で落ちる。
 static ARTIFACT_STATE_TMP_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-fn artifact_state_path(dir: &std::path::Path, artifact_id: &str) -> std::path::PathBuf {
+pub(crate) fn artifact_state_path(dir: &std::path::Path, artifact_id: &str) -> std::path::PathBuf {
     dir.join(format!("{}.{}", artifact_id, ARTIFACT_STATE_EXT))
 }
 
 /// scope（"worktree" | "repository"）と ID からアーティファクト格納ディレクトリを解決する
-fn artifact_scope_dir(
+pub(crate) fn artifact_scope_dir(
     app_handle: &tauri::AppHandle,
     scope: &str,
     scope_id: &str,
@@ -2278,6 +2279,8 @@ pub fn run() {
             list_repo_artifacts,
             read_repo_artifact,
             copy_artifact_to_repository,
+            artifact_export::export_artifact,
+            artifact_export::import_artifact,
             delete_repo_artifact,
             resolve_artifact_scope,
             artifact_lock_heartbeat_interval,

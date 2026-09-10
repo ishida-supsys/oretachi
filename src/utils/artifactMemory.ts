@@ -164,6 +164,17 @@ export function postArtifactBridgeMemoryChanged(
 }
 
 /**
+ * エクスポートした単体 HTML（zip の `view.html`）であることを示すグローバルフラグ。
+ * `reactArtifactSrcdoc.ts` がブリッジより前にこれを立てる。
+ *
+ * 単体ファイルには応答を返す親がいないため、そのままだとメモリー保存が
+ * タイムアウトするまで（10 秒）ぶら下がり、`callTool` は必ず失敗する。
+ * フラグが立っているときはメモリーをメモリ上だけで完結させ（保存は即 resolve）、
+ * ブリッジ越しの呼び出しは「エクスポートされたファイルでは使えない」と即座に断る。
+ */
+export const ARTIFACT_STANDALONE_FLAG = "__oretachiStandalone";
+
+/**
  * iframe 内に注入するブリッジ本体。`window.__oretachi` を定義し、
  * `reactArtifactSrcdoc.ts` の makeRequire が `require('oretachi')` として返す。
  *
@@ -173,6 +184,7 @@ export function postArtifactBridgeMemoryChanged(
  */
 export const ARTIFACT_BRIDGE_JS =
   "(function(){" +
+  "  var standalone=window[" + JSON.stringify(ARTIFACT_STANDALONE_FLAG) + "]===true;" +
   // ── リクエスト/レスポンスの土台（メモリー以外の method も後からここに乗る）──
   "  var pending={};" +
   "  var seq=0;" +
@@ -197,6 +209,8 @@ export const ARTIFACT_BRIDGE_JS =
   "    else p.reject(new Error(String(d.error||'oretachi bridge error')));" +
   "  });" +
   "  function call(method,params){" +
+  "    if(standalone)return Promise.reject(new Error(" +
+  "      'oretachi bridge is unavailable in an exported file: '+method));" +
   "    return new Promise(function(resolve,reject){" +
   "      var id='r'+(++seq);" +
   "      var timer=setTimeout(function(){" +
@@ -248,6 +262,9 @@ export const ARTIFACT_BRIDGE_JS =
   "      batch.forEach(function(w){w.reject(tooLarge);});" +
   "      return;" +
   "    }" +
+  // 単体ファイルには保存先が無い。メモリ上の state はそのまま生きているので、
+  // 「保存できた」ことにして UI を止めない（次に開いたときに残らないだけ）
+  "    if(standalone){batch.forEach(function(w){w.resolve();});return;}" +
   "    inflight=true;" +
   // 前の保存が返ってから、その間に積まれた分をまとめて送り直す
   "    var done=function(){inflight=false;if(waiters.length>0)flush();};" +
