@@ -1538,6 +1538,10 @@ onMounted(async () => {
   await getCurrentWindow().setAlwaysOnTop(settings.value.alwaysOnTop);
   loadWorktreesFromSettings();
   restoreAutoApprovalPrompts();
+  // 自動承認の保存状態はサブウィンドウ復元より前に戻す。復元時に `autoApprovalMap` が
+  // 空だとサブウィンドウ側が `autoApproval=false` で立ち上がり、以後の
+  // sub-try-auto-approve が全て即 approved=false で返る（#256）。
+  autoApproval.restoreFromSettings();
 
   // 保存された description 開閉状態を復元
   for (const wt of settings.value.worktrees) {
@@ -1890,11 +1894,17 @@ onMounted(async () => {
           pendingAiRestore.delete(t.id);
         }
       }
+      // **自動承認の状態はスナップショットではなく今のマップから読む（#256）。**
+      // `moveToSubWindow` は `detachedWorktrees` を同期で立てるので、webview の
+      // ロードが終わる前から `isDetached()` は true になる。その窓で走った
+      // `sub-set-auto-approval` は受信者ゼロで消えるため、`initData` の値を
+      // そのまま送ると `sub-init` が古い値で上書き固定してしまう
+      // （サブ側は以後トグルするまで戻らない）。
       await emitTo(`sub-${worktreeId}`, "sub-init", {
         worktreeId,
         terminals: initData.terminals,
-        autoApproval: initData.autoApproval,
-        autoApprovalPrompt: initData.autoApprovalPrompt,
+        autoApproval: autoApprovalMap.get(worktreeId) ?? initData.autoApproval,
+        autoApprovalPrompt: autoApprovalPromptMap.get(worktreeId) ?? initData.autoApprovalPrompt,
         layout: initData.layout,
         webSessions,
         aiSessions,
@@ -1945,6 +1955,13 @@ onMounted(async () => {
     logDebug(`[Notification] cleared by MCP: ${event.payload.worktree} (${event.payload.worktreeId})`);
   });
 
+  // 自動承認リスナーを初期化（notify-worktree, sub-auto-approve-result 等）。
+  //
+  // **必ず initNotificationListener より前に登録すること。** 向こうの shouldHold は
+  // 自動承認 ON のワークツリーの approval / general を保留する（提示を自動承認側へ委ねる）
+  // ので、ここが未登録の間に届いた通知はどちらにも拾われず消える。
+  await autoApproval.init();
+
   // 通知リスナー初期化 (ワークツリー名 → ID 解決関数と自動承認中は保留するコールバックを渡す)
   await initNotificationListener(
     (name: string) => worktrees.value.find((w) => w.name === name)?.id,
@@ -1979,9 +1996,6 @@ onMounted(async () => {
     },
     () => settings.value.notificationSound,
   );
-
-  // 自動承認リスナーを初期化（notify-worktree, sub-auto-approve-result 等）
-  await autoApproval.init();
 
   // サブウィンドウからの自動承認プロンプト保存
   await listen<{ worktreeId: string; prompt: string }>("sub-save-auto-approval-prompt", (event) => {

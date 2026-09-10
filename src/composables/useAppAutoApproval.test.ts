@@ -326,3 +326,45 @@ describe("useAppAutoApproval: サブウィンドウ経由", () => {
     expect(h.sendOsNotification).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("useAppAutoApproval: 保存状態の復元", () => {
+  /** init() を呼ばずに composable を作る（サブウィンドウ復元時の順序を再現するため） */
+  function makeWithoutInit(worktrees: { id: string; autoApproval?: boolean }[]) {
+    return useAppAutoApproval({
+      worktrees: ref([makeWorktree()]),
+      settings: ref({ worktrees } as unknown as AppSettings),
+      scheduleSave: vi.fn(),
+      isDetached: () => false,
+      getTerminalRef: () => undefined,
+      autoApprovalPromptMap: new Map(),
+      lastJudgedCommandMap: new Map(),
+      addNotification: vi.fn(),
+      isWorktreeFocused: () => false,
+      onClickAutoApproval: vi.fn(),
+      playSoundForKind: vi.fn(),
+      sendOsNotification: vi.fn(async () => {}),
+      t: (key: string) => key,
+    });
+  }
+
+  it("restoreFromSettings は init を待たずに autoApprovalMap を埋める（#256）", () => {
+    const auto = makeWithoutInit([
+      { id: "home", autoApproval: true },
+      { id: WT_ID, autoApproval: false },
+    ]);
+    // 復元前は空。この状態で moveToSubWindow に渡すとサブウィンドウが OFF で立ち上がる
+    expect(auto.autoApprovalMap.get("home")).toBeUndefined();
+
+    auto.restoreFromSettings();
+
+    expect(auto.autoApprovalMap.get("home")).toBe(true);
+    expect(auto.autoApprovalMap.get(WT_ID)).toBeUndefined();
+  });
+
+  it("init 後に restoreFromSettings を重ねても状態は変わらない（冪等）", async () => {
+    const auto = makeWithoutInit([{ id: "home", autoApproval: true }]);
+    await auto.init();
+    auto.restoreFromSettings();
+    expect(auto.autoApprovalMap.get("home")).toBe(true);
+  });
+});
