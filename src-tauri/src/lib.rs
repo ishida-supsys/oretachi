@@ -574,6 +574,21 @@ fn open_in_file_explorer(path: String) -> Result<(), String> {
     ide_launcher::open_in_file_explorer(&path)
 }
 
+/// ログの出力先ディレクトリをOSのファイルマネージャで開く。
+/// ディレクトリは tauri-plugin-log が起動時に作成するが、念のための防御的措置として
+/// 開く前に `create_dir_all` しておく。
+#[tauri::command]
+fn open_log_dir(app_handle: tauri::AppHandle) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::OpenLogDir);
+    let dir = app_handle
+        .path()
+        .app_log_dir()
+        .map_err(|e| format!("ログディレクトリの取得に失敗しました: {}", e))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| format!("ログディレクトリの作成に失敗しました: {}", e))?;
+    ide_launcher::open_in_file_explorer(&dir.to_string_lossy())
+}
+
 // ─── MCP コマンド ─────────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -2231,6 +2246,7 @@ pub fn run() {
             detect_ai_agents,
             open_in_ide,
             open_in_file_explorer,
+            open_log_dir,
             get_mcp_status,
             restart_mcp_server,
             regenerate_mcp_api_key,

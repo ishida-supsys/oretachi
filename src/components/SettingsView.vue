@@ -32,6 +32,14 @@ async function onDebugModeChange(enabled: boolean) {
   await invoke("set_debug_mode", { enabled });
 }
 
+async function onOpenLogDir() {
+  try {
+    await invoke("open_log_dir");
+  } catch (e) {
+    toast.add({ severity: "error", summary: t("debug.openLogDirFailed"), detail: String(e), life: 5000 });
+  }
+}
+
 async function onUiScaleChange(value: string) {
   if (!settings.value.appearance) settings.value.appearance = {};
   settings.value.appearance.uiScale = value === "large" || value === "xlarge" ? value : "normal";
@@ -739,6 +747,7 @@ function getSoundLabel(sound: string | null | undefined): string {
           @change="(e) => { settings.debugMode = (e.target as HTMLInputElement).checked; onDebugModeChange(settings.debugMode!); scheduleSave(); }"
         />
         <label for="debugMode" class="inline-label toggle-label">{{ t('debug.enable') }}</label>
+        <button class="btn-secondary" @click="onOpenLogDir">{{ t('debug.openLogDir') }}</button>
       </div>
     </div>
 
@@ -1279,7 +1288,9 @@ function getSoundLabel(sound: string | null | undefined): string {
     },
     "debug": {
       "label": "Debug Mode",
-      "enable": "Enable verbose debug logging"
+      "enable": "Enable verbose debug logging",
+      "openLogDir": "Open log folder",
+      "openLogDirFailed": "Failed to open the log folder"
     }
   },
   "ja": {
@@ -1389,7 +1400,9 @@ function getSoundLabel(sound: string | null | undefined): string {
     },
     "debug": {
       "label": "デバッグモード",
-      "enable": "詳細なデバッグログを有効にする"
+      "enable": "詳細なデバッグログを有効にする",
+      "openLogDir": "ログフォルダを開く",
+      "openLogDirFailed": "ログフォルダを開けませんでした"
     }
   }
 }
