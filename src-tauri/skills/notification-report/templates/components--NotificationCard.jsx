@@ -875,8 +875,12 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
                   type="checkbox"
                   disabled={locked}
                   checked={d.mode === 'escapeThenText'}
+                  // **`picks` を消さない。** `setDraft` はパッチのマージなので、
+                  // ここで空にすると多設問フォームで全問埋めたあと ESC を
+                  // ON→OFF しただけで回答が全部消える（OFF 側では戻せない）。
+                  // 送信経路は `d.mode` で分かれるので、残しておいても誤送信にならない
                   onChange={e => onDraft(e.target.checked
-                    ? { mode: 'escapeThenText', optionIndex: null, value: null, picks: {} }
+                    ? { mode: 'escapeThenText', optionIndex: null, value: null }
                     : { mode: questionForm ? 'selectAll' : 'select' })}
                 />
                 <span>

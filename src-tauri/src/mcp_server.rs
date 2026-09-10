@@ -4003,7 +4003,8 @@ impl NotifyService {
         indices: &[u32],
     ) -> Result<CallToolResult, McpError> {
         use crate::prompt_parser::{
-            answered_tabs, plan_select_all_step, select_all_progressed, Answer, SelectAllStep,
+            answered_tabs, plan_select_all_step, select_all_progressed, Answer, PromptShape,
+            SelectAllStep,
         };
 
         {
@@ -4106,9 +4107,35 @@ impl NotifyService {
                             answered,
                         );
                     }
-                    // ダイアログが閉じた = 全問の回答が宛先へ渡った
+                    // **「askUserQuestion でなくなった」だけで成功を名乗らない。**
+                    // 再描画途中の 1 フレームが `unknown` / `numbered` に見えることが
+                    // あり、それを「閉じた」と読むと**まだ答え切っていないのに
+                    // 『返答済み』**になる。確認画面を素の番号リストへ誤分類した
+                    // ときも同じ形で踏む（3 回目のセルフレビューで検出）。
+                    //
+                    // 本当に片付いたなら、宛先は入力欄へ戻っている（`text`）か、
+                    // 全設問のタブが `☒` になっている
+                    let all_dispatched =
+                        last_qidx.is_some_and(|i| i + 1 >= indices.len());
+                    let really_closed = parsed.shape == PromptShape::Text
+                        || answered >= indices.len();
                     last = Some(parsed);
-                    return outcome("sent", sent, last.as_ref(), None, answered);
+                    if all_dispatched && really_closed {
+                        return outcome("sent", sent, last.as_ref(), None, answered);
+                    }
+                    return outcome(
+                        "unverified",
+                        sent,
+                        last.as_ref(),
+                        Some(format!(
+                            "ダイアログが見えなくなりましたが、答え切ったのか確かめられませんでした（宛先で確定 {} 問 / 送った設問 {} 件中 {} 問目まで / 現在の画面 '{}'）。**再送しないでください**。ターミナルで状態を確認してください",
+                            answered,
+                            indices.len(),
+                            last_qidx.map(|i| i + 1).unwrap_or(0),
+                            last.as_ref().map(|p| p.shape.as_str()).unwrap_or("?")
+                        )),
+                        answered,
+                    );
                 }
                 SelectAllStep::Refuse(reason) => {
                     let status = if sent.is_empty() { "unsupported" } else { "unverified" };

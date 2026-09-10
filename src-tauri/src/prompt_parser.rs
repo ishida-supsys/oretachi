@@ -410,14 +410,24 @@ pub fn plan_select_all_step(
         ));
     }
 
-    let on_review = parsed.tabs.iter().any(|t| t.is_submit)
-        && parsed.tabs.iter().all(|t| t.is_submit || t.answered);
+    // タブバーを読めなくても、見出しと `Submit answers` の並びで確認画面と分かる
+    // （#264。タブバーが画面外へ流れると `tabs` が空になる）
+    let review_without_tabs = parsed.tabs.is_empty()
+        && contains_ci(&parsed.header, "submit your answers")
+        && parsed
+            .questions
+            .first()
+            .is_some_and(|q| q.options.iter().any(|o| o.label.to_lowercase().starts_with("submit")));
+    let on_review = review_without_tabs
+        || (parsed.tabs.iter().any(|t| t.is_submit)
+            && parsed.tabs.iter().all(|t| t.is_submit || t.answered));
     if on_review {
         // **見出しでも裏取りする。** 「Submit タブがあって全部 ☒」だけを条件に
         // `submit` を含むラベルを探すと、人がタブを戻して回答済みの設問を表示していて
         // その設問に `Submit for review` のような選択肢があったときに別のものを確定する。
         // 確認画面の見出しは `Ready to submit your answers?`（実測）
         let heading_ok = contains_ci(&parsed.header, "submit");
+        debug_assert!(!review_without_tabs || heading_ok);
         let submit = parsed
             .questions
             .first()
@@ -847,15 +857,32 @@ fn find_preview_column(lines: &[&str]) -> Option<usize> {
     candidates.sort_unstable();
 
     candidates.into_iter().find(|&col| {
-        let with_content_left = lines
+        let rows: Vec<&&str> = lines
             .iter()
             .filter(|line| first_box_column(line, MIN_PREVIEW_COL) == Some(col))
+            .collect();
+        // 枠の左に選択肢の本体があること（ツリー図では左は空白しかない）
+        let with_content_left = rows
+            .iter()
             .filter(|line| {
                 let (body, _) = strip_frame(&cut_at_column(line, col));
                 !body.is_empty() && !is_rule_line(&body)
             })
             .count();
+        // 枠の右にプレビューの中身があること。**これが無いとダイアログ自身の
+        // 右枠線を候補にしてしまう**（切る桁が右枠線なので実害は出ていなかったが、
+        // 「プレビューがある」と誤って判断している状態には変わりない）
+        let with_content_right = rows
+            .iter()
+            .filter(|line| {
+                let cut = cut_at_column(line, col);
+                let rest: String = line.chars().skip(cut.chars().count() + 1).collect();
+                let (body, _) = strip_frame(&rest);
+                !body.is_empty()
+            })
+            .count();
         with_content_left >= MIN_ROWS_WITH_CONTENT_LEFT
+            && with_content_right >= MIN_ROWS_WITH_CONTENT_LEFT
     })
 }
 
@@ -1016,6 +1043,7 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
         let start = i;
         let mut options = vec![PromptOption { index, label }];
         let mut num_cols = vec![num_col];
+        let mut label_cols = vec![label_col];
         let mut cursor_index = if has_cursor { Some(index) } else { None };
         let mut expected = 2u32;
         let mut current_label_col = label_col;
@@ -1034,6 +1062,7 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
                 }
                 options.push(PromptOption { index: idx, label });
                 num_cols.push(ncol);
+                label_cols.push(col);
                 expected += 1;
                 current_label_col = col;
                 end = j;
@@ -1073,11 +1102,19 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
         // これを拾わないと `cursor_index` が `None` になり、矢印の移動量を決められず
         // **2 問目以降が一切答えられなくなる**。誤爆を避けるため
         // 「1 行だけが他より左」という形にきっちり当てはまるときしか採らない
+        // **番号の桁だけでは足りない。** 選択肢がちょうど 10 件で番号が右寄せ描画
+        // されると `10.` の行だけ番号が 1 桁左から始まり、カーソル扱いになる。
+        // カーソル行はマーカーぶん**行全体**が左へ寄るので、ラベルの桁も一緒に
+        // ずれていることを求める（右寄せの `10.` はラベルの桁が揃う）
         if cursor_index.is_none() && options.len() >= 2 {
-            let base = *num_cols.iter().max().unwrap_or(&0);
-            let outliers: Vec<usize> =
-                (0..num_cols.len()).filter(|&k| num_cols[k] < base).collect();
-            if outliers.len() == 1 {
+            let num_base = *num_cols.iter().max().unwrap_or(&0);
+            let label_base = *label_cols.iter().max().unwrap_or(&0);
+            let outliers: Vec<usize> = (0..num_cols.len())
+                .filter(|&k| num_cols[k] < num_base && label_cols[k] < label_base)
+                .collect();
+            let others_aligned = (0..num_cols.len())
+                .all(|k| outliers.contains(&k) || (num_cols[k] == num_base && label_cols[k] == label_base));
+            if outliers.len() == 1 && others_aligned {
                 cursor_index = Some(options[outliers[0]].index);
             }
         }
@@ -1389,26 +1426,58 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     // 素の番号リストが `AskUserQuestion` に化け、矢印キーを送ることになる。
     // タブが 1 つだけの形（単一設問）は強い形と区別できないので、
     // **`AskUserQuestion` のフッタが出ていて、かつ選択肢のすぐ上にある**ことも求める。
-    let tabs: Vec<QuestionTab> = above
-        .iter()
-        .enumerate()
-        .rev()
-        .find_map(|(row, body)| {
+    //
+    // **強い候補を先に探す。** 下から順に「受理できる最初の行」を採ると、本物の
+    // タブバーより下に `☐` を 1 個含む行（設問文・選択肢の説明・TodoWrite）が
+    // あったときにそちらが勝つ。そうなると `is_submit` が失われて確認画面へ
+    // 進めなくなり、偽タブは `☒` に変わらないので「進んでいない」と誤判定され続ける
+    // （2 回目のセルフレビューで検出）
+    let find_tab_bar = |strong_only: bool| -> Option<(usize, Vec<QuestionTab>)> {
+        above.iter().enumerate().rev().find_map(|(row, body)| {
             let parsed = parse_tab_bar(body)?;
+            if is_strong_tab_bar(&parsed, body) {
+                return Some((row, parsed));
+            }
+            if strong_only {
+                return None;
+            }
+            // タブが 1 つだけの単一設問。TodoWrite と形が同じなので、
+            // `AskUserQuestion` のフッタと選択肢からの近さで裏を取る
             let close_enough = above.len() - 1 - row <= TAB_BAR_MAX_GAP;
-            let acceptable = is_strong_tab_bar(&parsed, body)
-                || (below_has_aq_footer && close_enough);
-            if acceptable {
+            if below_has_aq_footer && close_enough {
                 Some((row, parsed))
             } else {
                 None
             }
         })
+    };
+    let tabs: Vec<QuestionTab> = find_tab_bar(true)
+        .or_else(|| find_tab_bar(false))
         .map(|(row, parsed)| {
             above.drain(..=row);
             parsed
         })
         .unwrap_or_default();
+
+    // ── タブバーを読めなかった確認画面の救済（#264。3 回目のセルフレビューで検出）──
+    //
+    // 全問答えたあとの確認画面には Claude Code のフッタが無い。タブバーだけが
+    // 「これは Claude Code のダイアログだ」という印なので、それが画面外へ流れたり
+    // `CONTEXT_WINDOW`（24 行）より上へ押し出されたりすると**素の番号リストへ
+    // 落ちる**。そうなると `2. Cancel` を選んだつもりで数字キーが飛び、確定キー
+    // ではない数字のあとの CR が `❯` の当たっている `1. Submit answers` を
+    // 確定する（＝押していない方が通る）。
+    //
+    // 見出しと `Submit answers` という並びは確認画面固有なので、これ自体を印にする。
+    let submit_review = above
+        .iter()
+        .rev()
+        .find(|b| !b.is_empty() && !is_rule_line(b))
+        .is_some_and(|h| contains_ci(h, "submit your answers"))
+        && run
+            .options
+            .iter()
+            .any(|o| o.label.to_lowercase().starts_with("submit"));
 
     // **見出しは折り返しうる。** 選択肢の直上にある連続した非空行をまとめて 1 つの
     // 見出しとして扱う（実測: 13 桁のターミナルでは `Do you want to proceed?` が
@@ -1422,7 +1491,7 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     {
         block_start -= 1;
     }
-    let (header, context) = if tabs.is_empty() {
+    let (header, context) = if tabs.is_empty() && !submit_review {
         let header = above[block_start..]
             .iter()
             .map(|b| b.as_str())
@@ -1440,9 +1509,9 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
             .join("\n");
         (header, context)
     } else {
-        // タブバーがある画面（`AskUserQuestion`）では、タブバーと選択肢に挟まれた
-        // 非空行がそのまま設問。**最後の 1 行が設問文**で、その上は補足
-        // （確認画面の `Review your answers` / `● Which color? → Red` など）。
+        // タブバーがある画面（`AskUserQuestion`）と、タブバーを読めなかった
+        // 確認画面。**最後の非空行が設問文（確認画面なら見出し）**で、その上は補足
+        // （`Review your answers` / `● Which color? → Red` など）。
         let body: Vec<&String> =
             above.iter().filter(|b| !b.is_empty() && !is_rule_line(b)).collect();
         match body.split_last() {
@@ -1460,7 +1529,7 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     // （`Review your answers` / `❯ 1. Submit answers`）には Claude Code のフッタが
     // 出ないため、フッタだけを見ると素の番号リストへ落ちて数字キーを送ってしまい、
     // **確定できないまま止まる**（実測）。
-    let has_cc_footer = footer_says_cc || !tabs.is_empty();
+    let has_cc_footer = footer_says_cc || !tabs.is_empty() || submit_review;
 
     // 罫線の下に番号なしで置かれた逃げ道を拾う（#264）。実測: 選択肢に preview が
     // 付くレイアウトでは `Chat about this` が番号を持たずに罫線の下へ出る。
@@ -1502,7 +1571,7 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
         }
     }
 
-    let shape = if below_has_aq_footer || has_chat_about_this || !tabs.is_empty() {
+    let shape = if below_has_aq_footer || has_chat_about_this || !tabs.is_empty() || submit_review {
         PromptShape::AskUserQuestion
     } else if has_amend_footer || header.to_lowercase().starts_with("do you want to") {
         PromptShape::Permission
@@ -2253,6 +2322,81 @@ mod tests {
         let p = parse_prompt(&screen);
         let labels: Vec<&str> = p.questions[0].options.iter().map(|o| o.label.as_str()).collect();
         assert_eq!(labels, vec!["Grid", "List"], "labels={:?}", labels);
+    }
+
+    /// タブバーが画面外へ流れた確認画面でも、素の番号リストへ落とさない
+    /// （3 回目のセルフレビューで検出）。
+    ///
+    /// 落とすと `2. Cancel` を選んだつもりで数字キーが飛び、確定キーではない
+    /// 数字のあとの CR が `❯` の当たっている `1. Submit answers` を確定する
+    /// （＝押していない方が通る）。
+    #[test]
+    fn the_submit_review_screen_is_recognised_without_its_tab_bar() {
+        let screen = [
+            "Review your answers",
+            "",
+            " ● Which color?",
+            "   → Red",
+            " ● Which size?",
+            "   → Large",
+            "",
+            "Ready to submit your answers?",
+            "",
+            "❯ 1. Submit answers",
+            "  2. Cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert!(p.tabs.is_empty(), "タブバーは画面に無い");
+        assert_eq!(p.shape, PromptShape::AskUserQuestion);
+        assert_eq!(p.navigation, Navigation::Arrows, "数字キーでは確定しない");
+        assert_eq!(p.header, "Ready to submit your answers?");
+        let keys = plan_keys(&p, &Answer::Select { option_index: 2 }).expect("cancel");
+        assert_eq!(keys_preview(&keys), vec!["Down", "CR"], "数字を送ってはいけない");
+        // 一括回答からも確定できる
+        assert_eq!(
+            plan_select_all_step(&p, &[1, 1], Some(1)),
+            SelectAllStep::Submit { option_index: 1 }
+        );
+    }
+
+    /// 本物のタブバーより下に `☐` を含む行があっても、本物を採る
+    /// （3 回目のセルフレビューで検出）。
+    ///
+    /// 取り違えると `is_submit` が失われて確認画面へ進めなくなり、偽タブは
+    /// `☒` に変わらないので「進んでいない」と誤判定され続ける。
+    #[test]
+    fn a_strong_tab_bar_wins_over_a_checkbox_in_the_question_text() {
+        let screen = [
+            "←  ☐ Task  ✔ Submit  →",
+            "☐ の項目のうちどれを先にやりますか?",
+            "",
+            "❯ 1. テストを書く",
+            "  2. 実装する",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        let labels: Vec<&str> = p.tabs.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(labels, vec!["Task", "Submit"], "tabs={:?}", p.tabs);
+        assert!(p.tabs[1].is_submit);
+        assert_eq!(p.header, "☐ の項目のうちどれを先にやりますか?");
+    }
+
+    /// 選択肢がちょうど 10 件で番号が右寄せでも、`10.` をカーソルと誤認しない
+    /// （3 回目のセルフレビューで検出）。
+    #[test]
+    fn right_aligned_two_digit_numbers_are_not_mistaken_for_a_cursor() {
+        let mut lines = vec!["Pick a target:".to_string()];
+        for i in 1..=10 {
+            // 番号だけ右寄せ（`  1.` … ` 10.`）。ラベルの桁は揃う
+            lines.push(format!("{:>3}. option-{}", i, i));
+        }
+        lines.push("Selection: ".to_string());
+        let p = parse_prompt(&lines.join("\n"));
+        assert_eq!(p.questions[0].options.len(), 10);
+        assert_eq!(p.questions[0].cursor_index, None, "❯ が無いのに位置を決めない");
     }
 
     #[test]

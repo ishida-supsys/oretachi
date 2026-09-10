@@ -279,7 +279,25 @@ function optionsOf(n) {
 function askQuestions(n) {
   const r = n && n.request;
   if (!r || !Array.isArray(r.questions)) return [];
-  return r.questions.filter(q => q && Array.isArray(q.options) && q.options.length > 0);
+  return r.questions.filter(usableQuestion);
+}
+
+/**
+ * その設問をフォームに出せるか。
+ *
+ * **ラベルの無い選択肢が 1 つでもあれば設問ごと落とす。** 生成側が
+ * `options: ["Red", "Blue"]`（文字列の配列）と書くと `o.label` が `undefined` に
+ * なり、カードは中身の見えない選択肢を並べたまま**送信はできてしまう**。
+ * 一部だけ落とすと番号がずれて別の選択肢を確定するので、設問単位で落として
+ * `hasDroppedQuestion` に検出させる。
+ */
+function usableQuestion(q) {
+  return !!(
+    q &&
+    Array.isArray(q.options) &&
+    q.options.length > 0 &&
+    q.options.every(o => o && typeof o.label === 'string' && o.label.trim())
+  );
 }
 
 /**
@@ -441,6 +459,14 @@ function blockedReason(n, conflicts) {
       return (
         `'${n.worktreeName}' のダイアログが画面に収まっていません（タブが狭い）。` +
         'この状態では宛先へキーを送れないため、ターミナルを広げるか直接操作してください'
+      );
+    }
+    // 画面の解析結果が空。`cursorReadable` でも落ちるが、そちらの文面は
+    // 「❯ が読み取れません」で、人が「作り直せばいい」と判断できない
+    if (optionsOf(n).length === 0) {
+      return (
+        `'${n.worktreeName}' の宛先の画面の解析結果がレポートに入っていません（生成が不完全）。` +
+        '照合できないまま送るのは危険なので送信できません。レポートを作り直してください'
       );
     }
     const conflictQ = conflicts && conflicts[n.id];
@@ -788,6 +814,7 @@ exports.questionOf = questionOf;
 exports.optionsOf = optionsOf;
 exports.askQuestions = askQuestions;
 exports.hasDroppedQuestion = hasDroppedQuestion;
+exports.usableQuestion = usableQuestion;
 exports.tabAnsweredAt = tabAnsweredAt;
 exports.cursorReadable = cursorReadable;
 exports.isQuestionForm = isQuestionForm;
