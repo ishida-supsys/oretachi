@@ -4046,7 +4046,7 @@ impl NotifyService {
         indices: &[u32],
     ) -> Result<CallToolResult, McpError> {
         use crate::prompt_parser::{
-            answered_tabs, is_submit_review_screen, plan_select_all_step, select_all_progressed,
+            answered_tabs, plan_select_all_step, review_screen_visible, select_all_progressed,
             Answer, PromptShape, SelectAllStep,
         };
 
@@ -4136,23 +4136,42 @@ impl NotifyService {
             }
             answered = answered.max(answered_tabs(&parsed));
 
+            let plan = plan_select_all_step(&parsed, indices, last_qidx);
+
             // 描き終わらない画面でキー列を組むと、前の設問の並びとカーソルから
-            // 矢印の回数を出すことになる。組まずに人へ返す
-            if !stable {
+            // 矢印の回数を出すことになる。組まずに人へ返す。
+            //
+            // **キーを送らない `Done` / `Refuse` より後ろで見る。** 前に置くと、
+            // 宛先が描画中なだけで実際には完了しているときまで `unverified` に
+            // 落ちる（差分レビューで検出）
+            let sends_keys = matches!(
+                plan,
+                SelectAllStep::Answer { .. } | SelectAllStep::Submit { .. }
+            );
+            if !stable && sends_keys {
                 let status = if sent.is_empty() { "unsupported" } else { "unverified" };
+                // **`sent` が空でないときに「何も送っていません」と書かない。**
+                // 呼び出し側が未送信と読んで再送すると、同じ回答が二重に届く
+                let tail = if sent.is_empty() {
+                    "何も送っていません".to_string()
+                } else {
+                    format!(
+                        "ここまでで宛先では {} 問が確定しています。**再送しないでください**（❯ が二重に動きます）",
+                        answered
+                    )
+                };
                 return outcome(
                     status,
                     sent,
                     Some(&parsed),
                     Some(format!(
-                        "宛先の画面が {}ms 待っても描き終わりませんでした。途中のフレームでキーを組むと別の設問の並びから矢印の回数を出すことになるため、何も送っていません。ターミナルで状態を確認してください",
-                        ANSWER_SETTLE_MAX.as_millis()
+                        "宛先の画面が {}ms 待っても描き終わりませんでした。途中のフレームでキーを組むと別の設問の並びから矢印の回数を出すことになるため、この先は送っていません。{}。ターミナルで状態を確認してください",
+                        ANSWER_SETTLE_MAX.as_millis(),
+                        tail
                     )),
                     answered,
                 );
             }
-
-            let plan = plan_select_all_step(&parsed, indices, last_qidx);
             let (target, on_review) = match plan {
                 SelectAllStep::Done => {
                     if step == 0 {
@@ -4254,9 +4273,17 @@ impl NotifyService {
             // 「確認画面へ着いた」を進捗とみなすので、既に確認画面にいるときに
             // 使うと**据え置きの画面まで「進んだ」**ことになり、Submit の CR が
             // 届いていなくても「返答済み」を名乗る（差分レビューで検出）。
-            // 確定を撃ったあとは「確認画面から出た」ことを待つ
+            // 確定を撃ったあとは「確認画面から出た」ことを待つ。
+            //
+            // **判定は `review_screen_visible` に揃える。** ここだけ別の述語
+            // （「確定してよい画面か」）を見ていたせいで、見出しやタブバーが
+            // 解析窓の外へ出た確認画面が「出た」ことになり、Submit の CR が
+            // 届いていなくても「返答済み」を名乗っていた（差分レビューで検出）
             let (after, progressed) = if on_review {
-                self.settle_until(session_id, |p| !is_submit_review_screen(p)).await
+                self.settle_until(session_id, |p| {
+                    p.shape == PromptShape::Text || !review_screen_visible(p)
+                })
+                .await
             } else {
                 self.settle_until(session_id, |p| select_all_progressed(&parsed, p)).await
             };

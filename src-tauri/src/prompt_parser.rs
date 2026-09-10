@@ -380,14 +380,36 @@ pub fn select_all_progressed(before: &ParsedPrompt, after: &ParsedPrompt) -> boo
     // 「据え置き」なので、Submit の CR が届かず画面が変わっていない場合まで
     // 進んだことになり、**押していないのに「返答済み」**になる
     // （差分レビューで検出）。
-    if !is_submit_review_screen(before) && is_submit_review_screen(after) {
+    if !review_screen_visible(before) && review_screen_visible(after) {
         return true;
     }
     answered_tabs(after) > answered_tabs(before)
 }
 
-/// 全問回答後の確認画面か（タブバーが読めていてもいなくても判定できる形）。
-pub fn is_submit_review_screen(parsed: &ParsedPrompt) -> bool {
+/// 確認画面が**まだ画面に出ている**か（形が崩れていても）。
+///
+/// # なぜ 1 本に集約するのか
+///
+/// 「確認画面かどうか」を [`can_submit_now`] / [`has_submit_option`] /
+/// [`looks_like_review_remnant`] の 3 つに分けて使用箇所ごとに別の組み合わせで
+/// 呼んでいたところ、**その非対称から critical が 2 件出た**（差分レビュー）:
+///
+/// - 送るキーを決める側は 2 つの OR で「確認画面が残っている」と判断するのに、
+///   待ち条件は 1 つだけを見ていたので、据え置きの確認画面を「進んだ」と読んだ
+/// - 「未回答タブが残っている + 本文は確認画面」という矛盾フレームが
+///   どちらの網からも漏れ、確認画面の `2. Cancel` へ第 2 問の答えを撃っていた
+///
+/// **「まだ出ているか」と「いま確定してよいか」は別の問い。** 前者がこれ、
+/// 後者が [`can_submit_now`]。判断する側は必ずこの 2 つだけを使う。
+pub fn review_screen_visible(parsed: &ParsedPrompt) -> bool {
+    can_submit_now(parsed) || has_submit_option(parsed) || looks_like_review_remnant(parsed)
+}
+
+/// いま `Submit answers` を撃ってよい画面か。
+///
+/// **「確認画面が見えている」だけでは足りない。** 未回答のタブが残っている
+/// 矛盾フレームで撃つと、確認画面の選択肢（`2. Cancel`）へ設問の答えが飛ぶ。
+pub fn can_submit_now(parsed: &ParsedPrompt) -> bool {
     if parsed.tabs.iter().any(|t| t.is_submit)
         && parsed.tabs.iter().all(|t| t.is_submit || t.answered)
     {
@@ -426,13 +448,10 @@ pub fn plan_select_all_step(
 ) -> SelectAllStep {
     if parsed.shape != PromptShape::AskUserQuestion {
         // 確認画面が再描画途中で別の形状に見えているだけかもしれない。
-        // `Submit answers` が画面に残っている限り「閉じた」とは言わない
+        // 確認画面が残っている限り「閉じた」とは言わない
         // （言うと、押していないのに「返答済み」になる。5 回目のセルフレビューで検出）
-        if has_submit_option(parsed) || looks_like_review_remnant(parsed) {
-            return SelectAllStep::Refuse(
-                "宛先の画面にまだ『Submit answers』が残っています（確認画面の描き直し途中かもしれません）。取り違えを避けるため何も送っていません。ターミナルを開いて確定してください"
-                    .to_string(),
-            );
+        if review_screen_visible(parsed) {
+            return SelectAllStep::Refuse(REVIEW_STILL_VISIBLE.to_string());
         }
         return SelectAllStep::Done;
     }
@@ -451,8 +470,7 @@ pub fn plan_select_all_step(
 
     // タブバーを読めなくても、見出しと `Submit answers` の並びで確認画面と分かる
     // （#264。タブバーが画面外へ流れると `tabs` が空になる）
-    let on_review = is_submit_review_screen(parsed);
-    if on_review {
+    if can_submit_now(parsed) {
         // **見出しでも裏取りする。** 「Submit タブがあって全部 ☒」だけを条件に
         // `submit` を含むラベルを探すと、人がタブを戻して回答済みの設問を表示していて
         // その設問に `Submit for review` のような選択肢があったときに別のものを確定する。
@@ -468,6 +486,13 @@ pub fn plan_select_all_step(
                 "全問の回答は送りましたが、確認画面の『Submit answers』を確かめられませんでした（見出しと選択肢が想定と違います）。取り違えを避けるため何も送っていません。ターミナルを開いて確定してください".to_string(),
             ),
         };
+    }
+
+    // **確認画面が見えているのに確定できない = 矛盾したフレーム。**
+    // ここで設問の答えを送ると、確認画面の選択肢（`2. Cancel`）へ飛んで
+    // 全回答が破棄される（差分レビューで検出）
+    if review_screen_visible(parsed) {
+        return SelectAllStep::Refuse(REVIEW_STILL_VISIBLE.to_string());
     }
 
     let qidx = match parsed.tabs.iter().position(|t| !t.answered && !t.is_submit) {
@@ -788,8 +813,14 @@ fn is_input_box_line(lines: &[&str], i: usize) -> bool {
     // 書いてあるだけで入力欄判定が無効化され、下書きが選択肢として解析される
     // （＝押すと下書きがそのまま宛先へ送信される。差分レビューで検出）。
     // 探すのは**箱の外、閉じ罫線のすぐ下**だけ
+    // 閉じ罫線の下は空行が挟まることがあるので、**最初の非空行から**数行見る
     let below_box = &lines[(down + 1).min(lines.len())..];
-    if has_dialog_footer(&below_box[..below_box.len().min(FOOTER_LOOKAHEAD)]) {
+    let first_content = below_box
+        .iter()
+        .position(|l| !strip_frame(l).0.is_empty())
+        .unwrap_or(below_box.len());
+    let window = &below_box[first_content..];
+    if has_dialog_footer(&window[..window.len().min(FOOTER_LOOKAHEAD)]) {
         return false;
     }
     // 箱の最初の非空行が入力欄の記号（`❯` / `>`）で始まっていること。
@@ -851,6 +882,9 @@ fn parse_tab_bar(body: &str) -> Option<Vec<QuestionTab>> {
 /// 片方だけ直すと、画面は確認画面と認識できているのに一括回答から
 /// Submit を押せない（あるいはその逆）という食い違いになる。
 pub const SUBMIT_REVIEW_HEADING: &str = "submit your answers";
+
+/// 確認画面が残っている画面へキーを送らないときの文言。
+const REVIEW_STILL_VISIBLE: &str = "宛先の画面に回答の確認画面が残っています（描き直しの途中か、まだ答えていない設問があります）。ここでキーを送ると確認画面の選択肢を確定してしまうため、何も送っていません。ターミナルを開いて確定してください";
 
 /// 選択肢の上にある行を「末尾の見出しブロック」と「その上の補足」に割る。
 ///
@@ -950,11 +984,14 @@ fn looks_like_tab_bar_line(tabs: &[QuestionTab], body: &str) -> bool {
 /// [`has_submit_option`] では捕まらない。見出しとの AND で拾う。
 /// 素の番号リストの `1. Submit for review` は見出しが違うので落ちる。
 fn looks_like_review_remnant(parsed: &ParsedPrompt) -> bool {
-    // 見出しと承認対象の**両方**を見る。描き直し途中は見出しの抽出も揺れるので、
-    // 片方だけ見ると（実際に）空文字と突き合わせることになる
-    let heading = format!("{} {}", parsed.header, parsed.context).to_lowercase();
-    let review_ish =
-        heading.contains(SUBMIT_REVIEW_HEADING) || heading.contains("review your answers");
+    // 見出しと承認対象の**両方**を見る（描き直し途中は見出しの抽出も揺れる）が、
+    // **行の頭で一致すること**を求める。単に含まれるだけを見ると、本文で
+    // 「Review your answers を読んでから決めます」と言及しているだけの
+    // 素の番号リストまで塞ぐ（差分レビューで検出）
+    let review_ish = std::iter::once(parsed.header.as_str())
+        .chain(parsed.context.lines())
+        .map(|l| l.trim().to_lowercase())
+        .any(|l| l.starts_with("review your answers") || l.contains(SUBMIT_REVIEW_HEADING));
     review_ish
         && parsed
             .questions
@@ -2754,21 +2791,31 @@ mod tests {
         ]
         .join("\n");
         let p = parse_prompt(&screen);
+        assert!(review_screen_visible(&p), "確認画面はまだ見えている");
         match plan_select_all_step(&p, &[1, 1], Some(1)) {
-            SelectAllStep::Refuse(reason) => {
-                assert!(reason.contains("Submit answers"), "reason={}", reason);
-            }
+            SelectAllStep::Refuse(_) => {}
             other => panic!("閉じたと言ってはいけない: {:?}", other),
         }
     }
 
-    /// 進捗の判定に「`askUserQuestion` でなくなった」を使わない。
+    /// 描き直し途中の確認画面へ**キーを送らない**。
+    ///
+    /// 「確認画面へ着いた」こと自体は進捗（最終設問が片付いた印）なので
+    /// `select_all_progressed` は真を返してよい。危ないのはそのフレームで
+    /// キー列を組むことなので、そちらを `plan_select_all_step` が塞ぐ。
+    /// **据え置き（before も after も確認画面）は進捗ではない** —— そこを
+    /// 進捗と読むと、Submit の CR が届いていなくても「返答済み」になる。
     #[test]
-    fn a_half_drawn_frame_is_not_progress() {
+    fn a_half_drawn_review_frame_is_progress_but_never_receives_keys() {
         let before = parse_prompt(&multi_question_second_screen());
         let half = parse_prompt("● Which color? → Red\n❯ 1. Submit answers\n  2. Cancel");
         assert_ne!(half.shape, PromptShape::AskUserQuestion);
-        assert!(!select_all_progressed(&before, &half));
+        assert!(select_all_progressed(&before, &half), "確認画面へ着いたのは進捗");
+        assert!(!select_all_progressed(&half, &half), "据え置きは進捗ではない");
+        match plan_select_all_step(&half, &[1, 1], Some(1)) {
+            SelectAllStep::Refuse(_) => {}
+            other => panic!("このフレームへキーを送ってはいけない: {:?}", other),
+        }
     }
 
     /// 見出しの長いタブが混ざっても本物のタブバーを落とさない
@@ -2883,13 +2930,13 @@ mod tests {
     #[test]
     fn a_review_screen_that_has_not_changed_is_not_progress() {
         let review = parse_prompt(&submit_review_screen());
-        assert!(is_submit_review_screen(&review));
+        assert!(review_screen_visible(&review));
         assert!(!select_all_progressed(&review, &review), "据え置きは進捗ではない");
 
         let tabless = parse_prompt(
             "Review your answers\n\nReady to submit your answers?\n\n❯ 1. Submit answers\n  2. Cancel",
         );
-        assert!(is_submit_review_screen(&tabless));
+        assert!(review_screen_visible(&tabless));
         assert!(!select_all_progressed(&tabless, &tabless));
     }
 
@@ -2906,7 +2953,16 @@ mod tests {
         .join("\n");
         let p = parse_prompt(&screen);
         assert!(p.tabs.iter().any(|t| !t.answered && !t.is_submit), "tabs={:?}", p.tabs);
-        assert!(!is_submit_review_screen(&p), "未回答が残っているのに Submit を撃ってはいけない");
+        assert!(!can_submit_now(&p), "未回答が残っているのに Submit を撃ってはいけない");
+        // **確認画面は見えている。** ここで設問の答えを送ると、確認画面の
+        // `2. Cancel` を確定して全回答が破棄される（差分レビューで検出）
+        assert!(review_screen_visible(&p));
+        for last in [None, Some(0), Some(1)] {
+            match plan_select_all_step(&p, &[1, 2], last) {
+                SelectAllStep::Refuse(_) => {}
+                other => panic!("last_qidx={:?} で送ってはいけない: {:?}", last, other),
+            }
+        }
     }
 
     /// 入力欄の下書きに `Esc to cancel` と書いてあっても入力欄のまま
