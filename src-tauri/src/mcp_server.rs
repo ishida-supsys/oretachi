@@ -1296,9 +1296,10 @@ const SELECT_ALL_MAX_STEPS: usize = 24;
 ///
 /// このロックは `event_delivery::write_push`（押し込み）と
 /// `lib.rs::pty_write_locked`（UI の自動承認 Enter）も取るので、握っている間は
-/// そのセッションへの押し込みと自動承認が止まる。設問が多い / 宛先の再描画が
-/// 遅いときに [`SELECT_ALL_MAX_STEPS`] × [`ANSWER_SETTLE_MAX`] ぶん
-/// （70 秒超）握りっぱなしにならないよう、ここで打ち切る。
+/// そのセッションへの押し込みと自動承認が止まる。1 ステップで最大
+/// `inspect_stable`（[`ANSWER_SETTLE_MAX`]）+ `settle_until`（同）= 6 秒かかり、
+/// [`SELECT_ALL_MAX_STEPS`] まで回ると 2 分を超えるので、ここで打ち切る。
+/// 通常のダイアログは 240ms で安定するため、実際にはここへ届かない。
 const SELECT_ALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
 
 /// PTY セッション単位の書き込みロック。
@@ -3951,17 +3952,17 @@ impl NotifyService {
     async fn inspect_stable(
         &self,
         session_id: u32,
-    ) -> Result<crate::prompt_parser::ParsedPrompt, McpError> {
+    ) -> Result<(crate::prompt_parser::ParsedPrompt, bool), McpError> {
         let deadline = tokio::time::Instant::now() + ANSWER_SETTLE_MAX;
         let mut prev = self.inspect_screen(session_id)?.0;
         loop {
             if tokio::time::Instant::now() >= deadline {
-                return Ok(prev);
+                return Ok((prev, false));
             }
             tokio::time::sleep(ANSWER_POLL_INTERVAL).await;
             let now = self.inspect_screen(session_id)?.0;
             if now.fingerprint == prev.fingerprint {
-                return Ok(now);
+                return Ok((now, true));
             }
             prev = now;
         }
@@ -3984,6 +3985,9 @@ impl NotifyService {
     {
         let deadline = tokio::time::Instant::now() + ANSWER_SETTLE_MAX;
         let mut last: Option<crate::prompt_parser::ParsedPrompt> = None;
+        // 「直前の**読めた**フレーム」の fingerprint。読み取りに失敗した周回を
+        // 挟んでも連続比較が壊れないよう、`last` とは別に持つ
+        let mut prev_fp: Option<String> = None;
         loop {
             tokio::time::sleep(ANSWER_POLL_INTERVAL).await;
             let now = self.inspect_screen(session_id).ok().map(|t| t.0);
@@ -3996,10 +4000,11 @@ impl NotifyService {
                 // カーソルから矢印の回数を組み立てる**（6 回目のセルフレビューで検出）。
                 //
                 // fingerprint が 2 回続けて同じなら描き終わっているとみなす。
-                let stable = last.as_ref().is_some_and(|l| l.fingerprint == p.fingerprint);
+                let stable = prev_fp.as_deref() == Some(p.fingerprint.as_str());
                 if done(p) && stable {
                     return (now, true);
                 }
+                prev_fp = Some(p.fingerprint.clone());
             }
             last = now.or(last);
             if tokio::time::Instant::now() >= deadline {
@@ -4041,8 +4046,8 @@ impl NotifyService {
         indices: &[u32],
     ) -> Result<CallToolResult, McpError> {
         use crate::prompt_parser::{
-            answered_tabs, plan_select_all_step, select_all_progressed, Answer, PromptShape,
-            SelectAllStep,
+            answered_tabs, is_submit_review_screen, plan_select_all_step, select_all_progressed,
+            Answer, PromptShape, SelectAllStep,
         };
 
         {
@@ -4097,7 +4102,7 @@ impl NotifyService {
         for step in 0..SELECT_ALL_MAX_STEPS {
             // **描き終わった画面で判断する。** 破れフレームで選択肢の並びと `❯` を
             // 読むと、前の設問の並びから矢印の回数を組み立てることになる（#264）
-            let parsed = match self.inspect_stable(session_id).await {
+            let (parsed, stable) = match self.inspect_stable(session_id).await {
                 Ok(p) => p,
                 Err(e) => {
                     // 既にキーを送ったあとで読めなくなった場合、`?` で投げると
@@ -4130,6 +4135,22 @@ impl NotifyService {
                 );
             }
             answered = answered.max(answered_tabs(&parsed));
+
+            // 描き終わらない画面でキー列を組むと、前の設問の並びとカーソルから
+            // 矢印の回数を出すことになる。組まずに人へ返す
+            if !stable {
+                let status = if sent.is_empty() { "unsupported" } else { "unverified" };
+                return outcome(
+                    status,
+                    sent,
+                    Some(&parsed),
+                    Some(format!(
+                        "宛先の画面が {}ms 待っても描き終わりませんでした。途中のフレームでキーを組むと別の設問の並びから矢印の回数を出すことになるため、何も送っていません。ターミナルで状態を確認してください",
+                        ANSWER_SETTLE_MAX.as_millis()
+                    )),
+                    answered,
+                );
+            }
 
             let plan = plan_select_all_step(&parsed, indices, last_qidx);
             let (target, on_review) = match plan {
@@ -4229,9 +4250,16 @@ impl NotifyService {
                 sent.push(key.label.clone());
             }
 
-            let (after, progressed) = self
-                .settle_until(session_id, |p| select_all_progressed(&parsed, p))
-                .await;
+            // **確認画面での待ち条件は別物。** `select_all_progressed` は
+            // 「確認画面へ着いた」を進捗とみなすので、既に確認画面にいるときに
+            // 使うと**据え置きの画面まで「進んだ」**ことになり、Submit の CR が
+            // 届いていなくても「返答済み」を名乗る（差分レビューで検出）。
+            // 確定を撃ったあとは「確認画面から出た」ことを待つ
+            let (after, progressed) = if on_review {
+                self.settle_until(session_id, |p| !is_submit_review_screen(p)).await
+            } else {
+                self.settle_until(session_id, |p| select_all_progressed(&parsed, p)).await
+            };
             if let Some(a) = &after {
                 answered = answered.max(answered_tabs(a));
             }

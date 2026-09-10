@@ -372,24 +372,33 @@ pub fn select_all_progressed(before: &ParsedPrompt, after: &ParsedPrompt) -> boo
     if after.shape == PromptShape::Text {
         return true;
     }
-    // **確認画面へ着いたのも「進んだ」。** タブバーが解析窓の外へ流れた確認画面では
+    // **確認画面へ「着いた」のも進んだ。** タブバーが解析窓の外へ流れた確認画面では
     // `tabs` が空になるので `☒` の数では進捗を測れず、最終設問に答えた直後に
     // 3 秒待って `unverified` になっていた（6 回目のセルフレビューで検出）。
-    // 宛先は確認画面で止まったまま、カードは読み取り専用で再送もできない
-    if is_submit_review_screen(after) {
+    //
+    // **`before` が既に確認画面ならこれは使えない。** 「着いた」ではなく
+    // 「据え置き」なので、Submit の CR が届かず画面が変わっていない場合まで
+    // 進んだことになり、**押していないのに「返答済み」**になる
+    // （差分レビューで検出）。
+    if !is_submit_review_screen(before) && is_submit_review_screen(after) {
         return true;
     }
     answered_tabs(after) > answered_tabs(before)
 }
 
 /// 全問回答後の確認画面か（タブバーが読めていてもいなくても判定できる形）。
-fn is_submit_review_screen(parsed: &ParsedPrompt) -> bool {
+pub fn is_submit_review_screen(parsed: &ParsedPrompt) -> bool {
     if parsed.tabs.iter().any(|t| t.is_submit)
         && parsed.tabs.iter().all(|t| t.is_submit || t.answered)
     {
         return true;
     }
-    contains_ci(&parsed.header, SUBMIT_REVIEW_HEADING) && has_submit_option(parsed)
+    // 見出しによる救済は**タブバーを読めなかったときだけ**。タブが読めていて
+    // 未回答が残っているなら、見出しが何であれ確認画面ではない
+    // （残したままだと未回答の設問があるのに Submit を撃つ。差分レビューで検出）
+    parsed.tabs.is_empty()
+        && contains_ci(&parsed.header, SUBMIT_REVIEW_HEADING)
+        && has_submit_option(parsed)
 }
 
 /// 回答済み（`☒`）のタブ数。`✔ Submit` は数えない。
@@ -419,7 +428,7 @@ pub fn plan_select_all_step(
         // 確認画面が再描画途中で別の形状に見えているだけかもしれない。
         // `Submit answers` が画面に残っている限り「閉じた」とは言わない
         // （言うと、押していないのに「返答済み」になる。5 回目のセルフレビューで検出）
-        if has_submit_option(parsed) {
+        if has_submit_option(parsed) || looks_like_review_remnant(parsed) {
             return SelectAllStep::Refuse(
                 "宛先の画面にまだ『Submit answers』が残っています（確認画面の描き直し途中かもしれません）。取り違えを避けるため何も送っていません。ターミナルを開いて確定してください"
                     .to_string(),
@@ -755,17 +764,11 @@ fn strip_cursor_marker(s: &str) -> (&str, bool) {
 /// 押すと CR が入力欄へ入って**下書きがそのまま宛先へ送信される**。
 /// そこで行単体ではなく**罫線で挟まれた箱**として見て、箱の最初の非空行が
 /// 入力欄の記号で始まっていれば箱の中の行を全部除外する。
-fn is_input_box_line(lines: &[&str], i: usize, screen_has_dialog_footer: bool) -> bool {
+fn is_input_box_line(lines: &[&str], i: usize) -> bool {
     /// 入力欄の箱として許す高さ（罫線までの行数）。長すぎるとダイアログを巻き込む
     const INPUT_BOX_MAX_LINES: usize = 8;
-
-    // **ダイアログのフッタが出ている画面では入力欄扱いにしない。**
-    // 見出しの無い枠付きダイアログ（枠のすぐ下が `❯ 1. Yes`）を丸ごと落として
-    // しまうため（6 回目のセルフレビューで検出）。入力欄しか出ていない画面の
-    // フッタは `esc to interrupt` などで、ここで見る語とは重ならない
-    if screen_has_dialog_footer {
-        return false;
-    }
+    /// 箱の下でフッタを探す行数。
+    const FOOTER_LOOKAHEAD: usize = 3;
 
     let rule_at = |j: usize| -> bool {
         let (b, _) = strip_frame(lines[j]);
@@ -774,9 +777,21 @@ fn is_input_box_line(lines: &[&str], i: usize, screen_has_dialog_footer: bool) -
     // 上下それぞれ、近くに罫線があるか（間に何行あってもよい = 複数行の下書き）
     let up = (0..i).rev().take(INPUT_BOX_MAX_LINES).find(|&j| rule_at(j));
     let down = (i + 1..lines.len()).take(INPUT_BOX_MAX_LINES).find(|&j| rule_at(j));
-    let (Some(up), Some(_down)) = (up, down) else {
+    let (Some(up), Some(down)) = (up, down) else {
         return false;
     };
+    // **箱の下に Claude Code のダイアログのフッタがあれば、それはダイアログ。**
+    // 見出しの無い枠付きダイアログ（枠のすぐ下が `❯ 1. Yes`）を入力欄と誤認して
+    // 丸ごと落とすのを防ぐ（6 回目のセルフレビューで検出）。
+    //
+    // **画面全体でフッタを探してはいけない。** 下書き本文に `Esc to cancel` と
+    // 書いてあるだけで入力欄判定が無効化され、下書きが選択肢として解析される
+    // （＝押すと下書きがそのまま宛先へ送信される。差分レビューで検出）。
+    // 探すのは**箱の外、閉じ罫線のすぐ下**だけ
+    let below_box = &lines[(down + 1).min(lines.len())..];
+    if has_dialog_footer(&below_box[..below_box.len().min(FOOTER_LOOKAHEAD)]) {
+        return false;
+    }
     // 箱の最初の非空行が入力欄の記号（`❯` / `>`）で始まっていること。
     // ダイアログも枠で囲まれることがあるが、その中の先頭行は見出しか設問文になる
     lines[up + 1..=i]
@@ -890,10 +905,11 @@ fn split_heading_and_context(above: &[String]) -> (String, String) {
 ///
 /// 本物のタブバーは 1 行にタブが並ぶので、次のどちらかで見分ける:
 ///
-/// - タブが 2 つ以上ある、または `←` / `→` / `✔ Submit` を伴う（複数設問・確認画面）
+/// - `←` / `→` / `✔ Submit` を伴う（複数設問・確認画面）
 /// - タブが 1 つだけ（単一設問）のときは、**呼び出し側が
 ///   「`AskUserQuestion` のフッタが出ている」「選択肢のすぐ上にある」を追加で確かめる**
 fn is_strong_tab_bar(tabs: &[QuestionTab], body: &str) -> bool {
+    // 強い印は**送り記号（`←` / `→`）か `✔ Submit`** の有無。
     // **「チェックボックスが 2 つ以上」を強い印にしない。** 行頭がチェックボックスの
     // 散文（`☒ A と ☐ B のどちらか`）が強い候補に化けて、ラベル長の条件を
     // すり抜ける（6 回目のセルフレビューで検出）。本物の複数設問タブバーには
@@ -925,6 +941,25 @@ fn looks_like_tab_bar_line(tabs: &[QuestionTab], body: &str) -> bool {
     // （5 回目のセルフレビューで検出）。強い候補は形自体が散文と紛れない
     is_strong_tab_bar(tabs, body)
         || tabs.iter().all(|t| t.label.chars().count() <= MAX_TAB_LABEL_CHARS)
+}
+
+/// 確認画面の描き直し途中に見える画面か。
+///
+/// `Submit answers` の `answers` がまだ描かれていないフレーム
+/// （`Review your answers` / `❯ 1. Submit` / `2. Cancel`）は
+/// [`has_submit_option`] では捕まらない。見出しとの AND で拾う。
+/// 素の番号リストの `1. Submit for review` は見出しが違うので落ちる。
+fn looks_like_review_remnant(parsed: &ParsedPrompt) -> bool {
+    // 見出しと承認対象の**両方**を見る。描き直し途中は見出しの抽出も揺れるので、
+    // 片方だけ見ると（実際に）空文字と突き合わせることになる
+    let heading = format!("{} {}", parsed.header, parsed.context).to_lowercase();
+    let review_ish =
+        heading.contains(SUBMIT_REVIEW_HEADING) || heading.contains("review your answers");
+    review_ish
+        && parsed
+            .questions
+            .first()
+            .is_some_and(|q| q.options.iter().any(|o| o.label.to_lowercase().starts_with("submit")))
 }
 
 /// 画面に `Submit answers` の選択肢があるか（確認画面が残っている印）。
@@ -1160,7 +1195,6 @@ fn find_last_option_run(lines: &[&str]) -> Option<OptionRun> {
 /// `preview_col` が `Some` なら各行をその表示桁で切ってから解析する
 /// （横並びのプレビュー枠を切り離す）。
 fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<OptionRun> {
-    let screen_has_dialog_footer = has_dialog_footer(lines);
     let cut = |line: &str| -> String {
         match preview_col {
             Some(col) => cut_at_column(line, col),
@@ -1172,7 +1206,7 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
     let mut i = 0usize;
     while i < lines.len() {
         // 入力欄に `1. …` と打ち込んだ行を選択肢として拾わない（`is_input_box_line` 参照）
-        if is_input_box_line(lines, i, screen_has_dialog_footer) {
+        if is_input_box_line(lines, i) {
             i += 1;
             continue;
         }
@@ -1325,12 +1359,15 @@ fn find_unnumbered_escape(
     None
 }
 
-/// 画面のどこかに Claude Code の**ダイアログ**のフッタがあるか。
+/// 渡された行の中に Claude Code の**ダイアログ**のフッタがあるか。
 ///
 /// 入力欄だけの画面のフッタ（`esc to interrupt` / `auto mode on`）とは語が重ならない。
+///
+/// **選択肢行や下書き本文を含む範囲を渡してはいけない。** ラベルに
+/// `Esc to cancel` と書いてあるだけで真になる（既存の
+/// `an_option_label_is_not_mistaken_for_a_cc_footer` が守っている不変条件）。
 fn has_dialog_footer(lines: &[&str]) -> bool {
-    let tail_start = lines.len().saturating_sub(TAIL_WINDOW);
-    let joined = lines[tail_start..]
+    let joined = lines
         .iter()
         .map(|l| strip_frame(l).0)
         .collect::<Vec<_>>()
@@ -1433,9 +1470,7 @@ fn looks_like_free_input(tail: &[&str]) -> Option<FreeInputKind> {
         }
         // **入力欄の判定を選択肢判定より先に行う。** 実機の入力欄は `❯1. …` のように
         // 選択肢行と同じ形になりうるので、位置（上下が罫線）で先に確定させる
-        // ここは `tail`（画面末尾）だけを見ている場面なので、ダイアログの
-        // フッタ判定も同じ範囲で取る
-        if is_input_box_line(tail, i, has_dialog_footer(tail)) {
+        if is_input_box_line(tail, i) {
             return Some(FreeInputKind::ClaudeCodeBox);
         }
         // 選択肢行は入力欄ではない（上の不変条件）。ここで打ち切って `Unknown` へ倒す
@@ -2839,6 +2874,70 @@ mod tests {
         let p = parse_prompt("Pick:\n  1) Submit for review\n  2) Merge directly\nSelection: ");
         assert_ne!(p.shape, PromptShape::AskUserQuestion);
         assert_eq!(plan_select_all_step(&p, &[1], Some(0)), SelectAllStep::Done);
+    }
+
+    /// 据え置きの確認画面を「進んだ」と読まない（差分レビューで検出）。
+    ///
+    /// 読むと、`Submit answers` の CR が宛先に届かず画面が変わっていなくても
+    /// **押していないのに「返答済み」**を名乗る。
+    #[test]
+    fn a_review_screen_that_has_not_changed_is_not_progress() {
+        let review = parse_prompt(&submit_review_screen());
+        assert!(is_submit_review_screen(&review));
+        assert!(!select_all_progressed(&review, &review), "据え置きは進捗ではない");
+
+        let tabless = parse_prompt(
+            "Review your answers\n\nReady to submit your answers?\n\n❯ 1. Submit answers\n  2. Cancel",
+        );
+        assert!(is_submit_review_screen(&tabless));
+        assert!(!select_all_progressed(&tabless, &tabless));
+    }
+
+    /// 未回答のタブが残っている画面を確認画面と読まない（差分レビューで検出）。
+    #[test]
+    fn a_screen_with_unanswered_tabs_is_never_the_review_screen() {
+        let screen = [
+            "←  ☒ Color  ☐ Size  ✔ Submit  →",
+            "Ready to submit your answers?",
+            "",
+            "❯ 1. Submit answers",
+            "  2. Cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert!(p.tabs.iter().any(|t| !t.answered && !t.is_submit), "tabs={:?}", p.tabs);
+        assert!(!is_submit_review_screen(&p), "未回答が残っているのに Submit を撃ってはいけない");
+    }
+
+    /// 入力欄の下書きに `Esc to cancel` と書いてあっても入力欄のまま
+    /// （差分レビューで検出）。
+    ///
+    /// 画面全体でフッタを探すと、下書きの文字列でダイアログ判定が立ち、
+    /// 下書きが「画面に実在する選択肢」として解析される（＝押すと下書きが
+    /// そのまま宛先へ送信される）。
+    #[test]
+    fn a_draft_mentioning_the_footer_text_is_still_an_input_box() {
+        let screen = [
+            "────────────────────────────────────────",
+            "❯1. Esc to cancel handling",
+            "  2. then that",
+            "────────────────────────────────────────",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Text, "options={:?}", p.questions);
+    }
+
+    /// 描き直し途中で `Submit answers` の `answers` がまだ出ていないフレームも
+    /// 「閉じた」と読まない（差分レビューで検出）。
+    #[test]
+    fn a_review_remnant_without_the_full_label_is_not_treated_as_closed() {
+        let p = parse_prompt("Review your answers\n\n❯ 1. Submit\n  2. Cancel");
+        match plan_select_all_step(&p, &[1, 1], Some(1)) {
+            SelectAllStep::Refuse(_) => {}
+            other => panic!("閉じたと言ってはいけない: {:?}", other),
+        }
     }
 
     #[test]
