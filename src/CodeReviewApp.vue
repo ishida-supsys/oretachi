@@ -174,11 +174,25 @@ function scheduleRefresh() {
 }
 
 let unlistenFsChanged: (() => void) | null = null;
+let unlistenSettings: (() => void) | null = null;
 
 onMounted(async () => {
   document.title = `Code Review - ${worktreeName}`;
 
   await loadSettings();
+
+  // 他ウィンドウの保存に追従する。
+  //
+  // このウィンドウは `useCodeReviewSettings.update()` から `scheduleSave()` を呼び、
+  // **自分が持つ settings のスナップショット全体**を書き戻す（`save_from` は無条件上書き）。
+  // ここで追従しないとスナップショットが開いた時刻のまま古くなり、Monaco 設定を
+  // 1つ変えただけで、その間にメインウィンドウで変更された設定（ワークグループの
+  // 「タスク完了後にホームへ復帰」など）を丸ごと巻き戻す lost update になる（#261）。
+  unlistenSettings = await listen<{ source?: string } | null>("settings-changed", async (event) => {
+    // 自分の保存に由来するものは無視する（自分の in-memory 変更を巻き戻さないため）
+    if (event.payload?.source === getCurrentWindow().label) return;
+    await loadSettings();
+  });
 
   // FS ウォッチャー起動
   if (worktreeId && worktreePath) {
@@ -221,6 +235,8 @@ function cleanup() {
   window.removeEventListener("focus", scheduleRefresh);
   unlistenFsChanged?.();
   unlistenFsChanged = null;
+  unlistenSettings?.();
+  unlistenSettings = null;
   if (worktreeId) {
     invoke("stop_fs_watch", { worktreeId }).catch(() => {});
   }
