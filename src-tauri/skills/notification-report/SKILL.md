@@ -1,7 +1,7 @@
 ---
 name: notification-report
 description: 購読しているワークツリーから通知が溜まったときに、関連する通知の一覧を読んでレポートアーティファクトを作成する。人はレポートを見るだけで、ターミナルを1つずつ開かずに溜まった通知へ一括でクイックに返答できる。ホームタブや teamwork-parent の親ワークツリーからの利用を想定。ユーザーが「通知をまとめて確認したい」「溜まった通知にまとめて返したい」等と言ったときに使う。
-allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__plugin_oretachi_oretachi__oretachi_subscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_worktree_notifications, mcp__plugin_oretachi_oretachi__oretachi_poll_inbox, mcp__plugin_oretachi_oretachi__oretachi_ack_message, mcp__plugin_oretachi_oretachi__oretachi_clear_worktree_notification, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp__plugin_oretachi_oretachi__oretachi_list_terminals, mcp__plugin_oretachi_oretachi__oretachi_read_terminal, mcp__plugin_oretachi_oretachi__oretachi_inspect_prompt, mcp__plugin_oretachi_oretachi__notify_worktree, mcp__plugin_oretachi_oretachi__artifact, mcp__plugin_oretachi_oretachi__artifact_module, mcp__plugin_oretachi_oretachi__artifact_store, mcp__plugin_oretachi_oretachi__search_artifact, Read, Glob, Grep, Bash
+allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__plugin_oretachi_oretachi__oretachi_subscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_worktree_notifications, mcp__plugin_oretachi_oretachi__oretachi_poll_inbox, mcp__plugin_oretachi_oretachi__oretachi_ack_message, mcp__plugin_oretachi_oretachi__oretachi_clear_worktree_notification, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp__plugin_oretachi_oretachi__oretachi_list_terminals, mcp__plugin_oretachi_oretachi__oretachi_read_terminal, mcp__plugin_oretachi_oretachi__oretachi_inspect_prompt, mcp__plugin_oretachi_oretachi__notify_worktree, mcp__plugin_oretachi_oretachi__artifact, mcp__plugin_oretachi_oretachi__artifact_module, mcp__plugin_oretachi_oretachi__artifact_store, mcp__plugin_oretachi_oretachi__search_artifact, Read, Glob, Grep, Bash(gh issue view:*), Bash(gh pr view:*), Bash(gh repo view:*), Bash(git log:*), Bash(git diff:*), Bash(git show:*)
 ---
 
 # notification-report スキル
@@ -18,6 +18,8 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__
   ②それでも足りなければ**このセッションから該当ワークツリーを直接見に行く**
   （`gh issue view`、そのワークツリーの `git log` / `git diff`、ファイル、`search_artifact`）。
   それでも分からない項目は「不明」と明示する。**推測で埋めない。**
+  使える shell は読み取り専用のものだけに絞ってある（`allowed-tools` 参照）
+  —— **調べに行くのであって、他のワークツリーに手を入れるのではない。**
 - **`approval` の通知本文には聞かれていることが全部入っている（#264）。** `PermissionRequest`
   フックの JSON なので `tool_name` と `tool_input` が丸ごと来る。`AskUserQuestion` なら
   **全設問・全選択肢・`description`・`preview` まで**。一方ターミナルの画面は 1 問ずつしか
@@ -341,9 +343,18 @@ request: {
 }
 ```
 
-**順番を変えてはいけない。** カードは i 番目の選択肢を画面の i+1 番として送る
+**順番を変えてはいけない。並べ替えも間引きもしない。** カードは i 番目の選択肢を
+画面の i+1 番として送り、宛先では**設問がタブの並び順に対応づけられる**
 （Claude Code は通知の選択肢をその順で `1.` から並べ、後ろに `Type something.` /
-`Chat about this` を足す）。並べ替えると別の選択肢を確定する。
+`Chat about this` を足す）。1 問でも落とすと**以降の設問へ 1 つずれた答えが入る**。
+
+保険は二重に置いてある（どちらも「ずれていたら 1 件も送らない」）:
+
+- `lib/send` の `hasDroppedQuestion` が「選択肢の無い設問」を見つけたらカードを塞ぐ
+- Rust の `plan_select_all_step` が画面のタブ数と回答数を突き合わせて拒否する
+
+ただし**保険に頼らないこと** —— 塞がれたレポートは作り直すしかなく、その間
+宛先のエージェントは止まったままになる。
 
 `preview` は**ターミナルでは `✂ N lines hidden` で切られて読めない**ものなので、
 省略せず全文を入れる（レポートの価値がいちばん出るところ）。

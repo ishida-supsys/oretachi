@@ -283,6 +283,36 @@ function askQuestions(n) {
 }
 
 /**
+ * `request.questions` に「選択肢の無い設問」が混ざっていたか。
+ *
+ * **混ざっていたら 1 件も送ってはいけない。** 送る番号は設問の並び順で組み、
+ * 宛先では**画面のタブの並び**に対応づけられる。途中の設問が抜けると
+ * **以降の設問へ 1 つずれた答えが入る**。`request.questions` はレポート生成側の
+ * AI が hook JSON から書き起こすデータなので、落とす事故が現実にありうる。
+ * Rust 側（`plan_select_all_step`）も件数を突き合わせて弾くが、こちらでも塞ぐ。
+ */
+function hasDroppedQuestion(n) {
+  const r = n && n.request;
+  if (!r || !Array.isArray(r.questions)) return false;
+  return r.questions.length !== askQuestions(n).length;
+}
+
+/**
+ * 設問 `i`（`request.questions` の並び）が**宛先で既に回答済み**か。
+ *
+ * 画面のタブバー（`☒` / `☐`）から見る。人が先にターミナルで答えていた場合、
+ * その設問へ送った番号は使われない（Rust 側は未回答タブから順に消化する）。
+ * カードはそれを伝えるためだけに使い、**選択の要求は緩めない**
+ * （タブの状態は生成時のスナップショットなので、これを根拠に選択を省くと
+ * 実際には未回答だった設問へ何も答えないまま画面が進む）。
+ */
+function tabAnsweredAt(n, i) {
+  const tabs = (n && n.prompt && n.prompt.tabs) || [];
+  const qTabs = tabs.filter(t => t && !t.isSubmit);
+  return !!(qTabs[i] && qTabs[i].answered);
+}
+
+/**
  * このカードが「通知由来の設問フォーム」で答えるか。
  *
  * 画面が `askUserQuestion` で止まっていて、通知から設問を起こせているときだけ。
@@ -382,6 +412,13 @@ function blockedReason(n, conflicts) {
   // 通知から設問を起こせているカードは、以降の「画面から選択肢を読めたか」系の
   // 判定を受けない（選択肢を画面から読んでいないため。#264）
   if (isQuestionForm(n)) {
+    // 設問が抜けていると番号がずれて別の設問へ答えが入る（`hasDroppedQuestion` 参照）
+    if (hasDroppedQuestion(n)) {
+      return (
+        `'${n.worktreeName}' の設問の一部に選択肢が入っていません（レポートの生成が不完全）。` +
+        'このまま送ると別の設問へ答えが入るため送信できません。レポートを作り直してください'
+      );
+    }
     // 選択肢は通知から出しているので画面が切れていても一覧は完全だが、
     // **Rust 側の `plan_keys` は `truncated` な画面への選択を拒否する**
     // （読めていない選択肢がある画面で矢印を送らせない安全弁）。ここで塞がないと
@@ -390,6 +427,16 @@ function blockedReason(n, conflicts) {
       return (
         `'${n.worktreeName}' のダイアログが画面に収まっていません（タブが狭い）。` +
         'この状態では宛先へキーを送れないため、ターミナルを広げるか直接操作してください'
+      );
+    }
+    // **矢印の移動量が決まらない画面では送らせない。** 選択肢は通知から出して
+    // いても、キーを送るのは画面に対してなので `❯` の位置は要る。塞がないと
+    // 押した瞬間 Rust が `unsupported` を返し、カードが読み取り専用になって死ぬ
+    // （非設問フォームの経路と同じ理由。セルフレビューで検出）
+    if (!cursorReadable(n) && !canEscape(n)) {
+      return (
+        `'${n.worktreeName}' の画面でいまどの選択肢が選ばれているか（❯）が読み取れず、` +
+        '矢印の移動量を決められないため送信できません。ターミナルを開いて直接操作してください'
       );
     }
     const conflictQ = conflicts && conflicts[n.id];
@@ -411,10 +458,7 @@ function blockedReason(n, conflicts) {
   // `unsupported` を返す。UI 側で先に塞がないと、押した瞬間カードが `readOnly` に
   // なって選び直せず死ぬ（ESC 経路が使えるならそれだけ残す）
   if (hasPrompt(n) && n.prompt.navigation === 'arrows') {
-    const q = questionOf(n);
-    const cursorOk = q && typeof q.cursorIndex === 'number' &&
-      optionsOf(n).some(o => o.index === q.cursorIndex);
-    if (!cursorOk && !canEscape(n)) {
+    if (!cursorReadable(n) && !canEscape(n)) {
       return (
         `'${n.worktreeName}' の画面でいまどの選択肢が選ばれているか（❯）が読み取れず、` +
         '矢印の移動量を決められないため送信できません。ターミナルを開いて直接操作してください'
@@ -424,6 +468,22 @@ function blockedReason(n, conflicts) {
   const conflict = conflicts && conflicts[n.id];
   if (conflict) return conflict;
   return null;
+}
+
+/**
+ * 矢印で答える画面で `❯` の現在位置が読めているか。
+ *
+ * 読めないと Rust の `plan_keys` が移動量を決められず `unsupported` を返す。
+ * 矢印以外のナビゲーション（数字キー / y-n）ではこの制約が無いので true を返す。
+ */
+function cursorReadable(n) {
+  if (!hasPrompt(n) || n.prompt.navigation !== 'arrows') return true;
+  const q = questionOf(n);
+  return !!(
+    q &&
+    typeof q.cursorIndex === 'number' &&
+    optionsOf(n).some(o => o.index === q.cursorIndex)
+  );
 }
 
 const errText = e => String((e && e.message) || e);
@@ -714,6 +774,9 @@ exports.ESCAPABLE_SHAPES = ESCAPABLE_SHAPES;
 exports.questionOf = questionOf;
 exports.optionsOf = optionsOf;
 exports.askQuestions = askQuestions;
+exports.hasDroppedQuestion = hasDroppedQuestion;
+exports.tabAnsweredAt = tabAnsweredAt;
+exports.cursorReadable = cursorReadable;
 exports.isQuestionForm = isQuestionForm;
 exports.screenIndexFor = screenIndexFor;
 exports.selectAllIndices = selectAllIndices;

@@ -1292,6 +1292,15 @@ const ANSWER_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_mill
 /// 画面が想定外の遷移をしたときに無限にキーを送り続けないための止め木。
 const SELECT_ALL_MAX_STEPS: usize = 24;
 
+/// `kind="selectAll"` がセッション書き込みロックを握り続ける上限。
+///
+/// このロックは `event_delivery::write_push`（押し込み）と
+/// `lib.rs::pty_write_locked`（UI の自動承認 Enter）も取るので、握っている間は
+/// そのセッションへの押し込みと自動承認が止まる。設問が多い / 宛先の再描画が
+/// 遅いときに [`SELECT_ALL_MAX_STEPS`] × [`ANSWER_SETTLE_MAX`] ぶん
+/// （70 秒超）握りっぱなしにならないよう、ここで打ち切る。
+const SELECT_ALL_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// PTY セッション単位の書き込みロック。
 ///
 /// `oretachi_answer_prompt` は「画面を読む → fingerprint を照合する → キーを送る」を
@@ -3927,13 +3936,31 @@ impl NotifyService {
         session_id: u32,
         before: &str,
     ) -> (Option<crate::prompt_parser::ParsedPrompt>, bool) {
+        self.settle_until(session_id, |p| p.fingerprint != before).await
+    }
+
+    /// `done` が真になるまで画面を読み直す（#264）。
+    ///
+    /// [`settle_after_keys`] は「fingerprint が変わったか」で待つが、複数設問の
+    /// 一括回答ではそれでは足りない。fingerprint には `❯` の位置が入っているので、
+    /// **矢印だけ届いて CR がまだ処理されていない中間画面**でも変わってしまい、
+    /// 「進んだ」と誤判定すると同じ設問へ CR をもう 1 回送ることになる。
+    /// 呼び出し側が「何をもって進んだとするか」を渡せるようにしてある。
+    async fn settle_until<F>(
+        &self,
+        session_id: u32,
+        done: F,
+    ) -> (Option<crate::prompt_parser::ParsedPrompt>, bool)
+    where
+        F: Fn(&crate::prompt_parser::ParsedPrompt) -> bool,
+    {
         let deadline = tokio::time::Instant::now() + ANSWER_SETTLE_MAX;
         let mut last: Option<crate::prompt_parser::ParsedPrompt> = None;
         loop {
             tokio::time::sleep(ANSWER_POLL_INTERVAL).await;
             let now = self.inspect_screen(session_id).ok().map(|t| t.0);
             if let Some(p) = &now {
-                if p.fingerprint != before {
+                if done(p) {
                     return (now, true);
                 }
             }
@@ -3958,21 +3985,26 @@ impl NotifyService {
     ///
     /// - **最初の 1 手だけ `expect_fingerprint` で照合する。** 2 手目以降は
     ///   「自分が送ったキーで画面が変わった」ことが前提なので照合できない。
-    ///   代わりに毎ステップ「まだ `askUserQuestion` のタブ UI か」を確かめ、
-    ///   外れたら送るのをやめる。
+    ///   代わりに毎ステップ [`plan_select_all_step`] が「まだ `askUserQuestion` の
+    ///   タブ UI か」「設問数と回答数が合っているか」「同じ設問へ 2 回送っていないか」を
+    ///   確かめ、外れたら送るのをやめる。
+    /// - **「進んだ」の判定に fingerprint を使わない。** fingerprint には `❯` の位置が
+    ///   入っているので、矢印だけ届いて CR がまだ処理されていない中間画面でも変わる。
+    ///   それを「進んだ」と読むと同じ設問へ CR をもう 1 回送り、遅れて確定した
+    ///   **次の設問の既定選択肢を確定してしまう**（セルフレビューで検出）。
+    ///   判定は [`select_all_progressed`]（回答済みタブが増えたか / ダイアログが閉じたか）。
     /// - **セッション書き込みロックを最後まで握り続ける。** 設問の途中で
-    ///   別の write が割り込むと、答えが別の設問へ入る。
-    /// - **画面が進まなかったら止める。** そのまま次の番号を送ると、進んでいない
-    ///   設問へ 2 問目の答えを撃ち込むことになる。
-    /// - **どの設問に答えるかはタブの `☐` / `☒` から決める。** 人が先に何問か
-    ///   答えていても、未回答のタブに対応する番号が使われる。
+    ///   別の write が割り込むと、答えが別の設問へ入る。ただし握りっぱなしで
+    ///   宛先への押し込みを止め続けないよう、[`SELECT_ALL_DEADLINE`] で打ち切る。
     async fn answer_all_questions(
         &self,
         session_id: u32,
         expect_fingerprint: &str,
         indices: &[u32],
     ) -> Result<CallToolResult, McpError> {
-        use crate::prompt_parser::{Answer, PromptShape};
+        use crate::prompt_parser::{
+            answered_tabs, plan_select_all_step, select_all_progressed, Answer, SelectAllStep,
+        };
 
         {
             let pty = self.app_handle.state::<PtyManager>();
@@ -4015,12 +4047,32 @@ impl NotifyService {
         let lock = session_write_lock(session_id);
         let _guard = lock.lock().await;
 
+        let deadline = tokio::time::Instant::now() + SELECT_ALL_DEADLINE;
         let mut sent: Vec<String> = Vec::new();
+        // **「確定できた設問の数」は画面のタブから採る。** 自分が送った回数だと、
+        // 人が先に答えていたぶんを取りこぼすうえ、送ったが通っていない設問まで数える
         let mut answered = 0usize;
         let mut last: Option<crate::prompt_parser::ParsedPrompt> = None;
+        let mut last_qidx: Option<usize> = None;
 
         for step in 0..SELECT_ALL_MAX_STEPS {
-            let (parsed, _cursor, _lost, _rows, _cols) = self.inspect_screen(session_id)?;
+            let parsed = match self.inspect_screen(session_id) {
+                Ok((p, ..)) => p,
+                Err(e) => {
+                    // 既にキーを送ったあとで読めなくなった場合、`?` で投げると
+                    // 「何問目まで確定したか」が呼び出し元へ返らない
+                    if sent.is_empty() {
+                        return Err(e);
+                    }
+                    return outcome(
+                        "pastedOnly",
+                        sent,
+                        None,
+                        Some(format!("送信の途中で宛先の画面を読めなくなりました: {}", e)),
+                        answered,
+                    );
+                }
+            };
 
             if step == 0 && parsed.fingerprint != expect_fingerprint {
                 return outcome(
@@ -4036,66 +4088,35 @@ impl NotifyService {
                     0,
                 );
             }
+            answered = answered.max(answered_tabs(&parsed));
 
-            if parsed.shape != PromptShape::AskUserQuestion {
-                if step == 0 {
-                    return outcome(
-                        "unsupported",
-                        Vec::new(),
-                        Some(&parsed),
-                        Some(format!(
-                            "画面の形状は '{}' です。kind=\"selectAll\" は複数設問の askUserQuestion にだけ使えます",
-                            parsed.shape.as_str()
-                        )),
-                        0,
-                    );
-                }
-                // ダイアログが閉じた = 全問の回答が宛先へ渡った
-                last = Some(parsed);
-                break;
-            }
-
-            // 全タブが `☒` になっていれば確認画面。ここで `Submit answers` を確定する
-            let on_review = parsed.tabs.iter().any(|t| t.is_submit)
-                && parsed.tabs.iter().all(|t| t.is_submit || t.answered);
-            let target = if on_review {
-                match parsed
-                    .questions
-                    .first()
-                    .and_then(|q| q.options.iter().find(|o| o.label.to_lowercase().contains("submit")))
-                {
-                    Some(o) => o.index,
-                    None => {
+            let plan = plan_select_all_step(&parsed, indices, last_qidx);
+            let (target, on_review) = match plan {
+                SelectAllStep::Done => {
+                    if step == 0 {
                         return outcome(
-                            "pastedOnly",
-                            sent,
-                            Some(&parsed),
-                            Some("全問の回答は送りましたが、確認画面に『Submit answers』が見つからず確定できませんでした。ターミナルを開いて確定してください".to_string()),
-                            answered,
-                        );
-                    }
-                }
-            } else {
-                let qidx = parsed
-                    .tabs
-                    .iter()
-                    .position(|t| !t.answered && !t.is_submit)
-                    .unwrap_or(answered);
-                match indices.get(qidx) {
-                    Some(i) => *i,
-                    None => {
-                        return outcome(
-                            "pastedOnly",
-                            sent,
+                            "unsupported",
+                            Vec::new(),
                             Some(&parsed),
                             Some(format!(
-                                "設問 {} 問目の回答が option_indices（{} 件）に足りません。途中まで送った状態で止めました",
-                                qidx + 1,
-                                indices.len()
+                                "画面の形状は '{}' です。kind=\"selectAll\" は複数設問の askUserQuestion にだけ使えます",
+                                parsed.shape.as_str()
                             )),
-                            answered,
+                            0,
                         );
                     }
+                    // ダイアログが閉じた = 全問の回答が宛先へ渡った
+                    last = Some(parsed);
+                    return outcome("sent", sent, last.as_ref(), None, answered);
+                }
+                SelectAllStep::Refuse(reason) => {
+                    let status = if sent.is_empty() { "unsupported" } else { "unverified" };
+                    return outcome(status, sent, Some(&parsed), Some(reason), answered);
+                }
+                SelectAllStep::Submit { option_index } => (option_index, true),
+                SelectAllStep::Answer { qidx, option_index } => {
+                    last_qidx = Some(qidx);
+                    (option_index, false)
                 }
             };
 
@@ -4104,7 +4125,7 @@ impl NotifyService {
             }) {
                 Ok(keys) => keys,
                 Err(e) => {
-                    let status = if sent.is_empty() { "unsupported" } else { "pastedOnly" };
+                    let status = if sent.is_empty() { "unsupported" } else { "unverified" };
                     return outcome(status, sent, Some(&parsed), Some(e.0), answered);
                 }
             };
@@ -4130,11 +4151,16 @@ impl NotifyService {
                 sent.push(key.label.clone());
             }
 
-            let (after, changed) = self.settle_after_keys(session_id, &parsed.fingerprint).await;
+            let (after, progressed) = self
+                .settle_until(session_id, |p| select_all_progressed(&parsed, p))
+                .await;
+            if let Some(a) = &after {
+                answered = answered.max(answered_tabs(a));
+            }
             last = after;
             if on_review {
                 // 確定を撃った。これ以上進めるものは無い
-                if !changed {
+                if !progressed {
                     return outcome(
                         "unverified",
                         sent,
@@ -4145,25 +4171,49 @@ impl NotifyService {
                 }
                 return outcome("sent", sent, last.as_ref(), None, answered);
             }
-            answered += 1;
-            if !changed {
-                // 進んでいないのに次の番号を送ると、同じ設問へ別の答えを撃ち込む
+            if !progressed {
+                // 進んでいないのに次の番号を送ると、遅れて確定した先の設問へ撃ち込む
                 return outcome(
                     "unverified",
                     sent,
                     last.as_ref(),
                     Some(format!(
-                        "{} 問目まで送りましたが、画面が次の設問へ進みませんでした。**再送しないでください**（❯ が二重に動きます）。ターミナルで状態を確認してください",
+                        "宛先では {} 問が確定していますが、その先で画面が次の設問へ進みませんでした。**再送しないでください**（❯ が二重に動きます）。ターミナルで状態を確認してください",
                         answered
+                    )),
+                    answered,
+                );
+            }
+            if tokio::time::Instant::now() >= deadline {
+                // ロックを握り続けると、その間このセッションへの押し込みと
+                // UI の自動承認が止まる。打ち切って人へ返す
+                return outcome(
+                    "unverified",
+                    sent,
+                    last.as_ref(),
+                    Some(format!(
+                        "宛先では {} 問が確定していますが、{} 秒を超えたので打ち切りました。残りはターミナルで答えてください",
+                        answered,
+                        SELECT_ALL_DEADLINE.as_secs()
                     )),
                     answered,
                 );
             }
         }
 
-        outcome("sent", sent, last.as_ref(), None, answered)
+        // ステップ数を使い切った = 画面が想定外の遷移をし続けている。
+        // 送るだけ送って確定できていないので `sent` を名乗ってはいけない
+        outcome(
+            "unverified",
+            sent,
+            last.as_ref(),
+            Some(format!(
+                "{} 手送っても設問が終わりませんでした（宛先では {} 問が確定）。ターミナルで状態を確認してください",
+                SELECT_ALL_MAX_STEPS, answered
+            )),
+            answered,
+        )
     }
-
     #[tool(description = "指定 PTY セッションにいま出ている「問い」を解析して返す（読み取りのみ）。返り値の JSON: { shape, header, context, questions, tabs, escapeHatch, fingerprint, tail, cursor, lostBytes, rows, cols, detectedAtMs }。tabs は複数設問 AskUserQuestion のタブバー（[{ label, answered, isSubmit }]。☐ が未回答 / ☒ が回答済み）で、**画面には常に 1 問ぶんしか出ない**ため questions には現在のタブの設問しか入らない。shape は \"text\"(自由入力) / \"permission\"(ツール許可ダイアログ) / \"plan\"(プラン承認) / \"askUserQuestion\" / \"yesno\"((y/N) プロンプト) / \"numbered\"(素の番号選択) / \"unknown\"(分類不能)。**oretachi_read_terminal のテキストからダイアログを読もうとしないこと** — Claude Code はカーソル移動で差分描画するので ANSI を除去すると断片しか残らない。このツールは出力履歴を VT エミュレータへ流し直した画面グリッドを見る。**questions[].options[].label は画面に実在する選択肢そのもの**なので、人へ提示する候補を創作せずこれを出すこと。fingerprint は oretachi_answer_prompt へそのまま渡す（画面が変わっていたら送信されない）。shape が \"unknown\" のときはキーを送れないので tail を人に見せて手動操作へ誘導する", annotations(read_only_hint = true))]
     fn oretachi_inspect_prompt(
         &self,

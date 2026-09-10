@@ -25,6 +25,7 @@ const {
   isQuestionForm,
   askQuestions,
   answeredCount,
+  tabAnsweredAt,
   paragraphsOf,
   richSegments,
   questionOf,
@@ -439,6 +440,16 @@ function QuestionForm({ n, draft, disabled, onDraft }) {
             <span style={{ fontSize: 13, fontWeight: 700, color: '#cdd6f4', fontFamily: FONT, lineHeight: 1.6 }}>
               {q.question}
             </span>
+            {/* 人が先にターミナルで答えていた設問。宛先はこの設問を飛ばすので、
+                ここでの選択は使われない。**選択の要求は緩めない** —— タブの状態は
+                生成時のスナップショットなので、これを根拠に選択を省くと、実際には
+                未回答だったときに何も答えないまま画面が進む */}
+            {tabAnsweredAt(n, qi) && (
+              <Badge
+                label="宛先で回答済み"
+                color="#a6e3a1"
+                title="レポート生成時点で、この設問は宛先の画面で既に回答済みでした。ここでの選択は送られません" />
+            )}
           </div>
           <div style={{ display: 'flex', flexDirection: 'column', gap: 6, paddingLeft: 28 }}>
             {q.options.map((o, oi) => (
@@ -649,7 +660,9 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
           <Badge
             label={status === 'sent'
               ? `${STATUS_LABEL.sent} ${answer.at || ''}`.trim()
-              : (STATUS_LABEL[status] || status)}
+              : (dialog && status === 'pastedOnly'
+                ? '送信途中で停止'
+                : (STATUS_LABEL[status] || status))}
             color={accent} />
         )}
         {inflight && <Badge label="送信中…" color="#89b4fa" />}
@@ -701,7 +714,11 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
 
       {/* 送信失敗のエラー / 未送信の理由。stale と unsupported は
           **リトライボタンを出さない**（画面が変わっているのでレポートを作り直す） */}
-      {answer && ['failed', 'stale', 'unsupported', 'unverified'].indexOf(status) >= 0 && (
+      {answer && ['failed', 'stale', 'unsupported', 'unverified'].indexOf(status) >= 0
+        // ダイアログ経路の `pastedOnly`（selectAll が途中で止まった）もここへ出す。
+        // 出さないと「何問目まで確定したか」も理由もカードに現れず、
+        // `Enter 未送信` というバッジだけが残って人が状況を読めない
+        || (dialog && status === 'pastedOnly') ? (
         <div style={{
           fontSize: 12, fontFamily: FONT, color: accent,
           background: `${accent}14`, border: `1px solid ${accent}44`, borderRadius: 6,
@@ -726,9 +743,17 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
               <b>この形状にはこの回答を送れないため、何も送っていません。</b>
             </div>
           )}
+          {dialog && status === 'pastedOnly' && (
+            <div style={{ marginBottom: 4 }}>
+              <b>送信の途中で止まりました。</b>
+              <b>同じ回答を再送しないでください</b>（既に送ったキーで ❯ が動いています）。
+              残りはターミナルを開いて答えてください。
+            </div>
+          )}
           {typeof answer.answeredCount === 'number' && answer.answeredCount > 0 && (
             <div style={{ marginBottom: 4 }}>
-              <b>{answer.answeredCount} 問目までは宛先へ確定しています。</b>
+              {/* Rust 側は画面のタブ（☒）から数える。人が先に答えていたぶんも含む */}
+              <b>宛先では {answer.answeredCount} 問が確定済みです。</b>
               残りはターミナルを開いて答えてください。
             </div>
           )}
@@ -739,7 +764,7 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
             </div>
           )}
         </div>
-      )}
+      ) : null}
 
       {/* 本文だけ届いた状態。同じ内容を送り直すと二重になるので Enter だけ送る */}
       {resumeEnter && (

@@ -327,6 +327,119 @@ impl Answer {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanError(pub String);
 
+// ─── 複数設問の一括回答（#264）──────────────────────────────────────────────
+
+/// 複数設問の `AskUserQuestion` を 1 回の呼び出しで答え切るときの、
+/// 「いまの画面に対して次に何をするか」。
+///
+/// **I/O から切り離した純粋関数にしてある**（[`plan_select_all_step`]）。
+/// ここの判断を誤ると答えが別の設問へ入るので、テストで固定できる形にしておく。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SelectAllStep {
+    /// `qidx` 問目（0 始まり）へ `option_index` を選ぶ
+    Answer { qidx: usize, option_index: u32 },
+    /// 確認画面。`option_index`（`Submit answers`）を選んで確定する
+    Submit { option_index: u32 },
+    /// ダイアログが閉じた。やることは残っていない
+    Done,
+    /// 送ってはいけない状態。文言をそのまま `reason` に使う
+    Refuse(String),
+}
+
+/// 「1 手ぶん進んだか」の判定（#264）。
+///
+/// **fingerprint の差分で判定してはいけない。** fingerprint には `❯` の位置が
+/// 入っているので、矢印だけ届いて CR がまだ処理されていない**中間画面**でも変わる。
+/// そこで「進んだ」と誤判定すると、次の周回で同じ設問へ CR をもう 1 回送ってしまい、
+/// 1 発目で確定して次の設問へ進んだ画面に対して**2 発目が既定の選択肢を確定する**
+/// （セルフレビューで検出）。
+///
+/// 進んだと言えるのは次のどちらか:
+///
+/// - ダイアログが閉じた（`askUserQuestion` でなくなった）
+/// - 回答済み（`☒`）のタブが増えた
+pub fn select_all_progressed(before: &ParsedPrompt, after: &ParsedPrompt) -> bool {
+    if after.shape != PromptShape::AskUserQuestion {
+        return true;
+    }
+    answered_tabs(after) > answered_tabs(before)
+}
+
+/// 回答済み（`☒`）のタブ数。`✔ Submit` は数えない。
+pub fn answered_tabs(parsed: &ParsedPrompt) -> usize {
+    parsed.tabs.iter().filter(|t| t.answered && !t.is_submit).count()
+}
+
+/// 設問タブの数（`✔ Submit` を除く）。
+pub fn question_tabs(parsed: &ParsedPrompt) -> usize {
+    parsed.tabs.iter().filter(|t| !t.is_submit).count()
+}
+
+/// いまの画面に対して次に何をするかを決める（純粋関数）。
+///
+/// `indices` は**設問の並び順**（= タブの並び順）に並べた画面上の選択肢番号。
+/// `last_qidx` は直前にこの呼び出しが答えた設問の位置。
+///
+/// **同じ設問へ 2 回答えない。** `last_qidx` と同じ位置がまた来たら「進んでいない」
+/// ということなので、送らずに止める（進んでいない画面へ次のキーを送ると、
+/// 遅れて処理された 1 発目のあとに 2 発目が別の設問を確定する）。
+pub fn plan_select_all_step(
+    parsed: &ParsedPrompt,
+    indices: &[u32],
+    last_qidx: Option<usize>,
+) -> SelectAllStep {
+    if parsed.shape != PromptShape::AskUserQuestion {
+        return SelectAllStep::Done;
+    }
+
+    // 設問数と渡された回答数が合わないなら**何も送らない**。ずれたまま送ると
+    // 別の設問へ別の答えが入る（`request.questions` は生成側 AI が書き起こす
+    // データなので、設問を落とす事故が現実にありうる）
+    let total = question_tabs(parsed);
+    if total > 0 && total != indices.len() {
+        return SelectAllStep::Refuse(format!(
+            "宛先の画面には設問が {} 問ありますが、渡された回答は {} 件です。ずれたまま送ると別の設問へ答えが入るため、何も送っていません（レポートを作り直してください）",
+            total,
+            indices.len()
+        ));
+    }
+
+    let on_review = parsed.tabs.iter().any(|t| t.is_submit)
+        && parsed.tabs.iter().all(|t| t.is_submit || t.answered);
+    if on_review {
+        let submit = parsed
+            .questions
+            .first()
+            .and_then(|q| q.options.iter().find(|o| o.label.to_lowercase().contains("submit")));
+        return match submit {
+            Some(o) => SelectAllStep::Submit { option_index: o.index },
+            None => SelectAllStep::Refuse(
+                "全問の回答は送りましたが、確認画面に『Submit answers』が見つからず確定できませんでした。ターミナルを開いて確定してください".to_string(),
+            ),
+        };
+    }
+
+    let qidx = match parsed.tabs.iter().position(|t| !t.answered && !t.is_submit) {
+        Some(i) => i,
+        // タブが読めない画面（単一設問でタブバーが出ないケースなど）は先頭から順に
+        None => last_qidx.map(|i| i + 1).unwrap_or(0),
+    };
+    if Some(qidx) == last_qidx {
+        return SelectAllStep::Refuse(format!(
+            "{} 問目を送ったあと画面が次の設問へ進みませんでした。**同じ設問へもう一度送ると、遅れて確定した先の設問で別の選択肢を確定しえます**。ターミナルで状態を確認してください",
+            qidx + 1
+        ));
+    }
+    match indices.get(qidx) {
+        Some(i) => SelectAllStep::Answer { qidx, option_index: *i },
+        None => SelectAllStep::Refuse(format!(
+            "設問 {} 問目の回答が渡された {} 件の中にありません。途中まで送った状態で止めました",
+            qidx + 1,
+            indices.len()
+        )),
+    }
+}
+
 /// 画面の形状と回答から、送るキー列を組み立てる（純粋関数）。
 ///
 /// **`Unknown` には何も組み立てない。** 分類できていない画面へ推測でキーを送ると、
@@ -658,8 +771,18 @@ fn push_tab(tabs: &mut Vec<QuestionTab>, answered: bool, is_submit: bool, label:
 /// （`"Grid    ┌────────┐"`）、枠の続き行が「折り返した続き行」として
 /// 直前の選択肢のラベルへ吸い込まれる（実測）。
 ///
-/// 手がかりは「同じ桁に縦枠の文字が 3 行以上ある」こと。ダイアログ自身の外枠
-/// （左端の `│`）を拾わないよう、左に十分寄った桁は候補にしない。
+/// # 誤検出は「選択肢のラベルを黙って切る」ので危険（セルフレビューで検出）
+///
+/// 「同じ桁に縦枠が 3 行以上」だけを条件にすると、承認対象に混ざったツリー図
+/// （`┌── src` / `├── lib` …）をプレビュー枠と取り違える。そのとき
+/// `Yes, and don't ask again for tree commands` が `Yes, and do` へ切り詰められ、
+/// **「以後無条件で承認」であることが隠れたまま人に承認させる。**
+/// `truncated` は立たないので安全弁も効かない。
+///
+/// 決め手は「**枠の左に選択肢の本体がある**」こと。本物の横並びレイアウトでは
+/// 枠の開始（`┌`）が 1 番目の選択肢と同じ行にあり、その桁で切っても
+/// `❯ 1. Grid` として読める。ツリー図では枠の左は空白しかないので、切ると何も残らない。
+/// この差で切り分ける。
 fn find_preview_column(lines: &[&str]) -> Option<usize> {
     const MIN_PREVIEW_COL: usize = 16;
     const MIN_PREVIEW_ROWS: usize = 3;
@@ -675,11 +798,23 @@ fn find_preview_column(lines: &[&str]) -> Option<usize> {
             }
         }
     }
-    counts
+    let mut candidates: Vec<usize> = counts
         .into_iter()
         .filter(|&(_, n)| n >= MIN_PREVIEW_ROWS)
-        .min_by_key(|&(col, _)| col)
         .map(|(col, _)| col)
+        .collect();
+    candidates.sort_unstable();
+
+    candidates.into_iter().find(|&col| {
+        lines.iter().any(|line| {
+            // 枠の開始行であること（`│` の途中行だけが揃っていても採らない）
+            let starts_box = line.chars().nth(col).is_some_and(|c| matches!(c, '┌' | '╭'));
+            // かつ、その桁で切った左側が選択肢の 1 番目として読めること
+            starts_box
+                && parse_option_line(&cut_at_column(line, col))
+                    .is_some_and(|(index, ..)| index == 1)
+        })
+    })
 }
 
 /// 桁 `col` より右を落とす（プレビュー枠を切り離す）。
@@ -1687,6 +1822,125 @@ mod tests {
         assert_eq!(p.shape, PromptShape::Permission);
         assert!(p.tabs.is_empty());
         assert_eq!(p.questions[0].options.len(), 3);
+    }
+
+    /// 承認対象に混ざったツリー図をプレビュー枠と取り違えない（セルフレビューで検出）。
+    ///
+    /// 取り違えるとその桁で選択肢のラベルが切られ、
+    /// `Yes, and don't ask again for tree commands` が `Yes, and do` になる。
+    /// **`truncated` は立たないので安全弁も効かず**、「以後無条件で承認」であることが
+    /// 隠れたまま人に承認させることになる。
+    #[test]
+    fn a_tree_diagram_in_the_context_is_not_a_preview_panel() {
+        let screen = [
+            "Bash command",
+            "tree -L 2 src",
+            "                ┌── src",
+            "                ├── lib",
+            "                ├── bin",
+            "                └── tests",
+            "",
+            "Do you want to proceed?",
+            "",
+            "❯ 1. Yes",
+            "  2. Yes, and don't ask again for tree commands",
+            "  3. No, and tell Claude what to do differently (esc)",
+            "",
+            "  Esc to cancel · Tab to amend",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Permission);
+        let labels: Vec<&str> = p.questions[0].options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Yes",
+                "Yes, and don't ask again for tree commands",
+                "No, and tell Claude what to do differently (esc)",
+            ],
+            "ツリー図の桁でラベルが切られている"
+        );
+        assert!(p.questions[0].allow_other);
+    }
+
+    // ── 複数設問の一括回答の手順（#264）──────────────────────────────────────
+
+    #[test]
+    fn select_all_answers_the_first_unanswered_tab() {
+        let p = parse_prompt(&multi_question_second_screen());
+        assert_eq!(p.tabs.len(), 3);
+        // 1 問目は ☒ なので 2 問目（qidx=1）へ 2 番目の選択肢を送る
+        let step = plan_select_all_step(&p, &[1, 2], None);
+        assert_eq!(step, SelectAllStep::Answer { qidx: 1, option_index: 2 });
+    }
+
+    #[test]
+    fn select_all_confirms_on_the_review_screen() {
+        let p = parse_prompt(&submit_review_screen());
+        let step = plan_select_all_step(&p, &[1, 1], Some(1));
+        assert_eq!(step, SelectAllStep::Submit { option_index: 1 });
+    }
+
+    #[test]
+    fn select_all_is_done_when_the_dialog_closed() {
+        let p = parse_prompt(&free_input_screen());
+        assert_eq!(plan_select_all_step(&p, &[1], Some(0)), SelectAllStep::Done);
+    }
+
+    /// **同じ設問へ 2 回送らない。**
+    ///
+    /// CR がまだ処理されていない中間画面を「進んだ」と読んでしまうと、同じ設問が
+    /// もう一度来る。そこで送ると、遅れて確定した**次の設問**の既定選択肢を
+    /// 確定してしまう（セルフレビューで検出した経路）。
+    #[test]
+    fn select_all_refuses_to_answer_the_same_question_twice() {
+        let p = parse_prompt(&multi_question_first_screen());
+        // 1 問目（qidx=0）を送った直後、まだ画面が進んでいない
+        match plan_select_all_step(&p, &[1, 2], Some(0)) {
+            SelectAllStep::Refuse(reason) => {
+                assert!(reason.contains("進みませんでした"), "reason={}", reason);
+            }
+            other => panic!("送ってはいけない: {:?}", other),
+        }
+    }
+
+    /// 設問数と渡された回答数がずれていたら**何も送らない**。
+    ///
+    /// ずれたまま送ると、ある設問へ別の設問の答えが入る。`request.questions` は
+    /// レポート生成側の AI が書き起こすデータなので、設問を落とす事故が現実にありうる。
+    #[test]
+    fn select_all_refuses_when_the_answer_count_does_not_match() {
+        let p = parse_prompt(&multi_question_first_screen());
+        match plan_select_all_step(&p, &[1], None) {
+            SelectAllStep::Refuse(reason) => {
+                assert!(reason.contains("2 問"), "reason={}", reason);
+                assert!(reason.contains("1 件"), "reason={}", reason);
+            }
+            other => panic!("送ってはいけない: {:?}", other),
+        }
+    }
+
+    /// 「進んだ」を fingerprint の差分で測らない（セルフレビューで検出）。
+    ///
+    /// 矢印だけ届いて CR がまだ処理されていない中間画面は fingerprint が変わるが、
+    /// **設問は 1 つも片付いていない**。ここを取り違えると同じ設問へ CR を二重に送る。
+    #[test]
+    fn moving_the_cursor_alone_is_not_progress() {
+        let before = parse_prompt(&multi_question_first_screen());
+        let mid = parse_prompt(&multi_question_first_screen().replace("❯ 1. Red", "  1. Red").replace("  2. Blue", "❯ 2. Blue"));
+        assert_ne!(before.fingerprint, mid.fingerprint, "❯ が動けば fingerprint は変わる");
+        assert!(!select_all_progressed(&before, &mid), "設問は片付いていない");
+
+        let after = parse_prompt(&multi_question_second_screen());
+        assert!(select_all_progressed(&before, &after), "☒ が増えたら進んだ");
+    }
+
+    #[test]
+    fn closing_the_dialog_counts_as_progress() {
+        let before = parse_prompt(&submit_review_screen());
+        let after = parse_prompt(&free_input_screen());
+        assert!(select_all_progressed(&before, &after));
     }
 
     #[test]
