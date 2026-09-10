@@ -895,6 +895,37 @@ struct ArtifactData {
     updated_at: u64,
 }
 
+/// 変更系コマンド (artifact の create/update/rewrite、artifact_module の
+/// create/update/rewrite/delete) の戻り値を作る。
+///
+/// **アーティファクト全体を返してはいけない** (#257)。1 行の update でも本文と全モジュール
+/// を丸ごと echo するため、モジュールが数百行あるアーティファクトでは MCP クライアント側の
+/// 1 レスポンス上限を超えて「書き込みは成功したのにツール呼び出しは失敗」になる。
+/// 書き込んだ結果を確認するのに必要な要約 (行数・モジュール一覧) だけを返し、
+/// 中身が要るときは get / outline を使わせる。
+fn artifact_mutation_summary(command: &str, data: &ArtifactData) -> serde_json::Value {
+    let mut modules: Vec<serde_json::Value> = data
+        .modules
+        .iter()
+        .map(|(name, src)| serde_json::json!({ "module_name": name, "lines": src.lines().count() }))
+        .collect();
+    modules.sort_by(|a, b| {
+        a["module_name"].as_str().unwrap_or("").cmp(b["module_name"].as_str().unwrap_or(""))
+    });
+    serde_json::json!({
+        "ok": true,
+        "command": command,
+        "id": data.id,
+        "title": data.title,
+        "type": data.content_type,
+        "entry_lines": data.content.lines().count(),
+        "modules": modules,
+        "locked_while_open": data.locked_while_open,
+        "updated_at": data.updated_at,
+        "note": "中身は返しません。確認が必要なら artifact(command: \"outline\"/\"get\") / artifact_module(command: \"get\") を使ってください",
+    })
+}
+
 /// アーティファクトがいま「表示中ロック」中なら弾く。
 ///
 /// 判定は **永続フラグ（`locked_while_open`）× 実行時の開閉状態** の AND。
@@ -1373,7 +1404,7 @@ impl NotifyService {
         }
     }
 
-    #[tool(description = "アーティファクトを操作する。create: 新規作成, update: 差分更新(old_str→new_str), rewrite: 全置換, get: 1件取得(offset/limitで行範囲指定可)。**テンプレートやファイルの中身をそのまま中身として登録する場合は content ではなく file_path を使うこと** (ファイルを Read して同じテキストを content へ書き戻す往復が消え、生成が大幅に速く・安くなる)。保存先は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は repository/branch では特定できないため project_dir が必須", annotations(read_only_hint = true))]
+    #[tool(description = "アーティファクトを操作する。create: 新規作成, update: 差分更新(old_str→new_str), rewrite: 全置換, get: 1件取得(offset/limitで行範囲指定可)。**テンプレートやファイルの中身をそのまま中身として登録する場合は content ではなく file_path を使うこと** (ファイルを Read して同じテキストを content へ書き戻す往復が消え、生成が大幅に速く・安くなる)。create / update / rewrite の戻り値は書き込み結果の**要約**(行数・モジュール一覧)だけで、中身は返さない。中身の確認が要るときは get / outline を使うこと。保存先は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は repository/branch では特定できないため project_dir が必須", annotations(read_only_hint = true))]
     async fn artifact(
         &self,
         Parameters(ArtifactParams {
@@ -1614,10 +1645,12 @@ impl NotifyService {
                 let _ = crate::report_db::insert(&pool.inner().0, "artifact_change:create", &id).await;
             }
         }
-        Ok(CallToolResult::success(vec![Content::text(json)]))
+        let summary = serde_json::to_string_pretty(&artifact_mutation_summary(&command, &data))
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(summary)]))
     }
 
-    #[tool(description = "Reactアーティファクトのモジュールを操作する。大規模アーティファクトをファイル単位で管理するために使用。list: モジュール一覧(行数のみ), get: 1モジュール取得(offset/limitで行範囲指定可), create: 追加, update: 差分更新, rewrite: 全置換, delete: 削除。**テンプレートやファイルの中身をそのままモジュールとして登録する場合は content ではなく file_path を使うこと** (ファイルを Read して同じテキストを content へ書き戻す往復が消え、生成が大幅に速く・安くなる)。対象は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は project_dir が必須", annotations(read_only_hint = true))]
+    #[tool(description = "Reactアーティファクトのモジュールを操作する。大規模アーティファクトをファイル単位で管理するために使用。list: モジュール一覧(行数のみ), get: 1モジュール取得(offset/limitで行範囲指定可), create: 追加, update: 差分更新, rewrite: 全置換, delete: 削除。**テンプレートやファイルの中身をそのままモジュールとして登録する場合は content ではなく file_path を使うこと** (ファイルを Read して同じテキストを content へ書き戻す往復が消え、生成が大幅に速く・安くなる)。create / update / rewrite / delete の戻り値は書き込み結果の**要約**(行数・モジュール一覧)だけで、中身は返さない。中身の確認が要るときは get を使うこと。対象は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は project_dir が必須", annotations(read_only_hint = true))]
     async fn artifact_module(
         &self,
         Parameters(ArtifactModuleParams {
@@ -1749,7 +1782,10 @@ impl NotifyService {
                 if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
                     "worktreeId": worktree_id, "artifactId": id, "command": "create",
                 })) { log::warn!("Failed to emit artifact-changed: {}", e); }
-                json
+                let mut summary = artifact_mutation_summary("create", &data);
+                summary["module_name"] = serde_json::json!(name);
+                serde_json::to_string_pretty(&summary)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
             }
             "rewrite" => {
                 let name = module_name.as_deref()
@@ -1766,7 +1802,10 @@ impl NotifyService {
                 if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
                     "worktreeId": worktree_id, "artifactId": id, "command": "rewrite",
                 })) { log::warn!("Failed to emit artifact-changed: {}", e); }
-                json
+                let mut summary = artifact_mutation_summary("rewrite", &data);
+                summary["module_name"] = serde_json::json!(name);
+                serde_json::to_string_pretty(&summary)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
             }
             "update" => {
                 let name = module_name.as_deref()
@@ -1791,7 +1830,10 @@ impl NotifyService {
                 if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
                     "worktreeId": worktree_id, "artifactId": id, "command": "update",
                 })) { log::warn!("Failed to emit artifact-changed: {}", e); }
-                json
+                let mut summary = artifact_mutation_summary("update", &data);
+                summary["module_name"] = serde_json::json!(name);
+                serde_json::to_string_pretty(&summary)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
             }
             "delete" => {
                 let name = module_name.as_deref()
@@ -1807,7 +1849,10 @@ impl NotifyService {
                 if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
                     "worktreeId": worktree_id, "artifactId": id, "command": "delete_module",
                 })) { log::warn!("Failed to emit artifact-changed: {}", e); }
-                json
+                let mut summary = artifact_mutation_summary("delete", &data);
+                summary["module_name"] = serde_json::json!(name);
+                serde_json::to_string_pretty(&summary)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?
             }
             other => return Err(McpError::invalid_params(
                 format!("不明なコマンド '{}'. list/get/create/update/rewrite/delete のいずれかを指定してください", other),
@@ -8169,5 +8214,34 @@ mod tests {
             classify_source(None, Some("a.jsx".into()), "create").unwrap(),
             SourceSpec::File("a.jsx".into())
         );
+    }
+
+    /// #257: 変更系コマンドの戻り値に本文・モジュールの中身を混ぜてはいけない。
+    /// 混ざると 1 行の update でもアーティファクト全体を echo し、
+    /// MCP クライアントの 1 レスポンス上限を超えて呼び出しごと失敗する。
+    #[test]
+    fn mutation_summary_omits_bodies() {
+        let mut modules = HashMap::new();
+        modules.insert("lib/send".to_string(), "SECRET_MODULE_BODY\nline2\n".to_string());
+        let data = ArtifactData {
+            id: "notif-report-1".into(),
+            content_type: "application/vnd.ant.react".into(),
+            title: "レポート".into(),
+            content: "SECRET_ENTRY_BODY\nb\nc".into(),
+            language: None,
+            modules,
+            locked_while_open: None,
+            created_at: 1,
+            updated_at: 2,
+        };
+        let v = artifact_mutation_summary("create", &data);
+        let json = serde_json::to_string(&v).unwrap();
+        assert!(!json.contains("SECRET_ENTRY_BODY"), "本文が戻り値に混ざっている: {}", json);
+        assert!(!json.contains("SECRET_MODULE_BODY"), "モジュール本文が戻り値に混ざっている: {}", json);
+        assert_eq!(v["id"], "notif-report-1");
+        assert_eq!(v["command"], "create");
+        assert_eq!(v["entry_lines"], 3);
+        assert_eq!(v["modules"][0]["module_name"], "lib/send");
+        assert_eq!(v["modules"][0]["lines"], 2);
     }
 }
