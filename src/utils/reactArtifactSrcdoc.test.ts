@@ -1,5 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { artifactSrcdocSourceKey } from "./reactArtifactSrcdoc";
+import { artifactSrcdocSourceKey, buildReactSrcdoc } from "./reactArtifactSrcdoc";
+import { ARTIFACT_STANDALONE_FLAG } from "./artifactMemory";
 
 describe("artifactSrcdocSourceKey", () => {
   it("content が同じでもモジュールが変われば別のキーになる", () => {
@@ -34,5 +35,23 @@ describe("artifactSrcdocSourceKey", () => {
 
   it("content が変われば別のキーになる", () => {
     expect(artifactSrcdocSourceKey("a", {})).not.toBe(artifactSrcdocSourceKey("b", {}));
+  });
+});
+
+describe("buildReactSrcdoc", () => {
+  it("既定ではスタンドアロンフラグを立てない（ビューアの iframe は親と話す）", () => {
+    const html = buildReactSrcdoc("<html><head></head>", "const App = () => null;");
+    // ブリッジ本体はフラグを「読む」ので、見るのは立てているかどうか
+    expect(html).not.toContain(`window["${ARTIFACT_STANDALONE_FLAG}"]=true;`);
+  });
+
+  it("standalone ではブリッジより先にフラグを立てる", () => {
+    const html = buildReactSrcdoc("<html><head></head>", "const App = () => null;", undefined, undefined, {
+      standalone: true,
+    });
+    const flagAt = html.indexOf(`window["${ARTIFACT_STANDALONE_FLAG}"]=true;`);
+    // ブリッジは読み込み時に一度だけフラグを見るので、順序が逆だと効かない
+    expect(flagAt).toBeGreaterThan(-1);
+    expect(flagAt).toBeLessThan(html.indexOf("__oretachi="));
   });
 });

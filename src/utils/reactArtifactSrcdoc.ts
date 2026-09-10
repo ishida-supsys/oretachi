@@ -4,7 +4,7 @@
  */
 
 import { ARTIFACT_LINK_INTERCEPT_JS } from "./artifactFrameLink";
-import { ARTIFACT_BRIDGE_JS } from "./artifactMemory";
+import { ARTIFACT_BRIDGE_JS, ARTIFACT_STANDALONE_FLAG } from "./artifactMemory";
 
 function htmlEscape(str: string): string {
   return str
@@ -154,6 +154,14 @@ export function buildReactSrcdoc(
   content: string,
   modules?: Record<string, string>,
   memory?: Record<string, unknown>,
+  options?: {
+    /**
+     * 親ウィンドウを持たない単体 HTML（zip エクスポートの `view.html`）として組み立てる。
+     * メモリー保存はメモリ上だけで完結し、`callTool` は即エラーになる
+     * （`ARTIFACT_STANDALONE_FLAG` の説明を参照）。
+     */
+    standalone?: boolean;
+  },
 ): string {
   const modulesJson = modules && Object.keys(modules).length > 0
     ? htmlEscape(JSON.stringify(modules))
@@ -170,6 +178,10 @@ export function buildReactSrcdoc(
     '<textarea id="_source" style="display:none">' + htmlEscape(content) + "</textarea>\n" +
     '<textarea id="_modules" style="display:none">' + modulesJson + "</textarea>\n" +
     '<textarea id="_memory" style="display:none">' + memoryJson + "</textarea>\n" +
+    // ブリッジは読み込み時にフラグを見るので、必ずブリッジより先に立てる
+    (options?.standalone
+      ? openTag("window[" + JSON.stringify(ARTIFACT_STANDALONE_FLAG) + "]=true;") + "\n"
+      : "") +
     // require('oretachi') が解決できるよう、RUNTIME_JS より先に window.__oretachi を作る
     openTag(ARTIFACT_BRIDGE_JS) + "\n" +
     openTag(RUNTIME_JS) + "\n" +

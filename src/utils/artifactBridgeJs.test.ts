@@ -15,6 +15,7 @@ import {
   ARTIFACT_BRIDGE_METHOD_MCP_CALL,
   ARTIFACT_BRIDGE_PUSH_MARKER,
   ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED,
+  ARTIFACT_STANDALONE_FLAG,
 } from "./artifactMemory";
 
 interface PostedRequest {
@@ -34,11 +35,15 @@ interface Bridge {
   subscribeMemory(fn: (memory: Record<string, unknown>) => void): () => void;
 }
 
-function setupBridge(initialMemory: Record<string, unknown>) {
+function setupBridge(
+  initialMemory: Record<string, unknown>,
+  options?: { standalone?: boolean },
+) {
   const posted: PostedRequest[] = [];
   let onMessage: ((event: { data: unknown }) => void) | null = null;
 
   const fakeWindow: Record<string, unknown> = {
+    [ARTIFACT_STANDALONE_FLAG]: options?.standalone === true,
     addEventListener(type: string, fn: (event: { data: unknown }) => void) {
       if (type === "message") onMessage = fn;
     },
@@ -313,6 +318,36 @@ describe("ARTIFACT_BRIDGE_JS", () => {
     });
     reply(posted[0].requestId, { ok: true, result: "written" });
     await expect(p).resolves.toBe("written");
+  });
+
+  // エクスポートした単体 HTML（zip の view.html）は親を持たない。
+  // 保存が 10 秒ぶら下がって失敗する、という見え方にならないことを確かめる。
+  describe("standalone（エクスポートした単体ファイル）", () => {
+    it("メモリーはメモリ上で完結し、保存は postMessage せずに resolve する", async () => {
+      const { bridge, posted } = setupBridge({ a: 1 }, { standalone: true });
+      const p = bridge.setMemoryKey("b", 2);
+      await vi.advanceTimersByTimeAsync(400);
+      await expect(p).resolves.toBeUndefined();
+      expect(posted).toHaveLength(0);
+      // 保存されないだけで、表示中の値としては更新されている
+      expect(bridge.getMemory()).toEqual({ a: 1, b: 2 });
+    });
+
+    it("上限超過の判定は standalone でも効く", async () => {
+      const { bridge } = setupBridge({}, { standalone: true });
+      const p = bridge.setMemoryKey("big", "x".repeat(ARTIFACT_MEMORY_MAX_BYTES));
+      const rejected = expect(p).rejects.toThrow("too large");
+      await vi.advanceTimersByTimeAsync(400);
+      await rejected;
+    });
+
+    it("callTool は待たずに reject する（呼べる相手がいない）", async () => {
+      const { bridge, posted } = setupBridge({}, { standalone: true });
+      await expect(bridge.callTool("oretachi_write_terminal", {})).rejects.toThrow(
+        "unavailable in an exported file",
+      );
+      expect(posted).toHaveLength(0);
+    });
   });
 
   it("上限超過は IPC を往復させず iframe 側で reject する", async () => {

@@ -7,6 +7,7 @@ import {
   buildReactSrcdoc,
   artifactSrcdocSourceKey,
 } from "../../utils/reactArtifactSrcdoc";
+import { loadVendors, type VendorScripts } from "../../utils/reactArtifactVendors";
 import {
   readArtifactLinkHoverMessage,
   readArtifactNavigateMessage,
@@ -21,32 +22,6 @@ import {
   postArtifactBridgeMemoryChanged,
   type ArtifactBridgeRequest,
 } from "../../utils/artifactMemory";
-
-type VendorScripts = { react: string; reactDom: string; babel: string; tailwind: string };
-
-// Promise キャッシュ: 同時マウント時も重複フェッチしない。失敗時は null にリセットしてリトライ可能にする。
-let _vendorPromise: Promise<VendorScripts> | null = null;
-
-function loadVendors(): Promise<VendorScripts> {
-  if (!_vendorPromise) {
-    const fetchText = async (url: string) => {
-      const r = await fetch(url);
-      if (!r.ok) throw new Error(`Failed to load ${url}: ${r.status} ${r.statusText}`);
-      return r.text();
-    };
-    _vendorPromise = Promise.all([
-      fetchText("/vendor/react.production.min.js"),
-      fetchText("/vendor/react-dom.production.min.js"),
-      import("@babel/standalone/babel.min.js?raw").then((m) => m.default),
-      fetchText("/vendor/tailwindcss-browser.js"),
-    ]).then(([react, reactDom, babel, tailwind]) => ({ react, reactDom, babel, tailwind }))
-      .catch((e) => {
-        _vendorPromise = null; // 失敗時はリトライ可能にする
-        throw e;
-      });
-  }
-  return _vendorPromise;
-}
 
 const props = defineProps<{
   content: string;
