@@ -4117,8 +4117,14 @@ impl NotifyService {
                     // 全設問のタブが `☒` になっている
                     let all_dispatched =
                         last_qidx.is_some_and(|i| i + 1 >= indices.len());
-                    let really_closed = parsed.shape == PromptShape::Text
-                        || answered >= indices.len();
+                    // `unknown` は再描画途中の可能性が高いので「閉じた」と認めない。
+                    // それ以外（入力欄へ戻った / 別のダイアログが開いた / 全タブ `☒`）は
+                    // 自分のダイアログが片付いたと見てよい。**単一設問には `✔ Submit`
+                    // タブが無く `☒` を観測する機会が無い**ので、`answered` だけを
+                    // 条件にすると正常系が `unverified` に落ちる
+                    let really_closed = answered >= indices.len()
+                        || (parsed.shape != PromptShape::AskUserQuestion
+                            && parsed.shape != PromptShape::Unknown);
                     last = Some(parsed);
                     if all_dispatched && really_closed {
                         return outcome("sent", sent, last.as_ref(), None, answered);

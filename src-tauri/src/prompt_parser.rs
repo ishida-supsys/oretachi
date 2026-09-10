@@ -413,7 +413,7 @@ pub fn plan_select_all_step(
     // タブバーを読めなくても、見出しと `Submit answers` の並びで確認画面と分かる
     // （#264。タブバーが画面外へ流れると `tabs` が空になる）
     let review_without_tabs = parsed.tabs.is_empty()
-        && contains_ci(&parsed.header, "submit your answers")
+        && contains_ci(&parsed.header, SUBMIT_REVIEW_HEADING)
         && parsed
             .questions
             .first()
@@ -776,6 +776,45 @@ fn parse_tab_bar(body: &str) -> Option<Vec<QuestionTab>> {
     }
 }
 
+/// 確認画面（全問回答後）の見出し。タブバーを読めないときの唯一の手がかり。
+///
+/// **`parse_prompt` と [`plan_select_all_step`] で同じ文字列を照合する。**
+/// 片方だけ直すと、画面は確認画面と認識できているのに一括回答から
+/// Submit を押せない（あるいはその逆）という食い違いになる。
+pub const SUBMIT_REVIEW_HEADING: &str = "submit your answers";
+
+/// 選択肢の上にある行を「末尾の見出しブロック」と「その上の補足」に割る。
+///
+/// **見出しは折り返す。** 実測（13 桁のターミナル）では
+/// `Do you want to proceed?` が 3 行に割れた。1 行だけ拾うと `proceed?` になり、
+/// 見出しでの判定（確認画面の検出など）が**狭いタブでだけ外れる**。
+/// 末尾の空行と罫線を飛ばしてから、連続する非空行をまとめて 1 つの見出しにする。
+fn split_heading_and_context(above: &[String]) -> (String, String) {
+    let mut end = above.len();
+    while end > 0 && (above[end - 1].is_empty() || is_rule_line(&above[end - 1])) {
+        end -= 1;
+    }
+    let mut start = end;
+    while start > 0 && !above[start - 1].is_empty() && !is_rule_line(&above[start - 1]) {
+        start -= 1;
+    }
+    let heading = above[start..end]
+        .iter()
+        .map(|b| b.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let context = above[..start]
+        .iter()
+        .filter(|b| !b.is_empty() && !is_rule_line(b))
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    (heading, context)
+}
+
 /// タブバーとして採ってよいだけの形をしているか（#264。セルフレビューで検出）。
 ///
 /// **`☐` / `☒` が 1 個あるだけでは足りない。** Claude Code の TodoWrite パネルは
@@ -794,6 +833,25 @@ fn parse_tab_bar(body: &str) -> Option<Vec<QuestionTab>> {
 ///   「`AskUserQuestion` のフッタが出ている」「選択肢のすぐ上にある」を追加で確かめる**
 fn is_strong_tab_bar(tabs: &[QuestionTab], body: &str) -> bool {
     tabs.len() >= 2 || body.contains('←') || body.contains('→') || tabs.iter().any(|t| t.is_submit)
+}
+
+/// タブのラベルとして許す最大文字数。
+///
+/// `AskUserQuestion` の `header` は短い見出し（`Color` / `URL表示` / `Submit`）で、
+/// 仕様上も 12 文字までとされている。長いものは**設問文や todo の項目**なので、
+/// 行頭がチェックボックスでもタブバーとして採らない（4 回目のセルフレビューで
+/// 検出: `☐ の項目のうちどれを先にやりますか?` が本物のタブバーに勝っていた）。
+const MAX_TAB_LABEL_CHARS: usize = 16;
+
+/// タブバー**らしい行の形**をしているか。
+///
+/// 行頭（trim 後）が `←` かチェックボックスで始まること、ラベルが短いこと。
+/// これで散文が落ちる（4 回目のセルフレビューで検出: `凡例: ☒ 完了 / ☐ 未完了` が
+/// 「タブ 2 つ = 強い候補」として本物より優先されていた）。
+fn looks_like_tab_bar_line(tabs: &[QuestionTab], body: &str) -> bool {
+    let head = body.trim_start().chars().next();
+    let starts_right = matches!(head, Some('←') | Some('☐') | Some('☑') | Some('☒'));
+    starts_right && tabs.iter().all(|t| t.label.chars().count() <= MAX_TAB_LABEL_CHARS)
 }
 
 fn push_tab(tabs: &mut Vec<QuestionTab>, answered: bool, is_submit: bool, label: String) {
@@ -1043,7 +1101,6 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
         let start = i;
         let mut options = vec![PromptOption { index, label }];
         let mut num_cols = vec![num_col];
-        let mut label_cols = vec![label_col];
         let mut cursor_index = if has_cursor { Some(index) } else { None };
         let mut expected = 2u32;
         let mut current_label_col = label_col;
@@ -1062,7 +1119,6 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
                 }
                 options.push(PromptOption { index: idx, label });
                 num_cols.push(ncol);
-                label_cols.push(col);
                 expected += 1;
                 current_label_col = col;
                 end = j;
@@ -1102,20 +1158,27 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
         // これを拾わないと `cursor_index` が `None` になり、矢印の移動量を決められず
         // **2 問目以降が一切答えられなくなる**。誤爆を避けるため
         // 「1 行だけが他より左」という形にきっちり当てはまるときしか採らない
-        // **番号の桁だけでは足りない。** 選択肢がちょうど 10 件で番号が右寄せ描画
-        // されると `10.` の行だけ番号が 1 桁左から始まり、カーソル扱いになる。
-        // カーソル行はマーカーぶん**行全体**が左へ寄るので、ラベルの桁も一緒に
-        // ずれていることを求める（右寄せの `10.` はラベルの桁が揃う）
+        // **桁数の多い番号を巻き込まない。** 選択肢がちょうど 10 件で番号が
+        // 右寄せ描画されると `10.` の行だけ 1 桁左から始まり、カーソル扱いになる。
+        // 右寄せで左へ出るのは**桁が増えた番号**だけなので、外れ値の番号が
+        // 他より桁数が多いなら採らない（4 回目のセルフレビューで検出）
         if cursor_index.is_none() && options.len() >= 2 {
-            let num_base = *num_cols.iter().max().unwrap_or(&0);
-            let label_base = *label_cols.iter().max().unwrap_or(&0);
-            let outliers: Vec<usize> = (0..num_cols.len())
-                .filter(|&k| num_cols[k] < num_base && label_cols[k] < label_base)
-                .collect();
-            let others_aligned = (0..num_cols.len())
-                .all(|k| outliers.contains(&k) || (num_cols[k] == num_base && label_cols[k] == label_base));
+            let base = *num_cols.iter().max().unwrap_or(&0);
+            let outliers: Vec<usize> =
+                (0..num_cols.len()).filter(|&k| num_cols[k] + 1 == base).collect();
+            let others_aligned =
+                (0..num_cols.len()).all(|k| outliers.contains(&k) || num_cols[k] == base);
             if outliers.len() == 1 && others_aligned {
-                cursor_index = Some(options[outliers[0]].index);
+                let k = outliers[0];
+                let digits = |i: u32| i.to_string().len();
+                let widest_other = (0..options.len())
+                    .filter(|&j| j != k)
+                    .map(|j| digits(options[j].index))
+                    .max()
+                    .unwrap_or(1);
+                if digits(options[k].index) <= widest_other {
+                    cursor_index = Some(options[k].index);
+                }
             }
         }
         runs.push(OptionRun { start, end, options, cursor_index, preview_col });
@@ -1427,21 +1490,28 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     // タブが 1 つだけの形（単一設問）は強い形と区別できないので、
     // **`AskUserQuestion` のフッタが出ていて、かつ選択肢のすぐ上にある**ことも求める。
     //
-    // **強い候補を先に探す。** 下から順に「受理できる最初の行」を採ると、本物の
-    // タブバーより下に `☐` を 1 個含む行（設問文・選択肢の説明・TodoWrite）が
-    // あったときにそちらが勝つ。そうなると `is_submit` が失われて確認画面へ
-    // 進めなくなり、偽タブは `☒` に変わらないので「進んでいない」と誤判定され続ける
-    // （2 回目のセルフレビューで検出）
-    let find_tab_bar = |strong_only: bool| -> Option<(usize, Vec<QuestionTab>)> {
-        above.iter().enumerate().rev().find_map(|(row, body)| {
+    // **下から見て最初に「タブバーらしくて受理できる」行を採る。**
+    //
+    // 「強い候補を画面全体から先に探す」形にすると、本物より上にある偽の強い候補
+    // （`凡例: ☒ 完了 / ☐ 未完了` など）が、選択肢の直上にある本物に勝つ
+    // （4 回目のセルフレビューで検出）。逆に「下から最初の受理可能な行」だけだと、
+    // 本物より下の設問文に含まれる `☐` が勝つ（2 回目のセルフレビューで検出）。
+    //
+    // 両方を塞ぐのは**行の形**の条件（`looks_like_tab_bar_line`）で、
+    // 散文はここで落ちる。そのうえで下から最初のものを採る。
+    let tabs: Vec<QuestionTab> = above
+        .iter()
+        .enumerate()
+        .rev()
+        .find_map(|(row, body)| {
             let parsed = parse_tab_bar(body)?;
+            if !looks_like_tab_bar_line(&parsed, body) {
+                return None;
+            }
             if is_strong_tab_bar(&parsed, body) {
                 return Some((row, parsed));
             }
-            if strong_only {
-                return None;
-            }
-            // タブが 1 つだけの単一設問。TodoWrite と形が同じなので、
+            // タブが 1 つだけの単一設問。TodoWrite の 1 行と形が同じなので、
             // `AskUserQuestion` のフッタと選択肢からの近さで裏を取る
             let close_enough = above.len() - 1 - row <= TAB_BAR_MAX_GAP;
             if below_has_aq_footer && close_enough {
@@ -1450,9 +1520,6 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
                 None
             }
         })
-    };
-    let tabs: Vec<QuestionTab> = find_tab_bar(true)
-        .or_else(|| find_tab_bar(false))
         .map(|(row, parsed)| {
             above.drain(..=row);
             parsed
@@ -1469,11 +1536,13 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     // 確定する（＝押していない方が通る）。
     //
     // 見出しと `Submit answers` という並びは確認画面固有なので、これ自体を印にする。
-    let submit_review = above
-        .iter()
-        .rev()
-        .find(|b| !b.is_empty() && !is_rule_line(b))
-        .is_some_and(|h| contains_ci(h, "submit your answers"))
+    //
+    // **見出しは折り返す。** しかもこの救済が要る状況（狭い / 短いタブ）は
+    // まさに `Ready to submit your answers?` が複数行へ割れる状況なので、
+    // 最後の 1 行だけを見ると**救済が必要なときに限って発火しない**
+    // （4 回目のセルフレビューで検出）。末尾の非空ブロックを連結してから照合する。
+    let (block_heading, block_context) = split_heading_and_context(&above);
+    let submit_review = contains_ci(&block_heading, SUBMIT_REVIEW_HEADING)
         && run
             .options
             .iter()
@@ -1510,17 +1579,10 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
         (header, context)
     } else {
         // タブバーがある画面（`AskUserQuestion`）と、タブバーを読めなかった
-        // 確認画面。**最後の非空行が設問文（確認画面なら見出し）**で、その上は補足
-        // （`Review your answers` / `● Which color? → Red` など）。
-        let body: Vec<&String> =
-            above.iter().filter(|b| !b.is_empty() && !is_rule_line(b)).collect();
-        match body.split_last() {
-            Some((last, rest)) => (
-                (*last).clone(),
-                rest.iter().map(|b| b.as_str()).collect::<Vec<_>>().join("\n"),
-            ),
-            None => (String::new(), String::new()),
-        }
+        // 確認画面。**末尾の非空ブロックが設問文（確認画面なら見出し）**で、
+        // その上は補足（`Review your answers` / `● Which color? → Red` など）。
+        // 折り返しに耐えるようブロックごと連結する
+        (block_heading, block_context)
     };
 
     let footer_says_cc =
@@ -2397,6 +2459,77 @@ mod tests {
         let p = parse_prompt(&lines.join("\n"));
         assert_eq!(p.questions[0].options.len(), 10);
         assert_eq!(p.questions[0].cursor_index, None, "❯ が無いのに位置を決めない");
+    }
+
+    /// 見出しが折り返していても確認画面と分かる（4 回目のセルフレビューで検出）。
+    ///
+    /// この救済が要るのは狭い / 短いタブで、**まさに見出しが割れる状況**。
+    /// 最後の 1 行だけを見ていると、必要なときに限って発火しなかった。
+    #[test]
+    fn the_submit_review_screen_is_recognised_when_its_heading_wraps() {
+        let screen = [
+            "Review your",
+            "answers",
+            "",
+            "Ready to",
+            "submit your",
+            "answers?",
+            "",
+            "❯ 1. Submit",
+            "     answers",
+            "  2. Cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::AskUserQuestion);
+        assert_eq!(p.navigation, Navigation::Arrows, "数字キーでは確定しない");
+        assert_eq!(p.header, "Ready to submit your answers?");
+        let keys = plan_keys(&p, &Answer::Select { option_index: 2 }).expect("cancel");
+        assert_eq!(keys_preview(&keys), vec!["Down", "CR"]);
+        assert_eq!(
+            plan_select_all_step(&p, &[1, 1], Some(1)),
+            SelectAllStep::Submit { option_index: 1 }
+        );
+    }
+
+    /// 本物のタブバーより**上**にある散文の `☒` / `☐` に負けない
+    /// （4 回目のセルフレビューで検出）。
+    ///
+    /// 「強い候補を画面全体から先に探す」形にしたときの新しい穴だった。
+    #[test]
+    fn prose_with_checkboxes_above_does_not_beat_the_real_tab_bar() {
+        let screen = [
+            "凡例: ☒ 完了 / ☐ 未完了",
+            "",
+            "☐ Color",
+            "Which color?",
+            "",
+            "❯ 1. Red",
+            "  2. Blue",
+            "",
+            "Enter to select · ↑/↓ to navigate · Esc to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        let labels: Vec<&str> = p.tabs.iter().map(|t| t.label.as_str()).collect();
+        assert_eq!(labels, vec!["Color"], "tabs={:?}", p.tabs);
+        assert_eq!(p.header, "Which color?");
+    }
+
+    /// 番号が左寄せなら、選択肢が 10 件以上でもカーソルを推定できる
+    /// （`10.` の行だけラベルの桁がずれることで取り逃していた）。
+    #[test]
+    fn the_cursor_is_still_recovered_with_ten_or_more_options() {
+        let mut lines = vec!["←  ☒ A  ☐ B  ✔ Submit  →".to_string(), "Pick one".to_string(), String::new()];
+        for i in 1..=10 {
+            // カーソル行だけマーカーぶん左（`❯` は描かれていない）
+            let prefix = if i == 3 { " " } else { "  " };
+            lines.push(format!("{}{}. option-{}", prefix, i, i));
+        }
+        lines.push("Enter to select · Tab/Arrow keys to navigate · Esc to cancel".to_string());
+        let p = parse_prompt(&lines.join("\n"));
+        assert_eq!(p.questions[0].options.len(), 10);
+        assert_eq!(p.questions[0].cursor_index, Some(3));
     }
 
     #[test]
