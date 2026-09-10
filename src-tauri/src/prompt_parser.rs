@@ -365,7 +365,11 @@ pub enum SelectAllStep {
 /// - ダイアログが閉じた（`askUserQuestion` でなくなった）
 /// - 回答済み（`☒`）のタブが増えた
 pub fn select_all_progressed(before: &ParsedPrompt, after: &ParsedPrompt) -> bool {
-    if after.shape != PromptShape::AskUserQuestion {
+    // **「`askUserQuestion` でなくなった」で進んだと言わない。** 確認画面の
+    // 再描画途中はタブバーも見出しも出ておらず `numbered` に見えるので、
+    // そのフレームを掴むと「進んだ」→次の周回で「閉じた」と読んでしまう
+    // （5 回目のセルフレビューで検出）。入力欄へ戻っていれば確かに片付いている
+    if after.shape == PromptShape::Text {
         return true;
     }
     answered_tabs(after) > answered_tabs(before)
@@ -395,6 +399,15 @@ pub fn plan_select_all_step(
     last_qidx: Option<usize>,
 ) -> SelectAllStep {
     if parsed.shape != PromptShape::AskUserQuestion {
+        // 確認画面が再描画途中で別の形状に見えているだけかもしれない。
+        // `Submit answers` が画面に残っている限り「閉じた」とは言わない
+        // （言うと、押していないのに「返答済み」になる。5 回目のセルフレビューで検出）
+        if has_submit_option(parsed) {
+            return SelectAllStep::Refuse(
+                "宛先の画面にまだ『Submit answers』が残っています（確認画面の描き直し途中かもしれません）。取り違えを避けるため何も送っていません。ターミナルを開いて確定してください"
+                    .to_string(),
+            );
+        }
         return SelectAllStep::Done;
     }
 
@@ -717,25 +730,50 @@ fn strip_cursor_marker(s: &str) -> (&str, bool) {
 ///
 /// 効く手がかりは**位置**。入力欄は上下を罫線（`────` / `╭╮` / `╰╯`）で挟まれている。
 /// ダイアログの選択肢は見出しや他の選択肢に挟まれているので、両側が罫線になることはない。
+/// # 複数行の下書き（5 回目のセルフレビューで検出）
+///
+/// 入力欄は複数行になる。2 行目以降は `❯` で始まらないので、行単体で見ると
+/// 判定が外れる:
+///
+/// ```text
+/// ────────────────────────────────
+/// ❯1. do this thing first
+///   2. then that
+/// ────────────────────────────────
+///   ? for shortcuts
+/// ```
+///
+/// 外れると人の**書きかけの下書き**が「画面に実在する選択肢」としてカードに並び、
+/// 押すと CR が入力欄へ入って**下書きがそのまま宛先へ送信される**。
+/// そこで行単体ではなく**罫線で挟まれた箱**として見て、箱の最初の非空行が
+/// 入力欄の記号で始まっていれば箱の中の行を全部除外する。
 fn is_input_box_line(lines: &[&str], i: usize) -> bool {
-    let (body, _) = strip_frame(lines[i]);
-    if !matches!(body.chars().next(), Some('❯') | Some('>')) {
-        return false;
-    }
-    // 直近の非空行が上下ともに罫線か
-    let neighbour_is_rule = |range: &mut dyn Iterator<Item = usize>| -> bool {
-        for j in range {
-            let (b, _) = strip_frame(lines[j]);
-            if b.is_empty() {
-                continue;
-            }
-            return is_rule_line(&b);
-        }
-        false
+    /// 入力欄の箱として許す高さ（罫線までの行数）。長すぎるとダイアログを巻き込む
+    const INPUT_BOX_MAX_LINES: usize = 8;
+
+    let rule_at = |j: usize| -> bool {
+        let (b, _) = strip_frame(lines[j]);
+        is_rule_line(&b)
     };
-    let above = neighbour_is_rule(&mut (0..i).rev());
-    let below = neighbour_is_rule(&mut (i + 1..lines.len()));
-    above && below
+    // 上下それぞれ、近くに罫線があるか（間に何行あってもよい = 複数行の下書き）
+    let up = (0..i).rev().take(INPUT_BOX_MAX_LINES).find(|&j| rule_at(j));
+    let down = (i + 1..lines.len()).take(INPUT_BOX_MAX_LINES).find(|&j| rule_at(j));
+    let (Some(up), Some(_down)) = (up, down) else {
+        return false;
+    };
+    // 箱の最初の非空行が入力欄の記号（`❯` / `>`）で始まっていること。
+    // ダイアログも枠で囲まれることがあるが、その中の先頭行は見出しか設問文になる
+    lines[up + 1..=i]
+        .iter()
+        .find_map(|l| {
+            let (b, _) = strip_frame(l);
+            if b.is_empty() {
+                None
+            } else {
+                Some(matches!(b.chars().next(), Some('❯') | Some('>')))
+            }
+        })
+        .unwrap_or(false)
 }
 
 /// タブバー行（`←  ☒ Color  ☐ Size  ✔ Submit  →`）を解析する（#264）。
@@ -795,7 +833,15 @@ fn split_heading_and_context(above: &[String]) -> (String, String) {
         end -= 1;
     }
     let mut start = end;
-    while start > 0 && !above[start - 1].is_empty() && !is_rule_line(&above[start - 1]) {
+    // **行数に上限を置く。** 確認画面ではタブバーが解析窓の外へ出ると
+    // 回答サマリ 30 行が全部ひとつながりの非空ブロックになり、見出しが
+    // 数百文字の 1 行になってカードが読めなくなる。折り返しを繋ぐのに要るのは
+    // 数行なので、そこで打ち切って残りは補足へ回す（5 回目のセルフレビュー）
+    while start > 0
+        && end - start < HEADER_WRAP_LINES
+        && !above[start - 1].is_empty()
+        && !is_rule_line(&above[start - 1])
+    {
         start -= 1;
     }
     let heading = above[start..end]
@@ -851,7 +897,22 @@ const MAX_TAB_LABEL_CHARS: usize = 16;
 fn looks_like_tab_bar_line(tabs: &[QuestionTab], body: &str) -> bool {
     let head = body.trim_start().chars().next();
     let starts_right = matches!(head, Some('←') | Some('☐') | Some('☑') | Some('☒'));
-    starts_right && tabs.iter().all(|t| t.label.chars().count() <= MAX_TAB_LABEL_CHARS)
+    if !starts_right {
+        return false;
+    }
+    // **長さの条件は弱い候補（タブ 1 つ）にだけ課す。** 強い候補にも課すと、
+    // 見出しの長い設問が 1 つ混ざっただけで本物のタブバーごと落ちる
+    // （5 回目のセルフレビューで検出）。強い候補は形自体が散文と紛れない
+    is_strong_tab_bar(tabs, body)
+        || tabs.iter().all(|t| t.label.chars().count() <= MAX_TAB_LABEL_CHARS)
+}
+
+/// 画面に `Submit answers` の選択肢があるか（確認画面が残っている印）。
+fn has_submit_option(parsed: &ParsedPrompt) -> bool {
+    parsed
+        .questions
+        .first()
+        .is_some_and(|q| q.options.iter().any(|o| o.label.to_lowercase().starts_with("submit")))
 }
 
 fn push_tab(tabs: &mut Vec<QuestionTab>, answered: bool, is_submit: bool, label: String) {
@@ -1164,26 +1225,23 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
         // これを拾わないと `cursor_index` が `None` になり、矢印の移動量を決められず
         // **2 問目以降が一切答えられなくなる**。誤爆を避けるため
         // 「1 行だけが他より左」という形にきっちり当てはまるときしか採らない
-        // **桁数の多い番号を巻き込まない。** 選択肢がちょうど 10 件で番号が
-        // 右寄せ描画されると `10.` の行だけ 1 桁左から始まり、カーソル扱いになる。
-        // 右寄せで左へ出るのは**桁が増えた番号**だけなので、外れ値の番号が
-        // 他より桁数が多いなら採らない（4 回目のセルフレビューで検出）
+        // **右寄せ描画と取り違えない。** 番号が右寄せだと桁数の多い `10.` だけ
+        // 1 桁左から始まり、カーソル扱いになる。右寄せなら**番号の終わり桁**が
+        // 全行で揃うので、それで先に弾く（桁数だけで弾くと、左寄せで
+        // カーソルが 10 番目にある場合を取り逃す。4・5 回目のセルフレビュー）
         if cursor_index.is_none() && options.len() >= 2 {
-            let base = *num_cols.iter().max().unwrap_or(&0);
-            let outliers: Vec<usize> =
-                (0..num_cols.len()).filter(|&k| num_cols[k] + 1 == base).collect();
-            let others_aligned =
-                (0..num_cols.len()).all(|k| outliers.contains(&k) || num_cols[k] == base);
-            if outliers.len() == 1 && others_aligned {
-                let k = outliers[0];
-                let digits = |i: u32| i.to_string().len();
-                let widest_other = (0..options.len())
-                    .filter(|&j| j != k)
-                    .map(|j| digits(options[j].index))
-                    .max()
-                    .unwrap_or(1);
-                if digits(options[k].index) <= widest_other {
-                    cursor_index = Some(options[k].index);
+            let digits = |i: u32| i.to_string().len();
+            let ends: Vec<usize> =
+                (0..options.len()).map(|k| num_cols[k] + digits(options[k].index)).collect();
+            let right_aligned = ends.iter().all(|e| *e == ends[0]);
+            if !right_aligned {
+                let base = *num_cols.iter().max().unwrap_or(&0);
+                let outliers: Vec<usize> =
+                    (0..num_cols.len()).filter(|&k| num_cols[k] + 1 == base).collect();
+                let others_aligned =
+                    (0..num_cols.len()).all(|k| outliers.contains(&k) || num_cols[k] == base);
+                if outliers.len() == 1 && others_aligned {
+                    cursor_index = Some(options[outliers[0]].index);
                 }
             }
         }
@@ -2572,6 +2630,107 @@ mod tests {
     #[test]
     fn a_bare_numbered_list_without_a_cursor_still_uses_digits() {
         let p = parse_prompt("Pick a target:\n  1) staging\n  2) production\nSelection: ");
+        assert_eq!(p.navigation, Navigation::Digits);
+    }
+
+    /// 入力欄に**複数行**の下書きが入っていても選択肢ダイアログと取り違えない
+    /// （5 回目のセルフレビューで検出）。
+    ///
+    /// 取り違えると、人の書きかけの下書きが「画面に実在する選択肢」として並び、
+    /// 押すと CR が入力欄へ入って**下書きがそのまま宛先へ送信される**。
+    #[test]
+    fn a_multiline_draft_in_the_input_box_is_not_an_option_list() {
+        let screen = [
+            "────────────────────────────────",
+            "❯1. do this thing first",
+            "  2. then that",
+            "────────────────────────────────",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Text, "tail={:?}", p.tail);
+        assert!(p.questions.is_empty() || p.questions[0].options.is_empty());
+    }
+
+    /// 枠で囲まれたダイアログは入力欄扱いにしない（上の変更の巻き添え確認）。
+    #[test]
+    fn a_framed_dialog_is_still_parsed_as_options() {
+        let p = parse_prompt(&ask_user_question_screen());
+        assert_eq!(p.shape, PromptShape::AskUserQuestion);
+        assert_eq!(p.questions[0].options.len(), 4);
+    }
+
+    /// 確認画面が描き直し途中で `numbered` に見えても「閉じた」と言わない
+    /// （5 回目のセルフレビューで検出）。
+    ///
+    /// 言うと、Submit を押していないのに「返答済み」になり、宛先は確認画面で
+    /// 止まったまま誰も気づけない。
+    #[test]
+    fn a_half_drawn_review_screen_is_not_treated_as_closed() {
+        let screen = [
+            "● Which color? → Red",
+            "❯ 1. Submit answers",
+            "  2. Cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        match plan_select_all_step(&p, &[1, 1], Some(1)) {
+            SelectAllStep::Refuse(reason) => {
+                assert!(reason.contains("Submit answers"), "reason={}", reason);
+            }
+            other => panic!("閉じたと言ってはいけない: {:?}", other),
+        }
+    }
+
+    /// 進捗の判定に「`askUserQuestion` でなくなった」を使わない。
+    #[test]
+    fn a_half_drawn_frame_is_not_progress() {
+        let before = parse_prompt(&multi_question_second_screen());
+        let half = parse_prompt("● Which color? → Red\n❯ 1. Submit answers\n  2. Cancel");
+        assert_ne!(half.shape, PromptShape::AskUserQuestion);
+        assert!(!select_all_progressed(&before, &half));
+    }
+
+    /// 見出しの長いタブが混ざっても本物のタブバーを落とさない
+    /// （5 回目のセルフレビューで検出）。
+    #[test]
+    fn a_long_tab_label_does_not_drop_the_whole_tab_bar() {
+        let screen = [
+            "←  ☒ Color  ☐ これはとてもとても長い見出しですねこれは  ✔ Submit  →",
+            "Which size?",
+            "",
+            "❯ 1. Large",
+            "  2. Small",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.tabs.len(), 3, "tabs={:?}", p.tabs);
+        assert!(p.tabs[2].is_submit);
+        assert_eq!(p.header, "Which size?");
+    }
+
+    /// `10.` が `9.` の 1 桁左に来る形は、**右寄せ描画と原理的に区別できない**。
+    ///
+    /// 「カーソルが 10 番目にあって行全体が 1 桁左へ寄っている」画面と
+    /// 「番号が右寄せで桁の増えた `10.` だけ左へ出ている」画面は、
+    /// 文字の並びとして同じものになる。取り違えると 9 個ぶん矢印を送って
+    /// 別の選択肢を確定するので、**曖昧なら諦める**（`None`）。
+    /// カードは「❯ が読み取れません」と出して手動操作へ誘導する。
+    #[test]
+    fn a_ten_option_list_with_a_shifted_last_row_is_ambiguous_and_gives_up() {
+        let mut lines = vec!["Pick one".to_string(), String::new()];
+        for i in 1..=10 {
+            let prefix = if i == 10 { " " } else { "  " };
+            lines.push(format!("{}{}. option-{}", prefix, i, i));
+        }
+        let p = parse_prompt(&lines.join("\n"));
+        assert_eq!(p.questions[0].options.len(), 10);
+        assert_eq!(p.questions[0].cursor_index, None);
+        // カーソルが要るのは矢印で答える画面だけ。ここは `❯` もフッタも無いので
+        // 素の番号リスト（数字 + CR）として扱われ、そちらは影響を受けない
         assert_eq!(p.navigation, Navigation::Digits);
     }
 

@@ -35,7 +35,7 @@
 // `kind` が `worktree.created` / `worktree.closed` のカードは**報告カード**で、
 // 人の判断を必要としない（返答 UI が出ない）。判定は `lib/send` の `isReportOnly`
 // が `kind` から機械的にやるので、**この配列にフラグを足す必要は無い**。
-// 報告カードで埋めるのは次の 5 つだけ:
+// 報告カードで埋めるのは次の 6 つだけ:
 //
 //   id / inboxIds / worktreeName / kind / at / paragraphs
 //   （+ 任意で branchName / worktreeId / issueRef / links）

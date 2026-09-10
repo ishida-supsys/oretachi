@@ -276,6 +276,13 @@ oretachi_inspect_prompt(session_id: <1-4(b) と同じ値>)
 ただし ESC 経路が実際に使えるのは `permission` / `plan` / `askUserQuestion` の 3 形状のみ
 （`yesno` / `numbered` では `escapeHatch` が立っていても使えない）。
 
+**キーの種類は `shape` ではなく `navigation` で決まる。** 上の表の「送られるキー」は
+典型的な組み合わせで、実際に送られるのは `prompt.navigation` が示すもの
+（`arrows` = 矢印 + CR / `digits` = 数字 + CR）。`numbered` に見える画面でも、
+**選択肢に `❯` が描かれていれば矢印**になる（Claude Code の確認画面がこれ。
+数字は確定キーではないので、数字を送ると無視されて CR だけが効き、
+`❯` の当たっている別の選択肢が確定してしまう。#264）。
+
 **選択は数字キーではなく矢印 + CR。** 実測で確認済み: 許可ダイアログへ Down を 2 回送ってから
 CR を送ると、3 番目の選択肢が確定した。`cursorIndex` から目標までの移動量を Rust 側が計算するので、
 選択肢が 10 件以上あっても同じ手順で通る（数字キーだと 2 桁を打てない）。

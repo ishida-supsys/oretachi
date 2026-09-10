@@ -4117,14 +4117,18 @@ impl NotifyService {
                     // 全設問のタブが `☒` になっている
                     let all_dispatched =
                         last_qidx.is_some_and(|i| i + 1 >= indices.len());
-                    // `unknown` は再描画途中の可能性が高いので「閉じた」と認めない。
-                    // それ以外（入力欄へ戻った / 別のダイアログが開いた / 全タブ `☒`）は
-                    // 自分のダイアログが片付いたと見てよい。**単一設問には `✔ Submit`
-                    // タブが無く `☒` を観測する機会が無い**ので、`answered` だけを
-                    // 条件にすると正常系が `unverified` に落ちる
-                    let really_closed = answered >= indices.len()
-                        || (parsed.shape != PromptShape::AskUserQuestion
-                            && parsed.shape != PromptShape::Unknown);
+                    // **「`askUserQuestion` 以外なら閉じた」に緩めてはいけない。**
+                    // 4 回目のレビューで「単一設問の正常系が `unverified` に落ちうる」
+                    // という軽い理由で緩めたところ、3 回目に塞いだ critical が
+                    // そのまま開いた（5 回目のレビューで検出）: 確認画面の再描画途中で
+                    // タブバーと見出しがまだ出ていないフレームは `numbered` に見えるので、
+                    // **Submit を押していないのに「返答済み」**になる。
+                    //
+                    // 閉じたと言えるのは「宛先が入力欄へ戻った」か「全設問のタブが `☒`」。
+                    // 単一設問が `unverified` へ落ちるのは**安全側の誤警告**で、
+                    // 誤って成功を名乗るより軽い
+                    let really_closed =
+                        parsed.shape == PromptShape::Text || answered >= indices.len();
                     last = Some(parsed);
                     if all_dispatched && really_closed {
                         return outcome("sent", sent, last.as_ref(), None, answered);
