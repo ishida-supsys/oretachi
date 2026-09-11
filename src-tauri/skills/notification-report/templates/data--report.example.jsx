@@ -74,6 +74,14 @@
 //   phase         (string)   : 設計中 / 実装中 / 実装完了 / レビュー対応中 / 停止条件待ち / 不明
 //   phaseSummary  (string)   : 現況の 1 行要約（ターミナル読み取りから）
 //   readAt        (string)   : ターミナルを読んだ時刻（`HH:MM`）
+//   artifacts     (array)    : 発信元ワークツリーに登録されている**URL アーティファクト**
+//                              （#265）。`[{ id, title }]`。ワークツリー名の隣の
+//                              「📄 アーティファクト」ボタンのポップアップに並ぶ。
+//                              `search_artifact` で発信元のものを探し、返り値の `type` が
+//                              `text/uri-list` のものだけを入れる。**URL 本体はここに入れない**
+//                              （リンク先は `artifact://worktree/<worktreeId>/<id>` で、
+//                              開くのは飛んだ先のビューの「ブラウザで開く」ボタン）。
+//                              無ければ省略する
 //   choices       (string[]) : 候補ボタン。**`prompt.shape` が `"text"` のときだけ使う。**
 //                              通知内容から作る。`その他（補足で指示）` はコード側で
 //                              常に足されるので**ここに入れない**
@@ -187,6 +195,8 @@ const NOTIFICATIONS = [
       { label: '作業ディレクトリ', value: 'X:\\devel\\worktree\\oretachi-xaoe', code: true },
     ],
     links: null,
+    // ワークツリー名の隣の「📄 アーティファクト」に並ぶ（#265）
+    artifacts: [{ id: 'url-pr-187', title: 'PR #187' }],
     choices: [],
     request: { tool: 'Bash' },
     prompt: {

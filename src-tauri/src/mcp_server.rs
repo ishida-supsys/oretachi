@@ -858,7 +858,7 @@ pub struct ArtifactParams {
     pub content_type: Option<String>,
     #[schemars(description = "アーティファクトのタイトル (create時必須)")]
     pub title: Option<String>,
-    #[schemars(description = "アーティファクトの中身 (create/rewrite時は content か file_path のどちらかが必須)。markdown / html / react では `artifact:` リンクで他のアーティファクトへ遷移できる: 同一ワークツリー内は `artifact:<アーティファクトID>`、他ワークツリー宛は `artifact://worktree/<worktreeId>/<アーティファクトID>`、リポジトリ保管庫宛は `artifact://repository/<encodeURIComponent(リポジトリの絶対パス)>/<アーティファクトID>`。react ではメモリー（アーティファクトごとに永続化される JSON ストア）が使える: `import { useMemory } from 'oretachi'` して `const [value, setValue] = useMemory('key', 初期値)`。書き込みはデバウンスされ、ウィンドウを閉じて開き直しても・リポジトリへ転送しても復元される（合計 1MB まで。他に getMemory / setMemory / clearMemory / subscribeMemory がある）。さらに `import { callTool } from 'oretachi'` で oretachi の MCP ツールを呼べる: `await callTool('oretachi_write_terminal', { session_id: 12, text: 'echo hi' })`。呼べるのは oretachi_write_terminal / oretachi_add_task / notify_worktree / oretachi_poll_inbox / oretachi_ack_message / oretachi_read_terminal / oretachi_list_worktree_notifications / oretachi_inspect_prompt / oretachi_answer_prompt だけで、terminal_id / project_dir / notify_worktree の宛先 / add_task の追加先ワークグループはアーティファクトの置き場所のワークツリーへ強制される(session_id は同じワークツリーの稼働中端末、または**アーティファクトの置き場所ワークツリーが oretachi_subscribe_worktree で購読しているワークツリー**の稼働中端末に限る)。戻り値はツールの結果を JSON.parse したもの(パースできなければ文字列)。**制約**: アーティファクトからは oretachi_list_terminals が呼べないため、read/write_terminal に渡す session_id は生成時にコードへ埋め込むこと(アプリ再起動やタブ再作成で無効になる)。oretachi_poll_inbox / oretachi_ack_message / notify_worktree(kind: \"worktree.message\") はそのワークツリーで AI エージェント端末がちょうど1つ走行中でないとエラーになるので、AI セッション終了後も動かしたいボタンには使わないこと。他ワークツリーの端末へ read/write_terminal したい場合は、アーティファクトの置き場所ワークツリー側から宛先を購読しておくこと(逆向き＝宛先側が置き場所を購読しているだけでは通らない)。**宛先がダイアログ(ツール許可 / プラン承認 / AskUserQuestion)で止まっている場合に write_terminal で自由テキストを送ってはいけない**: テキストはダイアログに吸われ、末尾の CR が意図しない選択肢(既定は `1. Yes`)の確定として解釈される。先に oretachi_inspect_prompt(session_id) で画面の形状と実在する選択肢を取り、oretachi_answer_prompt(session_id, expect_fingerprint, kind, ...) で答えること")]
+    #[schemars(description = "アーティファクトの中身 (create/rewrite時は content か file_path のどちらかが必須)。markdown / html / react では `artifact:` リンクで他のアーティファクトへ遷移できる: 同一ワークツリー内は `artifact:<アーティファクトID>`、他ワークツリー宛は `artifact://worktree/<worktreeId>/<アーティファクトID>`、リポジトリ保管庫宛は `artifact://repository/<encodeURIComponent(リポジトリの絶対パス)>/<アーティファクトID>`。react ではメモリー（アーティファクトごとに永続化される JSON ストア）が使える: `import { useMemory } from 'oretachi'` して `const [value, setValue] = useMemory('key', 初期値)`。書き込みはデバウンスされ、ウィンドウを閉じて開き直しても・リポジトリへ転送しても復元される（合計 1MB まで。他に getMemory / setMemory / clearMemory / subscribeMemory がある）。さらに `import { callTool } from 'oretachi'` で oretachi の MCP ツールを呼べる: `await callTool('oretachi_write_terminal', { session_id: 12, text: 'echo hi' })`。呼べるのは oretachi_write_terminal / oretachi_add_task / notify_worktree / oretachi_poll_inbox / oretachi_ack_message / oretachi_read_terminal / oretachi_list_worktree_notifications / oretachi_inspect_prompt / oretachi_answer_prompt / oretachi_clear_worktree_notification / oretachi_show_worktree だけで、terminal_id / project_dir / notify_worktree の宛先 / add_task の追加先ワークグループはアーティファクトの置き場所のワークツリーへ強制される(session_id は同じワークツリーの稼働中端末、または**アーティファクトの置き場所ワークツリーが oretachi_subscribe_worktree で購読しているワークツリー**の稼働中端末に限る)。戻り値はツールの結果を JSON.parse したもの(パースできなければ文字列)。**制約**: アーティファクトからは oretachi_list_terminals が呼べないため、read/write_terminal に渡す session_id は生成時にコードへ埋め込むこと(アプリ再起動やタブ再作成で無効になる)。oretachi_poll_inbox / oretachi_ack_message / notify_worktree(kind: \"worktree.message\") はそのワークツリーで AI エージェント端末がちょうど1つ走行中でないとエラーになるので、AI セッション終了後も動かしたいボタンには使わないこと。他ワークツリーの端末へ read/write_terminal したい場合は、アーティファクトの置き場所ワークツリー側から宛先を購読しておくこと(逆向き＝宛先側が置き場所を購読しているだけでは通らない)。**宛先がダイアログ(ツール許可 / プラン承認 / AskUserQuestion)で止まっている場合に write_terminal で自由テキストを送ってはいけない**: テキストはダイアログに吸われ、末尾の CR が意図しない選択肢(既定は `1. Yes`)の確定として解釈される。先に oretachi_inspect_prompt(session_id) で画面の形状と実在する選択肢を取り、oretachi_answer_prompt(session_id, expect_fingerprint, kind, ...) で答えること。**oretachi_show_worktree** は宛先のタブを oretachi の前面に出すだけのツールで(端末の内容は読み書きしない)、宛先は worktree_id でのみ指定する(worktree_name / project_dir は落とされる)。session_id を添えるとそのタブまで当たる。許可範囲は read/write_terminal と同じで、自ワークツリーか購読先に限る")]
     pub content: Option<String>,
     #[schemars(description = "create/rewrite時: content の代わりに、このパスのファイルを読んでそのまま中身として登録する。**テンプレートをそのまま登録する場合はこちらを使う** (スキル同梱の templates/*.jsx など)。ファイルを Read してから同じテキストを content に書き戻す往復が消えるので、生成が大幅に速く・安くなる。content とは排他。相対パスはワークツリー追加先ディレクトリ基準。読めるのは**ワークツリー追加先ディレクトリ配下**と **oretachi プラグインディレクトリ (claude-plugins) 配下**のファイルだけで、それ以外の絶対パスはエラーになる (この範囲は設定由来の固定値で、対象ワークツリーの指定では変わらない)。UTF-8 テキスト限定 (BOM は自動で除去)、1MB まで")]
     pub file_path: Option<String>,
@@ -1409,11 +1409,16 @@ pub struct ShowWorktreeParams {
     pub worktree_name: Option<String>,
     #[schemars(description = "ワークツリーID（同名ワークツリーが複数ある場合に指定）")]
     pub worktree_id: Option<String>,
+    #[schemars(description = "そのワークツリーの中で前面に出したいターミナルの PTY セッションID（任意）。同じワークツリーに複数タブがあるとき、どのタブを見せたいかまで指定できる。指定したセッションがそのワークツリーに無ければワークツリーを出すだけに留める")]
+    pub session_id: Option<u32>,
 }
 
+// フィールド名はそのままフロントの payload になる（App.vue が snake_case で読む）
 #[derive(Debug, Serialize, Clone)]
 struct ShowWorktreeEvent {
     worktree_id: String,
+    /// 前面に出したいターミナルの PTY セッションID。`None` なら直近のタブのまま
+    session_id: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1478,13 +1483,15 @@ pub struct AnswerPromptParams {
     pub session_id: u32,
     #[schemars(description = "直前の oretachi_inspect_prompt が返した fingerprint。現在の画面と一致しない場合は**何も送らず** status=\"stale\" を返す（これが安全弁。人が手でダイアログを消した後に送ると、別のダイアログの既定選択を確定しうる）")]
     pub expect_fingerprint: String,
-    #[schemars(description = "回答の種類。\"select\"(選択肢を選ぶ: permission / plan / askUserQuestion / numbered) / \"text\"(自由入力へ本文を送る。shape が text のときだけ) / \"escapeThenText\"(ESC でダイアログを抜けてから本文を送る = 拒否して指示する) / \"yesno\"(素の (y/N) プロンプト) / \"selectAll\"(複数設問の askUserQuestion へ option_indices で全問まとめて答え、確認画面の Submit まで確定する)")]
+    #[schemars(description = "回答の種類。\"select\"(選択肢を選ぶ: permission / plan / askUserQuestion / numbered) / \"selectThenText\"(自由入力欄を開く選択肢 `Type something.` を選んでから本文を送る。option_index と text の両方が必須) / \"text\"(自由入力へ本文を送る。shape が text のときだけ) / \"escapeThenText\"(ESC でダイアログを抜けてから本文を送る = 拒否して指示する) / \"yesno\"(素の (y/N) プロンプト) / \"selectAll\"(複数設問の askUserQuestion へ option_indices で全問まとめて答え、確認画面の Submit まで確定する)")]
     pub kind: String,
-    #[schemars(description = "kind=\"select\" のとき必須。oretachi_inspect_prompt が返した questions[0].options[].index をそのまま渡す。**画面に無い番号は拒否される**")]
+    #[schemars(description = "kind=\"select\" / \"selectThenText\" のとき必須。oretachi_inspect_prompt が返した questions[0].options[].index をそのまま渡す。**画面に無い番号は拒否される**。selectThenText では、その番号のラベルが `Type something.` でなければ拒否される")]
     pub option_index: Option<u32>,
     #[schemars(description = "kind=\"selectAll\" のとき必須。複数設問の AskUserQuestion へ**全問まとめて**答える。設問の並び順（tabs の並び順 = AskUserQuestion の questions の並び順）に選択肢番号を並べる。1 問ずつ「選ぶ → 画面が次の設問へ進むのを待つ」を繰り返し、最後の確認画面で Submit まで確定する。既に回答済みのタブは飛ばして未回答のタブに対応する番号を使う")]
     pub option_indices: Option<Vec<u32>>,
-    #[schemars(description = "kind=\"text\" / \"escapeThenText\" のとき必須。改行や ESC を含む制御文字が入っていると拒否する（宛先の TUI へのエスケープシーケンス注入防止）。1 行に畳んで渡すこと")]
+    #[schemars(description = "kind=\"selectAll\" の任意パラメータ。option_indices と**同じ長さ**で並べ、自由入力で答えたい設問だけ本文を入れる（他は空文字）。本文を入れた設問では、対応する option_indices の番号は自由入力欄を開く選択肢 `Type something.` を指していなければならない（ラベルが違えば何も送らない）")]
+    pub option_texts: Option<Vec<String>>,
+    #[schemars(description = "kind=\"text\" / \"escapeThenText\" / \"selectThenText\" のとき必須。改行や ESC を含む制御文字が入っていると拒否する（宛先の TUI へのエスケープシーケンス注入防止）。1 行に畳んで渡すこと")]
     pub text: Option<String>,
     #[schemars(description = "kind=\"yesno\" のとき必須。\"y\" または \"n\"")]
     pub value: Option<String>,
@@ -3814,7 +3821,7 @@ impl NotifyService {
     #[tool(description = "指定ワークツリーを oretachi UI 上でフォーカスする。メインウィンドウにあればタブを切り替え（所属ワークグループが非アクティブなら併せて切り替え）、サブウィンドウへ分離済みならそのウィンドウを前面に出す。ユーザーに特定ワークツリーの様子を見せたいときに使う", annotations(read_only_hint = true))]
     fn oretachi_show_worktree(
         &self,
-        Parameters(ShowWorktreeParams { worktree_name, worktree_id }): Parameters<ShowWorktreeParams>,
+        Parameters(ShowWorktreeParams { worktree_name, worktree_id, session_id }): Parameters<ShowWorktreeParams>,
     ) -> Result<CallToolResult, McpError> {
         let settings_manager = self.app_handle.state::<SettingsManager>();
         let settings = settings_manager.get();
@@ -3829,11 +3836,16 @@ impl NotifyService {
 
         // detached かどうかの判定はフロント側に任せる。ここで分岐すると
         // サブウィンドウの生成/破棄との競合で古い情報を見ることになる。
-        let event = ShowWorktreeEvent { worktree_id: wt.id.clone() };
+        let event = ShowWorktreeEvent { worktree_id: wt.id.clone(), session_id };
         self.app_handle
             .emit("mcp-show-worktree", &event)
             .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
-        log::info!("[mcp] oretachi_show_worktree: name={} id={}", wt.name, wt.id);
+        log::info!(
+            "[mcp] oretachi_show_worktree: name={} id={} session_id={:?}",
+            wt.name,
+            wt.id,
+            session_id
+        );
 
         Ok(CallToolResult::success(vec![Content::text(format!(
             "ワークツリー '{}' を表示しました。",
@@ -4366,6 +4378,9 @@ impl NotifyService {
         session_id: u32,
         expect_fingerprint: &str,
         indices: &[u32],
+        // 設問ごとの自由入力本文（#265）。`indices` と同じ長さで、空文字なら
+        // 「選ぶだけ」。空でない要素は `Type something.` を選んでから本文 + CR を送る
+        texts: &[String],
     ) -> Result<CallToolResult, McpError> {
         use crate::prompt_parser::{
             answered_tabs, plan_select_all_step, review_screen_visible, select_all_progressed,
@@ -4494,7 +4509,7 @@ impl NotifyService {
                     answered,
                 );
             }
-            let (target, on_review) = match plan {
+            let (target, on_review, free_text) = match plan {
                 SelectAllStep::Done => {
                     if step == 0 {
                         return outcome(
@@ -4553,16 +4568,25 @@ impl NotifyService {
                     let status = if sent.is_empty() { "unsupported" } else { "unverified" };
                     return outcome(status, sent, Some(&parsed), Some(reason), answered);
                 }
-                SelectAllStep::Submit { option_index } => (option_index, true),
+                // **確定（Submit）へ本文を混ぜない。** `texts` は設問の並びなので、
+                // 確認画面には対応する要素が無い
+                SelectAllStep::Submit { option_index } => (option_index, true, String::new()),
                 SelectAllStep::Answer { qidx, option_index } => {
                     last_qidx = Some(qidx);
-                    (option_index, false)
+                    let text = texts.get(qidx).cloned().unwrap_or_default();
+                    (option_index, false, text)
                 }
             };
 
-            let keys = match crate::prompt_parser::plan_keys(&parsed, &Answer::Select {
-                option_index: target,
-            }) {
+            // 自由入力で答える設問だけ「選ぶ → 本文 → CR」に膨らむ（#265）。
+            // その番号が本当に `Type something.` かは plan_keys がラベルで裏取りする。
+            // 空判定は上の検証ループと同じ `trim()` 基準
+            let answer = if free_text.trim().is_empty() {
+                Answer::Select { option_index: target }
+            } else {
+                Answer::SelectThenText { option_index: target, text: free_text }
+            };
+            let keys = match crate::prompt_parser::plan_keys(&parsed, &answer) {
                 Ok(keys) => keys,
                 Err(e) => {
                     let status = if sent.is_empty() { "unsupported" } else { "unverified" };
@@ -4707,6 +4731,7 @@ impl NotifyService {
             kind,
             option_index,
             option_indices,
+            option_texts,
             text,
             value,
         }): Parameters<AnswerPromptParams>,
@@ -4726,7 +4751,46 @@ impl NotifyService {
                     None,
                 ));
             }
-            return self.answer_all_questions(session_id, &expect_fingerprint, &indices).await;
+            // 自由入力（`Type something.`）で答える設問の本文（#265）。**長さが違えば
+            // 別の設問へ本文が入る**ので、ずれたまま 1 手も送らない
+            let texts = match option_texts {
+                Some(t) if t.len() != indices.len() => {
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "option_texts は option_indices と同じ長さで渡してください（option_indices {} 件 / option_texts {} 件）。ずれたまま送ると別の設問へ本文が入ります",
+                            indices.len(),
+                            t.len()
+                        ),
+                        None,
+                    ));
+                }
+                Some(t) => {
+                    // 制御文字の検査は Answer::from_parts と同じ規則で、キーを送る前に済ませる。
+                    // **「空」の判定は `trim()` で揃える。** ここと実行側で規則がずれると、
+                    // 空白だけの要素が検証では「本文あり」・実行では「選ぶだけ」になる
+                    for (i, s) in t.iter().enumerate() {
+                        if !s.trim().is_empty() {
+                            crate::prompt_parser::Answer::from_parts(
+                                "selectThenText",
+                                Some(indices[i]),
+                                Some(s.as_str()),
+                                None,
+                            )
+                            .map_err(|e| {
+                                McpError::invalid_params(
+                                    format!("option_texts[{}]: {}", i, e),
+                                    None,
+                                )
+                            })?;
+                        }
+                    }
+                    t
+                }
+                None => vec![String::new(); indices.len()],
+            };
+            return self
+                .answer_all_questions(session_id, &expect_fingerprint, &indices, &texts)
+                .await;
         }
 
         // 回答の組み立て（制御文字の検査を含む）はキーを送る前に済ませる
@@ -5644,6 +5708,11 @@ struct SubscriberIdentity {
 ///   代わりに 2 つの安全弁を置いている: `expect_fingerprint` が現在の画面と一致しなければ
 ///   何も送らない（`stale`）、`shape` が `unknown` なら何も送らない（`unsupported`）。
 ///   照合とキー送信の間は `session_write_lock` で直列化してある。
+/// - **`oretachi_show_worktree` は「宛先のタブを前面に出す」ツール（#265）。**
+///   通知レポートのカードから発信元のターミナルへ飛ぶための導線で、`read/write_terminal`
+///   と同じ #211 の購読スコープを掛けてある（`worktree_id` だけを見る。`worktree_name` は
+///   同名ワークツリーで曖昧になるため `normalize_artifact_tool_params` が落とす）。
+///   できるのは UI のフォーカス移動だけで、端末の内容は読み書きしない。
 pub(crate) const ARTIFACT_CALLABLE_TOOLS: &[&str] = &[
     "oretachi_write_terminal",
     "oretachi_add_task",
@@ -5655,6 +5724,7 @@ pub(crate) const ARTIFACT_CALLABLE_TOOLS: &[&str] = &[
     "oretachi_inspect_prompt",
     "oretachi_answer_prompt",
     "oretachi_clear_worktree_notification",
+    "oretachi_show_worktree",
 ];
 
 /// 自由文（`add_task` の prompt / `notify_worktree` の body）へ前置する出自の断り書き。
@@ -5765,6 +5835,14 @@ pub(crate) fn normalize_artifact_tool_params(
     // （自ワークツリーへ固定済み）に倒れる。
     if tool == "oretachi_clear_worktree_notification" {
         obj.remove("worktree_name");
+    }
+
+    // ターミナルへ飛ぶ導線も宛先は `worktree_id` だけで指定させる（#265）。
+    // 通知クリアと同じ理由で、名前を残すと購読チェック（ID）と解決（名前優先）がずれる。
+    // このツールは `project_dir` を持たないので、ID を省くと呼び出し自体がエラーになる
+    if tool == "oretachi_show_worktree" {
+        obj.remove("worktree_name");
+        obj.remove("project_dir");
     }
 
     Ok(obj)
@@ -6015,7 +6093,17 @@ pub(crate) async fn call_tool_for_artifact(
 
     // 通知クリアも端末操作と同じ #211 の購読スコープで通す（#218）。`worktree_id` 未指定なら
     // `project_dir`（自ワークツリー）へ倒れるので検査は不要。
-    if tool == "oretachi_clear_worktree_notification" {
+    // ターミナルへ飛ぶ導線も同じ購読スコープで通す（#265）。`normalize_artifact_tool_params`
+    // が `worktree_name` を落としてあるので、宛先は `worktree_id` だけで決まる
+    if matches!(
+        tool,
+        "oretachi_clear_worktree_notification" | "oretachi_show_worktree"
+    ) {
+        let purpose = if tool == "oretachi_show_worktree" {
+            "ターミナルの表示"
+        } else {
+            "未確認通知のクリア"
+        };
         if let Some(dest_worktree_id) = obj
             .get("worktree_id")
             .and_then(|v| v.as_str())
@@ -6029,7 +6117,7 @@ pub(crate) async fn call_tool_for_artifact(
                 worktree_id,
                 &worktree_name,
                 &dest_worktree_id,
-                "未確認通知のクリア",
+                purpose,
             )
             .await?;
             cross = Some((dest_worktree_id, grant));
@@ -6088,6 +6176,7 @@ pub(crate) async fn call_tool_for_artifact(
         "oretachi_clear_worktree_notification" => {
             service.oretachi_clear_worktree_notification(Parameters(parse(tool, args)?))
         }
+        "oretachi_show_worktree" => service.oretachi_show_worktree(Parameters(parse(tool, args)?)),
         // ARTIFACT_CALLABLE_TOOLS に足したのに dispatch を忘れた場合
         other => return Err(format!("ツール '{}' のディスパッチが未実装です", other)),
     };

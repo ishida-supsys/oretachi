@@ -34,6 +34,14 @@ const {
   isTruncated,
   canEscape,
   cursorReadable,
+  picksFreeText,
+  freeTextPickFor,
+  picksFreeTextAt,
+  isAnsweredAt,
+  flatten,
+  showTerminal,
+  artifactsOf,
+  artifactHref,
 } = require('../lib/send');
 
 // 返答状態ごとのアクセント色（Catppuccin Mocha）。
@@ -275,6 +283,122 @@ function ChoiceChip({ label, selected, disabled, other, onClick }) {
   );
 }
 
+/** 小さめのアイコンボタン。ワークツリー名の隣に並べる導線で使う（#265） */
+function MiniButton({ label, title, disabled, onClick, href }) {
+  const style = {
+    display: 'inline-flex', alignItems: 'center', gap: 5,
+    border: '1px solid #313244', borderRadius: 5, padding: '2px 8px',
+    background: 'transparent', color: disabled ? '#45475a' : '#9399b2',
+    fontSize: 10.5, fontFamily: FONT, fontWeight: 600, lineHeight: 1.6,
+    textDecoration: 'none', whiteSpace: 'nowrap',
+    cursor: disabled ? 'default' : 'pointer',
+  };
+  if (href) {
+    return <a href={href} title={title} style={style}>{label}</a>;
+  }
+  return (
+    <button type="button" title={title} disabled={disabled} onClick={onClick} style={style}>
+      {label}
+    </button>
+  );
+}
+
+/**
+ * ワークツリー名の隣に置く導線（#265）。
+ *
+ * - **ターミナルへ飛ぶ** — `oretachi_show_worktree` で発信元のタブを前面に出す。
+ *   通知だけでは分からないことを人が自分で見に行けるようにするための最短経路で、
+ *   できるのは UI のフォーカス移動だけ（端末の内容は読み書きしない）。
+ * - **アーティファクト** — 発信元に登録されている URL アーティファクトの一覧を出す。
+ *   リンク先は `artifact://` でアプリ内のアーティファクトを指す。**ここから直接
+ *   ブラウザを開かない**のは、sandbox の中の JS が名乗った URL をそのまま開ける形に
+ *   すると「レポートを開いただけで任意の URL が開く」ことになるため。飛んだ先の
+ *   ビューで人が URL を見てから「ブラウザで開く」を押す。
+ */
+function WorktreeActions({ n }) {
+  const [menuOpen, setMenuOpen] = React.useState(false);
+  const [error, setError] = React.useState(null);
+  const [busy, setBusy] = React.useState(false);
+  const boxRef = React.useRef(null);
+  const artifacts = artifactsOf(n);
+
+  // ポップアップの外を押したら閉じる。メニュー内のリンクで閉じないのは、リンクが
+  // `boxRef` の内側にあって `contains` が真になるため（親ウィンドウの横取りが止めるのは
+  // `click` / `auxclick` だけで、`mousedown` はここまで来る）。リンクを押した場合は
+  // ビューアが別のアーティファクトへ遷移してカードごと作り直されるので、閉じる必要も無い
+  React.useEffect(() => {
+    if (!menuOpen) return undefined;
+    const onDown = e => {
+      if (boxRef.current && !boxRef.current.contains(e.target)) setMenuOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    return () => document.removeEventListener('mousedown', onDown);
+  }, [menuOpen]);
+
+  // **`worktree.closed` の発信元は既に消えている。** ターミナルも
+  // アーティファクト（`delete_artifacts` で保管ごと削除される）も辿れないので、
+  // 導線をまとめて出さない（押しても失敗するか、空のビューアが開くだけ）
+  const canShow = !!n.worktreeId && n.kind !== 'worktree.closed';
+  if (!canShow) return null;
+
+  const open = async () => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    const r = await showTerminal(n);
+    if (!r.ok) setError(r.error);
+    setBusy(false);
+  };
+
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, position: 'relative' }}>
+      <MiniButton
+        label={busy ? '⧉ …' : '⧉ ターミナル'}
+        title="発信元のターミナルを oretachi の前面に出します（同じワークツリーに複数タブがあれば、この通知を出したタブまで当てます）"
+        disabled={busy}
+        onClick={open} />
+      {artifacts.length > 0 && (
+        <span ref={boxRef} style={{ position: 'relative' }}>
+          <MiniButton
+            label={`📄 アーティファクト (${artifacts.length})`}
+            title="発信元のワークツリーに登録されている URL アーティファクト"
+            onClick={() => setMenuOpen(v => !v)} />
+          {menuOpen && (
+            <div style={{
+              position: 'absolute', top: '100%', left: 0, marginTop: 4, zIndex: 20,
+              minWidth: 220, maxWidth: 420,
+              border: '1px solid #45475a', borderRadius: 6, background: '#1e1e2e',
+              boxShadow: '0 4px 12px rgba(0,0,0,0.45)', padding: 4,
+              display: 'flex', flexDirection: 'column', gap: 2,
+            }}>
+              {artifacts.map(a => (
+                <a
+                  key={a.id}
+                  href={artifactHref(n, a)}
+                  style={{
+                    display: 'block', padding: '6px 9px', borderRadius: 4,
+                    fontSize: 11.5, fontFamily: FONT, color: '#cdd6f4',
+                    textDecoration: 'none', wordBreak: 'break-all',
+                  }}
+                >
+                  <span style={{ color: '#89b4fa', marginRight: 6 }}>🔗</span>
+                  {a.title || a.id}
+                </a>
+              ))}
+            </div>
+          )}
+        </span>
+      )}
+      {error && (
+        <span
+          title={error}
+          style={{ fontSize: 10.5, color: '#f38ba8', fontFamily: FONT }}
+        >ターミナルを開けませんでした</span>
+      )}
+    </span>
+  );
+}
+
 // ワークツリーの identity: description（無ければターミナルから推定したミッション）と現況。
 // 通知本文だけでは「どのワークツリーが何をしていて、いまどの段階か」が分からない
 function WorktreeIdentity({ n }) {
@@ -416,6 +540,7 @@ function OptionRadios({ n, draft, disabled, onPickOption }) {
 function QuestionForm({ n, draft, disabled, onDraft }) {
   const questions = askQuestions(n);
   const picks = (draft && draft.picks) || {};
+  const texts = (draft && draft.texts) || {};
   const done = answeredCount(n, draft);
   return (
     <Section
@@ -430,13 +555,15 @@ function QuestionForm({ n, draft, disabled, onDraft }) {
       {questions.map((q, qi) => (
         <div key={qi} style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+            {/* **判定は `isAnsweredAt` 1 本。** ここだけ「選んだか」で見ると、
+                自由入力を選んで本文が空のときに ✓ が付くのに送信は塞がれる */}
             <span style={{
               width: 20, height: 20, borderRadius: 999, flexShrink: 0,
               display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-              background: typeof picks[qi] === 'number' ? '#a6e3a1' : '#313244',
-              color: typeof picks[qi] === 'number' ? '#11111b' : '#9399b2',
+              background: isAnsweredAt(n, draft, qi) ? '#a6e3a1' : '#313244',
+              color: isAnsweredAt(n, draft, qi) ? '#11111b' : '#9399b2',
               fontSize: 11, fontWeight: 700, fontFamily: MONO,
-            }}>{typeof picks[qi] === 'number' ? '✓' : qi + 1}</span>
+            }}>{isAnsweredAt(n, draft, qi) ? '✓' : qi + 1}</span>
             {q.header && <Badge label={q.header} color="#89b4fa" />}
             <span style={{ fontSize: 13, fontWeight: 700, color: '#cdd6f4', fontFamily: FONT, lineHeight: 1.6 }}>
               {q.question}
@@ -470,6 +597,48 @@ function QuestionForm({ n, draft, disabled, onDraft }) {
                 })}
               />
             ))}
+            {/* 画面の選択肢の後ろに Claude Code が足す `Type something.`（#265）。
+                通知には入っていないので、ここで同じ位置の番号を作って出す。
+                番号がずれていても Rust 側がラベルで裏取りして何も送らない */}
+            <OptionRow
+              index={freeTextPickFor(q) + 1}
+              label="Type something.（自由入力）"
+              description="候補のどれでもないとき。宛先の画面でこの選択肢を選んでから、下の本文を送ります"
+              selected={picksFreeTextAt(n, draft, qi)}
+              disabled={disabled}
+              onClick={() => onDraft({
+                mode: 'selectAll',
+                optionIndex: null,
+                value: null,
+                picks: {
+                  ...picks,
+                  [qi]: picksFreeTextAt(n, draft, qi) ? null : freeTextPickFor(q),
+                },
+              })}
+            />
+            {picksFreeTextAt(n, draft, qi) && (
+              <textarea
+                value={texts[qi] || ''}
+                disabled={disabled}
+                onChange={e => onDraft({ texts: { ...texts, [qi]: e.target.value } })}
+                rows={2}
+                placeholder="この設問への回答を書く（必須）"
+                style={{
+                  width: '100%', boxSizing: 'border-box', resize: 'vertical',
+                  border: '1px solid ' + (isAnsweredAt(n, draft, qi) ? '#45475a' : '#f38ba8'),
+                  borderRadius: 6, background: '#11111b', padding: '9px 12px',
+                  fontSize: 13, fontFamily: FONT, color: '#cdd6f4', lineHeight: 1.7,
+                }}
+              />
+            )}
+            {/* 設問フォームではキー列プレビューを出さない（2 問目以降の ❯ の位置が
+                その設問へ進むまで分からない）ので、赤枠だけでは理由が読めない。
+                単一選択側や「その他」と同じように 1 行で理由を出す */}
+            {picksFreeTextAt(n, draft, qi) && !isAnsweredAt(n, draft, qi) && (
+              <div style={{ fontSize: 11, color: '#f38ba8', fontFamily: FONT }}>
+                本文が空のため、この設問は未回答扱いです
+              </div>
+            )}
           </div>
         </div>
       ))}
@@ -485,9 +654,15 @@ function QuestionForm({ n, draft, disabled, onDraft }) {
  * イベントに返答欄を出すと、人は全カードを捌こうとして無い判断を探すことになる。
  *
  * 参照するフィールドは `kind` / `worktreeName` / `branchName` / `at` / 本文 /
- * `links` だけ。`sessionId` / `subscribed` / `prompt` / `desc` / `phase` は
- * **報告カードでは収集していない**ので触らない（`worktree.closed` は発信元が
- * 既に削除済みで、`get_worktree_status` も `read_terminal` も引けない）。
+ * `links` / `artifacts` だけ。`sessionId` / `subscribed` / `prompt` / `desc` /
+ * `phase` は**報告カードでは収集していない**ので触らない（`worktree.closed` は
+ * 発信元が既に削除済みで、`get_worktree_status` も `read_terminal` も引けない）。
+ *
+ * ワークツリー名の隣の導線（#265）は `worktree.created` にも出す（読むだけの
+ * カードでも「そのワークツリーを見に行く」はしたいため）。`sessionId` は
+ * 報告カードでは集めないので `showTerminal` はワークツリーを出すだけに倒れる。
+ * `worktree.closed` では `WorktreeActions` が丸ごと何も描かない（発信元が
+ * 既に消えていて、ターミナルもアーティファクトも辿れない）。
  */
 function ReportCard({ n, meta }) {
   const accent = KIND_COLOR[n.kind] || '#7f849c';
@@ -502,6 +677,7 @@ function ReportCard({ n, meta }) {
         <span style={{ fontSize: 12.5, fontWeight: 700, color: '#bac2de', fontFamily: FONT }}>
           {n.worktreeName || '(名前不明)'}
         </span>
+        <WorktreeActions n={n} />
         {n.branchName && (
           <span style={{ fontSize: 11, color: '#7f849c', fontFamily: MONO }}>{n.branchName}</span>
         )}
@@ -611,6 +787,7 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
         <span style={{ fontSize: 12.5, fontWeight: 700, color: '#bac2de', fontFamily: FONT }}>
           {n.worktreeName}
         </span>
+        <WorktreeActions n={n} />
         <IssueRef n={n} meta={meta} />
         <span style={{ fontSize: 10.5, color: '#585b70', fontFamily: MONO }}>{n.at}</span>
         <span style={{
@@ -644,6 +821,7 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
         <span style={{ fontSize: 13, fontWeight: 700, color: '#cdd6f4', fontFamily: FONT }}>
           {n.worktreeName}
         </span>
+        <WorktreeActions n={n} />
         <IssueRef n={n} meta={meta} />
         <span style={{ fontSize: 11, color: '#585b70', fontFamily: MONO }}>{n.at}</span>
         <Badge label={KIND_LABEL[n.kind] || n.kind} color={kindColor} />
@@ -858,6 +1036,23 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
               note="宛先の画面に実在する選択肢です（既定選択はありません）">
               <OptionRadios n={n} draft={d.mode === 'escapeThenText' ? {} : d} disabled={locked}
                 onPickOption={i => onDraft({ mode: 'select', optionIndex: i, value: null, picks: {} })} />
+              {/* `Type something.` を選んだら、その場で本文を書けるようにする（#265）。
+                  ターミナルでは選んだ先に入力欄が開くので、レポートも同じ着地点にする */}
+              {picksFreeText(n, d.mode === 'escapeThenText' ? {} : d) && (
+                <textarea
+                  value={d.freeText || ''}
+                  disabled={locked}
+                  onChange={e => onDraft({ freeText: e.target.value })}
+                  rows={2}
+                  placeholder="この内容が入力欄へ送られます（必須）"
+                  style={{
+                    width: '100%', boxSizing: 'border-box', resize: 'vertical',
+                    border: '1px solid ' + (flatten(d.freeText || '') ? '#45475a' : '#f38ba8'),
+                    borderRadius: 6, background: '#11111b', padding: '9px 12px',
+                    fontSize: 13, fontFamily: FONT, color: '#cdd6f4', lineHeight: 1.7,
+                  }}
+                />
+              )}
             </Section>
           )}
 
@@ -932,9 +1127,13 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
 
           {!keys && !questionForm && !locked && (
             <div style={{ fontSize: 11, color: '#6c7086', fontFamily: FONT }}>
-              {truncated
-                ? 'ESC + 指示を書くと、送信されるキー列がここに出ます'
-                : '選択肢を選ぶ（または ESC + 指示を書く）と、送信されるキー列がここに出ます'}
+              {/* 自由入力を選んでいるのに「選択肢を選ぶと〜」と出すと事実と食い違う
+                  （選択肢は選び終わっていて、足りないのは本文）。#265 */}
+              {picksFreeText(n, d.mode === 'escapeThenText' ? {} : d)
+                ? '本文を書くと、送信されるキー列がここに出ます'
+                : (truncated
+                  ? 'ESC + 指示を書くと、送信されるキー列がここに出ます'
+                  : '選択肢を選ぶ（または ESC + 指示を書く）と、送信されるキー列がここに出ます')}
             </div>
           )}
 
@@ -1033,16 +1232,23 @@ function describeSent(n, answer) {
   if (answer.mode === 'escapeThenText') return 'ESC で抜けて指示を送信';
   if (answer.mode === 'selectAll' && answer.picks) {
     const qs = askQuestions(n);
+    const texts = answer.texts || {};
     const parts = qs.map((q, qi) => {
       const oi = answer.picks[qi];
-      const label = typeof oi === 'number' && q.options[oi] ? q.options[oi].label : '—';
+      // 自由入力で答えた設問は、選択肢ラベルではなく送った本文を出す（#265）
+      const label = typeof oi !== 'number'
+        ? '—'
+        : (oi === freeTextPickFor(q)
+          ? `自由入力: ${texts[qi] || ''}`
+          : (q.options[oi] ? q.options[oi].label : '—'));
       return `${q.header || `設問${qi + 1}`}: ${label}`;
     });
     return parts.join(' / ') || '—';
   }
   if (typeof answer.optionIndex === 'number') {
     const hit = optionsOf(n).find(o => o.index === answer.optionIndex);
-    return hit ? `${hit.index}. ${hit.label}` : `選択肢 ${answer.optionIndex}`;
+    const picked = hit ? `${hit.index}. ${hit.label}` : `選択肢 ${answer.optionIndex}`;
+    return answer.freeText ? `${picked} → ${answer.freeText}` : picked;
   }
   if (answer.value) return answer.value;
   return '—';
