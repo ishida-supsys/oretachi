@@ -1,7 +1,7 @@
 ---
 name: teamwork-parent
 description: 親issueがsub-issueに分割された場合の進行管理を自動化する。ユーザーが「チームワークスキルを使って」「sub-issueを立てて分担して」等、既存または今後作成するsub-issue群の進行をこのセッションに任せたいときに使う。呼び出し後このセッションは「チームワークセッション」となり、sub-issueのワークツリーを購読し、進行可能なタスクを自動で子ワークツリーとして生成・監視し、全sub-issueがクローズしたら完了報告する。このセッション自身が誰かのsub-issueとして作られている場合は teamwork-child の義務と併用する。
-allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_oretachi_oretachi__oretachi_subscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_unsubscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__plugin_oretachi_oretachi__oretachi_poll_inbox, mcp__plugin_oretachi_oretachi__oretachi_ack_message, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp__plugin_oretachi_oretachi__oretachi_inspect_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_repository, mcp__plugin_oretachi_oretachi__notify_worktree, mcp__plugin_oretachi_oretachi__oretachi_set_tray_notification, mcp__plugin_oretachi_oretachi__artifact, mcp__plugin_oretachi_oretachi__artifact_module, mcp__plugin_oretachi_oretachi__search_artifact, Read, Write, Edit, Glob, Grep, Bash(gh issue:*), Bash(gh api:*), Bash(git branch:*)
+allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_oretachi_oretachi__oretachi_subscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_unsubscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__plugin_oretachi_oretachi__oretachi_poll_inbox, mcp__plugin_oretachi_oretachi__oretachi_ack_message, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp__plugin_oretachi_oretachi__oretachi_inspect_worktree, mcp__plugin_oretachi_oretachi__oretachi_list_repository, mcp__plugin_oretachi_oretachi__notify_worktree, mcp__plugin_oretachi_oretachi__oretachi_set_tray_notification, mcp__plugin_oretachi_oretachi__artifact, mcp__plugin_oretachi_oretachi__artifact_module, mcp__plugin_oretachi_oretachi__search_artifact, Read, Write, Edit, Glob, Grep, Bash(gh issue:*), Bash(gh api:*), Bash(gh repo view:*), Bash(git branch:*)
 ---
 
 # teamwork-parent スキル
@@ -162,6 +162,10 @@ domain-model-diagramと同様、ドラッグでパン・スクロールでズー
 
 フロー図を覆わないよう、四隅の欄は**既定ですべて畳まれている**。四隅のチップ(左上=進捗、右上=`⟲`/`?`、左下=凡例、右下=状況)をクリックすると展開し、同時に開くのは1つだけ。`Esc`キーまたは背景クリックで閉じる。右下の「状況」チップには畳んだ状態でも `▸<次に着手可能数> ⏸<未クリアの停止条件を持つタスク+エッジの数>` のバッジが出る(灰=未到達のものも含む総数)。
 
+タスクノードのissue番号(`#261`等)は`data/flow`の`REPO_URL`を使ったissueへのリンクになる。
+アーティファクトのiframeはsandbox内なのでクリックしてもブラウザは開かないが、**リンクにマウスを乗せると
+oretachi側のポップアップが飛び先URLとコピーボタンを出す**ので、そこからURLを取ってissueを開ける。
+
 停止条件を持つノード・依存線には `⏸`(未クリアあり) / `☑`(全クリア済み) のバッジが付き、**ホバーすると停止条件のtodoリストがポップアップする**(対象は白枠で強調される)。色は3フェーズを表す: 灰=未到達(タスクが未着手/ブロック中、またはエッジの遷移元がまだ`done`でない)、橙=到達済み(その作業・遷移の中で人の判定が入る)、緑=全条件クリア済み。
 
 ## レイアウト計算
@@ -212,6 +216,12 @@ artifact_module(command: "create", module_name: "data/flow",
   content: <Step1で分析したsub-issue一覧・依存関係。MESSAGESは空配列でよい>)
 ```
 
+**`REPO_URL`に対象リポジトリのURLを入れること**(テンプレートでは空)。タスクノードのissue番号は
+この値を使って`<REPO_URL>/issues/<番号>`へのリンクになる。値は`gh repo view --json url -q .url`で
+取得し、**推測で書かない**(別リポジトリのURLを入れると全ノードが無関係な同番号issueへ飛ぶ。
+空のままならリンクが出ないだけで済む)。`issueNumber`が数値のタスクだけがリンクになり、
+採番前のプレースホルダ文字列は素のテキストのまま出る。
+
 ## 検証
 
 ```
@@ -220,9 +230,16 @@ artifact(command: "outline")
 
 で構造確認。エントリポイント + 4モジュール(`lib/stopConditions`, `components/TaskNode`, `components/DependencyEdge`, `data/flow`)が揃っていれば完了。
 
+`outline`では`REPO_URL`の設定漏れ・書き換え忘れは検知できないので、**アーティファクトを開いて、ノードのissue番号が下線付きリンクになっていること・ホバーで出るURLが対象リポジトリのものであることを目視で確認する**。
+
 ## 進捗の反映(`data/flow`の更新方法)
 
 進捗管理マークダウン等の別ファイルは使わず、`data/flow`モジュール自体を`artifact_module(command:"update", ...)`で直接書き換えることで進捗を反映する。`old_str`/`new_str`はモジュール内で一意になる部分文字列を選ぶ。
+
+> **issue番号のリンク化より前に作成したアーティファクトについて**: `data/flow`に`REPO_URL`を
+> 足しても、登録済みの`components/TaskNode`とエントリポイントが旧版のままではリンクにならない。
+> 「アーティファクト作成」の手順2で`components/TaskNode`を登録し直し、エントリポイントも
+> 現行テンプレート(`REPO_URL`を`TaskNode`へ渡す版)へ更新すること。
 
 **タスク状態の更新**(Step2でsubscribe完了時、Step3でworktree.closed受信時など):
 ```

@@ -12,6 +12,26 @@ const STATUS_COLORS = {
   done:             { bg: '#a6e3a1', text: '#1e1e2e' }, // green   — 完了
 };
 
+// issueNumber が採番済みのときだけ GitHub の issue URL を作る。採番前のプレースホルダ
+// (「未採番」等の文字列)では null を返し、リンクにしない。
+// repoUrl は data/flow の REPO_URL(例 'https://github.com/<owner>/<repo>')。未設定なら
+// リンクにしない — 旧い data/flow で作られた既存アーティファクトはそのまま素のテキストで出る。
+//
+// アーティファクトの iframe は sandbox="allow-scripts"(allow-same-origin なし)なので、
+// クリックしてもそのままブラウザへは飛ばない。リンクにしておくと oretachi 側の
+// リンクホバーポップアップが飛び先 URL とコピーボタンを出してくれる、というのがここの狙い。
+function issueUrl(repoUrl, issueNumber) {
+  if (typeof repoUrl !== 'string') return null;
+  // 末尾のスラッシュと clone URL の `.git` を落とす(`.../r.git/issues/5` は 404 になる)
+  const base = repoUrl.trim().replace(/\/+$/, '').replace(/\.git$/i, '');
+  // 本文は AI が書くので、javascript: 等が混ざらないようスキームを http(s) に絞る
+  if (!/^https?:\/\/\S+$/.test(base)) return null;
+  const raw = typeof issueNumber === 'string' ? issueNumber.trim() : issueNumber;
+  const n = typeof raw === 'number' ? raw : (/^\d+$/.test(String(raw)) ? Number(raw) : NaN);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  return base + '/issues/' + n;
+}
+
 const STATUS_LABELS = {
   not_started: '未着手',
   in_progress: '進行中',
@@ -22,8 +42,9 @@ const STATUS_LABELS = {
 
 // hovered = このノードの停止条件ポップアップが今出ている(App が hover.key と照合して渡す)。
 // フェーズ色は意味を持つので変えず、明るいリングで対象だけを示す。
-function TaskNode({ task, x, y, hovered, onEnter, onLeave }) {
+function TaskNode({ task, x, y, hovered, onEnter, onLeave, repoUrl }) {
   const color = STATUS_COLORS[task.status] || { bg: '#cdd6f4', text: '#1e1e2e' };
+  const url = issueUrl(repoUrl, task.issueNumber);
   const conditions = getStopConditions(task);
   const stats = stopStats(task);
   const phase = stopPhase(task, isTaskActive(task));
@@ -82,7 +103,15 @@ function TaskNode({ task, x, y, hovered, onEnter, onLeave }) {
         gap: 6,
       }}>
         <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>
-          #{task.issueNumber}
+          {url ? (
+            /* data-ui: ここから始まるドラッグでキャンバスをパンさせない(リンクの操作を優先する) */
+            /* title="": ルート div の停止条件ツールチップを継承させない
+               (URL ポップアップと同じ位置に二重で出るため) */
+            <a data-ui="1" href={url} target="_blank" rel="noopener noreferrer" title=""
+              style={{ color: 'inherit', textDecoration: 'underline', textUnderlineOffset: 2 }}>
+              #{task.issueNumber}
+            </a>
+          ) : ('#' + task.issueNumber)}
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
           {stats.total > 0 && (

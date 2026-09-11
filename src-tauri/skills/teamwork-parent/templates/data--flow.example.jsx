@@ -5,6 +5,12 @@
 // 直接更新する。専用の進捗管理マークダウンは使わない — このartifactが唯一の進捗表示手段。
 //
 // フィールド仕様:
+//   REPO_URL: このプロジェクトのリポジトリ URL(例 'https://github.com/<owner>/<repo>')。
+//     タスクノードの issue 番号をこの URL 配下の issue へのリンクにするために使う。
+//     `gh repo view --json url -q .url` で取れる値をそのまま入れる。
+//     空文字のままなら issue 番号は素のテキストのまま出る。**別リポジトリの URL を
+//     書き換え忘れると、全ノードが無関係な同番号 issue へリンクしてしまう**ので、
+//     「分からないなら空のまま」が正しい(リンクが出ないだけで済む)。
 //   StopCondition: { id, text, checked, checkedAt }
 //     id: 一意なID。タスクは "sc-<issue番号>-<連番>"、エッジは "sc-e<エッジ番号>-<連番>"
 //     text: 人が判定する内容を1行で
@@ -35,6 +41,10 @@
 //   列の開始x: 40, 320, 600, 880, 1160, ...
 //   行の高さ: 84 + 間隔40 = 124px間隔
 //   ※ 依存関係のトポロジカル・レベル(何段目の依存か)を列に割り当てると見やすい
+
+// CUSTOMIZE: 対象リポジトリの URL を入れる(`gh repo view --json url -q .url`)。
+// 例: 'https://github.com/<owner>/<repo>'。空のままならリンクにしない
+const REPO_URL = '';
 
 const TASKS = [
   // 停止条件の3フェーズが1枚で見えるサンプル:
@@ -89,5 +99,6 @@ const MESSAGES = [
 ];
 
 exports.default = TASKS;
+exports.REPO_URL = REPO_URL;
 exports.DEPENDENCIES = DEPENDENCIES;
 exports.MESSAGES = MESSAGES;
