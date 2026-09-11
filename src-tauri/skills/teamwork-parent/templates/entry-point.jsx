@@ -2,7 +2,7 @@
 const { useState, useRef, useEffect, useCallback } = React;
 const { useMemory } = require('oretachi');
 const TASKS = require('./data/flow').default;
-const { DEPENDENCIES, MESSAGES } = require('./data/flow');
+const { DEPENDENCIES, MESSAGES, REPO_URL } = require('./data/flow');
 const TaskNode = require('./components/TaskNode').default;
 const { STATUS_COLORS, STATUS_LABELS } = require('./components/TaskNode');
 const { STOP_PHASE_COLORS, getStopConditions, stopStats } = require('./lib/stopConditions');
@@ -350,7 +350,7 @@ function App() {
         {/* Layer 2: タスクノード */}
         {TASKS.map(task => (
           <TaskNode key={task.id} task={task} x={task.x} y={task.y}
-            hovered={hoverKey === task.id}
+            hovered={hoverKey === task.id} repoUrl={REPO_URL}
             onEnter={handleStopEnter} onLeave={handleStopLeave} />
         ))}
       </div>
@@ -401,6 +401,7 @@ function App() {
             <div>Scroll: zoom | Drag: pan</div>
             <div>Esc / 背景クリック: 欄を閉じる</div>
             <div>⏸ 付きのノード/線にホバー: 停止条件を表示(対象を白枠で強調)</div>
+            <div>issue 番号にホバー: 飛び先 URL を表示(コピー可)</div>
           </PanelBody>
         )}
       </div>
