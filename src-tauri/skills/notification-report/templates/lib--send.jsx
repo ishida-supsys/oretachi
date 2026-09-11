@@ -67,14 +67,23 @@ function isReportOnly(n) {
 }
 
 /**
- * ESC で抜けてから本文を送れる形状（Rust の `plan_keys` の `is_cc_select()` と対応）。
+ * Claude Code のダイアログの形状（Rust の `plan_keys` の `is_cc_select()` と対応）。
+ *
+ * `escapeThenText`（ESC で抜けて本文）と `selectThenText`（`Type something.` を選んで
+ * 本文。#265）の**両方**が、Rust 側でこの 3 形状にしか通らない。
+ * **UI が Rust に無い経路を出してはいけない** —— 押した瞬間 `unsupported` が返り、
+ * そのカードは `readOnly` になって選び直せず死ぬ。
+ */
+const CC_SELECT_SHAPES = ['permission', 'plan', 'askUserQuestion'];
+
+/**
+ * ESC で抜けてから本文を送れる形状。
  *
  * **`escapeHatch` だけで判断してはいけない。** `escapeHatch` は画面末尾に
  * `Esc to cancel` があれば立つので `numbered` / `yesno` でも立ちうるが、Rust 側は
- * この 3 形状しか `escapeThenText` を受け付けない。UI が Rust に無い経路を出すと、
- * 押した瞬間 `unsupported` が返り、そのカードは `readOnly` になって選び直せず死ぬ。
+ * `is_cc_select()` の 3 形状しか `escapeThenText` を受け付けない。
  */
-const ESCAPABLE_SHAPES = ['permission', 'plan', 'askUserQuestion'];
+const ESCAPABLE_SHAPES = CC_SELECT_SHAPES;
 
 /** 形状ごとの日本語ラベル。カードの見出しに出す */
 const SHAPE_LABEL = {
@@ -267,6 +276,41 @@ function optionsOf(n) {
   return q && Array.isArray(q.options) ? q.options : [];
 }
 
+// ── 自由入力欄を開く選択肢（`Type something.`）。#265 ─────────────────────────
+//
+// Claude Code は選択肢の後ろに `Type something.` を足す。ターミナルではこれを選ぶと
+// 入力欄が開いて自由に書けるのに、レポートからは選ぶことしかできず「候補のどれでもない」
+// を伝えられなかった（ESC で抜ける経路は全設問のキャンセルになるので代わりにならない）。
+//
+// **判定はラベルで行い、Rust 側（`plan_keys`）でも同じラベルを裏取りする。**
+// 番号だけで送ると、ずれたときに別の選択肢を確定したうえで本文がその先の画面へ流れ込む。
+
+/** そのラベルは「選ぶと自由入力欄が開く」ものか（Rust の `is_free_text_option` と同じ規則） */
+function isFreeTextLabel(label) {
+  return typeof label === 'string' && /type something/i.test(label);
+}
+
+/**
+ * 画面の選択肢のうち自由入力欄を開くもの。無ければ null。
+ *
+ * **Claude Code のダイアログ以外では常に null。** Rust 側は `is_cc_select()` の
+ * 3 形状にしか `selectThenText` を通さないので、`numbered` の画面にたまたま
+ * `Type something` に当たるラベルがあっても入力欄を出してはいけない
+ * （押せるのに送信は必ず失敗し、カードが死ぬ）。
+ */
+function freeTextOptionOf(n) {
+  if (CC_SELECT_SHAPES.indexOf(shapeOf(n)) < 0) return null;
+  return optionsOf(n).find(o => isFreeTextLabel(o.label)) || null;
+}
+
+/** いまの下書きが「画面由来の選択肢から自由入力を選んでいる」か */
+function picksFreeText(n, draft) {
+  const d = draft || {};
+  if (d.mode === 'escapeThenText' || typeof d.optionIndex !== 'number') return false;
+  const ft = freeTextOptionOf(n);
+  return !!ft && ft.index === d.optionIndex;
+}
+
 // ── 通知に入っている「聞かれていること」（#264）───────────────────────────────
 //
 // `approval` の通知本文は `PermissionRequest` フックの JSON で、`tool_name` と
@@ -353,6 +397,34 @@ function screenIndexFor(oi) {
   return oi + 1;
 }
 
+/**
+ * その設問の「自由入力（`Type something.`）」を表す `picks` の値（#265）。
+ *
+ * 通知の選択肢は 0..N-1 なので、**1 つ後ろ**を自由入力の印として使う。こうすると
+ * `screenIndexFor` がそのまま画面上の番号（N+1 = `Type something.` の位置）を返し、
+ * 番号を作る場所が 1 か所のままで済む。
+ *
+ * **番号がずれても誤爆しない。** Rust 側はその番号のラベルが `Type something.` か
+ * 確かめてから送り、違えば何も送らない。
+ *
+ * **画面の実ラベル（`optionsOf`）で裏取りしないのはなぜか。** 画面に出ているのは
+ * 1 問ぶんだけで、それが `request.questions` の何問目なのかはレポート側から
+ * 確実には決められない（人がタブを戻して回答済みの設問を開いていることもある）。
+ * 「たぶんこの設問だろう」で実 index を当てると、外れたときに**別の設問の並びから
+ * 番号を作る**ことになる。合成の位置は実測のレイアウトで固定されており、
+ * ずれた場合は Rust 側のラベル照合が受け止める。
+ */
+function freeTextPickFor(q) {
+  return q && Array.isArray(q.options) ? q.options.length : 0;
+}
+
+/** 設問 `qi` で自由入力を選んでいるか */
+function picksFreeTextAt(n, draft, qi) {
+  const qs = askQuestions(n);
+  const picks = (draft && draft.picks) || {};
+  return !!qs[qi] && picks[qi] === freeTextPickFor(qs[qi]);
+}
+
 /** 一括回答で送る画面上の番号の並び。未回答があれば `null` */
 function selectAllIndices(n, draft) {
   const qs = askQuestions(n);
@@ -366,13 +438,42 @@ function selectAllIndices(n, draft) {
   return out;
 }
 
+/**
+ * 一括回答に添える設問ごとの本文（#265）。`selectAllIndices` と同じ長さで、
+ * 自由入力を選んでいない設問は空文字。
+ */
+function selectAllTexts(n, draft) {
+  const qs = askQuestions(n);
+  const texts = (draft && draft.texts) || {};
+  return qs.map((q, i) =>
+    picksFreeTextAt(n, draft, i) ? flatten(texts[i] || '') : ''
+  );
+}
+
+/**
+ * 設問 `qi` に**送れる形で**答え終わっているか（#265）。
+ *
+ * **「答えたか」の判定はここ 1 本だけ。** 進捗カウント・設問行のチェック・
+ * 入力欄の枠色・送信可否がそれぞれ別の条件を持つと、「回答済み 2/2 なのに
+ * 送信ボタンが押せない」のような説明のつかない状態が必ずどこかに出る
+ * （2 回目・3 回目のセルフレビューで実際に検出された）。
+ *
+ * 自由入力（`Type something.`）を選んだ設問は、**本文が空なら未回答**。
+ * 空のまま送ると `Type something.` を確定したあと空の CR が飛び、
+ * 宛先が入力欄で止まる。判定は送信に使うのと同じ `flatten` 基準で行う
+ * （`trim` だけだと制御文字しか無い本文を「あり」と数えてしまう）。
+ */
+function isAnsweredAt(n, draft, qi) {
+  const picks = (draft && draft.picks) || {};
+  const texts = (draft && draft.texts) || {};
+  if (typeof picks[qi] !== 'number') return false;
+  if (picksFreeTextAt(n, draft, qi)) return !!flatten(texts[qi] || '');
+  return true;
+}
+
 /** 何問中何問に答えたか */
 function answeredCount(n, draft) {
-  const qs = askQuestions(n);
-  const picks = (draft && draft.picks) || {};
-  let c = 0;
-  for (let i = 0; i < qs.length; i++) if (typeof picks[i] === 'number') c++;
-  return c;
+  return askQuestions(n).filter((_, i) => isAnsweredAt(n, draft, i)).length;
 }
 
 /**
@@ -556,7 +657,8 @@ function previewKeys(n, draft) {
   // 形状の推定が外れても（狭いターミナルで起きる）、キーの種類だけは Claude Code の
   // フッタという構造的な手がかりから決まる。Rust 側の `plan_keys` と同じ規則
   if (n.prompt.navigation === 'digits') {
-    return d.optionIndex ? [String(d.optionIndex), 'CR'] : null;
+    if (!d.optionIndex) return null;
+    return withFreeTextKeys(n, d, [String(d.optionIndex), 'CR']);
   }
   // 矢印で ❯ を動かして CR（Claude Code のダイアログ。数字キーは確定キーではない）
   const q = questionOf(n);
@@ -569,7 +671,67 @@ function previewKeys(n, draft) {
   const step = target > current ? 'Down' : 'Up';
   for (let i = 0; i < Math.abs(target - current); i++) keys.push(step);
   keys.push('CR');
-  return keys;
+  return withFreeTextKeys(n, d, keys);
+}
+
+/**
+ * 自由入力（`Type something.`）を選んでいるとき、選択の確定のあとに続く
+ * 本文 + CR を足す（#265）。選んでいなければ `keys` をそのまま返す。
+ *
+ * **本文が空ならキー列を出さない。** 出すと「押せば何か起きる」ように見えるが、
+ * 送信は `canSend` が塞いでいる。
+ */
+function withFreeTextKeys(n, draft, keys) {
+  if (!picksFreeText(n, draft)) return keys;
+  const body = flatten((draft || {}).freeText || '');
+  if (!body) return null;
+  // 文字数は Rust 側（`Keystroke::text` の `chars().count()`）に合わせてコードポイントで数える
+  return keys.concat([`text(${[...body].length}文字)`, 'CR']);
+}
+
+// ── カードからの導線（#265）──────────────────────────────────────────────────
+
+/**
+ * 発信元ワークツリーのターミナルを oretachi の前面に出す。
+ *
+ * **できるのは UI のフォーカス移動だけ**で、端末の内容は読み書きしない。
+ * `sessionId` を渡せるとタブまで当たる（同じワークツリーに複数タブがあると、
+ * ワークツリーを出すだけでは目的の端末に当たらない）。`sessionId` が失効していれば
+ * ワークツリーを出すだけに留まる。
+ *
+ * 許可は端末操作と同じ購読スコープ（自ワークツリーか購読先だけ）。
+ */
+async function showTerminal(n) {
+  if (!n || !n.worktreeId) {
+    return { ok: false, error: 'この通知にはワークツリーIDが入っていません（発信元をたどれません）' };
+  }
+  const params = { worktree_id: n.worktreeId };
+  if (typeof n.sessionId === 'number' && n.sessionId > 0) params.session_id = n.sessionId;
+  try {
+    await callTool('oretachi_show_worktree', params);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: errText(e) };
+  }
+}
+
+/**
+ * 発信元ワークツリーに登録されている URL アーティファクト（#265）。
+ *
+ * 生成側が `search_artifact` で拾って `n.artifacts` に入れる。`id` と `title` だけで、
+ * **URL そのものは持たない**: リンク先は `artifact://` でアプリ内のアーティファクトを
+ * 指し、実際に開くのはそのビューの「ブラウザで開く」ボタン（人が URL を見てから押す）。
+ */
+function artifactsOf(n) {
+  const list = (n && n.artifacts) || [];
+  return list.filter(a => a && typeof a.id === 'string' && a.id.trim() && n.worktreeId);
+}
+
+/** URL アーティファクトへのアプリ内リンク。クリックするとビューアがそこへ遷移する */
+function artifactHref(n, a) {
+  // 両セグメントとも encode する（`parseArtifactLink` が decode してラウンドトリップする）。
+  // ID には `%` が入りうるので、素で組むと decode が throw してリンクが死ぬ
+  return `artifact://worktree/${encodeURIComponent(n.worktreeId)}/${encodeURIComponent(a.id)}`;
 }
 
 // ── 送信 ─────────────────────────────────────────────────────────────────────
@@ -678,6 +840,12 @@ async function answerPrompt(n, draft) {
   } else if (shapeOf(n) === 'yesno') {
     params.kind = 'yesno';
     params.value = d.value;
+  } else if (picksFreeText(n, d)) {
+    // `Type something.` を選んでから本文 + CR（#265）。選ぶだけでは入力欄が開いた
+    // まま止まるので、Rust 側が 1 本のキー列として流す
+    params.kind = 'selectThenText';
+    params.option_index = d.optionIndex;
+    params.text = flatten(d.freeText);
   } else {
     params.kind = 'select';
     params.option_index = d.optionIndex;
@@ -714,6 +882,8 @@ async function answerAll(n, draft) {
       expect_fingerprint: n.prompt.fingerprint,
       kind: 'selectAll',
       option_indices: indices,
+      // 自由入力で答える設問の本文（#265）。他の設問は空文字
+      option_texts: selectAllTexts(n, draft),
     });
   } catch (e) {
     return { status: 'failed', error: errText(e) };
@@ -778,10 +948,16 @@ function canSend(n, answer, draft, conflicts) {
     if (!cursorReadable(n)) return false;
     // 通知由来の設問フォームは**全問埋まってから**送る。途中で送ると、残りの設問へ
     // 何も答えないまま画面が進み、宛先が答えの無い設問で止まる
-    if (isQuestionForm(n)) return selectAllIndices(n, d) !== null;
+    if (isQuestionForm(n)) {
+      if (selectAllIndices(n, d) === null) return false;
+      // 自由入力を選んだ設問は本文が要る。空のまま送ると、`Type something.` を
+      // 確定したあと空の CR が飛んで宛先が入力欄で止まる（#265）
+      return askQuestions(n).every((_, i) => isAnsweredAt(n, d, i));
+    }
     // 切れている画面では選択を許さない（ESC 経路だけ）
     if (isTruncated(n)) return false;
     if (shapeOf(n) === 'yesno') return d.value === 'y' || d.value === 'n';
+    if (picksFreeText(n, d)) return !!flatten(d.freeText);
     return typeof d.optionIndex === 'number';
   }
 
@@ -819,12 +995,22 @@ exports.tabAnsweredAt = tabAnsweredAt;
 exports.cursorReadable = cursorReadable;
 exports.isQuestionForm = isQuestionForm;
 exports.screenIndexFor = screenIndexFor;
+exports.isFreeTextLabel = isFreeTextLabel;
+exports.freeTextOptionOf = freeTextOptionOf;
+exports.picksFreeText = picksFreeText;
+exports.freeTextPickFor = freeTextPickFor;
+exports.picksFreeTextAt = picksFreeTextAt;
+exports.selectAllTexts = selectAllTexts;
+exports.isAnsweredAt = isAnsweredAt;
 exports.selectAllIndices = selectAllIndices;
 exports.answeredCount = answeredCount;
 exports.promptConflicts = promptConflicts;
 exports.blockedReason = blockedReason;
 exports.previewKeys = previewKeys;
 exports.canSend = canSend;
+exports.showTerminal = showTerminal;
+exports.artifactsOf = artifactsOf;
+exports.artifactHref = artifactHref;
 exports.sendOne = sendOne;
 exports.sendEnter = sendEnter;
 exports.answerPrompt = answerPrompt;

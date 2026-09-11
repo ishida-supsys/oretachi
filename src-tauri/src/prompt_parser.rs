@@ -266,6 +266,12 @@ impl Keystroke {
 pub enum Answer {
     /// 選択肢を 1 つ選ぶ
     Select { option_index: u32 },
+    /// **自由入力欄を開く選択肢**（`Type something.`）を選んでから本文を送る（#265）。
+    ///
+    /// `Select` + `Text` の 2 回呼びにしないのは、選んだ直後の画面は「ダイアログの中の
+    /// 入力欄」で、`parse_prompt` から見ると形状が変わってしまい `Text` が拒否されるため。
+    /// キー列を 1 本にまとめて一気に流す（`EscapeThenText` と同じ形）。
+    SelectThenText { option_index: u32, text: String },
     /// 自由入力へ本文を送る
     Text { text: String },
     /// ESC でダイアログを抜けてから本文を送る（`No, and tell Claude ...` の代わり）
@@ -293,25 +299,21 @@ impl Answer {
                 Ok(Answer::Select { option_index: i })
             }
             "text" | "escapeThenText" => {
-                let t = text
-                    .map(str::to_string)
-                    .filter(|t| !t.trim().is_empty())
-                    .ok_or_else(|| format!("kind=\"{}\" には空でない text が必須です", kind))?;
-                // 本文は「通知の中身 + ユーザーの補足」で、ブラケットペーストで囲んでいない。
-                // ESC がそのまま届くと宛先の TUI へ任意のエスケープシーケンスを注入できる
-                // ので、呼び出し側の畳み込みに頼らずここでも弾く（`lib/send` の flatten と
-                // 二重の防波堤。片方が外れても注入にならないようにする）
-                if let Some(bad) = t.chars().find(|c| c.is_control()) {
-                    return Err(format!(
-                        "text に制御文字 (U+{:04X}) が含まれています。宛先の TUI へエスケープシーケンスを注入しうるため受け付けません。改行や ESC を除いた 1 行に畳んでから渡してください",
-                        bad as u32
-                    ));
-                }
+                let t = checked_text(kind, text)?;
                 if kind == "text" {
                     Ok(Answer::Text { text: t })
                 } else {
                     Ok(Answer::EscapeThenText { text: t })
                 }
+            }
+            "selectThenText" => {
+                let i = option_index.ok_or_else(|| {
+                    "kind=\"selectThenText\" には option_index が必須です（自由入力欄を開く選択肢 `Type something.` の options[].index）".to_string()
+                })?;
+                Ok(Answer::SelectThenText {
+                    option_index: i,
+                    text: checked_text(kind, text)?,
+                })
             }
             "yesno" => match value.map(str::trim).map(str::to_ascii_lowercase).as_deref() {
                 Some("y") | Some("yes") => Ok(Answer::YesNo { yes: true }),
@@ -322,11 +324,31 @@ impl Answer {
                 )),
             },
             other => Err(format!(
-                "未知の kind '{}' です。使えるのは \"select\" / \"text\" / \"escapeThenText\" / \"yesno\" です",
+                "未知の kind '{}' です。使えるのは \"select\" / \"selectThenText\" / \"text\" / \"escapeThenText\" / \"yesno\" です",
                 other
             )),
         }
     }
+}
+
+/// 宛先へそのまま流す本文を検査して取り出す。
+///
+/// 本文は「通知の中身 + ユーザーの補足」で、ブラケットペーストで囲んでいない。
+/// ESC がそのまま届くと宛先の TUI へ任意のエスケープシーケンスを注入できるので、
+/// 呼び出し側の畳み込みに頼らずここでも弾く（`lib/send` の flatten と二重の防波堤。
+/// 片方が外れても注入にならないようにする）。
+fn checked_text(kind: &str, text: Option<&str>) -> Result<String, String> {
+    let t = text
+        .map(str::to_string)
+        .filter(|t| !t.trim().is_empty())
+        .ok_or_else(|| format!("kind=\"{}\" には空でない text が必須です", kind))?;
+    if let Some(bad) = t.chars().find(|c| c.is_control()) {
+        return Err(format!(
+            "text に制御文字 (U+{:04X}) が含まれています。宛先の TUI へエスケープシーケンスを注入しうるため受け付けません。改行や ESC を除いた 1 行に畳んでから渡してください",
+            bad as u32
+        ));
+    }
+    Ok(t)
 }
 
 /// キー列を組めなかった理由。呼び出し側が `unsupported` として返す文言に使う。
@@ -541,20 +563,35 @@ pub fn plan_keys(parsed: &ParsedPrompt, answer: &Answer) -> Result<Vec<Keystroke
     match (parsed.shape, answer) {
         // **選択肢を全部読めていない疑いがあるなら選ばせない。** 読めたぶんだけ見せると
         // 「`1. Yes` しか無い」と誤認させ、拒否の選択肢を見ないまま承認させてしまう
-        (_, Answer::Select { .. }) if parsed.truncated => Err(PlanError(
+        (_, Answer::Select { .. } | Answer::SelectThenText { .. }) if parsed.truncated => Err(PlanError(
             "ダイアログが宛先の画面に収まっておらず、選択肢を全部読めていません（画面外に流れた選択肢がある）。読めたぶんだけで選ばせると拒否の選択肢を見ないまま承認させることになるため、選択は受け付けません。ターミナルを開いて直接操作するか、ESC で抜けて指示を送る (kind=\"escapeThenText\") を使ってください".to_string(),
         )),
 
-        // 矢印で `❯` を動かして CR（Claude Code のダイアログ）
-        (_, Answer::Select { option_index }) if parsed.navigation == Navigation::Arrows => {
+        // 選択肢を選んで確定する（矢印 or 数字 + CR）。
+        // **`navigation` で絞る**のは、分類できていない画面（`unknown`）へ
+        // 推測でキーを送らないため（下の `PromptShape::Unknown` の分岐へ落とす）
+        (_, Answer::Select { option_index })
+            if matches!(parsed.navigation, Navigation::Arrows | Navigation::Digits) =>
+        {
+            plan_option_keys(parsed, *option_index)
+        }
+
+        // **自由入力欄を開く選択肢を選んでから本文を送る（#265）。**
+        //
+        // 選択肢を全部読めていない画面は上の `truncated` 分岐で既に落ちている。
+        // ここでは加えて「その番号が本当に `Type something.` か」をラベルで裏取りする:
+        // 呼び出し側は番号を通知の選択肢数から組み立てるので、ずれていれば
+        // **別の選択肢を確定したうえで本文がその先の画面へ流れ込む**。
+        (s, Answer::SelectThenText { option_index, text }) if s.is_cc_select() => {
             let q = parsed
                 .questions
                 .first()
                 .ok_or_else(|| unsupported("選択肢を読み取れませんでした"))?;
-            let target = q
+            let label = q
                 .options
                 .iter()
-                .position(|o| o.index == *option_index)
+                .find(|o| o.index == *option_index)
+                .map(|o| o.label.as_str())
                 .ok_or_else(|| {
                     PlanError(format!(
                         "option_index {} は画面に存在しません（画面の選択肢: {}）。**画面に無い選択肢は送れません**",
@@ -566,40 +603,14 @@ pub fn plan_keys(parsed: &ParsedPrompt, answer: &Answer) -> Result<Vec<Keystroke
                             .join(", ")
                     ))
                 })?;
-            // `❯` が読めないと移動量が決まらない。数字キーへ倒すと確定キーでない以上
-            // 何も起きないか、TUI 次第では別の解釈をされるので送らない
-            let cursor = q.cursor_index.ok_or_else(|| {
-                unsupported("いまどの選択肢が選ばれているか (❯) が読み取れず、矢印の移動量を決められません")
-            })?;
-            let current = q
-                .options
-                .iter()
-                .position(|o| o.index == cursor)
-                .ok_or_else(|| unsupported("❯ が指す選択肢が選択肢一覧の中に見つかりません"))?;
-            let mut keys = Vec::new();
-            if target > current {
-                keys.extend(std::iter::repeat_with(Keystroke::down).take(target - current));
-            } else {
-                keys.extend(std::iter::repeat_with(Keystroke::up).take(current - target));
-            }
-            keys.push(Keystroke::cr());
-            Ok(keys)
-        }
-
-        // 素の TUI の番号選択は行入力ベース。矢印ではなく数字 + CR
-        (_, Answer::Select { option_index }) if parsed.navigation == Navigation::Digits => {
-            let q = parsed
-                .questions
-                .first()
-                .ok_or_else(|| unsupported("選択肢を読み取れませんでした"))?;
-            if !q.options.iter().any(|o| o.index == *option_index) {
+            if !is_free_text_option(label) {
                 return Err(PlanError(format!(
-                    "option_index {} は画面に存在しません",
-                    option_index
+                    "option_index {} のラベルは '{}' で、自由入力欄を開く選択肢 (`Type something.`) ではありません。選んだ先に入力欄が無いと本文がそのまま次の画面へ流れ込むため、何も送っていません。選択肢を選ぶだけなら kind=\"select\" を使ってください",
+                    option_index, label
                 )));
             }
-            let mut keys: Vec<Keystroke> =
-                option_index.to_string().chars().map(Keystroke::ch).collect();
+            let mut keys = plan_option_keys(parsed, *option_index)?;
+            keys.push(Keystroke::text(text));
             keys.push(Keystroke::cr());
             Ok(keys)
         }
@@ -639,11 +650,82 @@ pub fn plan_keys(parsed: &ParsedPrompt, answer: &Answer) -> Result<Vec<Keystroke
             shape.as_str(),
             match answer {
                 Answer::Select { .. } => "\"select\"",
+                Answer::SelectThenText { .. } => "\"selectThenText\"",
                 Answer::Text { .. } => "\"text\"",
                 Answer::EscapeThenText { .. } => "\"escapeThenText\"",
                 Answer::YesNo { .. } => "\"yesno\"",
             }
         ))),
+    }
+}
+
+/// 「選択肢 `option_index` を選んで確定する」ぶんのキー列（純粋関数）。
+///
+/// `Select` と [`Answer::SelectThenText`] の**両方**がここを通る。選び方
+/// （矢印の移動量 / 数字）を 1 か所に閉じておかないと、片方だけ直したときに
+/// 「同じ番号なのに別の選択肢が確定する」経路ができる。
+fn plan_option_keys(parsed: &ParsedPrompt, option_index: u32) -> Result<Vec<Keystroke>, PlanError> {
+    let unsupported = |what: &str| {
+        PlanError(format!(
+            "画面の形状は '{}' で、{}。キーは送っていません",
+            parsed.shape.as_str(),
+            what
+        ))
+    };
+    let q = parsed
+        .questions
+        .first()
+        .ok_or_else(|| unsupported("選択肢を読み取れませんでした"))?;
+    let missing = || {
+        PlanError(format!(
+            "option_index {} は画面に存在しません（画面の選択肢: {}）。**画面に無い選択肢は送れません**",
+            option_index,
+            q.options
+                .iter()
+                .map(|o| o.index.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))
+    };
+
+    match parsed.navigation {
+        // 矢印で `❯` を動かして CR（Claude Code のダイアログ）
+        Navigation::Arrows => {
+            let target = q
+                .options
+                .iter()
+                .position(|o| o.index == option_index)
+                .ok_or_else(missing)?;
+            // `❯` が読めないと移動量が決まらない。数字キーへ倒すと確定キーでない以上
+            // 何も起きないか、TUI 次第では別の解釈をされるので送らない
+            let cursor = q.cursor_index.ok_or_else(|| {
+                unsupported("いまどの選択肢が選ばれているか (❯) が読み取れず、矢印の移動量を決められません")
+            })?;
+            let current = q
+                .options
+                .iter()
+                .position(|o| o.index == cursor)
+                .ok_or_else(|| unsupported("❯ が指す選択肢が選択肢一覧の中に見つかりません"))?;
+            let mut keys = Vec::new();
+            if target > current {
+                keys.extend(std::iter::repeat_with(Keystroke::down).take(target - current));
+            } else {
+                keys.extend(std::iter::repeat_with(Keystroke::up).take(current - target));
+            }
+            keys.push(Keystroke::cr());
+            Ok(keys)
+        }
+        // 素の TUI の番号選択は行入力ベース。矢印ではなく数字 + CR
+        Navigation::Digits => {
+            if !q.options.iter().any(|o| o.index == option_index) {
+                return Err(missing());
+            }
+            let mut keys: Vec<Keystroke> =
+                option_index.to_string().chars().map(Keystroke::ch).collect();
+            keys.push(Keystroke::cr());
+            Ok(keys)
+        }
+        Navigation::None => Err(unsupported("選択肢の選び方を読み取れませんでした")),
     }
 }
 
@@ -882,6 +964,26 @@ fn parse_tab_bar(body: &str) -> Option<Vec<QuestionTab>> {
 /// 片方だけ直すと、画面は確認画面と認識できているのに一括回答から
 /// Submit を押せない（あるいはその逆）という食い違いになる。
 pub const SUBMIT_REVIEW_HEADING: &str = "submit your answers";
+
+/// 「選ぶと自由入力欄が開く」選択肢のラベル（#265）。
+///
+/// Claude Code は `AskUserQuestion` の選択肢の後ろに `Type something.` を足す（実測）。
+/// これを選ぶとダイアログが入力欄に変わり、本文 + CR で回答できる。
+///
+/// **判定はわざと狭くしてある。** 広げると「自由入力のつもりで押した番号」が
+/// 別の選択肢を確定しうる。当たらなければ [`plan_keys`] が拒否するだけなので、
+/// 取りこぼしは安全側（何も送らない）に倒れる。
+///
+/// 照合は**この文字列の部分一致**（大文字小文字は無視）。`Type something.` と
+/// `Type something else` の両方を拾うためで、`Other` / `Custom` のような
+/// 「自由入力とは限らない」ラベルへは広げていない（`Chat about this` は
+/// ダイアログを抜けてチャットへ落ちる別物なので、ここには当たらない）。
+const FREE_TEXT_OPTION_LABEL: &str = "type something";
+
+/// その選択肢を選ぶと自由入力欄が開くか（`Type something.` / `Type something else`）。
+pub fn is_free_text_option(label: &str) -> bool {
+    contains_ci(label, FREE_TEXT_OPTION_LABEL)
+}
 
 /// 確認画面が残っている画面へキーを送らないときの文言。
 const REVIEW_STILL_VISIBLE: &str = "宛先の画面に回答の確認画面が残っています（描き直しの途中か、まだ答えていない設問があります）。ここでキーを送ると確認画面の選択肢を確定してしまうため、何も送っていません。ターミナルを開いて確定してください";
@@ -2089,6 +2191,79 @@ mod tests {
     fn detects_free_input() {
         let p = parse_prompt(&free_input_screen());
         assert_eq!(p.shape, PromptShape::Text);
+    }
+
+    // ── 自由入力欄を開く選択肢（`Type something.`）。#265 ─────────────────────
+
+    #[test]
+    fn select_then_text_moves_to_option_and_types() {
+        let p = parse_prompt(&multi_question_first_screen());
+        // `❯` は 1 番。`3. Type something.` まで 2 つ下がってから本文 + CR
+        let keys = plan_keys(
+            &p,
+            &Answer::SelectThenText { option_index: 3, text: "赤でも青でもない".into() },
+        )
+        .expect("selectThenText");
+        assert_eq!(
+            keys_preview(&keys),
+            vec!["Down", "Down", "CR", "text(8文字)", "CR"]
+        );
+    }
+
+    /// **番号が `Type something.` 以外を指していたら何も送らない。**
+    /// 呼び出し側は通知の選択肢数から番号を組み立てるので、ずれれば
+    /// 別の選択肢を確定したうえで本文がその先の画面へ流れ込む
+    #[test]
+    fn select_then_text_refuses_non_free_text_option() {
+        let p = parse_prompt(&multi_question_first_screen());
+        let err = plan_keys(
+            &p,
+            &Answer::SelectThenText { option_index: 2, text: "hi".into() },
+        )
+        .expect_err("Blue は自由入力欄を開かない");
+        assert!(err.0.contains("Blue"), "err={:?}", err.0);
+    }
+
+    #[test]
+    fn select_then_text_refuses_unknown_option() {
+        let p = parse_prompt(&multi_question_first_screen());
+        assert!(plan_keys(
+            &p,
+            &Answer::SelectThenText { option_index: 9, text: "hi".into() },
+        )
+        .is_err());
+    }
+
+    /// 自由入力欄を開く選択肢が無いダイアログ（許可ダイアログ）では送れない
+    #[test]
+    fn select_then_text_refuses_permission_dialog() {
+        let p = parse_prompt(&permission_screen("echo hi", "X:\\devel\\worktree\\oretachi-y14b"));
+        assert!(plan_keys(
+            &p,
+            &Answer::SelectThenText { option_index: 1, text: "hi".into() },
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn select_then_text_rejects_control_characters() {
+        let err = Answer::from_parts("selectThenText", Some(3), Some("a\x1b[Bb"), None)
+            .expect_err("ESC 入りは拒否");
+        assert!(err.contains("制御文字"), "err={:?}", err);
+    }
+
+    #[test]
+    fn select_then_text_requires_option_index() {
+        assert!(Answer::from_parts("selectThenText", None, Some("hi"), None).is_err());
+        assert!(Answer::from_parts("selectThenText", Some(3), None, None).is_err());
+    }
+
+    #[test]
+    fn free_text_option_label_matching() {
+        assert!(is_free_text_option("Type something."));
+        assert!(is_free_text_option("  3. type something else"));
+        assert!(!is_free_text_option("Chat about this"));
+        assert!(!is_free_text_option("Yes"));
     }
 
     // ── 複数設問の AskUserQuestion（#264。すべて実機の画面から採った）──────────

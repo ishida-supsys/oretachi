@@ -1380,20 +1380,58 @@ async function onTrayButtonClick() {
 }
 
 /**
+ * PTY セッションID から、そのワークツリー内のターミナルIDを引く (#265)。
+ *
+ * `sessionId` は PTY セッションごとの採番で、アプリ再起動やタブ再作成で変わる。
+ * 呼び出し元（通知レポート等）が持っている値は古くなりうるので、引けなければ
+ * null を返して「タブは動かさない」に倒す。
+ *
+ * **サブウィンドウへ分離済みのワークツリーは別経路で引く。** detach 時に
+ * `worktreeFrameBundles` からバンドルごと消える（`onMoveToSubWindow`）ので、
+ * TerminalView の ref からは辿れない。代わりに `useSubWindows` が持っている
+ * terminalId → sessionId の写しを使う。
+ */
+function findTerminalIdBySessionId(worktreeId: string, sessionId: number): number | null {
+  if (isDetached(worktreeId)) {
+    const terminals = worktrees.value.find((w) => w.id === worktreeId)?.terminals ?? [];
+    return terminals.find((t) => getDetachedSessionId(t.id) === sessionId)?.id ?? null;
+  }
+  const bundle = worktreeFrameBundles.get(worktreeId);
+  if (!bundle) return null;
+  for (const [terminalId, termRef] of bundle.terminalRefs) {
+    if (termRef?.sessionId === sessionId) return terminalId;
+  }
+  return null;
+}
+
+/**
  * 指定ワークツリーを実ウィンドウの前面に出す。
  * MCP (mcp-show-worktree) とトレイの「ウィンドウで開く」(tray-show-worktree) で共有する。
  * ctx はログ識別用の呼び出し元名。
  */
-async function showWorktreeInWindows(worktreeId: string, ctx: string): Promise<void> {
+async function showWorktreeInWindows(
+  worktreeId: string,
+  ctx: string,
+  sessionId?: number | null,
+): Promise<void> {
   const targetWt = worktrees.value.find((w) => w.id === worktreeId);
   if (!targetWt) {
     logDebug(`[Terminal] ${ctx}: worktree ${worktreeId} not found, skipping`);
     return;
   }
+  // PTY セッションID で「どのタブを見せたいか」まで指定できる (#265)。
+  // 同じワークツリーに複数タブがあると、ワークツリーを出すだけでは目的の端末に
+  // 当たらない。引けなければワークツリーを出すだけに留める（当てずっぽうで
+  // 別のタブへ切り替えない）
+  const targetTerminalId =
+    sessionId == null ? null : findTerminalIdBySessionId(worktreeId, sessionId);
   // サブウィンドウへ分離済みならそのウィンドウを前面に出す（メイン側のタブは動かさない）
   if (isDetached(worktreeId)) {
     try {
       await focusSubWindow(worktreeId);
+      if (targetTerminalId != null) {
+        await emitTo(`sub-${worktreeId}`, "sub-focus-terminal", { terminalId: targetTerminalId });
+      }
     } catch (e) {
       logDebug(`[Terminal] ${ctx}: focusSubWindow failed: ${e}`);
     }
@@ -1418,10 +1456,24 @@ async function showWorktreeInWindows(worktreeId: string, ctx: string): Promise<v
   }
   // トレイ常駐のためメインウィンドウは hide / minimize されているのが常態。
   // setFocus だけでは画面に出てこないので show → unminimize から行う。
+  //
+  // **タブの切り替えより先にウィンドウを出す。** 後ろに置くと、タブ切り替えが
+  // 失敗（あるいは `handleTabActivated` の rAF 内で例外が出て Promise が
+  // 解決しないまま止まる）したときにウィンドウが出てこず、押した人からは
+  // 「何も起きない」に見える。ワークツリーまでは切り替わっているので、
+  // タブが当たらなくても画面を出したほうが役に立つ
   const win = getCurrentWindow();
   await win.show();
   await win.unminimize();
   await win.setFocus();
+  if (targetTerminalId != null) {
+    try {
+      await switchToTerminal(targetTerminalId);
+    } catch (e) {
+      // タブが当たらなくてもワークツリーは出ている。ここで return しない
+      logDebug(`[Terminal] ${ctx}: switchToTerminal failed: ${e}`);
+    }
+  }
 }
 
 function onFrameAddTerminal(wid: string, leafId: string) {
@@ -1796,9 +1848,16 @@ onMounted(async () => {
   await initEventSubscriptions();
 
   // MCP: 指定ワークツリーをフォーカスする
-  await listen<{ worktree_id: string }>("mcp-show-worktree", async (event) => {
-    await showWorktreeInWindows(event.payload.worktree_id, "mcp-show-worktree");
-  });
+  await listen<{ worktree_id: string; session_id?: number | null }>(
+    "mcp-show-worktree",
+    async (event) => {
+      await showWorktreeInWindows(
+        event.payload.worktree_id,
+        "mcp-show-worktree",
+        event.payload.session_id,
+      );
+    },
+  );
 
   // MCP: git 上に存在するが oretachi 未登録のワークツリーを settings へ取り込む。
   // git worktree 自体は既にあるので git_worktree_add は呼ばず、エントリ登録だけを行う。

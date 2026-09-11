@@ -15,6 +15,9 @@ const {
   isDialog,
   isQuestionForm,
   isReportOnly,
+  picksFreeText,
+  selectAllTexts,
+  flatten,
   promptConflicts,
 } = require('./lib/send');
 
@@ -133,6 +136,12 @@ function App() {
             mode: useAll ? 'selectAll' : (d.mode || 'select'),
             optionIndex: typeof d.optionIndex === 'number' ? d.optionIndex : null,
             picks: useAll ? { ...(d.picks || {}) } : null,
+            // 自由入力（`Type something.`）で答えた本文（#265）。読み取り専用表示で
+            // 「何を送ったか」を出すのに要る（選択肢ラベルでは伝わらない）。
+            // **記録するのは送信に使った値そのもの**（`flatten` 済み）。下書きの生値だと
+            // 改行や制御文字を含む本文で「送信内容」が実際と食い違う
+            texts: useAll ? selectAllTexts(n, d) : null,
+            freeText: !useAll && picksFreeText(n, d) ? flatten(d.freeText) : null,
             value: d.value || null,
             note: (d.note || '').trim(),
             status: result.status,
