@@ -76,6 +76,8 @@ const copyingPng = ref(false);
 const menuRef = ref<InstanceType<typeof Popover> | null>(null);
 /** ピン止め更新が飛んでいる最中の ID（連打による UI とディスクの食い違いを防ぐ） */
 const pinningIds = ref<Set<string>>(new Set());
+/** マークダウンをレンダリング結果ではなく生ソースで表示するか（選択を移すと既定のプレビューへ戻す） */
+const markdownSourceMode = ref(false);
 
 let unlisten: UnlistenFn | null = null;
 let unlistenNavigate: UnlistenFn | null = null;
@@ -212,6 +214,10 @@ const reactViewRef = ref<InstanceType<typeof ArtifactReactView> | null>(null);
 
 const selectedMemory = computed(() =>
   selectedId.value ? states.value[selectedId.value]?.memory : undefined,
+);
+
+const isMarkdownArtifact = computed(
+  () => selectedArtifact.value?.content_type === "text/markdown",
 );
 
 const hasSelectedMemory = computed(() => {
@@ -753,6 +759,8 @@ async function resolveScopeName() {
 
 // 選択が変わったらロックを張り替える。null になったら解除する
 watch(selectedId, (id) => {
+  // 表示モードはアーティファクトごとの一時的な見方なので、選択を移したら既定へ戻す
+  markdownSourceMode.value = false;
   if (id) void touchLock();
   else void releaseLock();
 });
@@ -972,6 +980,21 @@ onUnmounted(() => {
             </span>
           </div>
           <div class="header-actions">
+            <!-- マークダウンはレンダリング結果と生ソースを見比べたい場面が多いので、
+                 メニューへ畳まずヘッダーへ直接切替ボタンを出す。
+                 ラベル / アイコンは状態ではなく「押すと何が起きるか」を出す
+                 （状態を示すハイライトを併用すると意味が反転して読めるため付けない） -->
+            <button
+              v-if="isMarkdownArtifact"
+              class="btn-header"
+              :title="markdownSourceMode ? t('markdownView.previewTooltip') : t('markdownView.sourceTooltip')"
+              @click="markdownSourceMode = !markdownSourceMode"
+            >
+              <i :class="markdownSourceMode ? 'pi pi-eye' : 'pi pi-code'" />
+              <span>{{
+                markdownSourceMode ? t("markdownView.previewLabel") : t("markdownView.sourceLabel")
+              }}</span>
+            </button>
             <!-- リポジトリスコープにはメニューが無いので、リセットはヘッダーに直接出す
                  （転送でメモリーを引き継ぐため、転送先でもリセットは必要） -->
             <button
@@ -1093,8 +1116,13 @@ onUnmounted(() => {
             :content="selectedArtifact.content"
             :language="selectedArtifact.language"
           />
+          <ArtifactCodeView
+            v-else-if="isMarkdownArtifact && markdownSourceMode"
+            :content="selectedArtifact.content"
+            language="markdown"
+          />
           <ArtifactMarkdownView
-            v-else-if="selectedArtifact.content_type === 'text/markdown'"
+            v-else-if="isMarkdownArtifact"
             :content="selectedArtifact.content"
             @navigate="onNavigate"
           />
@@ -1644,6 +1672,12 @@ onUnmounted(() => {
       "renamed": "The ID {from} was taken, so it was imported as {to}",
       "failed": "Import failed"
     },
+    "markdownView": {
+      "sourceLabel": "Source",
+      "sourceTooltip": "Show the raw markdown source",
+      "previewLabel": "Preview",
+      "previewTooltip": "Back to the rendered preview"
+    },
     "copyPng": {
       "label": "Copy as PNG",
       "tooltip": "Copy as a PNG image so you can paste it straight into an issue",
@@ -1723,6 +1757,12 @@ onUnmounted(() => {
       "done": "取り込みました",
       "renamed": "ID {from} は使用中だったため {to} として取り込みました",
       "failed": "取り込みに失敗しました"
+    },
+    "markdownView": {
+      "sourceLabel": "ソース",
+      "sourceTooltip": "マークダウンの生ソースを表示します",
+      "previewLabel": "プレビュー",
+      "previewTooltip": "レンダリング済みのプレビューへ戻します"
     },
     "copyPng": {
       "label": "PNG でコピー",
