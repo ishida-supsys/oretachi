@@ -2271,10 +2271,19 @@ fn is_completion_popup_row(body: &str) -> bool {
             let rest: String = chars.collect();
             !rest.starts_with(' ') && rest.split_whitespace().count() == 1
         }
-        // `+ src/main.ts`: 記号の後ろに空白を 1 つ挟んでパスが来る
+        // `+ src/main.ts`: 記号の後ろに空白を 1 つ挟んで**パス**が来る。
+        //
+        // **1 トークンであることだけでは足りない（4 周目のセルフレビュー）。**
+        // git diff のハンク行 `+ }` / `+ });` も 1 トークンなので通ってしまい、
+        // 罫線に挟まれた `>` 始まりのブロックの下に diff が来る画面が `text` に化ける。
+        // パスらしさ（`/` か `.` を含む）まで求める。
+        // **`@` 分岐に同じ条件を課さない** —— `@RE` のような打ちかけの途中を落とす
         Some('+') => {
             let rest: String = chars.collect();
-            rest.starts_with(' ') && rest.split_whitespace().count() == 1
+            let path = rest.trim_start();
+            rest.starts_with(' ')
+                && rest.split_whitespace().count() == 1
+                && (path.contains('/') || path.contains('.'))
         }
         _ => false,
     }
@@ -2477,17 +2486,37 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
 
     let run = find_last_option_run(&lines);
 
+    let last_meaningful = tail_lines
+        .iter()
+        .rev()
+        .map(|l| strip_frame(l).0)
+        .find(|b| !b.is_empty() && !is_rule_line(b));
+
+    // ── ページャとピッカーは**選択肢の並びより先に**決める（#292。4 周目のセルフレビュー）──
+    //
+    // 判定を「選択肢の並びが見つからなかったとき」の中に置くと、
+    // **スクロールバックに残った番号付きリストに乗っ取られる。** Claude Code は
+    // 代替画面バッファを使わずインラインで描くので、直前の出力の `1. …` / `2. …` が
+    // 可視グリッドに残ったまま `/resume` / `/config` が開く形は現実に起こる。
+    // そうなると:
+    //
+    // - 残骸がフッタから近ければ `Esc to cancel` を拾って `permission` になり、
+    //   **スクロールバック由来の選択肢を提示して矢印 + CR をピッカーへ撃つ**
+    // - 遠ければ / `Esc to cancel` が無い `/config` なら `numbered` になり、
+    //   **数字 + CR が絞り込み欄へ飛ぶ**（CR はハイライト中の項目を確定する）
+    //
+    // どちらも #292 が塞ごうとした着地点そのもの。`footer_region` は入力欄の中身を
+    // 除外して最後の罫線より下だけを見るので、本物のダイアログのフッタ領域に
+    // ピッカーの語が入ることはない。
+    if last_meaningful.as_deref().is_some_and(is_pager_line) {
+        return seal(quiet_prompt(PromptShape::Pager, escape_hatch, tail));
+    }
+    if is_picker_footer(&footer_region(tail_lines)) {
+        return seal(quiet_prompt(PromptShape::Menu, escape_hatch, tail));
+    }
+
     let Some(run) = run else {
-        // 選択肢が無い画面。y/n → ページャ → ピッカー → 自由入力 → unknown の順で倒す。
-        //
-        // **ページャとピッカーは自由入力より先に見る（#292）。** どちらも「罫線で
-        // 挟まれた箱」を持つことがあり（`/resume` / `/config` の `⌕ Search…` 欄）、
-        // 先に自由入力へ倒すと**絞り込み欄へ本文 + CR を撃ち込む**ことになる。
-        let last_meaningful = tail_lines
-            .iter()
-            .rev()
-            .map(|l| strip_frame(l).0)
-            .find(|b| !b.is_empty() && !is_rule_line(b));
+        // 選択肢が無い画面。y/n → 自由入力 → unknown の順で倒す
         if last_meaningful.as_deref().is_some_and(is_yesno_line) {
             let header = last_meaningful.unwrap_or_default();
             return seal(ParsedPrompt {
@@ -2511,16 +2540,6 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
                 pending_input: String::new(),
                 input_suggestion: String::new(),
             });
-        }
-        if last_meaningful.as_deref().is_some_and(is_pager_line) {
-            return seal(quiet_prompt(PromptShape::Pager, escape_hatch, tail));
-        }
-        // **フッタは折り返すが、画面末尾の数行に限って探す。** `tail_joined`
-        // （末尾 12 行ぜんぶ）で照合すると、スクロールバックに残った
-        // `Type to search` という**ただの出力**で自由入力の画面をピッカー扱いにし、
-        // 返答できるはずのカードを黙って塞ぐ
-        if is_picker_footer(&footer_region(tail_lines)) {
-            return seal(quiet_prompt(PromptShape::Menu, escape_hatch, tail));
         }
         if let Some(free) = looks_like_free_input(tail_lines) {
             return text_prompt(&free, tail_lines, &tail, escape_hatch);
@@ -3509,6 +3528,51 @@ mod tests {
         let p = parse_prompt(&wrapped_label_preview_screen());
         assert!(!p.truncated, "読めているダイアログを選べなくしてはいけない");
         assert!(plan_keys(&p, &Answer::Select { option_index: 3 }).is_ok());
+    }
+
+    /// スクロールバックに残った番号付きリストにピッカー判定を乗っ取らせない
+    /// （#292。4 周目のセルフレビューで検出）。
+    ///
+    /// Claude Code は代替画面バッファを使わずインラインで描くので、直前の出力の
+    /// `1. …` が残ったまま `/resume` が開く形は現実に起こる。判定が run の有無の
+    /// 後ろにあると、**残骸の選択肢を提示して矢印 + CR をピッカーへ撃つ**。
+    #[test]
+    fn a_stale_numbered_list_does_not_hijack_the_picker() {
+        let screen = [
+            "  やることは次の3つです:",
+            "  1. まず設計する",
+            "  2. 次に実装する",
+            "  3. 最後にテストする",
+            "",
+            "  Resume session (1 of 33)",
+            "  ❯ oretachi issue 292",
+            "    4 seconds ago",
+            "",
+            "    Type to search · Esc to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Menu, "残骸の選択肢を提示してはいけない");
+        assert!(plan_keys(&p, &Answer::Select { option_index: 1 }).is_err());
+    }
+
+    /// ピッカー判定を前へ出しても、本物のダイアログは奪われない（#292）。
+    #[test]
+    fn a_real_dialog_is_not_stolen_by_the_picker_check() {
+        let p = parse_prompt(&permission_screen("echo probe-292", "Print a probe"));
+        assert_eq!(p.shape, PromptShape::Permission);
+        let p = parse_prompt(&multi_question_first_screen());
+        assert_eq!(p.shape, PromptShape::AskUserQuestion);
+    }
+
+    /// git diff のハンク行を候補行として通さない（#292。4 周目のセルフレビュー）。
+    #[test]
+    fn a_diff_hunk_line_is_not_a_completion_popup_row() {
+        assert!(!is_completion_popup_row("+ }"));
+        assert!(!is_completion_popup_row("+ });"));
+        // パスらしさがあれば通る
+        assert!(is_completion_popup_row("+ src/main.ts"));
+        assert!(is_completion_popup_row("+ README.md"));
     }
 
     /// スクロールバックの語でピッカー誤判定しない（#292。3 周目のセルフレビュー）。

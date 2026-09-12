@@ -650,8 +650,12 @@ function blockedReason(n, conflicts) {
   //
   // どちらも `pendingInput` は fingerprint に入らないので `stale` では弾けない。
   // 読めるようになった価値（人が理由を読める）は保ったまま、送信だけ `unknown` 時代へ戻す。
+  //
+  // **先頭だけを見てはいけない（#292。4 周目のセルフレビュー）。** `@` ファイル補完は
+  // 行頭限定ではなく行中でも発火する（`これを見て @src/ma`）。見るのは**末尾のトークン**で、
+  // そこがカーソル位置＝補完が効いている場所になる。
   const draft = (hasPrompt(n) && n.prompt.pendingInput) || '';
-  if (shapeOf(n) === 'text' && /^[/@]/.test(draft)) {
+  if (shapeOf(n) === 'text' && /(^|\s)[/@]\S*$/.test(draft)) {
     return (
       `'${n.worktreeName}' の入力欄に補完の打ちかけ（${draft}）が残っており、` +
       '補完のポップアップが開いています。本文を送ると打ちかけの後ろへ連結されるうえ、' +

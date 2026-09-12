@@ -490,6 +490,7 @@ oretachi_inspect_prompt(session_id: <1-4(b) と同じ値>)
 | `yesno` | `(y/N)` / `[Y/n]`（シェル側の gh / npm / git など） | `y` / `n` ボタン | `y` or `n` → CR |
 | `numbered` | 素の TUI の `1) foo` | 画面の選択肢そのままのラジオ | 数字 → CR |
 | `menu` | 番号の無い `❯` リスト（`/resume` / `/config`）。フッタ `Type to search` / `Type to filter` | **送信ボタン無効。** 「ピッカーなのでターミナルで」の案内だけ | 送らない |
+| | ↑ `menu` / `pager` は選択肢を持たないので `truncated` は常に `false`。スクロールしていても立たない（選択 UI が無いので意味が無い） | | |
 | `pager` | `less` / `git log`。画面末尾が `:` / `(END)` / `--More--` | **送信ボタン無効。** 「ページャを閉じて」の案内だけ | 送らない |
 | `unknown` | 分類できないが入力待ちらしい | **送信ボタン無効。** 画面末尾を読み取り専用で表示 | 送らない |
 
@@ -503,7 +504,7 @@ oretachi_inspect_prompt(session_id: <1-4(b) と同じ値>)
 | `menu` | フッタの `Type to search` / `Type to filter` | `/config` には `Esc to cancel` が無いので、自由入力と読むと**設定の絞り込み欄へ本文 + CR を撃つ** |
 | `pager` | 画面末尾が `:` 単独 / `(END)` / `--More--` | `unknown` のままだと `tail` に git log のダンプがカードへ載る |
 
-**スクロールしているリストは必ず `truncated` が立つ（#292）。** `/model` のように
+**選択肢を出すカードでは、スクロールしているリストに必ず `truncated` が立つ（#292）。** `/model` のように
 画面へ入り切らないリストは `❯` と同じ桁に `↓` を描き、末尾に `… +3 models` を出す。
 選択肢は読めるが**画面に全部は出ていない**ので、カードは選択 UI を出さない。
 「2 つしか無い」と誤認させて選ばせないための安全弁で、**`truncated` を落とさないこと。**
