@@ -4,13 +4,10 @@ import { useI18n } from "vue-i18n";
 import { MdPreview, config } from "md-editor-v3";
 import "md-editor-v3/lib/preview.css";
 import mermaid from "mermaid";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { ask } from "@tauri-apps/plugin-dialog";
 import PanZoomCanvas from "./PanZoomCanvas.vue";
 import ArtifactLinkHoverPopup from "./ArtifactLinkHoverPopup.vue";
 import { mermaidConfig, sanitizeMermaidSvg } from "../../utils/mermaidTheme";
 import { createPanZoom, type PanZoomController } from "../../utils/panZoom";
-import { resolveExternalLink } from "../../utils/externalLink";
 import { ARTIFACT_SCHEME_RE } from "../../utils/artifactLink";
 
 const props = defineProps<{
@@ -174,6 +171,11 @@ function onKeydown(e: KeyboardEvent) {
  * 素通しするとこのウィンドウの webview 自身が外部サイトへ遷移してしまい、
  * Tauri の特権ドキュメントが差し替わったうえ戻る手段もなくなる。
  * キャプチャ段階で取るのは md-editor-v3 側のハンドラより先に止めるため。
+ *
+ * `artifact:` 以外のクリックは**不発**にする。外部 URL を開く導線はホバーで出る
+ * URL ポップアップ側に一本化してあり（issue #297）、本文のリンクテキストは AI が
+ * 自由に書けて飛び先を表さないため、押した対象＝開く URL が一致するのは
+ * 「URL そのものを押したとき」だけだからである。
  */
 function onLinkClick(e: MouseEvent) {
   const anchor = (e.target as Element | null)?.closest?.("a[href]");
@@ -184,16 +186,14 @@ function onLinkClick(e: MouseEvent) {
   // ここから先は開く/開かないに関わらず webview を遷移させない
   e.preventDefault();
   e.stopPropagation();
-  hideLinkPopup();
   // artifact: リンクは外部ブラウザではなくビューア内（または別ビューアウィンドウ）で開く。
   // 解析できない artifact: リンクも上へ渡す（受け側が書き間違いとして知らせる）
   if (href && ARTIFACT_SCHEME_RE.test(href.trim())) {
+    hideLinkPopup();
     emit("navigate", href);
-    return;
   }
-  const url = resolveExternalLink(href);
-  if (!url) return; // 相対パス・ローカルパス・非 http スキームは何もしない
-  void confirmAndOpen(url);
+  // それ以外は何もしない。ポップアップは閉じない（押した直後に URL を出したまま残し、
+  // そのままポップアップ側の URL へマウスを移して開けるようにする）
 }
 
 /**
@@ -229,21 +229,6 @@ function onLinkOut(e: Event) {
 /** スクロールするとリンクが動いてポップアップの位置が合わなくなる */
 function hideLinkPopup() {
   linkPopup.value?.hideNow();
-}
-
-async function confirmAndOpen(url: string) {
-  try {
-    // アーティファクト本文は AI が自由に書けるためリンクテキストは信用できない。
-    // 実 URL を見せて同意を取ってから外に出す
-    const ok = await ask(t("externalLink.confirm", { url }), {
-      title: t("externalLink.title"),
-      kind: "warning",
-    });
-    if (!ok) return;
-    await openUrl(url);
-  } catch (e) {
-    console.error("openUrl failed", e);
-  }
 }
 
 // mermaid の描画は非同期で、md-editor-v3 がブロック要素を差し替えるため DOM 変化を監視する

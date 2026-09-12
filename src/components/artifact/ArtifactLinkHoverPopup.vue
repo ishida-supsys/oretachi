@@ -1,7 +1,9 @@
 <script setup lang="ts">
-import { ref, nextTick, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { useI18n } from "vue-i18n";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import ArtifactLinkUrlText from "./ArtifactLinkUrlText.vue";
+import { resolveExternalLink } from "../../utils/externalLink";
 import type { ArtifactLinkRect } from "../../utils/artifactFrameLink";
 
 /**
@@ -12,11 +14,12 @@ import type { ArtifactLinkRect } from "../../utils/artifactFrameLink";
  * 親ドキュメント、html / react は sandbox iframe の中で、どちらもリンクの飛び先を
  * 見る手段が無い）。
  *
- * ただし「開く前に確かめる」が成立するのは markdown ビューだけ。ここが href を
- * `<a>` から直接読み、実際に開くのも同じ値だからである。html / react ビューの URL は
- * iframe 内のスクリプトが postMessage で申告した値で、アーティファクトの JS と同じ
- * レルムで動くため任意の値を名乗れる（代わりに iframe のリンクはそもそも開けない。
- * sandbox が外部遷移を塞いでいて、親へ渡るのは `artifact:` だけ）。
+ * **外部ブラウザで開く導線もここに一本化してある**（issue #297）。本文のリンクを押しても
+ * 何も起きず、開けるのはこのポップアップに出ている URL を押したときだけ。押した対象が
+ * そのまま開く URL なので、リンクテキストと飛び先の食い違いに引っかかりようがない
+ * （html / react ビューの URL は iframe 内のスクリプトの自己申告だが、表示と開く先が
+ * 同じ値である以上この性質は変わらない）。開けるのは `resolveExternalLink` が通す
+ * http(s) だけで、`artifact:` や相対パスはテキストとコピーのみになる。
  *
  * 座標は呼び出し側がリンクのビューポート座標で渡す。position: fixed で body へ
  * teleport するのは、markdown ビューの overflow や iframe の枠で切られないため。
@@ -132,6 +135,22 @@ function onLeave() {
   scheduleHide();
 }
 
+/** ポップアップの URL を押して外部ブラウザで開けるか（http(s) のみ） */
+const openTarget = computed(() => resolveExternalLink(href.value));
+
+async function open() {
+  const url = openTarget.value;
+  if (!url) return;
+  // 開いたらポップアップの役目は終わり。残すと他ウィンドウへフォーカスが移った先で
+  // 前面に浮いたままになる
+  hideNow();
+  try {
+    await openUrl(url);
+  } catch (e) {
+    console.error("openUrl failed", e);
+  }
+}
+
 async function copy() {
   try {
     await navigator.clipboard.writeText(href.value);
@@ -188,8 +207,17 @@ defineExpose({ showFor, scheduleHide, cancelHide, hideNow });
       @mouseenter="onEnter"
       @mouseleave="onLeave"
     >
-      <ArtifactLinkUrlText :href="href" />
-      <!-- click.stop: リンク本体のクリック（開く / artifact: 遷移）へ伝播させない -->
+      <!-- click.stop: 下に居るリンク本体のクリックへ伝播させない -->
+      <button
+        v-if="openTarget"
+        type="button"
+        class="link-hover-open"
+        :title="t('open')"
+        @click.stop.prevent="open"
+      >
+        <ArtifactLinkUrlText :href="href" />
+      </button>
+      <ArtifactLinkUrlText v-else :href="href" />
       <button
         type="button"
         class="link-hover-copy"
@@ -222,6 +250,27 @@ defineExpose({ showFor, scheduleHide, cancelHide, hideNow });
   line-height: 1.5;
 }
 
+/* URL テキストを押して開く。ボタンだが見た目はテキストのままにし、
+   ホバーで下線 + 色を変えて「押せる」ことだけ示す。
+   display: flex なのは中の span を flex アイテムにするため
+   （ArtifactLinkUrlText の max-height による打ち切りはインラインでは効かない） */
+.link-hover-open {
+  flex: 1 1 auto;
+  display: flex;
+  min-width: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: left;
+  font: inherit;
+  cursor: pointer;
+}
+
+.link-hover-open:hover :deep(.link-hover-url) {
+  color: #89b4fa;
+  text-decoration: underline;
+}
+
 .link-hover-copy {
   flex: 0 0 auto;
   display: flex;
@@ -245,11 +294,13 @@ defineExpose({ showFor, scheduleHide, cancelHide, hideNow });
 {
   "en": {
     "copy": "Copy URL",
-    "copied": "Copied"
+    "copied": "Copied",
+    "open": "Open in default browser"
   },
   "ja": {
     "copy": "URL をコピー",
-    "copied": "コピーしました"
+    "copied": "コピーしました",
+    "open": "既定のブラウザで開く"
   }
 }
 </i18n>
