@@ -6555,6 +6555,11 @@ fn resolve_workgroup_target(
 }
 
 /// リポジトリに通知フックが1件以上設定されているか。
+///
+/// **リポジトリが引けなければ false（＝未設定）に倒れる。** home 擬似ワークツリーは
+/// `repositoryId` が空文字なので必ずここに落ちる（`homeWorktree.ts` の
+/// `makeHomeWorktreeEntry`）。リポジトリ擬似ワークツリー（`isRepository`）は実リポジトリの
+/// ID を持つので、親リポジトリの設定をそのまま共有する。
 fn repo_has_notification_hooks(settings: &AppSettings, worktree: &WorktreeEntry) -> bool {
     settings
         .repositories
@@ -6562,6 +6567,38 @@ fn repo_has_notification_hooks(settings: &AppSettings, worktree: &WorktreeEntry)
         .find(|r| r.id == worktree.repository_id)
         .and_then(|r| r.notification_hooks.as_ref())
         .map_or(false, |h| !h.is_empty())
+}
+
+/// ライフサイクルフック由来の通知トーストを破棄すべきか（#286）。
+///
+/// プラグインの hooks は全ワークツリーへ無条件で注入される（`claude_plugin.rs` の
+/// `build_hooks_json`。SessionStart 注入と MCP を使わせるためにプラグイン自体を
+/// 常時有効化している）。そのため、通知フックを1件も設定していないリポジトリの通知挙動を
+/// 従来（プラグイン無効＝通知なし）へ揃える層がここになる。`kind` 明示指定
+/// （旧形式 / MCP 経由）は意図的な通知なので最初から対象外。
+///
+/// **`approval` だけは破棄しない（#286）。** 理由は2つ:
+///   - home 擬似ワークツリーには通知フックを設定する場所が無い（`setup_home_claude_dir` は
+///     hooks 空で `write_plugin_config` を呼ぶ）。「未設定＝ユーザーが意図的にオフにした」と
+///     読めるのは設定できるリポジトリだけで、home の未設定は構造上の既定でしかない。
+///   - `approval` を落とすと自動承認まで止まる。`useAppAutoApproval.ts` は
+///     `notify-worktree` の kind が `approval` / `general` のときだけ判定ループを回すので、
+///     ここでの破棄は「通知が出ない」ではなく「自動承認が起動しない」を意味する。
+///
+/// フロント側にも同型の例外がある（#225）: トレイ通知オフのワークツリー由来（`tray: false`）でも
+/// `approval` だけは提示する。「人の入力を待って止まった」ことを伝える唯一のフック経路だという
+/// 同じ理屈で、`hook` / `completed` の抑制は従来どおり維持する。
+fn should_drop_hook_toast(
+    settings: &AppSettings,
+    worktree: Option<&WorktreeEntry>,
+    kind_explicit: bool,
+    event: Option<&str>,
+    kind: NotifyKind,
+) -> bool {
+    if kind_explicit || event.is_none() || kind == NotifyKind::Approval {
+        return false;
+    }
+    worktree.map_or(false, |w| !repo_has_notification_hooks(settings, w))
 }
 
 /// イベント名の既定 kind。ユーザー設定 (repo.notification_hooks) が無い場合のフォールバック。
@@ -6797,23 +6834,22 @@ async fn notify_handler(
         }
     }
 
-    // ライフサイクルフック由来（event 指定・kind 明示なし）の通知は、通知フックが1件も
-    // 設定されていないリポジトリでは**トーストを**破棄する。プラグインは全ワークツリーで
-    // 無条件有効化される（SessionStart 注入用）ため、未設定リポジトリの通知挙動を
-    // 従来（プラグイン無効=通知なし）と一致させる。kind 明示指定（旧形式/MCP 経由）は
-    // 意図的な通知なので対象外。
+    // ライフサイクルフック由来（event 指定・kind 明示なし）の通知トーストの破棄判定。
+    // 条件と `approval` を例外にしている理由は `should_drop_hook_toast` のコメントを見ること。
     //
     // **購読イベントの発行より後に置くこと（#140）。** 購読は受信側が張るもので、
     // 発信元リポジトリのトースト設定とは無関係。ここで先に return すると
     // 「相手のリポジトリに通知フックを設定しないと completed を購読できない」という
     // 不可解な依存が生まれる。購読者ゼロなら索引が DB 書き込みを止めるので、
     // 全リポジトリで発行を試みてもコストは増えない。
-    if payload.kind.is_none() && payload.event.is_some() {
-        if let Some(w) = worktree {
-            if !repo_has_notification_hooks(&settings, w) {
-                return StatusCode::OK;
-            }
-        }
+    if should_drop_hook_toast(
+        &settings,
+        worktree,
+        payload.kind.is_some(),
+        payload.event.as_deref(),
+        kind,
+    ) {
+        return StatusCode::OK;
     }
 
     let event = NotifyWorktreeEvent {
@@ -8218,6 +8254,55 @@ mod tests {
         assert_eq!(
             resolve_kind_for_event(&settings, &settings.worktrees[0].clone(), "Stop"),
             NotifyKind::General
+        );
+    }
+
+    /// フック由来トーストの破棄（#286）。通知フック未設定リポジトリでも `approval` は通す。
+    #[test]
+    fn should_drop_hook_toast_keeps_approval_when_repo_has_no_hooks() {
+        let mut settings = target_settings();
+        let wt = settings.worktrees[0].clone();
+
+        // 通知フック未設定リポジトリ: hook / completed は破棄、approval だけ通す
+        assert!(should_drop_hook_toast(&settings, Some(&wt), false, Some("PostToolUse"), NotifyKind::Hook));
+        assert!(should_drop_hook_toast(&settings, Some(&wt), false, Some("Stop"), NotifyKind::Completed));
+        assert!(
+            !should_drop_hook_toast(&settings, Some(&wt), false, Some("PermissionRequest"), NotifyKind::Approval),
+            "approval を落とすと自動承認が起動しない（useAppAutoApproval.ts）"
+        );
+
+        // kind 明示指定（旧形式 / MCP 経由）は意図的な通知なので常に対象外
+        assert!(!should_drop_hook_toast(&settings, Some(&wt), true, Some("PostToolUse"), NotifyKind::Hook));
+        // event 無し（フック由来ではない）も対象外
+        assert!(!should_drop_hook_toast(&settings, Some(&wt), false, None, NotifyKind::Hook));
+        // ワークツリーを引けなかった場合は破棄しない（従来どおり）
+        assert!(!should_drop_hook_toast(&settings, None, false, Some("PostToolUse"), NotifyKind::Hook));
+
+        // 通知フックが1件でもあるリポジトリは全 kind 通す
+        settings.repositories[0].notification_hooks =
+            Some(vec![serde_json::from_str(r#"{"event":"Stop","kind":"general"}"#).unwrap()]);
+        assert!(!should_drop_hook_toast(&settings, Some(&wt), false, Some("PostToolUse"), NotifyKind::Hook));
+    }
+
+    /// `repository_id` がどのリポジトリにも一致しないワークツリー（#286）。
+    ///
+    /// home 擬似ワークツリーがこの形をしている（`makeHomeWorktreeEntry` は `repositoryId: ""`）。
+    /// **判定に効いているのは `repository_id` だけで `is_home` ではない**ので、home 以外でも
+    /// リポジトリを引けなければ同じ扱いになる。hook / completed は従来どおり破棄しつつ、
+    /// approval と自動承認の経路だけを通す。
+    #[test]
+    fn should_drop_hook_toast_keeps_approval_when_repository_is_unresolvable() {
+        let settings = target_settings();
+        let mut home = settings.worktrees[0].clone();
+        home.id = "home".into();
+        home.name = "home".into();
+        home.repository_id = String::new();
+        home.is_home = true;
+
+        assert!(should_drop_hook_toast(&settings, Some(&home), false, Some("PostToolUse"), NotifyKind::Hook));
+        assert!(
+            !should_drop_hook_toast(&settings, Some(&home), false, Some("PermissionRequest"), NotifyKind::Approval),
+            "home は通知フックを設定する場所が無いので「未設定＝意図的にオフ」とは読めない"
         );
     }
 
