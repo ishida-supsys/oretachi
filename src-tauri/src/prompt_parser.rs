@@ -1508,14 +1508,18 @@ fn strip_scroll_indicator(s: &str) -> (&str, bool) {
 /// 続き行が `…` で始まることはありうるので、`…` の後ろに `+件数` を要求する。
 /// 当たると run がそこで切れて `truncated` が立つため、外すと
 /// 「画面に選択肢が 3 つあるのに 1 つ」という #292 の事象そのものが戻る。
+/// 逆に**狭めすぎても静かに壊れる**（2 周目のセルフレビュー）: 拾えなかった行は
+/// 続き行として最後のラベルへ吸い込まれ、`Sonnet … 3 more` のようなラベルが
+/// `truncated` も立たないまま人に出る。実機で観測できているのは `… +3 models` と
+/// `↓ 46 more below` の 2 形式だけなので、`+件数` と `more` の**どちらか**を認める。
 fn is_more_items_line(body: &str) -> bool {
     let t = body.trim_start_matches(['↑', '↓', ' ']).trim();
-    let after_ellipsis = t.strip_prefix('…').or_else(|| t.strip_prefix("..."));
-    if let Some(rest) = after_ellipsis {
+    if let Some(rest) = t.strip_prefix('…').or_else(|| t.strip_prefix("...")) {
         let rest = rest.trim_start();
-        if let Some(count) = rest.strip_prefix('+') {
-            return count.starts_with(|c: char| c.is_ascii_digit());
-        }
+        let counted = rest
+            .strip_prefix('+')
+            .is_some_and(|c| c.starts_with(|c: char| c.is_ascii_digit()));
+        return counted || contains_ci(rest, "more");
     }
     contains_ci(t, "more below") || contains_ci(t, "more above")
 }
@@ -2198,13 +2202,33 @@ fn find_input_box_below_popup(tail: &[&str]) -> Option<FreeInput> {
 /// 一般化すると「罫線に挟まれた行の下にある任意の出力」が候補に化け、
 /// [`find_input_box_below_popup`] のガードが意味を失う。
 /// 当てはまらなければ `unknown` へ戻るだけなので、外し方は安全側。
+/// **記号だけでは足りない（2 周目のセルフレビューで検出）。** 記号だけを見ると
+/// `+ added line`（git diff）や `/usr/bin/env: ...`（コマンドの出力）が候補行に化け、
+/// 罫線に挟まれたコマンド行の下にそれらが来る画面が `text` のまま通ってしまう。
+/// 形まで見る:
+///
+/// - `/copy` / `/code-review` / `/plugin:skill` … **最初のトークンに `/` は 1 つだけ**。
+///   `/usr/bin/env:` は 2 つ目の `/` で落ちる
+/// - `+ src/main.ts` / `@src/ma` … 記号の後ろは**空白を含まない 1 トークン**。
+///   `+ added line` は空白で落ちる
 fn is_completion_popup_row(body: &str) -> bool {
     let mut chars = body.chars();
     match chars.next() {
-        // `/copy` / `@src/main.ts`: 記号の直後に名前が続くこと（`/ ` や `//` は候補ではない）
-        Some('/') | Some('@') => chars.next().is_some_and(|c| c.is_alphanumeric() || c == '.'),
-        // `+ src/main.ts`: 記号の後ろに空白を挟んでパスが来る
-        Some('+') => chars.next() == Some(' ') && chars.next().is_some(),
+        Some('/') => {
+            let name = body.split_whitespace().next().unwrap_or_default();
+            let name = &name[1..];
+            !name.is_empty() && !name.contains('/')
+        }
+        // `@src/ma`: 記号の直後からパスが続く（空白を挟まない）
+        Some('@') => {
+            let rest: String = chars.collect();
+            !rest.starts_with(' ') && rest.split_whitespace().count() == 1
+        }
+        // `+ src/main.ts`: 記号の後ろに空白を 1 つ挟んでパスが来る
+        Some('+') => {
+            let rest: String = chars.collect();
+            rest.starts_with(' ') && rest.split_whitespace().count() == 1
+        }
         _ => false,
     }
 }
@@ -3460,6 +3484,58 @@ mod tests {
         let p = parse_prompt(&screen);
         assert_ne!(p.shape, PromptShape::Text, "端末出力を自由入力と読んではいけない");
         assert!(plan_keys(&p, &Answer::Text { text: "hi".into() }).is_err());
+    }
+
+    /// 候補行の判定を記号だけで済ませない（#292。2 周目のセルフレビューで検出）。
+    ///
+    /// 記号だけだと git diff の `+ added line` やコマンド出力の `/usr/bin/env:` が
+    /// 候補行に化け、罫線に挟まれたコマンド行の下にそれらが来る画面が `text` で通る。
+    #[test]
+    fn command_output_is_not_a_completion_popup_row() {
+        // 本物の候補行
+        assert!(is_completion_popup_row("/copy       Copy Claude's last response"));
+        assert!(is_completion_popup_row("/code-review  Review the current diff"));
+        assert!(is_completion_popup_row("/oretachi:background-command  dev サーバ"));
+        assert!(is_completion_popup_row("+ src/main.ts"));
+        assert!(is_completion_popup_row("@src/ma"));
+        // 端末の出力
+        assert!(!is_completion_popup_row("+ added line"));
+        assert!(!is_completion_popup_row("/usr/bin/env: no such file"));
+        assert!(!is_completion_popup_row("+"));
+        assert!(!is_completion_popup_row("/"));
+    }
+
+    /// 罫線に挟まれたコマンド行 + git diff の出力を入力欄と読まない（#292）。
+    #[test]
+    fn a_framed_git_diff_is_not_an_input_box() {
+        let screen = [
+            "────────────────────────────────────────",
+            "> git diff",
+            "────────────────────────────────────────",
+            "+ added line",
+            "+ another added line",
+            "- removed line",
+            "  context line",
+            "  more context",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_ne!(p.shape, PromptShape::Text);
+        assert!(plan_keys(&p, &Answer::Text { text: "hi".into() }).is_err());
+    }
+
+    /// `+` 無しの「もっとある」行も拾う（#292。2 周目のセルフレビューで検出）。
+    ///
+    /// 拾えないと続き行として最後のラベルへ吸い込まれ、`Sonnet … 3 more` のような
+    /// ラベルが `truncated` も立たないまま人に出る。
+    #[test]
+    fn a_more_items_line_without_a_count_is_still_recognised() {
+        assert!(is_more_items_line("… 3 more"));
+        assert!(is_more_items_line("… more"));
+        assert!(is_more_items_line("... and more"));
+        // 散文の続き行は当たらないまま
+        assert!(!is_more_items_line("… なお、この選択肢は既定値です"));
+        assert!(!is_more_items_line("...and then rebuild the project"));
     }
 
     /// ツール出力が並んだ Claude Code のスクロールバックを打ちかけに化けさせない（#292）。
