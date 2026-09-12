@@ -235,29 +235,38 @@ pub struct Keystroke {
     /// 人間可読表現（`"Down"` / `"CR"` / `"text(42文字)"`）。UI のキー列プレビューに出す
     pub label: String,
     pub bytes: Vec<u8>,
+    /// **このキーの直後、次のキーを送る前に「画面が変わった」ことを確認してから進むべきか。**
+    ///
+    /// `Type something.` を選ぶ CR / `EscapeThenText` の ESC など、送った直後に
+    /// Claude Code 側が自由入力欄へ遷移する（=描画が変わる）キーに立てる。ここが
+    /// 固定の `SUBMIT_DELAY`（150ms）だけで次の本文を送っていたため、遷移し切る前に
+    /// 本文が届いて素のチャットメッセージとして吸われる事故があった（#282）。
+    /// 呼び出し側は固定待ちの代わりに `settle_after_keys` 相当のポーリングで待つ。
+    pub settle_after: bool,
 }
 
 impl Keystroke {
     fn down() -> Self {
-        Self { label: "Down".into(), bytes: b"\x1b[B".to_vec() }
+        Self { label: "Down".into(), bytes: b"\x1b[B".to_vec(), settle_after: false }
     }
     fn up() -> Self {
-        Self { label: "Up".into(), bytes: b"\x1b[A".to_vec() }
+        Self { label: "Up".into(), bytes: b"\x1b[A".to_vec(), settle_after: false }
     }
     fn cr() -> Self {
-        Self { label: "CR".into(), bytes: b"\r".to_vec() }
+        Self { label: "CR".into(), bytes: b"\r".to_vec(), settle_after: false }
     }
     fn esc() -> Self {
-        Self { label: "Esc".into(), bytes: b"\x1b".to_vec() }
+        Self { label: "Esc".into(), bytes: b"\x1b".to_vec(), settle_after: false }
     }
     fn text(s: &str) -> Self {
         Self {
             label: format!("text({}文字)", s.chars().count()),
             bytes: s.as_bytes().to_vec(),
+            settle_after: false,
         }
     }
     fn ch(c: char) -> Self {
-        Self { label: c.to_string(), bytes: c.to_string().into_bytes() }
+        Self { label: c.to_string(), bytes: c.to_string().into_bytes(), settle_after: false }
     }
 }
 
@@ -610,6 +619,12 @@ pub fn plan_keys(parsed: &ParsedPrompt, answer: &Answer) -> Result<Vec<Keystroke
                 )));
             }
             let mut keys = plan_option_keys(parsed, *option_index)?;
+            // 選択を確定する CR の直後、自由入力欄へ遷移し切るのを確認してから
+            // 本文を送る（#282）。固定待ちだと遷移前に本文が届き、素のチャット
+            // メッセージとして吸われる
+            if let Some(last) = keys.last_mut() {
+                last.settle_after = true;
+            }
             keys.push(Keystroke::text(text));
             keys.push(Keystroke::cr());
             Ok(keys)
@@ -625,7 +640,11 @@ pub fn plan_keys(parsed: &ParsedPrompt, answer: &Answer) -> Result<Vec<Keystroke
             if parsed.escape_hatch.is_none() {
                 return Err(unsupported("ESC で抜けられる表示 (Esc to cancel) が画面に無く、ESC 後の挙動が読めません"));
             }
-            Ok(vec![Keystroke::esc(), Keystroke::text(text), Keystroke::cr()])
+            // ESC の直後、自由入力欄へ遷移し切るのを確認してから本文を送る（#282。
+            // 事情は SelectThenText と同じ）
+            let mut esc = Keystroke::esc();
+            esc.settle_after = true;
+            Ok(vec![esc, Keystroke::text(text), Keystroke::cr()])
         }
 
         (PromptShape::YesNo, Answer::YesNo { yes }) => Ok(vec![
@@ -2208,6 +2227,39 @@ mod tests {
             keys_preview(&keys),
             vec!["Down", "Down", "CR", "text(8文字)", "CR"]
         );
+    }
+
+    /// **選択を確定する CR の直後だけ `settle_after` を立てる（#282）。**
+    ///
+    /// ここが立っていないと、遷移待ちをせず固定待ちで本文を送ってしまい、
+    /// 自由入力欄への遷移が間に合わなければ本文が素のチャットメッセージとして吸われる。
+    #[test]
+    fn select_then_text_marks_the_confirm_cr_for_settle_wait() {
+        let p = parse_prompt(&multi_question_first_screen());
+        let keys = plan_keys(
+            &p,
+            &Answer::SelectThenText { option_index: 3, text: "赤でも青でもない".into() },
+        )
+        .expect("selectThenText");
+        let flags: Vec<bool> = keys.iter().map(|k| k.settle_after).collect();
+        // ["Down", "Down", "CR", "text(...)", "CR"] のうち、選択を確定する CR
+        // （末尾から2番目）だけが立つ
+        assert_eq!(flags, vec![false, false, true, false, false]);
+    }
+
+    #[test]
+    fn escape_then_text_marks_the_esc_for_settle_wait() {
+        let p = parse_prompt(&permission_screen("echo hi", "X:\\wt"));
+        let keys = plan_keys(&p, &Answer::EscapeThenText { text: "別の方法で".into() }).unwrap();
+        let flags: Vec<bool> = keys.iter().map(|k| k.settle_after).collect();
+        assert_eq!(flags, vec![true, false, false]);
+    }
+
+    #[test]
+    fn plain_select_never_sets_settle_after() {
+        let p = parse_prompt(&multi_question_first_screen());
+        let keys = plan_keys(&p, &Answer::Select { option_index: 2 }).unwrap();
+        assert!(keys.iter().all(|k| !k.settle_after));
     }
 
     /// **番号が `Type something.` 以外を指していたら何も送らない。**

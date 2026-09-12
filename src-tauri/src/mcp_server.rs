@@ -1628,6 +1628,17 @@ pub struct AckMessageParams {
     pub project_dir: Option<String>,
 }
 
+/// [`NotifyService::send_keystrokes`] の結果（#282）。
+enum KeySendResult {
+    /// 全キー送信済み
+    Sent(Vec<String>),
+    /// PTY への書き込み自体が失敗した。`sent` は書き込めたキーのラベル
+    WriteFailed { sent: Vec<String>, label: String, error: String },
+    /// `settle_after` の遷移待ちがタイムアウトした。それ以降のキー（本文など）は
+    /// 送っていない
+    TransitionTimedOut { sent: Vec<String>, last: Option<crate::prompt_parser::ParsedPrompt> },
+}
+
 // ─── MCP Service ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
@@ -4274,6 +4285,74 @@ impl NotifyService {
         self.settle_until(session_id, |p| p.fingerprint != before).await
     }
 
+    /// `plan_keys` が組んだキー列を 1 本ずつ送る（#282）。
+    ///
+    /// **`settle_after` が立ったキーの直後は、固定待ちの代わりに画面が変わるまで
+    /// ポーリングする。** `Type something.` を選ぶ CR / `EscapeThenText` の ESC は、
+    /// 送った直後に Claude Code が自由入力欄へ遷移する（=描画が変わる）。ここを
+    /// 固定の `SUBMIT_DELAY`（150ms）で次のキー（本文）へ進んでいたため、遷移し切る
+    /// 前に本文が届き、素のチャットメッセージとして吸われる事故があった。
+    ///
+    /// 遷移待ちがタイムアウトしたら、**それ以降のキー（本文など）は送らずに打ち切る。**
+    /// ここで送ってしまうと、まさに直したい事故（未遷移の画面へ本文が届く）を
+    /// 自分で起こすことになる。
+    async fn send_keystrokes(
+        &self,
+        session_id: u32,
+        keys: &[crate::prompt_parser::Keystroke],
+    ) -> KeySendResult {
+        let mut sent: Vec<String> = Vec::new();
+        for (i, key) in keys.iter().enumerate() {
+            if i > 0 {
+                tokio::time::sleep(crate::event_delivery::SUBMIT_DELAY).await;
+            }
+            // 遷移待ちが要るキーだけ、送る**前**の画面を基準点として取っておく。
+            // 送った後に読むと、送信と読み取りの間に既に遷移し終えている場合があり、
+            // そのフィンガープリントを基準にすると「この先の変化」を待つことになって
+            // 二度と満たされない（実際は届いているのに `unverified` になる）。
+            let baseline_fp = if key.settle_after {
+                match self.inspect_screen(session_id) {
+                    Ok(t) => Some(t.0.fingerprint),
+                    Err(e) => {
+                        // ここを黙って `None`（=待たない）に倒すと、まさに直したい事故
+                        // （未遷移の画面へ本文が届く）を読み取り失敗時にだけ再発させる
+                        // 抜け道になる（差分レビューで検出）。ログを残したうえで、
+                        // 下の分岐で安全側（打ち切り）に倒す
+                        log::warn!(
+                            "[mcp] send_keystrokes: 遷移待ちの基準画面を読めませんでした session_id={} key={} error={}",
+                            session_id, key.label, e
+                        );
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            if let Err(e) = self
+                .app_handle
+                .state::<PtyManager>()
+                .write(session_id, key.bytes.clone())
+            {
+                return KeySendResult::WriteFailed { sent, label: key.label.clone(), error: e.to_string() };
+            }
+            sent.push(key.label.clone());
+            if key.settle_after {
+                match baseline_fp {
+                    Some(fp) => {
+                        let (last, changed) = self.settle_after_keys(session_id, &fp).await;
+                        if !changed {
+                            return KeySendResult::TransitionTimedOut { sent, last };
+                        }
+                    }
+                    // 基準画面を読めず、遷移したかどうかを確認しようがない。
+                    // 残りのキー（本文など）は送らずに打ち切る
+                    None => return KeySendResult::TransitionTimedOut { sent, last: None },
+                }
+            }
+        }
+        KeySendResult::Sent(sent)
+    }
+
     /// **描き終わった**画面を読む（#264）。
     ///
     /// 1 回読んだだけでは、再描画の途中（上半分だけ新しい）を掴みうる。
@@ -4594,25 +4673,29 @@ impl NotifyService {
                 }
             };
 
-            for (i, key) in keys.iter().enumerate() {
-                if i > 0 {
-                    tokio::time::sleep(crate::event_delivery::SUBMIT_DELAY).await;
-                }
-                if let Err(e) = self
-                    .app_handle
-                    .state::<PtyManager>()
-                    .write(session_id, key.bytes.clone())
-                {
+            match self.send_keystrokes(session_id, &keys).await {
+                KeySendResult::Sent(labels) => sent.extend(labels),
+                KeySendResult::WriteFailed { sent: partial, label, error } => {
+                    sent.extend(partial);
                     let status = if sent.is_empty() { "failed" } else { "pastedOnly" };
                     return outcome(
                         status,
                         sent,
                         None,
-                        Some(format!("キー '{}' の送信に失敗しました: {}", key.label, e)),
+                        Some(format!("キー '{}' の送信に失敗しました: {}", label, error)),
                         answered,
                     );
                 }
-                sent.push(key.label.clone());
+                KeySendResult::TransitionTimedOut { sent: partial, last: after_transition } => {
+                    sent.extend(partial);
+                    return outcome(
+                        "unverified",
+                        sent,
+                        after_transition.as_ref(),
+                        Some("選択肢を確定しましたが、自由入力欄への遷移を確認できませんでした。**本文は送っていません**（未遷移のまま送ると素のチャットメッセージとして吸われます）。ターミナルで状態を確認してください".to_string()),
+                        answered,
+                    );
+                }
             }
 
             // **確認画面での待ち条件は別物。** `select_all_progressed` は
@@ -4883,22 +4966,17 @@ impl NotifyService {
         // 1 キー 1 write + 各キー間に猶予。Claude Code は同じ読み取りチャンクに来た CR を
         // 送信として扱わないため、まとめて書くと確定しない
         let mut sent: Vec<String> = Vec::new();
-        for (i, key) in keys.iter().enumerate() {
-            if i > 0 {
-                tokio::time::sleep(crate::event_delivery::SUBMIT_DELAY).await;
-            }
-            let write_result = self
-                .app_handle
-                .state::<PtyManager>()
-                .write(session_id, key.bytes.clone());
-            if let Err(e) = write_result {
+        match self.send_keystrokes(session_id, &keys).await {
+            KeySendResult::Sent(labels) => sent.extend(labels),
+            KeySendResult::WriteFailed { sent: partial, label, error } => {
+                sent.extend(partial);
                 // 途中で失敗した場合、既に送ったキーは宛先へ届いている。同じ回答を
                 // そのまま再送すると矢印が二重に動いて別の選択肢を確定しうるので、
                 // 呼び出し元が「再送してはいけない」と分かる status を返す
                 let status = if sent.is_empty() { "failed" } else { "pastedOnly" };
                 log::warn!(
                     "[mcp] oretachi_answer_prompt: session_id={} status={} sent={:?} error={}",
-                    session_id, status, sent, e
+                    session_id, status, sent, error
                 );
                 return outcome(
                     status,
@@ -4906,8 +4984,8 @@ impl NotifyService {
                     None,
                     Some(format!(
                         "キー '{}' の送信に失敗しました: {}{}",
-                        key.label,
-                        e,
+                        label,
+                        error,
                         if status == "pastedOnly" {
                             "。**同じ回答を再送しないでください**（既に送ったキーで ❯ が動いており、再送すると別の選択肢を確定しえます）。ターミナルを開いて状態を確認してください"
                         } else {
@@ -4916,7 +4994,19 @@ impl NotifyService {
                     )),
                 );
             }
-            sent.push(key.label.clone());
+            KeySendResult::TransitionTimedOut { sent: partial, last: after_transition } => {
+                sent.extend(partial);
+                log::warn!(
+                    "[mcp] oretachi_answer_prompt: session_id={} status=unverified reason=transition_timeout sent={:?}",
+                    session_id, sent
+                );
+                return outcome(
+                    "unverified",
+                    sent,
+                    after_transition.as_ref(),
+                    Some("選択肢を確定しましたが、自由入力欄への遷移を確認できませんでした。**本文は送っていません**（未遷移のまま送ると素のチャットメッセージとして吸われます）。ターミナルで状態を確認してから oretachi_inspect_prompt を取り直してください".to_string()),
+                );
+            }
         }
 
         // 送信後にもう一度解析する。ロックはまだ握っているので、この再解析までの間に
