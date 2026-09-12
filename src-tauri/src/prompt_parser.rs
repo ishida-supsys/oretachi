@@ -1900,7 +1900,7 @@ fn is_open_dialog_footer(body: &str) -> bool {
 /// 「上罫線 / 入力欄の中身 / 下罫線 / ヒント行」なので、4 物理行には**人の打ちかけが
 /// 必ず入る**。`type to search` と打ちかけている端末が `menu` と判定され、
 /// 返答カードが黙って塞がれて `pendingInput` まで失われる。
-fn footer_region(tail: &[&str]) -> String {
+fn footer_region(tail: &[&str]) -> (usize, String) {
     /// フッタが折り返して占めうる行数の上限。
     ///
     /// **狭いタブでは 5 行以上に割れる**（実測: dev インスタンスの 7 行 13 桁のタブ）。
@@ -1923,11 +1923,12 @@ fn footer_region(tail: &[&str]) -> String {
             break;
         }
     }
-    (start..tail.len())
+    let text = (start..tail.len())
         .filter(|&i| !is_input_box_line(tail, i))
         .map(|i| strip_frame(tail[i]).0)
         .collect::<Vec<_>>()
-        .join(" ")
+        .join(" ");
+    (start, text)
 }
 
 /// 番号の無い `❯` リスト（ピッカー）のフッタか（#292）。
@@ -2271,19 +2272,21 @@ fn is_completion_popup_row(body: &str) -> bool {
             let rest: String = chars.collect();
             !rest.starts_with(' ') && rest.split_whitespace().count() == 1
         }
-        // `+ src/main.ts`: 記号の後ろに空白を 1 つ挟んで**パス**が来る。
+        // `+ src/main.ts`: 記号の後ろに空白を 1 つ挟んでパスが来る。
         //
         // **1 トークンであることだけでは足りない（4 周目のセルフレビュー）。**
         // git diff のハンク行 `+ }` / `+ });` も 1 トークンなので通ってしまい、
         // 罫線に挟まれた `>` 始まりのブロックの下に diff が来る画面が `text` に化ける。
-        // パスらしさ（`/` か `.` を含む）まで求める。
-        // **`@` 分岐に同じ条件を課さない** —— `@RE` のような打ちかけの途中を落とす
+        //
+        // **かといって「`/` か `.` を含む」は狭すぎる（5 周目のセルフレビュー）。**
+        // `+ Dockerfile` / `+ Makefile` / `+ LICENSE` が落ち、候補の先頭が
+        // それらのポップアップで `pending_input` の警告が効かなくなる。
+        // 弾きたいのは記号だけのハンク行なので、**英数字を 1 文字以上**求める
         Some('+') => {
             let rest: String = chars.collect();
-            let path = rest.trim_start();
             rest.starts_with(' ')
                 && rest.split_whitespace().count() == 1
-                && (path.contains('/') || path.contains('.'))
+                && rest.chars().any(|c| c.is_alphanumeric())
         }
         _ => false,
     }
@@ -2492,31 +2495,47 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
         .map(|l| strip_frame(l).0)
         .find(|b| !b.is_empty() && !is_rule_line(b));
 
-    // ── ページャとピッカーは**選択肢の並びより先に**決める（#292。4 周目のセルフレビュー）──
+    // ── 選択肢の並びより**下**にピッカーのフッタがあれば、並びの方が残骸（#292）──
     //
-    // 判定を「選択肢の並びが見つからなかったとき」の中に置くと、
-    // **スクロールバックに残った番号付きリストに乗っ取られる。** Claude Code は
-    // 代替画面バッファを使わずインラインで描くので、直前の出力の `1. …` / `2. …` が
-    // 可視グリッドに残ったまま `/resume` / `/config` が開く形は現実に起こる。
-    // そうなると:
+    // Claude Code は代替画面バッファを使わずインラインで描くので、直前の出力の
+    // `1. …` / `2. …` が可視グリッドに残ったまま `/resume` / `/config` が開く形は
+    // 現実に起こる。並びを優先すると:
     //
     // - 残骸がフッタから近ければ `Esc to cancel` を拾って `permission` になり、
     //   **スクロールバック由来の選択肢を提示して矢印 + CR をピッカーへ撃つ**
     // - 遠ければ / `Esc to cancel` が無い `/config` なら `numbered` になり、
     //   **数字 + CR が絞り込み欄へ飛ぶ**（CR はハイライト中の項目を確定する）
     //
-    // どちらも #292 が塞ごうとした着地点そのもの。`footer_region` は入力欄の中身を
-    // 除外して最後の罫線より下だけを見るので、本物のダイアログのフッタ領域に
-    // ピッカーの語が入ることはない。
-    if last_meaningful.as_deref().is_some_and(is_pager_line) {
-        return seal(quiet_prompt(PromptShape::Pager, escape_hatch, tail));
-    }
-    if is_picker_footer(&footer_region(tail_lines)) {
-        return seal(quiet_prompt(PromptShape::Menu, escape_hatch, tail));
+    // **ただし「フッタ領域にピッカーの語がある」だけで倒してはいけない**
+    // （4 周目の対応がこれで、5 周目のセルフレビューで退行が出た）。実機の
+    // Claude Code のダイアログには**罫線が無い**ので `footer_region` の窓は
+    // 切られず、承認対象・設問文・選択肢ラベル・直前の出力がそのまま窓に入る。
+    // `rg "Type to search"` の出力が残っているだけで**本物のダイアログが
+    // `menu` に化け、答えるべき問いに返答できなくなる。**
+    //
+    // 効く条件は**位置**。ピッカーのフッタが並びより下にあるときだけ、
+    // 並びの方を残骸とみなす。上や中にあるなら、それはダイアログの一部か
+    // その上のスクロールバックなので触らない。
+    //
+    // **ページャはここで見ない。** `less` は代替画面バッファを使うので
+    // スクロールバックはそもそも見えず、`:` で終わるダイアログを奪う側の
+    // 危険だけが残る。ページャ判定は従来どおり「並びが無い画面」に限る。
+    let (footer_start_in_tail, footer_text) = footer_region(tail_lines);
+    if is_picker_footer(&footer_text) {
+        let footer_start = tail_start + footer_start_in_tail;
+        if run.as_ref().is_some_and(|r| footer_start > r.end) {
+            return seal(quiet_prompt(PromptShape::Menu, escape_hatch, tail));
+        }
     }
 
     let Some(run) = run else {
-        // 選択肢が無い画面。y/n → 自由入力 → unknown の順で倒す
+        // 選択肢が無い画面。y/n → ページャ → ピッカー → 自由入力 → unknown の順で倒す。
+        //
+        // **ページャとピッカーは自由入力より先に見る（#292）。** どちらも「罫線で
+        // 挟まれた箱」を持つことがあり（`/resume` / `/config` の `⌕ Search…` 欄）、
+        // 先に自由入力へ倒すと**絞り込み欄へ本文 + CR を撃ち込む**ことになる。
+        // **y/n はさらに先**（`(y/N)` の画面にピッカーの語が残っているだけで
+        // `menu` に化けると、y/n に答えられなくなる）。
         if last_meaningful.as_deref().is_some_and(is_yesno_line) {
             let header = last_meaningful.unwrap_or_default();
             return seal(ParsedPrompt {
@@ -2540,6 +2559,12 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
                 pending_input: String::new(),
                 input_suggestion: String::new(),
             });
+        }
+        if last_meaningful.as_deref().is_some_and(is_pager_line) {
+            return seal(quiet_prompt(PromptShape::Pager, escape_hatch, tail));
+        }
+        if is_picker_footer(&footer_text) {
+            return seal(quiet_prompt(PromptShape::Menu, escape_hatch, tail));
         }
         if let Some(free) = looks_like_free_input(tail_lines) {
             return text_prompt(&free, tail_lines, &tail, escape_hatch);
@@ -3556,13 +3581,78 @@ mod tests {
         assert!(plan_keys(&p, &Answer::Select { option_index: 1 }).is_err());
     }
 
-    /// ピッカー判定を前へ出しても、本物のダイアログは奪われない（#292）。
+    /// **ピッカーの語が画面に残っているだけで本物の問いを奪わない**
+    /// （#292。5 周目のセルフレビューで検出）。
+    ///
+    /// 実機の Claude Code のダイアログには**罫線が無い**ので `footer_region` の窓は
+    /// 切られず、承認対象・設問文・選択肢ラベル・直前の出力がそのまま窓に入る。
+    /// `rg "Type to search"` の出力が残っているだけで `menu` に化けると、
+    /// 答えるべき問いに返答できなくなる（しかも `tail` を出さない約束なので、
+    /// 人は「ピッカーなのでターミナルで」という**事実と異なる案内**しか読めない）。
     #[test]
-    fn a_real_dialog_is_not_stolen_by_the_picker_check() {
-        let p = parse_prompt(&permission_screen("echo probe-292", "Print a probe"));
-        assert_eq!(p.shape, PromptShape::Permission);
-        let p = parse_prompt(&multi_question_first_screen());
-        assert_eq!(p.shape, PromptShape::AskUserQuestion);
+    fn a_picker_word_near_a_real_dialog_does_not_steal_it() {
+        // 設問文に含まれる
+        let aq = [
+            "←  ☐ Mode  ✔ Submit  →",
+            "Type to filter の実装をどう直しますか？",
+            "",
+            "❯ 1. 正規表現にする",
+            "  2. 前方一致にする",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]
+        .join("\n");
+        assert_eq!(parse_prompt(&aq).shape, PromptShape::AskUserQuestion);
+
+        // 選択肢ラベルに含まれる
+        let perm = [
+            "Bash command",
+            "rg \"Type to search\" src",
+            "",
+            "Do you want to proceed?",
+            "",
+            "❯ 1. Yes",
+            "  2. Yes, and don't ask again for rg commands",
+            "  3. No, and tell Claude what to do differently (esc)",
+            "",
+            "  Esc to cancel · Tab to amend",
+        ]
+        .join("\n");
+        assert_eq!(parse_prompt(&perm).shape, PromptShape::Permission);
+
+        // 直前の出力に残っているだけの y/n プロンプト
+        let yn = [
+            "$ rg \"Type to search\" src",
+            "src/a.rs:12:  // Type to search",
+            "Continue? (y/N) ",
+        ]
+        .join("\n");
+        assert_eq!(parse_prompt(&yn).shape, PromptShape::YesNo);
+
+        // 見出しに残っているだけの素の番号 TUI
+        let numbered =
+            ["Type to filter the list below", "  1) staging", "  2) production", "Selection: "]
+                .join("\n");
+        assert_eq!(parse_prompt(&numbered).shape, PromptShape::Numbered);
+
+        // 既存のフィクスチャも従来どおり
+        assert_eq!(
+            parse_prompt(&permission_screen("echo probe-292", "Print a probe")).shape,
+            PromptShape::Permission
+        );
+        assert_eq!(parse_prompt(&multi_question_first_screen()).shape, PromptShape::AskUserQuestion);
+    }
+
+    /// 拡張子もスラッシュも無い実在ファイル名を候補行として落とさない
+    /// （#292。5 周目のセルフレビュー）。
+    #[test]
+    fn an_extensionless_filename_is_still_a_completion_popup_row() {
+        assert!(is_completion_popup_row("+ Dockerfile"));
+        assert!(is_completion_popup_row("+ Makefile"));
+        assert!(is_completion_popup_row("+ LICENSE"));
+        // 記号だけの diff ハンク行は落ちたまま
+        assert!(!is_completion_popup_row("+ }"));
+        assert!(!is_completion_popup_row("+ });"));
     }
 
     /// git diff のハンク行を候補行として通さない（#292。4 周目のセルフレビュー）。
