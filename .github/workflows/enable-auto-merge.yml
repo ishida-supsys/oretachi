@@ -14,9 +14,13 @@ name: enable-auto-merge
 #   発火しないが、release.yml は tag push 起動なのでリリースは影響を受けない。
 #   影響は ci.yml の push: main 実行がスキップされることだけで、
 #   同じ checks が PR 側で通過済みのため冗長ランにあたる。
-# - `automerge` ラベルの付与には write 権限が必要。つまりラベルを付けられるのは
-#   リポジトリへの書き込みを許された主体だけで、fork PR 側からは武装できない。
-#   ラベルを付けてよい条件そのものは CLAUDE.md の「AI が守ること」で定義する。
+# - `automerge` ラベルを付けられるのは triage 以上の権限を持つ主体だけ
+#   (ラベルの作成・削除には write 以上が要るが、既存ラベルの付与・解除は triage で足りる)。
+#   ただし下の `if:` は draft とラベルしか見ておらず fork 判定がないため、
+#   **fork PR に付けた場合も同じようにマージされる**。no-checkout にしているのは
+#   このワークフロー自身が fork の差分を実行しないためであって、
+#   fork の差分が main に入らないという意味ではない。ラベルを付ける側が差分を確認すること。
+#   ラベルを付けてよい条件は CLAUDE.md の auto-merge 節で定義する。
 # - main ruleset は strict_required_status_checks_policy: false なので
 #   「Require branches to be up to date」による停止は起きない。
 #   後からこれを有効化する場合は auto-update または merge queue が別途必要。
