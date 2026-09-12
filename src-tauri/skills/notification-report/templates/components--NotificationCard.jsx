@@ -45,6 +45,7 @@ const {
   commandExecuted,
   COMMAND_MAX_LEN,
   showTerminal,
+  showArtifacts,
   artifactsOf,
   artifactHref,
 } = require('../lib/send');
@@ -319,31 +320,45 @@ function MiniButton({ label, title, disabled, onClick, href }) {
  * - **ターミナルへ飛ぶ** — `oretachi_show_worktree` で発信元のタブを前面に出す。
  *   通知だけでは分からないことを人が自分で見に行けるようにするための最短経路で、
  *   できるのは UI のフォーカス移動だけ（端末の内容は読み書きしない）。
- * - **アーティファクト** — 発信元に登録されている URL アーティファクトの一覧を出す。
- *   リンク先は `artifact://` でアプリ内のアーティファクトを指す。**ここから直接
- *   ブラウザを開かない**のは、sandbox の中の JS が名乗った URL をそのまま開ける形に
- *   すると「レポートを開いただけで任意の URL が開く」ことになるため。飛んだ先の
- *   ビューで人が URL を見てから「ブラウザで開く」を押す。
+ * - **アーティファクト** — **本体 UI のターミナルヘッダにあるボタンと同じ形（#291）**。
+ *   クリックで発信元ワークツリーのアーティファクトウィンドウが開き
+ *   （`oretachi_show_artifacts`。既に開いていれば前面に出る）、**ホバーすると
+ *   URL アーティファクトの一覧**がポップアップで出る。ウィンドウを開くだけなので
+ *   件数に依らず常に出す（URL 以外のアーティファクトしか無いワークツリーでも開ける）。
+ *   ポップアップのリンク先は `artifact://` でアプリ内のアーティファクトを指す。
+ *   **ここから直接ブラウザを開かない**のは、sandbox の中の JS が名乗った URL を
+ *   そのまま開ける形にすると「レポートを開いただけで任意の URL が開く」ことに
+ *   なるため（本体 UI のポップアップが `openUrl` で直接開くのとはここだけ違う）。
+ *   飛んだ先のビューで人が URL を見てから「ブラウザで開く」を押す。
  */
 function WorktreeActions({ n }) {
   const [menuOpen, setMenuOpen] = React.useState(false);
+  // `{ label, detail }`。label はカードに出す 1 行、detail は tooltip 側の原因
   const [error, setError] = React.useState(null);
-  const [busy, setBusy] = React.useState(false);
-  const boxRef = React.useRef(null);
-  const artifacts = artifactsOf(n);
+  const [busy, setBusy] = React.useState(null); // 'terminal' | 'artifacts' | null
+  const hideTimer = React.useRef(null);
 
-  // ポップアップの外を押したら閉じる。メニュー内のリンクで閉じないのは、リンクが
-  // `boxRef` の内側にあって `contains` が真になるため（親ウィンドウの横取りが止めるのは
-  // `click` / `auxclick` だけで、`mousedown` はここまで来る）。リンクを押した場合は
-  // ビューアが別のアーティファクトへ遷移してカードごと作り直されるので、閉じる必要も無い
-  React.useEffect(() => {
-    if (!menuOpen) return undefined;
-    const onDown = e => {
-      if (boxRef.current && !boxRef.current.contains(e.target)) setMenuOpen(false);
-    };
-    document.addEventListener('mousedown', onDown);
-    return () => document.removeEventListener('mousedown', onDown);
-  }, [menuOpen]);
+  const cancelHide = React.useCallback(() => {
+    if (hideTimer.current) {
+      clearTimeout(hideTimer.current);
+      hideTimer.current = null;
+    }
+  }, []);
+
+  // ボタン → ポップアップへマウスを移す間に閉じないよう猶予を持たせる
+  // （本体 UI の `ArtifactUrlHoverMenu` と同じ 180ms）
+  const scheduleHide = React.useCallback(() => {
+    cancelHide();
+    hideTimer.current = setTimeout(() => {
+      hideTimer.current = null;
+      setMenuOpen(false);
+    }, 180);
+  }, [cancelHide]);
+
+  // アンマウント後に `setMenuOpen` が走らないよう、待機中のタイマを必ず捨てる
+  React.useEffect(() => cancelHide, [cancelHide]);
+
+  const artifacts = artifactsOf(n);
 
   // **`worktree.closed` の発信元は既に消えている。** ターミナルも
   // アーティファクト（`delete_artifacts` で保管ごと削除される）も辿れないので、
@@ -351,59 +366,77 @@ function WorktreeActions({ n }) {
   const canShow = !!n.worktreeId && n.kind !== 'worktree.closed';
   if (!canShow) return null;
 
-  const open = async () => {
+  const run = async (which, fn, label) => {
     if (busy) return;
-    setBusy(true);
+    setBusy(which);
     setError(null);
-    const r = await showTerminal(n);
-    if (!r.ok) setError(r.error);
-    setBusy(false);
+    const r = await fn(n);
+    if (!r.ok) setError({ label, detail: r.error });
+    setBusy(null);
+  };
+
+  const openTerminal = () => run('terminal', showTerminal, 'ターミナルを開けませんでした');
+  const openArtifacts = () => {
+    cancelHide();
+    setMenuOpen(false);
+    return run('artifacts', showArtifacts, 'アーティファクトウィンドウを開けませんでした');
   };
 
   return (
     <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, position: 'relative' }}>
       <MiniButton
-        label={busy ? '⧉ …' : '⧉ ターミナル'}
+        label={busy === 'terminal' ? '⧉ …' : '⧉ ターミナル'}
         title="発信元のターミナルを oretachi の前面に出します（同じワークツリーに複数タブがあれば、この通知を出したタブまで当てます）"
-        disabled={busy}
-        onClick={open} />
-      {artifacts.length > 0 && (
-        <span ref={boxRef} style={{ position: 'relative' }}>
-          <MiniButton
-            label={`📄 アーティファクト (${artifacts.length})`}
-            title="発信元のワークツリーに登録されている URL アーティファクト"
-            onClick={() => setMenuOpen(v => !v)} />
-          {menuOpen && (
-            <div style={{
+        disabled={!!busy}
+        onClick={openTerminal} />
+      <span
+        style={{ position: 'relative' }}
+        onMouseEnter={() => { if (artifacts.length > 0) { cancelHide(); setMenuOpen(true); } }}
+        onMouseLeave={scheduleHide}
+      >
+        <MiniButton
+          label={busy === 'artifacts'
+            ? '📄 …'
+            : `📄 アーティファクト${artifacts.length > 0 ? ` (${artifacts.length})` : ''}`}
+          title={artifacts.length > 0
+            ? '発信元のワークツリーのアーティファクトウィンドウを開きます（ホバーで URL アーティファクトの一覧）'
+            : '発信元のワークツリーのアーティファクトウィンドウを開きます'}
+          disabled={!!busy}
+          onClick={openArtifacts} />
+        {menuOpen && artifacts.length > 0 && (
+          <div
+            onMouseEnter={cancelHide}
+            onMouseLeave={scheduleHide}
+            style={{
               position: 'absolute', top: '100%', left: 0, marginTop: 4, zIndex: 20,
               minWidth: 220, maxWidth: 420,
               border: '1px solid #45475a', borderRadius: 6, background: '#1e1e2e',
               boxShadow: '0 4px 12px rgba(0,0,0,0.45)', padding: 4,
               display: 'flex', flexDirection: 'column', gap: 2,
-            }}>
-              {artifacts.map(a => (
-                <a
-                  key={a.id}
-                  href={artifactHref(n, a)}
-                  style={{
-                    display: 'block', padding: '6px 9px', borderRadius: 4,
-                    fontSize: 11.5, fontFamily: FONT, color: '#cdd6f4',
-                    textDecoration: 'none', wordBreak: 'break-all',
-                  }}
-                >
-                  <span style={{ color: '#89b4fa', marginRight: 6 }}>🔗</span>
-                  {a.title || a.id}
-                </a>
-              ))}
-            </div>
-          )}
-        </span>
-      )}
+            }}
+          >
+            {artifacts.map(a => (
+              <a
+                key={a.id}
+                href={artifactHref(n, a)}
+                style={{
+                  display: 'block', padding: '6px 9px', borderRadius: 4,
+                  fontSize: 11.5, fontFamily: FONT, color: '#cdd6f4',
+                  textDecoration: 'none', wordBreak: 'break-all',
+                }}
+              >
+                <span style={{ color: '#89b4fa', marginRight: 6 }}>🔗</span>
+                {a.title || a.id}
+              </a>
+            ))}
+          </div>
+        )}
+      </span>
       {error && (
         <span
-          title={error}
+          title={error.detail}
           style={{ fontSize: 10.5, color: '#f38ba8', fontFamily: FONT }}
-        >ターミナルを開けませんでした</span>
+        >{error.label}</span>
       )}
     </span>
   );

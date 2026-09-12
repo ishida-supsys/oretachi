@@ -1859,6 +1859,26 @@ onMounted(async () => {
     },
   );
 
+  // MCP: 指定ワークツリーのアーティファクトウィンドウを開く（#291）。
+  // ビューアはワークツリーごとに1枚（ラベル `artifact-<worktreeId>`）なので、
+  // 既に開いていれば `openArtifactViewer` 側がフォーカス + 遷移に倒れる。
+  // サブウィンドウへ分離済みでもビューアはワークツリー単位なので、ここで一括して開く
+  await listen<{ worktree_id: string; artifact_id?: string | null }>(
+    "mcp-show-artifacts",
+    async (event) => {
+      const { worktree_id: worktreeId, artifact_id: artifactId } = event.payload;
+      if (!worktrees.value.some((w) => w.id === worktreeId)) {
+        logDebug(`[Artifact] mcp-show-artifacts: worktree ${worktreeId} not found, skipping`);
+        return;
+      }
+      try {
+        await openArtifactViewer(worktreeId, artifactId ?? undefined);
+      } catch (e) {
+        logDebug(`[Artifact] mcp-show-artifacts: openArtifactViewer failed: ${e}`);
+      }
+    },
+  );
+
   // MCP: git 上に存在するが oretachi 未登録のワークツリーを settings へ取り込む。
   // git worktree 自体は既にあるので git_worktree_add は呼ばず、エントリ登録だけを行う。
   await listen<{

@@ -858,7 +858,7 @@ pub struct ArtifactParams {
     pub content_type: Option<String>,
     #[schemars(description = "アーティファクトのタイトル (create時必須)")]
     pub title: Option<String>,
-    #[schemars(description = "アーティファクトの中身 (create/rewrite時は content か file_path のどちらかが必須)。markdown / html / react では `artifact:` リンクで他のアーティファクトへ遷移できる: 同一ワークツリー内は `artifact:<アーティファクトID>`、他ワークツリー宛は `artifact://worktree/<worktreeId>/<アーティファクトID>`、リポジトリ保管庫宛は `artifact://repository/<encodeURIComponent(リポジトリの絶対パス)>/<アーティファクトID>`。react ではメモリー（アーティファクトごとに永続化される JSON ストア）が使える: `import { useMemory } from 'oretachi'` して `const [value, setValue] = useMemory('key', 初期値)`。書き込みはデバウンスされ、ウィンドウを閉じて開き直しても・リポジトリへ転送しても復元される（合計 1MB まで。他に getMemory / setMemory / clearMemory / subscribeMemory がある）。さらに `import { callTool } from 'oretachi'` で oretachi の MCP ツールを呼べる: `await callTool('oretachi_write_terminal', { session_id: 12, text: 'echo hi' })`。呼べるのは oretachi_write_terminal / oretachi_add_task / notify_worktree / oretachi_poll_inbox / oretachi_ack_message / oretachi_read_terminal / oretachi_list_worktree_notifications / oretachi_inspect_prompt / oretachi_answer_prompt / oretachi_clear_worktree_notification / oretachi_show_worktree だけで、terminal_id / project_dir / notify_worktree の宛先 / add_task の追加先ワークグループはアーティファクトの置き場所のワークツリーへ強制される(session_id は同じワークツリーの稼働中端末、または**アーティファクトの置き場所ワークツリーが oretachi_subscribe_worktree で購読しているワークツリー**の稼働中端末に限る)。戻り値はツールの結果を JSON.parse したもの(パースできなければ文字列)。**制約**: アーティファクトからは oretachi_list_terminals が呼べないため、read/write_terminal に渡す session_id は生成時にコードへ埋め込むこと(アプリ再起動やタブ再作成で無効になる)。oretachi_poll_inbox / oretachi_ack_message / notify_worktree(kind: \"worktree.message\") はそのワークツリーで AI エージェント端末がちょうど1つ走行中でないとエラーになるので、AI セッション終了後も動かしたいボタンには使わないこと。他ワークツリーの端末へ read/write_terminal したい場合は、アーティファクトの置き場所ワークツリー側から宛先を購読しておくこと(逆向き＝宛先側が置き場所を購読しているだけでは通らない)。**宛先がダイアログ(ツール許可 / プラン承認 / AskUserQuestion)で止まっている場合に write_terminal で自由テキストを送ってはいけない**: テキストはダイアログに吸われ、末尾の CR が意図しない選択肢(既定は `1. Yes`)の確定として解釈される。先に oretachi_inspect_prompt(session_id) で画面の形状と実在する選択肢を取り、oretachi_answer_prompt(session_id, expect_fingerprint, kind, ...) で答えること。**oretachi_show_worktree** は宛先のタブを oretachi の前面に出すだけのツールで(端末の内容は読み書きしない)、宛先は worktree_id でのみ指定する(worktree_name / project_dir は落とされる)。session_id を添えるとそのタブまで当たる。許可範囲は read/write_terminal と同じで、自ワークツリーか購読先に限る")]
+    #[schemars(description = "アーティファクトの中身 (create/rewrite時は content か file_path のどちらかが必須)。markdown / html / react では `artifact:` リンクで他のアーティファクトへ遷移できる: 同一ワークツリー内は `artifact:<アーティファクトID>`、他ワークツリー宛は `artifact://worktree/<worktreeId>/<アーティファクトID>`、リポジトリ保管庫宛は `artifact://repository/<encodeURIComponent(リポジトリの絶対パス)>/<アーティファクトID>`。react ではメモリー（アーティファクトごとに永続化される JSON ストア）が使える: `import { useMemory } from 'oretachi'` して `const [value, setValue] = useMemory('key', 初期値)`。書き込みはデバウンスされ、ウィンドウを閉じて開き直しても・リポジトリへ転送しても復元される（合計 1MB まで。他に getMemory / setMemory / clearMemory / subscribeMemory がある）。さらに `import { callTool } from 'oretachi'` で oretachi の MCP ツールを呼べる: `await callTool('oretachi_write_terminal', { session_id: 12, text: 'echo hi' })`。呼べるのは oretachi_write_terminal / oretachi_add_task / notify_worktree / oretachi_poll_inbox / oretachi_ack_message / oretachi_read_terminal / oretachi_list_worktree_notifications / oretachi_inspect_prompt / oretachi_answer_prompt / oretachi_clear_worktree_notification / oretachi_show_worktree / oretachi_show_artifacts だけで、terminal_id / project_dir / notify_worktree の宛先 / add_task の追加先ワークグループはアーティファクトの置き場所のワークツリーへ強制される(session_id は同じワークツリーの稼働中端末、または**アーティファクトの置き場所ワークツリーが oretachi_subscribe_worktree で購読しているワークツリー**の稼働中端末に限る)。戻り値はツールの結果を JSON.parse したもの(パースできなければ文字列)。**制約**: アーティファクトからは oretachi_list_terminals が呼べないため、read/write_terminal に渡す session_id は生成時にコードへ埋め込むこと(アプリ再起動やタブ再作成で無効になる)。oretachi_poll_inbox / oretachi_ack_message / notify_worktree(kind: \"worktree.message\") はそのワークツリーで AI エージェント端末がちょうど1つ走行中でないとエラーになるので、AI セッション終了後も動かしたいボタンには使わないこと。他ワークツリーの端末へ read/write_terminal したい場合は、アーティファクトの置き場所ワークツリー側から宛先を購読しておくこと(逆向き＝宛先側が置き場所を購読しているだけでは通らない)。**宛先がダイアログ(ツール許可 / プラン承認 / AskUserQuestion)で止まっている場合に write_terminal で自由テキストを送ってはいけない**: テキストはダイアログに吸われ、末尾の CR が意図しない選択肢(既定は `1. Yes`)の確定として解釈される。先に oretachi_inspect_prompt(session_id) で画面の形状と実在する選択肢を取り、oretachi_answer_prompt(session_id, expect_fingerprint, kind, ...) で答えること。**oretachi_show_worktree** は宛先のタブを oretachi の前面に出すだけのツールで(端末の内容は読み書きしない)、宛先は worktree_id でのみ指定する(worktree_name / project_dir は落とされる)。session_id を添えるとそのタブまで当たる。許可範囲は read/write_terminal と同じで、自ワークツリーか購読先に限る。**oretachi_show_artifacts** は宛先のアーティファクトウィンドウを開くツールで、宛先の指定方法(worktree_id のみ)も許可範囲も oretachi_show_worktree と同じ。artifact_id を添えるとそのアーティファクトを選択した状態で開く")]
     pub content: Option<String>,
     #[schemars(description = "create/rewrite時: content の代わりに、このパスのファイルを読んでそのまま中身として登録する。**テンプレートをそのまま登録する場合はこちらを使う** (スキル同梱の templates/*.jsx など)。ファイルを Read してから同じテキストを content に書き戻す往復が消えるので、生成が大幅に速く・安くなる。content とは排他。相対パスはワークツリー追加先ディレクトリ基準。読めるのは**ワークツリー追加先ディレクトリ配下**と **oretachi プラグインディレクトリ (claude-plugins) 配下**のファイルだけで、それ以外の絶対パスはエラーになる (この範囲は設定由来の固定値で、対象ワークツリーの指定では変わらない)。UTF-8 テキスト限定 (BOM は自動で除去)、1MB まで")]
     pub file_path: Option<String>,
@@ -1419,6 +1419,24 @@ struct ShowWorktreeEvent {
     worktree_id: String,
     /// 前面に出したいターミナルの PTY セッションID。`None` なら直近のタブのまま
     session_id: Option<u32>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ShowArtifactsParams {
+    #[schemars(description = "アーティファクトウィンドウを開くワークツリーの名前")]
+    pub worktree_name: Option<String>,
+    #[schemars(description = "ワークツリーID（同名ワークツリーが複数ある場合に指定）")]
+    pub worktree_id: Option<String>,
+    #[schemars(description = "開いた直後に選択しておきたいアーティファクトID（任意）。既にそのワークツリーのウィンドウが開いていれば、そのアーティファクトへ遷移する")]
+    pub artifact_id: Option<String>,
+}
+
+// フィールド名はそのままフロントの payload になる（App.vue が snake_case で読む）
+#[derive(Debug, Serialize, Clone)]
+struct ShowArtifactsEvent {
+    worktree_id: String,
+    /// 開いた直後に選択するアーティファクトID。`None` なら一覧の既定選択のまま
+    artifact_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -3864,6 +3882,47 @@ impl NotifyService {
         ))]))
     }
 
+    #[tool(description = "指定ワークツリーのアーティファクトウィンドウを開く（既に開いていれば前面に出す）。artifact_id を添えるとそのアーティファクトを選択した状態にする。ユーザーにそのワークツリーのアーティファクトを見せたいときに使う", annotations(read_only_hint = true))]
+    fn oretachi_show_artifacts(
+        &self,
+        Parameters(ShowArtifactsParams { worktree_name, worktree_id, artifact_id }): Parameters<ShowArtifactsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+
+        let wt = resolve_worktree(
+            &settings,
+            worktree_id.as_deref(),
+            worktree_name.as_deref(),
+            None,
+            "specify one of worktree_name / worktree_id",
+        )?;
+
+        // 空文字の artifact_id を渡すと、フロントが `artifactId=` 付きの URL を組んで
+        // 存在しない ID への遷移になる。ここで落としておく
+        let artifact_id = artifact_id
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty());
+
+        // ウィンドウを実際に作るのはフロント（`useArtifactWindow`）。
+        // 既存ウィンドウへのフォーカス / 遷移の判定もそちらに任せる
+        let event = ShowArtifactsEvent { worktree_id: wt.id.clone(), artifact_id: artifact_id.clone() };
+        self.app_handle
+            .emit("mcp-show-artifacts", &event)
+            .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
+        log::info!(
+            "[mcp] oretachi_show_artifacts: name={} id={} artifact_id={:?}",
+            wt.name,
+            wt.id,
+            artifact_id
+        );
+
+        Ok(CallToolResult::success(vec![Content::text(format!(
+            "ワークツリー '{}' のアーティファクトウィンドウを開きました。",
+            wt.name
+        ))]))
+    }
+
     #[tool(description = "git リポジトリには存在するが oretachi に未登録のワークツリーを取り込む。path 省略または dry_run=true で候補を列挙し、path を指定するとその1件を登録する。ワークツリーの追加先ディレクトリの外にあるものも検出できる")]
     async fn oretachi_import_worktree(
         &self,
@@ -5788,6 +5847,11 @@ struct SubscriberIdentity {
 ///   と同じ #211 の購読スコープを掛けてある（`worktree_id` だけを見る。`worktree_name` は
 ///   同名ワークツリーで曖昧になるため `normalize_artifact_tool_params` が落とす）。
 ///   できるのは UI のフォーカス移動だけで、端末の内容は読み書きしない。
+/// - **`oretachi_show_artifacts` は「宛先のアーティファクトウィンドウを開く」ツール（#291）。**
+///   通知レポートのカードから発信元のアーティファクトを見に行くための導線で、
+///   `oretachi_show_worktree` と同じ #211 の購読スコープ・同じ引数の絞り方
+///   （`worktree_id` だけを見る）にしてある。開けるのは購読先ワークツリーのビューアだけで、
+///   中身の読み出しはアーティファクト側の JS ではなく人が見る画面の中に留まる。
 pub(crate) const ARTIFACT_CALLABLE_TOOLS: &[&str] = &[
     "oretachi_write_terminal",
     "oretachi_add_task",
@@ -5800,6 +5864,7 @@ pub(crate) const ARTIFACT_CALLABLE_TOOLS: &[&str] = &[
     "oretachi_answer_prompt",
     "oretachi_clear_worktree_notification",
     "oretachi_show_worktree",
+    "oretachi_show_artifacts",
 ];
 
 /// 自由文（`add_task` の prompt / `notify_worktree` の body）へ前置する出自の断り書き。
@@ -5914,8 +5979,9 @@ pub(crate) fn normalize_artifact_tool_params(
 
     // ターミナルへ飛ぶ導線も宛先は `worktree_id` だけで指定させる（#265）。
     // 通知クリアと同じ理由で、名前を残すと購読チェック（ID）と解決（名前優先）がずれる。
-    // このツールは `project_dir` を持たないので、ID を省くと呼び出し自体がエラーになる
-    if tool == "oretachi_show_worktree" {
+    // このツールは `project_dir` を持たないので、ID を省くと呼び出し自体がエラーになる。
+    // アーティファクトウィンドウを開く導線も同じ扱い（#291）
+    if matches!(tool, "oretachi_show_worktree" | "oretachi_show_artifacts") {
         obj.remove("worktree_name");
         obj.remove("project_dir");
     }
@@ -6172,12 +6238,12 @@ pub(crate) async fn call_tool_for_artifact(
     // が `worktree_name` を落としてあるので、宛先は `worktree_id` だけで決まる
     if matches!(
         tool,
-        "oretachi_clear_worktree_notification" | "oretachi_show_worktree"
+        "oretachi_clear_worktree_notification" | "oretachi_show_worktree" | "oretachi_show_artifacts"
     ) {
-        let purpose = if tool == "oretachi_show_worktree" {
-            "ターミナルの表示"
-        } else {
-            "未確認通知のクリア"
+        let purpose = match tool {
+            "oretachi_show_worktree" => "ターミナルの表示",
+            "oretachi_show_artifacts" => "アーティファクトウィンドウの表示",
+            _ => "未確認通知のクリア",
         };
         if let Some(dest_worktree_id) = obj
             .get("worktree_id")
@@ -6252,6 +6318,7 @@ pub(crate) async fn call_tool_for_artifact(
             service.oretachi_clear_worktree_notification(Parameters(parse(tool, args)?))
         }
         "oretachi_show_worktree" => service.oretachi_show_worktree(Parameters(parse(tool, args)?)),
+        "oretachi_show_artifacts" => service.oretachi_show_artifacts(Parameters(parse(tool, args)?)),
         // ARTIFACT_CALLABLE_TOOLS に足したのに dispatch を忘れた場合
         other => return Err(format!("ツール '{}' のディスパッチが未実装です", other)),
     };
@@ -8576,6 +8643,7 @@ mod tests {
             "oretachi_read_terminal",
             "oretachi_inspect_prompt",
             "oretachi_show_worktree",
+            "oretachi_show_artifacts",
         ];
         const NOT_READ_ONLY: &[&str] = &[
             "notify_worktree",
@@ -8749,6 +8817,28 @@ mod tests {
             .expect("normalized");
         assert!(!obj.contains_key("worktree_id"));
         assert_eq!(obj["project_dir"], serde_json::json!("X:/wt/oretachi-yo92"));
+    }
+
+    /// UI を動かす 2 つの導線（ターミナルへ飛ぶ / アーティファクトウィンドウを開く）も
+    /// 宛先は `worktree_id` だけ（#265 / #291）。通知クリアと同じ理由で、名前を残すと
+    /// 購読チェック（ID）と解決（名前優先）がずれる。`project_dir` も落とすので、
+    /// ID を省いた呼び出しは自ワークツリーへ倒れず `resolve_worktree` 側でエラーになる。
+    #[test]
+    fn artifact_tool_call_keeps_ui_focus_target_id_only() {
+        for tool in ["oretachi_show_worktree", "oretachi_show_artifacts"] {
+            let obj = normalize(
+                tool,
+                serde_json::json!({
+                    "worktree_id": "1788700000000-xaoe",
+                    "worktree_name": "someone-else",
+                    "project_dir": "X:/wt/somebody-else",
+                }),
+            )
+            .expect("normalized");
+            assert_eq!(obj["worktree_id"], serde_json::json!("1788700000000-xaoe"), "{}", tool);
+            assert!(!obj.contains_key("worktree_name"), "{}", tool);
+            assert!(!obj.contains_key("project_dir"), "{}", tool);
+        }
     }
 
     /// `add_task` は `project_dir` を持たずスコープ強制が効かないため、

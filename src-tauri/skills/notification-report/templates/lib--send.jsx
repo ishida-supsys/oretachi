@@ -819,6 +819,27 @@ async function showTerminal(n) {
 }
 
 /**
+ * 発信元ワークツリーのアーティファクトウィンドウを開く（#291）。
+ *
+ * 本体 UI のターミナルヘッダにあるアーティファクトボタンと同じ着地点で、
+ * **できるのはウィンドウを開く（既に開いていれば前面に出す）ことだけ**。
+ * 中身を読むのは人であって、アーティファクトの中の JS ではない。
+ *
+ * 許可は `showTerminal` と同じ購読スコープ（自ワークツリーか購読先だけ）。
+ */
+async function showArtifacts(n) {
+  if (!n || !n.worktreeId) {
+    return { ok: false, error: 'この通知にはワークツリーIDが入っていません（発信元をたどれません）' };
+  }
+  try {
+    await callTool('oretachi_show_artifacts', { worktree_id: n.worktreeId });
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: errText(e) };
+  }
+}
+
+/**
  * 発信元ワークツリーに登録されている URL アーティファクト（#265）。
  *
  * 生成側が `search_artifact` で拾って `n.artifacts` に入れる。`id` と `title` だけで、
@@ -1136,6 +1157,7 @@ exports.blockedReason = blockedReason;
 exports.previewKeys = previewKeys;
 exports.canSend = canSend;
 exports.showTerminal = showTerminal;
+exports.showArtifacts = showArtifacts;
 exports.artifactsOf = artifactsOf;
 exports.artifactHref = artifactHref;
 exports.sendOne = sendOne;
