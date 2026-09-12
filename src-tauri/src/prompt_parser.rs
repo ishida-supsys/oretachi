@@ -1866,7 +1866,12 @@ fn has_dialog_footer(lines: &[&str]) -> bool {
 /// auto-accept / plan モードの端末では補完ポップアップがまるごと検出できなくなる。
 /// そちらは [`is_open_dialog_footer`] を使う。
 fn looks_like_dialog_footer(body: &str) -> bool {
-    is_open_dialog_footer(body) || contains_ci(body, "shift+tab") || body.contains('⏵')
+    is_open_dialog_footer(body)
+        // `/config` のフッタは `Esc to clear` で終わり、`is_open_dialog_footer` の
+        // どの語にも当たらない。足さないと最後の選択肢のラベルへ吸い込まれる（#292）
+        || is_picker_footer(body)
+        || contains_ci(body, "shift+tab")
+        || body.contains('⏵')
 }
 
 /// **ダイアログが開いている**ことを示すフッタか（#292）。
@@ -1959,6 +1964,29 @@ fn join_from(tail: &[&str], from: usize) -> String {
 fn picker_footer_start(tail: &[&str]) -> Option<usize> {
     let window_start = footer_window_start(tail);
     (window_start..tail.len()).rev().find(|&row| is_picker_footer(&join_from(tail, row)))
+}
+
+/// ピッカーの絞り込み欄（`⌕ Search…`）がある行（#292）。
+///
+/// # これがピッカーの決定的な印
+///
+/// `/resume` も `/config` も、一覧の上に `╭─ ⌕ Search… ─╯` を描く（どちらも実測）。
+/// `⌕`（U+2315）はダイアログにも普通の端末出力にも出ない。
+///
+/// **フッタの語（`Type to search`）だけを手がかりにしてはいけない。** 語を含む
+/// 承認対象・設問文・選択肢ラベルを持つ**本物のダイアログを奪う**（5・6・7 周目の
+/// セルフレビュー）。かといって語の**位置**で決めようとすると、狭いタブで
+/// 折り返したフッタが選択肢のラベルへ吸われて位置そのものが狂い、
+/// 行単位の安全弁では原理的に追従できない（7 周目で critical）。
+///
+/// 「ピッカーにしか無いものが**在る**」という肯定的な印なら、どちらの方向にも転ばない:
+///
+/// - 本物のダイアログには絞り込み欄が無いので、奪われない
+/// - ピッカーには必ず在るので、スクロールバックに何が残っていても見つかる
+///
+/// 絞り込み欄を持たないピッカーは従来どおりの判定（並びが無ければ `menu`）に落ちる。
+fn picker_search_box_row(lines: &[&str]) -> Option<usize> {
+    lines.iter().rposition(|l| strip_frame(l).0.starts_with('⌕'))
 }
 
 /// 番号の無い `❯` リスト（ピッカー）のフッタか（#292）。
@@ -2517,7 +2545,15 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
         None
     };
 
-    let run = find_last_option_run(&lines);
+    // ── 絞り込み欄より下はピッカー自身の描画。選択肢の並びをそこへ伸ばさない（#292）──
+    //
+    // 伸びると、**狭いタブで折り返したフッタが最後の選択肢のラベルへ吸われて**
+    // `run.end` が画面最終行まで下がる。そうなるとフッタの位置と並びの位置を
+    // どう比べても区別が付かない（7 周目のセルフレビューで critical）。
+    // 行単位のフッタ判定は折り返しに原理的に追従できないので、
+    // **そもそも並びをピッカーの領域へ入れない**ことで塞ぐ。
+    let search_box_row = picker_search_box_row(&lines);
+    let run = find_last_option_run(&lines[..search_box_row.unwrap_or(lines.len())]);
 
     let last_meaningful = tail_lines
         .iter()
@@ -2550,9 +2586,18 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     // **ページャはここで見ない。** `less` は代替画面バッファを使うので
     // スクロールバックはそもそも見えず、`:` で終わるダイアログを奪う側の
     // 危険だけが残る。ページャ判定は従来どおり「並びが無い画面」に限る。
-    // **比べるのは「フッタが当たった行」。窓の開始行ではない**（6 周目のセルフレビュー）
-    let picker_row = picker_footer_start(tail_lines).map(|row| tail_start + row);
-    if picker_row.is_some_and(|row| run.as_ref().is_some_and(|r| row > r.end)) {
+    // ── ピッカーか（#292）────────────────────────────────────────────────
+    //
+    // フッタの語だけでは足りず、位置だけでも足りない（上の [`picker_search_box_row`]）。
+    // **語と絞り込み欄の両方**が要る。選択肢の並びが残っているなら、それは
+    // スクロールバックの残骸なので絞り込み欄より上にあるはず。
+    let has_picker_footer = picker_footer_start(tail_lines).is_some();
+    let is_picker = has_picker_footer
+        && search_box_row.is_some_and(|s| run.as_ref().is_none_or(|r| s > r.end));
+    // **並びがある画面だけここで倒す。** 並びが無い画面は y/n → ページャの順を
+    // 崩さないよう、従来どおり下のブロックで見る（`(y/N)` がピッカーに奪われると
+    // y/n に答えられなくなる。5 周目のセルフレビュー）
+    if run.is_some() && is_picker {
         return seal(quiet_prompt(PromptShape::Menu, escape_hatch, tail));
     }
 
@@ -2591,7 +2636,7 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
         if last_meaningful.as_deref().is_some_and(is_pager_line) {
             return seal(quiet_prompt(PromptShape::Pager, escape_hatch, tail));
         }
-        if picker_row.is_some() {
+        if has_picker_footer {
             return seal(quiet_prompt(PromptShape::Menu, escape_hatch, tail));
         }
         if let Some(free) = looks_like_free_input(tail_lines) {
@@ -3598,6 +3643,9 @@ mod tests {
             "  3. 最後にテストする",
             "",
             "  Resume session (1 of 33)",
+            "  ╭────────────────╮",
+            "  │ ⌕ Search…      │",
+            "  ╰────────────────╯",
             "  ❯ oretachi issue 292",
             "    4 seconds ago",
             "",
@@ -3693,6 +3741,9 @@ mod tests {
                     screen.push(String::new());
                 }
                 screen.push("  Resume session (1 of 33)".into());
+                screen.push("  ╭────────────────╮".into());
+                screen.push("  │ ⌕ Search…      │".into());
+                screen.push("  ╰────────────────╯".into());
                 screen.push("  ❯ oretachi issue 292".into());
                 screen.push("    Type to search · Esc to cancel".into());
                 let p = parse_prompt(&screen.join("\n"));
@@ -3727,6 +3778,80 @@ mod tests {
                 assert_eq!(p.navigation, Navigation::Arrows, "pad={} gap={}", pad, gap);
             }
         }
+    }
+
+    /// **狭いタブで折り返したフッタでも乗っ取られない**（#292。7 周目で critical）。
+    ///
+    /// 行単位のフッタ判定は折り返しに原理的に追従できない（`Type to` / `search ·` /
+    /// `Esc to` / `cancel` のどれも単独では当たらない）ので、フッタ全行が最後の
+    /// 選択肢のラベルへ吸われて `run.end` が画面最終行まで下がる。位置をどう比べても
+    /// 区別が付かなくなるため、**そもそも並びを絞り込み欄より下へ入れない**ことで塞ぐ。
+    #[test]
+    fn a_wrapped_picker_footer_is_not_hijacked_by_a_stale_list() {
+        let screen = [
+            "$ cc",
+            "1. 設計",
+            "2. 実装",
+            "3. テスト",
+            "  ╭──────╮",
+            "  │ ⌕ Sea… │",
+            "  ╰──────╯",
+            "  ❯ issue",
+            "    292",
+            "  Type to",
+            "  search ·",
+            "  Esc to",
+            "  cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Menu);
+        assert!(plan_keys(&p, &Answer::Select { option_index: 2 }).is_err());
+    }
+
+    /// `/config` のフッタ（`Esc to clear` で終わる）でも乗っ取られない（#292。7 周目で critical）。
+    ///
+    /// このフッタは `is_open_dialog_footer` のどの語にも当たらないので、
+    /// 安全弁に `is_picker_footer` を足さないと続き行として吸い込まれる。
+    #[test]
+    fn the_config_footer_is_not_swallowed_as_a_wrapped_label() {
+        assert!(looks_like_dialog_footer("Type to filter · Enter/↓ to select · Esc to clear"));
+        let screen = [
+            "$ claude",
+            "1. まず設計する",
+            "2. 次に実装する",
+            "3. 最後にテストする",
+            " ╭──────────────╮",
+            " │ ⌕ Search settings… │",
+            " ╰──────────────╯",
+            "   Auto-compact      true",
+            " Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Menu);
+        assert!(plan_keys(&p, &Answer::Select { option_index: 2 }).is_err());
+    }
+
+    /// 絞り込み欄を持たない画面は、語があっても本物の問いを奪わない（#292。7 周目 warning）。
+    ///
+    /// `join_from` は行を空白で連結するので、行をまたいで語ができることがある
+    /// （`ヒント: Type` / `to search で…`）。位置だけを見ていたときはこれで奪われた。
+    #[test]
+    fn a_picker_word_split_across_lines_does_not_steal_a_dialog() {
+        let screen = [
+            "Do you want to proceed?",
+            "",
+            "❯ 1. Yes",
+            "  2. No, and tell Claude what to do differently (esc)",
+            "  ヒント: Type",
+            "  to search で絞り込めます",
+            "  Esc to cancel · Tab to amend",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Permission);
+        assert_eq!(p.navigation, Navigation::Arrows);
     }
 
     /// 拡張子もスラッシュも無い実在ファイル名を候補行として落とさない
