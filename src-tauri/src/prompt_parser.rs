@@ -1633,6 +1633,11 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
         while j < lines.len() {
             if let Some(next) = parse_option_line(&cut(lines[j])) {
                 if next.index != expected {
+                    // 番号が飛んでいる（`1. / 2. / 4.`）＝ 間の選択肢を読めていない。
+                    // **`index == 1` は新しい並びの始まり**なので区別する（#292）
+                    if next.index > expected {
+                        incomplete = true;
+                    }
                     break;
                 }
                 if next.has_cursor {
@@ -1699,6 +1704,33 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
                 continue;
             }
             break;
+        }
+        // ── 打ち切った先に次の番号が残っていないか（#292。3 周目のセルフレビュー）──
+        //
+        // またげる区切りは 1 回だけ（#264）なので、**区切りが 2 つ続くとそこで
+        // run が終わる**。実測:
+        //
+        // ```text
+        //   3. Type something.
+        // ────────────────
+        //                      ← ここで skip を使い切っている
+        //   4. Chat about this
+        // ```
+        //
+        // 印を残さずに終わると `4. Chat about this`（＝自由入力への逃げ道）が
+        // 消えたまま `truncated` が false になり、選択が許可される。
+        //
+        // **「区切りを使い切ったら印」では広すぎる。** プレビュー枠の閉じ罫線 +
+        // 空行という**正常な終わり方**まで拾って、読めているダイアログを
+        // 選べなくしてしまう（既存のフィクスチャで確認）。そこで
+        // 「**次の番号が実際に下にあるか**」だけを見る
+        const DROPPED_OPTION_LOOKAHEAD: usize = 6;
+        if !incomplete {
+            let from = end + 1;
+            let to = (from + DROPPED_OPTION_LOOKAHEAD).min(lines.len());
+            incomplete = lines[from.min(lines.len())..to]
+                .iter()
+                .any(|l| parse_option_line(&cut(l)).is_some_and(|o| o.index == expected));
         }
         // `❯` が 1 つも描かれていないとき、選択中の行だけマーカーぶん左へ寄っている
         // ことを手がかりにする（#264）。複数設問でタブが自動で進んだ直後、Claude Code は
@@ -1812,9 +1844,7 @@ fn has_dialog_footer(lines: &[&str]) -> bool {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    is_ask_user_question_footer(&joined)
-        || contains_ci(&joined, "tab to amend")
-        || contains_ci(&joined, "esc to cancel")
+    is_open_dialog_footer(&joined)
 }
 
 /// その 1 行が Claude Code のダイアログのフッタか（#292）。
@@ -1844,6 +1874,11 @@ fn looks_like_dialog_footer(body: &str) -> bool {
 /// [`looks_like_dialog_footer`] と違い、入力欄のステータス行を含まない。
 /// 「ダイアログが開いているなら自由入力ではない」という安全判定に使うので、
 /// **入力欄と共存しうる行を混ぜてはいけない。**
+///
+/// **この判定はここ 1 か所に集約する（3 周目のセルフレビューの指摘）。**
+/// [`has_dialog_footer`] と [`looks_like_free_input`] にも同じ 3 語が散っていたが、
+/// 語を 1 つ足したときに片方だけ取り残されると、**同じ画面が呼ぶ場所によって
+/// 「ダイアログが開いている / いない」に分かれる。**
 fn is_open_dialog_footer(body: &str) -> bool {
     is_ask_user_question_footer(body)
         || contains_ci(body, "tab to amend")
@@ -1866,13 +1901,28 @@ fn is_open_dialog_footer(body: &str) -> bool {
 /// 必ず入る**。`type to search` と打ちかけている端末が `menu` と判定され、
 /// 返答カードが黙って塞がれて `pendingInput` まで失われる。
 fn footer_region(tail: &[&str]) -> String {
-    /// フッタが折り返して占めうる行数。
+    /// フッタが折り返して占めうる行数の上限。
     ///
     /// **狭いタブでは 5 行以上に割れる**（実測: dev インスタンスの 7 行 13 桁のタブ）。
     /// 足りないとフッタの先頭（`Type to` / `filter`）が窓から外れてピッカーを取りこぼす。
-    /// 入力欄の中身は上で除外しているので、広げても打ちかけを拾う方向へは効かない。
     const FOOTER_LINES: usize = 6;
-    let start = tail.len().saturating_sub(FOOTER_LINES);
+    let mut start = tail.len().saturating_sub(FOOTER_LINES);
+    // **罫線から下だけを見る（#292。3 周目のセルフレビューで検出）。**
+    //
+    // 行数だけで切ると、Claude Code の標準レイアウト
+    // （`罫線 / 入力欄 / 罫線 / ヒント行` の 4 行）では窓が**スクロールバックへ
+    // 2 行ぶん届く**。そこに `Type to filter` を含む出力が残っているだけで
+    // 自由入力の画面が `menu` に化け、カードが黙って塞がれて `pendingInput` も失われる
+    // （このリポジトリの SKILL.md 自身がその文字列を含むので、読んだ直後の画面で踏む）。
+    //
+    // 入力欄の下罫線が自然な境界になる。ピッカーの側は**フッタの近くに罫線が無い**
+    // （`⌕ Search…` の箱は画面上部）ので、折り返したフッタは全部窓に残る。
+    for i in (start..tail.len()).rev() {
+        if is_rule_line(&strip_frame(tail[i]).0) {
+            start = i + 1;
+            break;
+        }
+    }
     (start..tail.len())
         .filter(|&i| !is_input_box_line(tail, i))
         .map(|i| strip_frame(tail[i]).0)
@@ -2074,10 +2124,7 @@ fn looks_like_free_input(tail: &[&str]) -> Option<FreeInput> {
         // Claude Code のダイアログのフッタが**直近の意味のある行**なら、ダイアログが
         // 開いている。`escape_hatch` のように末尾 12 行を広く見ると、スクロールバックに
         // 残った古いダイアログの残骸でも立って自由入力を塞いでしまうので、ここだけに絞る
-        if is_ask_user_question_footer(&body)
-            || contains_ci(&body, "tab to amend")
-            || contains_ci(&body, "esc to cancel")
-        {
+        if is_open_dialog_footer(&body) {
             return None;
         }
         // Claude Code の入力欄らしき行。ただし**箱として同定できていない**（上下を罫線で
@@ -3418,6 +3465,71 @@ mod tests {
             "読み切れていないのに truncated が立たないと、消えた選択肢のまま選ばせてしまう"
         );
         assert!(plan_keys(&p, &Answer::Select { option_index: 2 }).is_err());
+    }
+
+    /// 区切りが 2 つ続いて run が切れたら `truncated` を立てる（#292。3 周目のセルフレビュー）。
+    ///
+    /// またげる区切りは 1 回だけなので、罫線 + 空行が続くとそこで並びが終わる。
+    /// 印を残さないと `4. Chat about this`（＝自由入力への逃げ道）が消えたまま
+    /// 選択が許可される。
+    #[test]
+    fn a_second_separator_that_drops_an_option_marks_it_truncated() {
+        let screen = [
+            "←  ☐ Color  ✔ Submit  →",
+            "Which color?",
+            "",
+            "❯ 1. Red",
+            "  2. Blue",
+            "  3. Type something.",
+            "────────────────",
+            "",
+            "  4. Chat about this",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert!(p.truncated, "落とした 4. Chat about this のぶん truncated が要る");
+        assert!(plan_keys(&p, &Answer::Select { option_index: 2 }).is_err());
+    }
+
+    /// 番号が飛んでいたら `truncated` を立てる（#292。3 周目のセルフレビュー）。
+    #[test]
+    fn a_gap_in_the_numbering_marks_it_truncated() {
+        let screen = ["❯ 1. Red", "  2. Blue", "  4. Green", "", "  Esc to cancel"].join("\n");
+        let p = parse_prompt(&screen);
+        assert!(p.truncated);
+    }
+
+    /// プレビュー枠の閉じ罫線 + 空行という**正常な終わり方**では立てない（#292）。
+    ///
+    /// 「区切りを使い切ったら印」にすると、読めているダイアログまで選べなくなる。
+    #[test]
+    fn a_normal_run_ending_is_not_marked_truncated() {
+        let p = parse_prompt(&wrapped_label_preview_screen());
+        assert!(!p.truncated, "読めているダイアログを選べなくしてはいけない");
+        assert!(plan_keys(&p, &Answer::Select { option_index: 3 }).is_ok());
+    }
+
+    /// スクロールバックの語でピッカー誤判定しない（#292。3 周目のセルフレビュー）。
+    ///
+    /// 窓を行数だけで切ると、標準レイアウト（罫線 / 入力欄 / 罫線 / ヒント行）では
+    /// スクロールバックへ届く。**このリポジトリの SKILL.md 自身が `Type to filter` を
+    /// 含む**ので、読んだ直後の画面で普通に踏む。
+    #[test]
+    fn scrollback_above_the_input_box_never_reaches_the_footer_region() {
+        let screen = [
+            "  ⎿  Read SKILL.md (120 lines)",
+            "  ⎿  | `menu` | Type to filter / Type to search |",
+            "  ⎿  Done",
+            "────────────────",
+            "❯",
+            "────────────────",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Text);
     }
 
     /// 入力欄のステータス行を「ダイアログのフッタ」と読まない（#292。セルフレビュー 2 周目）。
