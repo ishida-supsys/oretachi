@@ -44,8 +44,13 @@ export interface ArtifactLinkHover {
 
 /**
  * iframe 内に注入するリンク横取りスクリプト。
- * クリックを止めるのは `artifact:` リンクだけ（sandbox が外部遷移を既に塞いでいる）で、
- * ホバー通知はどのリンクでも親へ送る（親が URL とコピーボタンを出す）。
+ *
+ * クリックはページ内アンカー（`#...`）を除く全リンクで不発にする。sandbox は外部への
+ * 「遷移」を塞ぐが、塞いだ結果 iframe の表示が壊れる（about:blank 相当に化ける）ため、
+ * こちらで先に止める必要がある。`artifact:` だけは親へ転送して遷移を代行してもらう。
+ * 外部 URL を開きたい場合は、ホバー通知で親が出すポップアップ側の URL を押す。
+ *
+ * ホバー通知はどのリンクでも親へ送る（親が URL・コピー・ブラウザで開くを出す）。
  */
 export const ARTIFACT_LINK_INTERCEPT_JS =
   "(function(){" +
@@ -65,8 +70,14 @@ export const ARTIFACT_LINK_INTERCEPT_JS =
   "    var a=findAnchor(e);" +
   "    if(!a)return;" +
   "    var href=(a.getAttribute('href')||'').trim();" +
-  "    if(!/^artifact:/i.test(href))return;" +
+  // ページ内アンカーだけは素通しする（同じ文書内のジャンプで表示は壊れない）
+  "    if(href.charAt(0)==='#')return;" +
+  // preventDefault だけで遷移は止まる。stopPropagation まで広げると capture 段階で
+  // 握り潰すことになり、アーティファクト自身の onClick / デリゲーションが死ぬ。
+  // なお capture で先に preventDefault するので、アーティファクト側が
+  // event.defaultPrevented を見て早期 return する実装だけは動かなくなる
   "    e.preventDefault();" +
+  "    if(!/^artifact:/i.test(href))return;" +
   "    e.stopPropagation();" +
   "    try{parent.postMessage({" + JSON.stringify(ARTIFACT_NAVIGATE_MARKER) + ":true,href:href},'*');}catch(err){}" +
   "  }" +

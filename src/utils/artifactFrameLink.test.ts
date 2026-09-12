@@ -148,6 +148,48 @@ describe("ARTIFACT_LINK_INTERCEPT_JS: ホバー通知", () => {
   });
 });
 
+describe("ARTIFACT_LINK_INTERCEPT_JS: クリックの不発化", () => {
+  let ctx: ReturnType<typeof setup>;
+
+  beforeEach(() => {
+    ctx = setup();
+  });
+
+  // sandbox は遷移を塞ぐが、塞いだ結果 iframe の表示が壊れる。ここで先に止める
+  it("外部 URL のクリックは不発にし、親へも何も送らない", () => {
+    for (const type of ["click", "auxclick"]) {
+      const e = event([anchor("https://example.com/a")]);
+      ctx.onDocument(type, e);
+      expect(e.prevented).toBe(true);
+      // 伝播は止めない。止めるとアーティファクト自身の onClick / デリゲーションが死ぬ
+      expect(e.stopped).toBe(false);
+    }
+    expect(ctx.posted).toEqual([]);
+  });
+
+  it("http(s) 以外・相対パス・空 href も不発にする", () => {
+    for (const href of ["mailto:a@example.com", "./other.html", "", "javascript:alert(1)"]) {
+      const e = event([anchor(href)]);
+      ctx.onDocument("click", e);
+      expect(e.prevented).toBe(true);
+    }
+    expect(ctx.posted).toEqual([]);
+  });
+
+  it("ページ内アンカー（#...）は素通しする（同じ文書内のジャンプ）", () => {
+    const e = event([anchor("#heading")]);
+    ctx.onDocument("click", e);
+    expect(e.prevented).toBe(false);
+    expect(ctx.posted).toEqual([]);
+  });
+
+  it("リンク以外のクリックには触らない", () => {
+    const e = event([{ nodeType: 1, tagName: "DIV" }]);
+    ctx.onDocument("click", e);
+    expect(e.prevented).toBe(false);
+  });
+});
+
 describe("readArtifactLinkHoverMessage", () => {
   const frame = { contentWindow: {} } as unknown as HTMLIFrameElement;
   const from = (source: unknown, data: unknown) =>
