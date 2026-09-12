@@ -1,4 +1,9 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(gh pr edit --add-label automerge)"
+    ]
+  },
   "mcpServers": {
     "tauri-mcp": {
       "command": "npx",
