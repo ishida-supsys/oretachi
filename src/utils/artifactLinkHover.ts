@@ -6,6 +6,9 @@
  * 足して親のビューポート座標へ直す必要がある。html / react の両ビューが同じ処理を
  * するためここへ出した（ポップアップ本体は ArtifactLinkHoverPopup.vue）。
  *
+ * 渡す href / 座標はどちらもアーティファクトの自己申告なので `selfDeclared: true` を付ける
+ * （ポップアップ側がブラウザで開く前に確認ダイアログを挟む根拠になる）。
+ *
  * 座標は必ず iframe の矩形内へ丸める。注入した通知スクリプトはアーティファクトの JS と
  * 同じレルムで動くので、座標は「アーティファクトの自己申告」でしかない。ポップアップは
  * position: fixed で body へ出るため、丸めないと本文側が任意の位置＝親アプリの UI の上に
@@ -16,7 +19,11 @@ import type { ArtifactLinkHover, ArtifactLinkRect } from "./artifactFrameLink";
 
 /** ArtifactLinkHoverPopup が defineExpose しているうち、ここで使う分だけ */
 export interface ArtifactLinkHoverPopupApi {
-  showFor(rawHref: string, rect: ArtifactLinkRect): void;
+  showFor(
+    rawHref: string,
+    rect: ArtifactLinkRect,
+    options?: { selfDeclared?: boolean },
+  ): void;
   scheduleHide(): void;
   hideNow(): void;
 }
@@ -43,12 +50,17 @@ export function applyFrameLinkHover(
   }
   const left = clamp(hover.rect.left, 0, frameRect.width);
   const top = clamp(hover.rect.top, 0, frameRect.height);
-  popup.showFor(hover.href, {
-    left: frameRect.left + left,
-    top: frameRect.top + top,
-    width: clamp(hover.rect.width, 0, frameRect.width - left),
-    height: clamp(hover.rect.height, 0, frameRect.height - top),
-  });
+  popup.showFor(
+    hover.href,
+    {
+      left: frameRect.left + left,
+      top: frameRect.top + top,
+      width: clamp(hover.rect.width, 0, frameRect.width - left),
+      height: clamp(hover.rect.height, 0, frameRect.height - top),
+    },
+    // href も座標もアーティファクトの自己申告。ポップアップ側は開く前に確認を挟む
+    { selfDeclared: true },
+  );
 }
 
 function clamp(value: number, min: number, max: number): number {

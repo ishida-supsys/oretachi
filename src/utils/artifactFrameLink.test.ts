@@ -161,7 +161,8 @@ describe("ARTIFACT_LINK_INTERCEPT_JS: クリックの不発化", () => {
       const e = event([anchor("https://example.com/a")]);
       ctx.onDocument(type, e);
       expect(e.prevented).toBe(true);
-      expect(e.stopped).toBe(true);
+      // 伝播は止めない。止めるとアーティファクト自身の onClick / デリゲーションが死ぬ
+      expect(e.stopped).toBe(false);
     }
     expect(ctx.posted).toEqual([]);
   });

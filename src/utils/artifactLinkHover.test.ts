@@ -3,9 +3,10 @@ import { applyFrameLinkHover, type ArtifactLinkHoverPopupApi } from "./artifactL
 import type { ArtifactLinkRect } from "./artifactFrameLink";
 
 function fakePopup() {
-  const calls: Array<{ kind: "show"; href: string; rect: ArtifactLinkRect } | { kind: "scheduleHide" | "hideNow" }> = [];
+  const calls: Array<{ kind: "show"; href: string; rect: ArtifactLinkRect; selfDeclared?: boolean } | { kind: "scheduleHide" | "hideNow" }> = [];
   const popup: ArtifactLinkHoverPopupApi = {
-    showFor: (href, rect) => calls.push({ kind: "show", href, rect }),
+    showFor: (href, rect, options) =>
+      calls.push({ kind: "show", href, rect, selfDeclared: options?.selfDeclared }),
     scheduleHide: () => calls.push({ kind: "scheduleHide" }),
     hideNow: () => calls.push({ kind: "hideNow" }),
   };
@@ -29,6 +30,8 @@ describe("applyFrameLinkHover", () => {
         kind: "show",
         href: "https://example.com",
         rect: { left: 50, top: 220, width: 100, height: 16 },
+        // iframe 由来は必ず自己申告として渡す（ポップアップが開く前に確認を挟む）
+        selfDeclared: true,
       },
     ]);
   });
@@ -54,7 +57,12 @@ describe("applyFrameLinkHover", () => {
     );
     // 左上へ丸められ、iframe の左上（40, 200）に貼り付く
     expect(calls).toEqual([
-      { kind: "show", href: "https://evil.example", rect: { left: 40, top: 200, width: 1, height: 1 } },
+      {
+        kind: "show",
+        href: "https://evil.example",
+        rect: { left: 40, top: 200, width: 1, height: 1 },
+        selfDeclared: true,
+      },
     ]);
   });
 
@@ -66,7 +74,12 @@ describe("applyFrameLinkHover", () => {
       popup,
     );
     expect(calls).toEqual([
-      { kind: "show", href: "https://evil.example", rect: { left: 840, top: 800, width: 0, height: 0 } },
+      {
+        kind: "show",
+        href: "https://evil.example",
+        rect: { left: 840, top: 800, width: 0, height: 0 },
+        selfDeclared: true,
+      },
     ]);
   });
 

@@ -175,7 +175,8 @@ function onKeydown(e: KeyboardEvent) {
  * `artifact:` 以外のクリックは**不発**にする。外部 URL を開く導線はホバーで出る
  * URL ポップアップ側に一本化してあり（issue #297）、本文のリンクテキストは AI が
  * 自由に書けて飛び先を表さないため、押した対象＝開く URL が一致するのは
- * 「URL そのものを押したとき」だけだからである。
+ * 「URL そのものを押したとき」だけだからである。キーボードだけは代わりに
+ * ポップアップの URL ボタンへフォーカスを渡す（Tab では届かないため）。
  */
 function onLinkClick(e: MouseEvent) {
   const anchor = (e.target as Element | null)?.closest?.("a[href]");
@@ -191,8 +192,16 @@ function onLinkClick(e: MouseEvent) {
   if (href && ARTIFACT_SCHEME_RE.test(href.trim())) {
     hideLinkPopup();
     emit("navigate", href);
+    return;
   }
-  // それ以外は何もしない。ポップアップは閉じない（押した直後に URL を出したまま残し、
+  // キーボード操作（detail === 0 = Enter / Space 由来の click）はポップアップの
+  // URL ボタンへフォーカスを移す。マウスならポップアップへカーソルを動かせばよいが、
+  // ポップアップは body へ teleport されるので Tab では辿り着けないため
+  if (e.detail === 0) {
+    linkPopup.value?.focusOpen();
+    return;
+  }
+  // マウスでは何もしない。ポップアップは閉じない（押した直後に URL を出したまま残し、
   // そのままポップアップ側の URL へマウスを移して開けるようにする）
 }
 

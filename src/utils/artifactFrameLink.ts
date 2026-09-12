@@ -72,9 +72,11 @@ export const ARTIFACT_LINK_INTERCEPT_JS =
   "    var href=(a.getAttribute('href')||'').trim();" +
   // ページ内アンカーだけは素通しする（同じ文書内のジャンプで表示は壊れない）
   "    if(href.charAt(0)==='#')return;" +
+  // preventDefault だけで遷移は止まる。stopPropagation まで広げると capture 段階で
+  // 握り潰すことになり、アーティファクト自身の onClick / デリゲーションが死ぬ
   "    e.preventDefault();" +
-  "    e.stopPropagation();" +
   "    if(!/^artifact:/i.test(href))return;" +
+  "    e.stopPropagation();" +
   "    try{parent.postMessage({" + JSON.stringify(ARTIFACT_NAVIGATE_MARKER) + ":true,href:href},'*');}catch(err){}" +
   "  }" +
   // 中クリックは click ではなく auxclick で飛ぶ（ArtifactMarkdownView と同じ理由）
