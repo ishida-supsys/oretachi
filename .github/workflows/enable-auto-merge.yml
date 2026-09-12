@@ -14,7 +14,9 @@ name: enable-auto-merge
 #   発火しないが、release.yml は tag push 起動なのでリリースは影響を受けない。
 #   影響は ci.yml の push: main 実行がスキップされることだけで、
 #   同じ checks が PR 側で通過済みのため冗長ランにあたる。
-# - `automerge` ラベルの付与には write 権限が必要なので、ラベル自体が承認ゲートになる。
+# - `automerge` ラベルの付与には write 権限が必要。つまりラベルを付けられるのは
+#   リポジトリへの書き込みを許された主体だけで、fork PR 側からは武装できない。
+#   ラベルを付けてよい条件そのものは CLAUDE.md の「AI が守ること」で定義する。
 # - main ruleset は strict_required_status_checks_policy: false なので
 #   「Require branches to be up to date」による停止は起きない。
 #   後からこれを有効化する場合は auto-update または merge queue が別途必要。
