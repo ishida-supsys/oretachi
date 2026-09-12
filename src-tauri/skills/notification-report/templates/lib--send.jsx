@@ -191,6 +191,102 @@ function richSegments(text, repoUrl) {
   return out;
 }
 
+// ── コマンド実行の選択肢（#288）──────────────────────────────────────────────
+//
+// `!` 始まりの候補は、宛先の AI への**指示ではなく**、宛先のターミナルで走る
+// シェルコマンドとして扱う。Claude Code は入力欄の先頭に `!` が来た状態で CR を
+// 受けるとシェルモードとして実行する（実測: `!echo BANGTEST_A` を
+// `oretachi_write_terminal(submit: false)` で 1 回書いてから CR を送ると
+// `⎿ BANGTEST_A` が返り、シェルとして実行された）。
+//
+// **前置きを付けてはいけない。** `buildReplyText` の断り書きが先頭に付くと `!` が
+// 行頭から外れ、シェルモードに入らないまま「`!` で始まる長文」が 1 回のプロンプトと
+// して宛先のエージェントへ飛ぶ。これが #288 の「余計な記述が入って実行されない」。
+//
+// 同じ理由で**補足プロンプトも付けられない。** 後ろに足した文字はコマンドの一部に
+// なる（`components/NotificationCard` が候補側の補足欄を塞いでいる）。
+//
+// ── 権限ゲートについて（把握した上での設計）────────────────────────────────
+//
+// **シェルモードで走るコマンドは、宛先エージェントの Bash ツール許可ダイアログを
+// 通らない。** 人がターミナルで `!` を打つのと同じ経路だからで、`write_terminal` の
+// text は Rust 側でも無加工（`normalize_artifact_tool_params` が出自を前置するのは
+// `notify_worktree` の body と `oretachi_add_task` の prompt だけ）。
+//
+// つまり**ここでの唯一のゲートは、人がカードで中身を読んで押すこと**になる。
+// それが成り立つように:
+//
+//   - 表示と送信は同じ `commandOf` の戻り値を使う（見えている 1 行がそのまま走る）
+//   - `flattenCommand` が制御文字を落とす（表示に出ない文字を混ぜられない）
+//   - `COMMAND_MAX_LEN` を超える長さは送らせない（読まずに押す形にしない）
+//   - `!` の直後がコマンド名らしくない文字列はコマンド扱いしない
+//
+// これは新しい権限ではない（アーティファクトの JS は元から `oretachi_write_terminal`
+// で同じ文字列を書けた）。ただし**人が押す導線としては新しい**ので、候補に何を
+// 入れてよいかは SKILL.md の Step 4 で読み取り系に限っている。
+
+/** 候補として見せられるコマンドの長さ上限。これを超えると送信対象から外す */
+const COMMAND_MAX_LEN = 300;
+
+/** 前後の空白・制御文字を落として 1 行のコマンドにする。改行は空白へ畳む */
+function flattenCommand(s) {
+  return String(s == null ? '' : s)
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\x00-\x1f\x7f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+/**
+ * コマンド実行の文字列か。`!` の**直後がコマンド名らしい文字**であることまで見る。
+ *
+ * 先頭 1 文字だけで判定すると、生成側 AI が書いた感嘆符始まりの日本語
+ * （`!!至急やって`）や `!` 単独がシェルへ流れる。それらは返答文として
+ * 従来どおり前置き付きで送るのが正しい。
+ */
+function isCommandChoice(s) {
+  const t = String(s == null ? '' : s).trim();
+  if (t[0] !== '!') return false;
+  return /^[A-Za-z0-9._/\\-]/.test(t.slice(1).trim());
+}
+
+/**
+ * 下書き / 送信記録がコマンド実行なら、宛先へそのまま流す `!` 込みの 1 行を返す。
+ * コマンドでなければ null。
+ *
+ * `その他（補足で指示）` を選んだときは補足欄の中身をコマンド源として見る。
+ * 候補ボタンだけを特別扱いすると、補足欄に `!pnpm test` と書いた人が
+ * 前置き付きのテキストを送る同じ罠に落ちる。
+ */
+function commandOf(a) {
+  const src = a && a.choice === OTHER ? a.note : (a && a.choice);
+  if (!isCommandChoice(src)) return null;
+  return `!${flattenCommand(String(src).trim().slice(1))}`;
+}
+
+/** 長すぎて人が読み切れないコマンドか（送信対象から外す判定） */
+function commandTooLong(cmd) {
+  return typeof cmd === 'string' && cmd.length > COMMAND_MAX_LEN;
+}
+
+/**
+ * この通知への直前の送信が「コマンドを実行しただけ」だったか。
+ *
+ * **`status` まで見るのが要点。** `commandOf(answer)` だけで判断すると、
+ * 本文を 1 文字も書けずに `failed` で終わった送信まで「実行しました」になり、
+ * 失敗バナーと実行済みの案内が同時に出る（この機能は人の目視が唯一のゲートなので、
+ * 実行有無の誤報は許されない）。`pastedOnly` からの復旧が通れば `sent` になるので、
+ * 復旧経路が漏れることはない。
+ *
+ * true の間、カードは**返答窓口として開いたまま**にする（シェルモードの実行は
+ * 宛先のターンを開始しないので、元の問いは未回答のまま残っている）。
+ */
+function commandExecuted(n, answer) {
+  if (!answer || answer.status !== 'sent') return false;
+  if (isDialog(n)) return false;
+  return !!commandOf(answer);
+}
+
 /**
  * 1 通知ぶんの返答テキスト（1 行）を組み立てる。
  *
@@ -198,8 +294,15 @@ function richSegments(text, repoUrl) {
  * 自動で前置するのは `notify_worktree` の body と `oretachi_add_task` の prompt だけで、
  * `write_terminal` / `answer_prompt` の text には何も付かない。前置が無いと受け取った
  * エージェントが「人の指示」と「AI 生成アーティファクトのコードが書いた文」を区別できない。
+ *
+ * **コマンド実行（`!` 始まり）だけは前置きを付けずにそのまま返す（#288）。** 宛先の
+ * エージェントが読む文ではなくシェルへ渡る 1 行なので、断り書きを足すと実行されない。
+ * 出自を人へ示す役目は、押す前のカード側の警告表示が担う。
  */
 function buildReplyText(meta, n, answer) {
+  const command = commandOf(answer);
+  if (command) return command;
+
   const parts = [];
   parts.push(`[通知レポート ${meta.reportId}]`);
   parts.push(
@@ -751,7 +854,11 @@ async function sendEnter(n) {
 }
 
 /**
- * 自由入力の宛先へ 1 件送る。返り値の `status` は 3 種類:
+ * 自由入力の宛先へ 1 件送る。**コマンド実行の候補（`!` 始まり）も同じ経路**で、
+ * 本文が `buildReplyText` の返す `!<コマンド>` に変わるだけ（#288）。`!` を別の
+ * write に分ける必要は無い（1 回で書いてもシェルモードに入ることを実測で確認済み）。
+ *
+ * 返り値の `status` は 3 種類:
  *
  * - `sent`       — 本文と Enter の両方が通った
  * - `failed`     — 本文が届いていない。同じ内容をそのまま再送してよい
@@ -961,11 +1068,25 @@ function canSend(n, answer, draft, conflicts) {
     return typeof d.optionIndex === 'number';
   }
 
-  if (answer && answer.status === 'sent') return false;
+  // **コマンドを実行しただけのカードは閉じない（#288）。** シェルモードの実行は
+  // 宛先のターンを開始しないので、元の問いは未回答のまま残っている。ここで
+  // `sent` を理由に塞ぐと、事実を確かめるためにコマンドを押した人が、そのまま
+  // 本来の返答を送れなくなる（通知は生成時に ack 済みで、次のレポートにも出ない）。
+  // 実行直後に下書きの選択は `entry-point` が外すので、押しっぱなしで
+  // 一括送信のたびに再実行されることはない
+  if (answer && answer.status === 'sent' && !commandExecuted(n, answer)) return false;
+  // **直前に実行したのと同じコマンドが選ばれたままなら送らない。** 実行直後に
+  // `entry-point` が選択を外すが、その保存（サイドカー）に失敗すると次に開いた
+  // ときコマンドが選ばれたまま復元される。そこで一括送信を押すと、人は返答を
+  // 送ったつもりで同じコマンドをもう一度走らせることになる。
+  // 同じコマンドを撃ち直したいときはターミナルを開いて打つ
+  if (commandExecuted(n, answer) && commandOf(answer) === commandOf(d)) return false;
   // 本文は届いているので、再送するのは Enter だけ。下書きの内容は問わない
   if (answer && answer.status === 'pastedOnly') return true;
   if (!d.choice) return false;
   if (d.choice === OTHER && !(d.note || '').trim()) return false;
+  // 読み切れない長さのコマンドは送らせない（唯一のゲートが人の目視なので）
+  if (commandTooLong(commandOf(d))) return false;
   return true;
 }
 
@@ -976,6 +1097,12 @@ exports.REPORT_KINDS = REPORT_KINDS;
 exports.isReportOnly = isReportOnly;
 exports.SHAPE_LABEL = SHAPE_LABEL;
 exports.flatten = flatten;
+exports.flattenCommand = flattenCommand;
+exports.isCommandChoice = isCommandChoice;
+exports.commandOf = commandOf;
+exports.commandTooLong = commandTooLong;
+exports.commandExecuted = commandExecuted;
+exports.COMMAND_MAX_LEN = COMMAND_MAX_LEN;
 exports.paragraphsOf = paragraphsOf;
 exports.bodyText = bodyText;
 exports.richSegments = richSegments;
