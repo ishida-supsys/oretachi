@@ -116,6 +116,8 @@ const SHAPE_COLOR = {
   askUserQuestion: '#89b4fa',
   yesno: '#f9e2af',
   numbered: '#94e2d5',
+  menu: '#6c7086',
+  pager: '#6c7086',
   unknown: '#6c7086',
 };
 
