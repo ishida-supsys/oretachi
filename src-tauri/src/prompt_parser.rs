@@ -1900,7 +1900,7 @@ fn is_open_dialog_footer(body: &str) -> bool {
 /// 「上罫線 / 入力欄の中身 / 下罫線 / ヒント行」なので、4 物理行には**人の打ちかけが
 /// 必ず入る**。`type to search` と打ちかけている端末が `menu` と判定され、
 /// 返答カードが黙って塞がれて `pendingInput` まで失われる。
-fn footer_region(tail: &[&str]) -> (usize, String) {
+fn footer_window_start(tail: &[&str]) -> usize {
     /// フッタが折り返して占めうる行数の上限。
     ///
     /// **狭いタブでは 5 行以上に割れる**（実測: dev インスタンスの 7 行 13 桁のタブ）。
@@ -1923,12 +1923,42 @@ fn footer_region(tail: &[&str]) -> (usize, String) {
             break;
         }
     }
-    let text = (start..tail.len())
+    start
+}
+
+/// `from` 行から画面末尾までを 1 つの文字列に畳む（入力欄の中身は外す）。
+fn join_from(tail: &[&str], from: usize) -> String {
+    (from..tail.len())
         .filter(|&i| !is_input_box_line(tail, i))
         .map(|i| strip_frame(tail[i]).0)
         .collect::<Vec<_>>()
-        .join(" ");
-    (start, text)
+        .join(" ")
+}
+
+/// ピッカーのフッタが**どの行から始まっているか**（#292）。
+///
+/// # 窓の開始行を位置として使ってはいけない（6 周目のセルフレビューで critical）
+///
+/// [`footer_window_start`] が返すのは「走査した窓の開始行」であって
+/// 「フッタが当たった行」ではない。窓のどこかに語が 1 つあれば当たるので、
+/// 窓の開始行を選択肢の並びと比べても **「並びが窓より上で終わっているか」という
+/// 単なる距離条件**にしかならない。実測では、
+///
+/// - 残骸の末尾が画面下端から 6 行以内にあるだけで**乗っ取られる方向が復活**し
+///   （`/resume` の絞り込み欄へ矢印 + CR が飛ぶ）
+/// - 逆に総行数がちょうど `TAIL_WINDOW` になるアラインメントでは
+///   **本物の許可 / プランダイアログが `menu` に奪われた**
+///
+/// どちらも「画面の総行数」「空行の数」という**問いと無関係な要因で判定が反転する**。
+///
+/// # 折り返しに耐える探し方
+///
+/// フッタは折り返すので 1 行だけでは当たらない（`Type to` / `search` に割れる）。
+/// 下から順に行を足していくと文字は増える一方なので**当たり判定は単調**。
+/// つまり下から見て最初に当たった行が、フッタが始まる行。
+fn picker_footer_start(tail: &[&str]) -> Option<usize> {
+    let window_start = footer_window_start(tail);
+    (window_start..tail.len()).rev().find(|&row| is_picker_footer(&join_from(tail, row)))
 }
 
 /// 番号の無い `❯` リスト（ピッカー）のフッタか（#292）。
@@ -2520,12 +2550,10 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     // **ページャはここで見ない。** `less` は代替画面バッファを使うので
     // スクロールバックはそもそも見えず、`:` で終わるダイアログを奪う側の
     // 危険だけが残る。ページャ判定は従来どおり「並びが無い画面」に限る。
-    let (footer_start_in_tail, footer_text) = footer_region(tail_lines);
-    if is_picker_footer(&footer_text) {
-        let footer_start = tail_start + footer_start_in_tail;
-        if run.as_ref().is_some_and(|r| footer_start > r.end) {
-            return seal(quiet_prompt(PromptShape::Menu, escape_hatch, tail));
-        }
+    // **比べるのは「フッタが当たった行」。窓の開始行ではない**（6 周目のセルフレビュー）
+    let picker_row = picker_footer_start(tail_lines).map(|row| tail_start + row);
+    if picker_row.is_some_and(|row| run.as_ref().is_some_and(|r| row > r.end)) {
+        return seal(quiet_prompt(PromptShape::Menu, escape_hatch, tail));
     }
 
     let Some(run) = run else {
@@ -2563,7 +2591,7 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
         if last_meaningful.as_deref().is_some_and(is_pager_line) {
             return seal(quiet_prompt(PromptShape::Pager, escape_hatch, tail));
         }
-        if is_picker_footer(&footer_text) {
+        if picker_row.is_some() {
             return seal(quiet_prompt(PromptShape::Menu, escape_hatch, tail));
         }
         if let Some(free) = looks_like_free_input(tail_lines) {
@@ -3641,6 +3669,64 @@ mod tests {
             PromptShape::Permission
         );
         assert_eq!(parse_prompt(&multi_question_first_screen()).shape, PromptShape::AskUserQuestion);
+    }
+
+    /// ピッカー判定が**画面の行間隔や総行数で反転しない**（#292。6 周目のセルフレビュー）。
+    ///
+    /// 窓の開始行を位置として使っていたときは、
+    ///
+    /// - 残骸の末尾が画面下端から 6 行以内にあるだけで乗っ取られる方向が復活し
+    /// - 総行数がちょうど `TAIL_WINDOW` になるアラインメントでは本物のダイアログが奪われた
+    ///
+    /// どちらも**問いと無関係な要因**なので、振っても結果が変わらないことを固定する。
+    #[test]
+    fn the_picker_decision_does_not_depend_on_line_spacing() {
+        // ── 乗っ取られる方向: 残骸の番号リスト + ピッカー。常に Menu ──
+        for pad in 0..8 {
+            for gap in 0..5 {
+                let mut screen: Vec<String> =
+                    (0..pad).map(|i| format!("  出力 {}", i)).collect();
+                screen.push("  1. まず設計する".into());
+                screen.push("  2. 次に実装する".into());
+                screen.push("  3. 最後にテストする".into());
+                for _ in 0..gap {
+                    screen.push(String::new());
+                }
+                screen.push("  Resume session (1 of 33)".into());
+                screen.push("  ❯ oretachi issue 292".into());
+                screen.push("    Type to search · Esc to cancel".into());
+                let p = parse_prompt(&screen.join("\n"));
+                assert_eq!(p.shape, PromptShape::Menu, "pad={} gap={}", pad, gap);
+                assert!(
+                    plan_keys(&p, &Answer::Select { option_index: 2 }).is_err(),
+                    "pad={} gap={}",
+                    pad,
+                    gap
+                );
+            }
+        }
+
+        // ── 奪われる方向: 本物の許可ダイアログ + 画面に残ったピッカー語。常に Permission ──
+        for pad in 0..8 {
+            for gap in 0..5 {
+                let mut screen: Vec<String> =
+                    (0..pad).map(|i| format!("  出力 {}", i)).collect();
+                screen.push("Bash command".into());
+                screen.push("rg \"Type to search\" src".into());
+                screen.push(String::new());
+                screen.push("Do you want to proceed?".into());
+                screen.push(String::new());
+                screen.push("❯ 1. Yes".into());
+                screen.push("  2. No, and tell Claude what to do differently (esc)".into());
+                for _ in 0..gap {
+                    screen.push(String::new());
+                }
+                screen.push("  Esc to cancel · Tab to amend".into());
+                let p = parse_prompt(&screen.join("\n"));
+                assert_eq!(p.shape, PromptShape::Permission, "pad={} gap={}", pad, gap);
+                assert_eq!(p.navigation, Navigation::Arrows, "pad={} gap={}", pad, gap);
+            }
+        }
     }
 
     /// 拡張子もスラッシュも無い実在ファイル名を候補行として落とさない
