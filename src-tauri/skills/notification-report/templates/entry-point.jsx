@@ -18,6 +18,8 @@ const {
   picksFreeText,
   selectAllTexts,
   flatten,
+  commandOf,
+  commandExecuted,
   promptConflicts,
 } = require('./lib/send');
 
@@ -66,7 +68,9 @@ function App() {
 
   const setDraft = useCallback((id, patch) => {
     setDrafts(prev => ({ ...prev, [id]: { ...(prev[id] || {}), ...patch } }))
-      .catch(() => {});
+      // 握り潰すと、コマンド実行後の選択解除（#288）が保存されなかったことに
+      // 誰も気づけない。表示上は反映されているので進行は止めず、診断だけ残す
+      .catch(e => console.warn('下書きの保存に失敗しました', e));
   }, [setDrafts]);
 
   // **同じ宛先へキー操作カードを 2 枚向けない**（#215）。ダイアログは 1 つしか無いので、
@@ -99,7 +103,8 @@ function App() {
 
   const pending = actionable.filter(n => {
     const rec = answers[n.id];
-    return !rec || rec.status !== 'sent';
+    // コマンドを実行しただけのカードは未返答のまま（#288）
+    return !rec || rec.status !== 'sent' || commandExecuted(n, rec);
   });
 
   // 1 件ずつ順に送る。宛先ごとに別々のツール呼び出しになる（宛先の AI 端末が
@@ -157,7 +162,23 @@ function App() {
           result = resume ? await sendEnter(n) : await sendOne(META, n, d);
           rec = resume
             ? { ...prev, status: result.status, at: nowLabel() }
-            : { choice: d.choice, note: (d.note || '').trim(), status: result.status, at: nowLabel() };
+            : {
+              choice: d.choice,
+              note: (d.note || '').trim(),
+              status: result.status,
+              at: nowLabel(),
+              // **実行したコマンドの痕跡を残す（#288）。** 記録は 1 件 1 枠なので、
+              // コマンドを実行したあと本来の返答を送ると上書きされて「何を実行したか」が
+              // サイドカーから消える。返答のあとでも追えるように引き継ぐ
+              ranCommand: commandOf(prev) || (prev && prev.ranCommand) || null,
+            };
+          // **コマンド実行が通ったら選択を外す（#288）。** シェルモードの実行は
+          // 宛先のターンを開始しないのでカードは返答待ちのまま開いている。
+          // 選んだままだと、次に「選択した N 件へ送信」を押したときに同じ
+          // コマンドがもう一度走る（人は返答を送ったつもりで押す）
+          if (commandExecuted(n, rec)) {
+            setDraft(n.id, { choice: null });
+          }
         }
         if (result.error) rec.error = result.error;
         else delete rec.error;
@@ -178,9 +199,13 @@ function App() {
       setInflightId(null);
       setBusy(false);
     }
-  }, [busy, answers, drafts, setAnswers, conflicts]);
+  }, [busy, answers, drafts, setAnswers, setDraft, conflicts]);
 
-  const sentCount = actionable.filter(n => (answers[n.id] || {}).status === 'sent').length;
+  // コマンド実行は「返答済み」に数えない（#288）。元の問いは未回答のまま残っている
+  const sentCount = actionable.filter(n => {
+    const rec = answers[n.id] || {};
+    return rec.status === 'sent' && !commandExecuted(n, rec);
+  }).length;
   const failedCount = actionable.filter(n => {
     const s = (answers[n.id] || {}).status;
     return s === 'failed' || s === 'stale' || s === 'unsupported';

@@ -39,6 +39,11 @@ const {
   picksFreeTextAt,
   isAnsweredAt,
   flatten,
+  isCommandChoice,
+  commandOf,
+  commandTooLong,
+  commandExecuted,
+  COMMAND_MAX_LEN,
   showTerminal,
   artifactsOf,
   artifactHref,
@@ -265,18 +270,23 @@ function Section({ title, color, note, children }) {
 
 // 候補ボタン。単一選択トグル。`other` は「どれでもない」パターンで破線にして区別する
 function ChoiceChip({ label, selected, disabled, other, onClick }) {
+  // コマンド実行の候補（`!` 始まり）は等幅 + 橙で見分けが付くようにする（#288）。
+  // 押すと宛先のターミナルでそのまま走るので、「AI への返答」と同じ見た目にしない
+  const command = !other && isCommandChoice(label);
+  const accent = command ? '#fab387' : '#89b4fa';
   return (
     <button
       type="button"
+      title={command ? '宛先のターミナルでこのコマンドをそのまま実行します' : undefined}
       disabled={disabled}
       onClick={onClick}
       style={{
-        border: (other ? '1px dashed ' : '1px solid ') + (selected ? '#89b4fa' : '#45475a'),
+        border: (other ? '1px dashed ' : '1px solid ') + (selected ? accent : (command ? '#fab38766' : '#45475a')),
         borderRadius: 999,
         padding: '6px 14px',
-        background: selected ? '#89b4fa' : 'transparent',
-        color: disabled ? '#45475a' : (selected ? '#181825' : (other ? '#9399b2' : '#cdd6f4')),
-        fontSize: 12, fontWeight: 600, fontFamily: FONT,
+        background: selected ? accent : 'transparent',
+        color: disabled ? '#45475a' : (selected ? '#181825' : (other ? '#9399b2' : (command ? '#fab387' : '#cdd6f4'))),
+        fontSize: 12, fontWeight: 600, fontFamily: command ? MONO : FONT,
         cursor: disabled ? 'default' : 'pointer', whiteSpace: 'nowrap',
       }}
     >{label}</button>
@@ -734,7 +744,13 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
 
   const d = draft || {};
   const status = answer ? answer.status : 'pending';
-  const accent = ACCENT[status] || ACCENT.pending;
+  // **コマンドを実行しただけのカード（#288）。** シェルモードの実行は宛先のターンを
+  // 開始しないので、この通知への返答はまだ送られていない。判定は `lib/send` の
+  // `commandExecuted`（`status` まで見るので `failed` を実行済みと誤報しない）
+  const commandSent = commandExecuted(n, answer);
+  // 返答済み（緑 / ✓）と同じ見た目にすると、流し見で片付いたカードに見える
+  const accent = commandSent ? ACCENT.pastedOnly : (ACCENT[status] || ACCENT.pending);
+  const mark = commandSent ? '❯' : (MARK[status] || MARK.pending);
   // 送信済みカードは既定で縮小表示にする。レポートは上から順に捌いていくので、
   // 済んだカードが本文全文の高さのまま残ると未返答のカードが画面外へ押し出される。
   // **消さずに畳む**（何を送ったかは 1 行で残し、「展開」で全文へ戻せる）
@@ -746,6 +762,12 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
   const prompt = n.prompt || null;
   // 「その他」を選んだのに補足が空 → 送信対象にできない
   const otherNeedsNote = !dialog && d.choice === OTHER && !(d.note || '').trim();
+  // コマンドの候補（`!` 始まり）を選んでいる間は補足欄を塞ぐ（#288）。
+  // `その他` + 補足に `!` を書いた場合は補足欄そのものがコマンド源なので塞がない
+  const commandChip = !dialog && d.choice !== OTHER && isCommandChoice(d.choice);
+  // 実際に送られるコマンド（`!` 込み・1 行に畳んだ後）。コマンドでなければ null
+  const draftCommand = dialog ? null : commandOf(d);
+  const draftCommandTooLong = commandTooLong(draftCommand);
   // 送信済み（成功）は読み取り専用にする。失敗は選び直して再送できる。
   // pastedOnly は本文が宛先に残っているので、内容を変えられては困る（Enter を
   // 送り直すだけの状態）。入力も読み取り専用にする
@@ -753,8 +775,12 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
   // ダイアログのカードは一度送ったら読み取り専用。**再送させない**
   // （画面が変わっているか矢印が既に動いているので、同じ回答が別の選択肢を確定しうる）。
   // 例外は `failed` — 定義上キーを 1 つも送っていないので選び直して再送できる
+  //
+  // **コマンド実行（`!` 始まり）は `sent` でも閉じない（#288）。** 元の問いは
+  // 未回答のまま残っているので、続けて本来の返答を送れる必要がある
   const readOnly =
-    status === 'sent' || resumeEnter || (dialog && status !== 'pending' && status !== 'failed');
+    (status === 'sent' && !commandSent) || resumeEnter
+    || (dialog && status !== 'pending' && status !== 'failed');
   const locked = readOnly || busy || !!blocked;
   const keys = previewKeys(n, d);
   // **形状も見る。** `escapeHatch` だけで判断すると `numbered` / `yesno` にも ESC 欄を
@@ -775,7 +801,8 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
   // ままなら「まだ答え切れていない」状態で、その旨は full view にしか出ない。
   // 畳むと「返答済み」に見えるまま次のレポートを待つ導線が消える
   const questionRemains = !!(answer && answer.afterShape === 'askUserQuestion');
-  const collapsible = status === 'sent' && !questionRemains;
+  // コマンドを実行しただけのカードも畳まない（返答がまだ要る。#288）
+  const collapsible = status === 'sent' && !questionRemains && !commandSent;
   if (collapsible && !expanded) {
     return (
       <div style={{
@@ -795,7 +822,7 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 420,
         }}>
           送信内容: {describeSent(n, answer)}
-          {answer && answer.note ? ` / ${answer.note}` : ''}
+          {sentNote(answer) ? ` / ${sentNote(answer)}` : ''}
         </span>
         <div style={{ flex: 1 }} />
         <Badge label={`${STATUS_LABEL.sent} ${(answer && answer.at) || ''}`.trim()} color={accent} />
@@ -817,7 +844,7 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
     }}>
       {/* 見出し: 状態 / 発信元ワークツリー / issue / 時刻 / 種別 / 問いの形状 */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-        <span style={{ color: accent, fontSize: 13 }}>{MARK[status] || '●'}</span>
+        <span style={{ color: accent, fontSize: 13 }}>{mark}</span>
         <span style={{ fontSize: 13, fontWeight: 700, color: '#cdd6f4', fontFamily: FONT }}>
           {n.worktreeName}
         </span>
@@ -841,7 +868,10 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
         {answer && (
           <Badge
             label={status === 'sent'
-              ? `${STATUS_LABEL.sent} ${answer.at || ''}`.trim()
+              ? (commandSent
+                // 「返答済み」と出すと、返答がまだであることが見えなくなる（#288）
+                ? `コマンド実行済み・未返答 ${answer.at || ''}`.trim()
+                : `${STATUS_LABEL.sent} ${answer.at || ''}`.trim())
               : (dialog && status === 'pastedOnly'
                 ? '送信途中で停止'
                 : (STATUS_LABEL[status] || status))}
@@ -971,8 +1001,16 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
           <div style={{ fontSize: 12, fontFamily: FONT, color: '#bac2de', lineHeight: 1.8 }}>
             <span style={{ color: '#6c7086' }}>送信内容: </span>
             <b>{describeSent(n, answer)}</b>
-            {answer && answer.note ? <span style={{ color: '#9399b2' }}> / {answer.note}</span> : null}
+            {sentNote(answer) ? <span style={{ color: '#9399b2' }}> / {sentNote(answer)}</span> : null}
           </div>
+          {/* 返答の前にコマンドを実行していた場合の痕跡（#288）。返答の記録で
+              上書きされても「何を実行したか」を追えるようにする */}
+          {answer && answer.ranCommand && (
+            <div style={{ fontSize: 11, fontFamily: FONT, color: '#6c7086' }}>
+              返答前に実行したコマンド:{' '}
+              <code style={{ fontFamily: MONO, color: '#9399b2' }}>{answer.ranCommand}</code>
+            </div>
+          )}
           {answer && answer.afterShape && (
             <div style={{ fontSize: 11, fontFamily: MONO, color: '#6c7086' }}>
               送信後の画面: {SHAPE_LABEL[answer.afterShape] || answer.afterShape}
@@ -1168,27 +1206,92 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
               onClick={() => onPick(d.choice === OTHER ? null : OTHER)} />
           </div>
 
-          {/* 補足プロンプト。「その他」選択時は必須 */}
-          <textarea
-            value={d.note || ''}
-            disabled={locked}
-            onChange={e => onNote(e.target.value)}
-            rows={2}
-            placeholder={d.choice === OTHER
-              ? '補足プロンプト（必須） — 「その他」を選んだので、ここに直接指示を書く'
-              : '補足プロンプト（任意） — 候補で足りないときはここに書く'}
-            style={{
-              width: '100%', boxSizing: 'border-box', resize: 'vertical',
-              border: '1px solid ' + (otherNeedsNote ? '#f38ba8' : '#45475a'),
-              borderRadius: 6, background: otherNeedsNote ? '#f38ba80f' : '#11111b',
-              padding: '9px 12px',
-              fontSize: 13, fontFamily: FONT, color: '#cdd6f4', lineHeight: 1.7,
-            }}
-          />
+          {/* 補足プロンプト。「その他」選択時は必須。
+              **コマンドの候補を選んでいる間は塞ぐ**（#288）— 後ろに足した文字は
+              コマンドの一部になるので、補足として送る先が無い */}
+          {commandChip ? (
+            /* 書きかけの補足を `disabled` で残すと「送られる」ように見える。
+               コマンドの候補を選んでいる間は欄ごと固定文言に差し替える（#288）。
+               下書きの中身は消さないので、候補を外せばそのまま戻る */
+            <div style={{
+              width: '100%', boxSizing: 'border-box',
+              border: '1px dashed #45475a', borderRadius: 6, background: '#11111b',
+              padding: '9px 12px', fontSize: 12, fontFamily: FONT,
+              color: '#6c7086', lineHeight: 1.7,
+            }}>
+              補足は送れません — コマンドの候補を選んでいる間は、下のコマンドだけがそのまま実行されます
+              （候補を外すと補足欄に戻ります）。
+            </div>
+          ) : (
+            <textarea
+              value={d.note || ''}
+              disabled={locked}
+              onChange={e => onNote(e.target.value)}
+              rows={2}
+              placeholder={d.choice === OTHER
+                ? '補足プロンプト（必須） — 「その他」を選んだので、ここに直接指示を書く。先頭を ! にするとコマンドとして実行されます'
+                : '補足プロンプト（任意） — 候補で足りないときはここに書く'}
+              style={{
+                width: '100%', boxSizing: 'border-box', resize: 'vertical',
+                border: '1px solid ' + (otherNeedsNote ? '#f38ba8' : '#45475a'),
+                borderRadius: 6, background: otherNeedsNote ? '#f38ba80f' : '#11111b',
+                padding: '9px 12px',
+                fontSize: 13, fontFamily: FONT, color: '#cdd6f4', lineHeight: 1.7,
+              }}
+            />
+          )}
 
           {otherNeedsNote && (
             <div style={{ fontSize: 11, color: '#f38ba8', fontFamily: FONT }}>
               補足プロンプトが空のため、この 1 件は送信対象に入りません
+            </div>
+          )}
+
+          {/* コマンド実行の予告（#288）。押した瞬間に何が走るのかを、送る前に
+              そのままの文字列で見せる。AI が生成した候補なので、人が読んで
+              納得できないものは押させない */}
+          {draftCommand && (
+            <div style={{
+              fontSize: 11.5, color: '#fab387',
+              background: '#fab38712', border: '1px solid #fab38744', borderRadius: 6,
+              padding: '9px 12px', lineHeight: 1.8,
+            }}>
+              <b>これは AI への返答ではなくコマンド実行です。</b>
+              宛先のターミナルをシェルモードにして、次の 1 行を<b>そのまま実行</b>します
+              （前置きも補足も付きません）。
+              {/* **折り返して全文を出す。** 1 行に丸めると長いコマンドの後半が
+                  読まれないまま押される（このカードでは人の目視が唯一のゲート） */}
+              <pre style={{
+                margin: '6px 0 0', fontFamily: MONO, fontSize: 12, color: '#f9e2af',
+                background: '#11111b', border: '1px solid #313244', borderRadius: 5,
+                padding: '6px 10px', whiteSpace: 'pre-wrap', wordBreak: 'break-all',
+                lineHeight: 1.6,
+              }}>{draftCommand}</pre>
+              {draftCommandTooLong && (
+                <div style={{ marginTop: 6, color: '#f38ba8' }}>
+                  <b>長すぎるため送信できません</b>（{draftCommand.length} 文字 /
+                  上限 {COMMAND_MAX_LEN} 文字）。読み切れない 1 行を押させない上限です。
+                  ターミナルを開いて直接実行してください。
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* コマンドを実行しただけの状態。**返答はまだ送っていない**ことを
+              カード上に残す（#288）。実行結果は宛先のターミナルとエージェントの
+              コンテキストに入っているので、それを見てから改めて返答を選ぶ */}
+          {commandSent && (
+            <div style={{
+              fontSize: 11.5, color: '#a6e3a1',
+              background: '#a6e3a112', border: '1px solid #a6e3a144', borderRadius: 6,
+              padding: '9px 12px', lineHeight: 1.8,
+            }}>
+              <b>コマンドを実行しました（{answer.at || ''}）。</b>
+              <code style={{ fontFamily: MONO, fontSize: 11.5, color: '#f9e2af' }}>
+                {commandOf(answer)}
+              </code>
+              {' '}の出力は宛先のターミナルとエージェントのコンテキストに入っています。
+              <b>この通知への返答はまだ送っていません</b> — 結果を見て、改めて候補を選んで送信してください。
             </div>
           )}
 
@@ -1223,10 +1326,26 @@ function promptTitle(n) {
   return text ? `${label} — ${text}` : label;
 }
 
+/**
+ * 送信内容の横に添える補足。**コマンド実行では出さない（#288）。**
+ *
+ * コマンドは 1 行がそのまま実行され、補足は送られない。それでも下書きに
+ * 書きかけの補足が残っていることはある（候補を選ぶ前に書いてから選んだ場合）ので、
+ * 素で出すと「送っていない文」を送信済みとして見せてしまう。
+ */
+function sentNote(answer) {
+  if (!answer || !answer.note) return '';
+  return commandOf(answer) ? '' : answer.note;
+}
+
 /** 読み取り専用表示用に「何を送ったか」を 1 行で表す */
 function describeSent(n, answer) {
   if (!answer) return '—';
   if (!isDialog(n)) {
+    // コマンド実行は「何を実行したか」がそのまま送信内容（#288）。
+    // `その他` 経由でも、送ったのは補足文ではなくコマンドなのでそちらを出す
+    const command = commandOf(answer);
+    if (command) return command;
     return answer.choice === OTHER ? '（補足で直接指示）' : (answer.choice || '—');
   }
   if (answer.mode === 'escapeThenText') return 'ESC で抜けて指示を送信';
