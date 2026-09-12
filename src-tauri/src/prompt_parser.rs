@@ -1797,6 +1797,26 @@ fn looks_like_dialog_footer(body: &str) -> bool {
         || contains_ci(body, "esc to cancel")
 }
 
+/// フッタの照合に使う「画面末尾の意味のある数行」。
+///
+/// 実物のフッタは最終行に出るが、狭いターミナルでは数行へ折り返す（実測: 13 桁で
+/// `Esc to cancel · Tab to amend` が 4 行に割れる）。そこで**下から数えて数行**を
+/// 連結する。画面末尾 12 行をまるごと連結すると、スクロールバックに残った
+/// 出力までフッタとして読むことになる。
+///
+/// **空行を読み飛ばして数えない。** 飛ばすと数える範囲が上へいくらでも伸び、
+/// 行数で絞った意味が無くなる（入力欄の上の余白を越えてスクロールバックへ届く）。
+/// 折り返したフッタは連続した行に出るので、物理行で数えれば足りる。
+fn footer_region(tail: &[&str]) -> String {
+    /// フッタが折り返して占めうる行数。
+    const FOOTER_LINES: usize = 4;
+    tail.iter()
+        .skip(tail.len().saturating_sub(FOOTER_LINES))
+        .map(|l| strip_frame(l).0)
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 /// 番号の無い `❯` リスト（ピッカー）のフッタか（#292）。
 ///
 /// 実測:
@@ -2314,8 +2334,11 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
         if last_meaningful.as_deref().is_some_and(is_pager_line) {
             return seal(quiet_prompt(PromptShape::Pager, escape_hatch, tail));
         }
-        // フッタは折り返すので、行ごとではなく連結した `tail_joined` で照合する
-        if is_picker_footer(&tail_joined) {
+        // **フッタは折り返すが、画面末尾の数行に限って探す。** `tail_joined`
+        // （末尾 12 行ぜんぶ）で照合すると、スクロールバックに残った
+        // `Type to search` という**ただの出力**で自由入力の画面をピッカー扱いにし、
+        // 返答できるはずのカードを黙って塞ぐ
+        if is_picker_footer(&footer_region(tail_lines)) {
             return seal(quiet_prompt(PromptShape::Menu, escape_hatch, tail));
         }
         if let Some(free) = looks_like_free_input(tail_lines) {
@@ -3164,6 +3187,28 @@ mod tests {
         let p = parse_prompt(&config_picker_screen());
         assert_eq!(p.shape, PromptShape::Menu);
         assert!(plan_keys(&p, &Answer::Text { text: "hello".into() }).is_err());
+    }
+
+    /// スクロールバックに残った `Type to search` でピッカー扱いにしない（#292）。
+    ///
+    /// 画面末尾の**フッタ**だけを見る。末尾 12 行を丸ごと見ると、直前のコマンドの
+    /// 出力に同じ語が出ているだけで返答できるカードが黙って塞がれる。
+    #[test]
+    fn a_stale_picker_footer_in_the_scrollback_does_not_block_free_input() {
+        let screen = [
+            "  Type to search · Esc to cancel",
+            "  ⎿ (前のコマンドの出力)",
+            "",
+            "",
+            "",
+            "────────────────────────────────────────",
+            "❯",
+            "────────────────────────────────────────",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Text);
     }
 
     /// ページャは `pager`（#292）。`unknown` だと git log のダンプがカードに載る。
