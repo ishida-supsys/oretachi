@@ -6,6 +6,31 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.31.3] - 2026-09-12
+
+### Added
+- アーティファクトのマークダウンをプレビュー / ソースで切り替えられるようにした (#275)
+- アーティファクトを issue へ添付できる zip でエクスポート / インポートできるようにした (#266)
+- MCP にアーティファクトの削除と、検索条件への作成日時・更新日時を追加した (#273)
+- notification-report のカードにターミナル遷移・アーティファクト・テキスト送信の導線を追加した (#265)
+- teamwork-parent の計画フロー図の issue 番号を issue へのリンクにした (#274)
+- 設定のデバッグログ出力の隣にログディレクトリを開くボタンを設置した (#262)
+
+### Fixed
+- notification-report のカードを生データの貼り付けからフォームへ作り直し、AskUserQuestion の複数設問に対応した (#264)
+- notification-report のレポート / カードの生成判定を「原則作る」に直し、端末出力を簡潔にした (#268)
+- prompt-parser で自由入力欄への遷移待ちを固定待ちからポーリングに変え、自由入力は確定 CR を挟まずに打つようにした (#282)
+- 設定の lost update を塞ぎ、確定操作を即時保存するようにした (#261)
+- サブウィンドウの自動承認フラグの写しのずれで承認が黙って止まるのを防いだ (#263)
+- サブウィンドウ復元時に自動承認フラグが失われる問題を修正した (#256)
+- `artifact` / `artifact_module` の変更系コマンドが全文を返すのをやめた (#257)
+
+### Changed
+- prompt-parser の「確認画面が見えているか」の判定を 1 本に集約した (#264)
+
+### Documentation
+- notification-report で発信元ワークツリーへのアクセスを issue / Read / アーティファクトに限ることを明記した (#264)
+
 ## [0.31.2] - 2026-09-09
 
 ### Added
@@ -754,7 +779,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.31.2...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.31.3...HEAD
+[0.31.3]: https://github.com/ishida-supsys/oretachi/compare/0.31.2...0.31.3
 [0.31.2]: https://github.com/ishida-supsys/oretachi/compare/0.31.1...0.31.2
 [0.31.1]: https://github.com/ishida-supsys/oretachi/compare/0.31.0...0.31.1
 [0.31.0]: https://github.com/ishida-supsys/oretachi/compare/0.30.0...0.31.0
