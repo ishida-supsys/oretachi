@@ -2436,7 +2436,6 @@ fn text_prompt(
     })
 }
 
-/// 画面テキストから問いを解析する（純粋関数）。
 /// 「入力待ちではあるが、こちらからは何も送れない」画面（#292）。
 ///
 /// `menu` / `pager` 用。設問も選択肢も持たず、人へ渡せるのは `tail` だけ。
@@ -2459,6 +2458,7 @@ fn quiet_prompt(shape: PromptShape, escape_hatch: Option<String>, tail: String) 
     }
 }
 
+/// 画面テキストから問いを解析する（純粋関数）。
 pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     let lines: Vec<&str> = screen.lines().collect();
     let tail_start = lines.len().saturating_sub(TAIL_WINDOW);
