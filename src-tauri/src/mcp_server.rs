@@ -1630,13 +1630,13 @@ pub struct AckMessageParams {
 
 /// [`NotifyService::send_keystrokes`] の結果（#282）。
 enum KeySendResult {
-    /// 全キー送信済み
-    Sent(Vec<String>),
+    /// 全キー送信済み。`last` は送信途中に `require` を確かめたときの画面
+    Sent { keys: Vec<String>, last: Option<crate::prompt_parser::ParsedPrompt> },
     /// PTY への書き込み自体が失敗した。`sent` は書き込めたキーのラベル
     WriteFailed { sent: Vec<String>, label: String, error: String },
-    /// `settle_after` の遷移待ちがタイムアウトした。それ以降のキー（本文など）は
-    /// 送っていない
-    TransitionTimedOut { sent: Vec<String>, last: Option<crate::prompt_parser::ParsedPrompt> },
+    /// キーの `require`（送る前に満たしているべき画面の条件）が時間内に満たされず、
+    /// **そのキー以降は送っていない**
+    RequirementUnmet { sent: Vec<String>, last: Option<crate::prompt_parser::ParsedPrompt> },
 }
 
 // ─── MCP Service ──────────────────────────────────────────────────────────────
@@ -4287,47 +4287,36 @@ impl NotifyService {
 
     /// `plan_keys` が組んだキー列を 1 本ずつ送る（#282）。
     ///
-    /// **`settle_after` が立ったキーの直後は、固定待ちの代わりに画面が変わるまで
-    /// ポーリングする。** `Type something.` を選ぶ CR / `EscapeThenText` の ESC は、
-    /// 送った直後に Claude Code が自由入力欄へ遷移する（=描画が変わる）。ここを
-    /// 固定の `SUBMIT_DELAY`（150ms）で次のキー（本文）へ進んでいたため、遷移し切る
-    /// 前に本文が届き、素のチャットメッセージとして吸われる事故があった。
+    /// **`require` が付いたキーは、送る前に「画面がその条件を満たす」までポーリングする。**
+    /// 自由入力の本文は、宛先が本当に入力を受け取れる状態（`❯` が `Type something.` の
+    /// 行に乗っている / ダイアログが畳まれて入力欄になった）でないと別の場所へ流れ込む。
+    /// 固定の `SUBMIT_DELAY`（150ms）では、矢印が届く前に本文を打ち始めうる。
     ///
-    /// 遷移待ちがタイムアウトしたら、**それ以降のキー（本文など）は送らずに打ち切る。**
-    /// ここで送ってしまうと、まさに直したい事故（未遷移の画面へ本文が届く）を
-    /// 自分で起こすことになる。
+    /// 条件が満たされないままタイムアウトしたら、**そのキー以降（本文など）は
+    /// 送らずに打ち切る。** ここで送ってしまうと、まさに直したい事故
+    /// （狙っていない画面へ本文が届く）を自分で起こすことになる。
+    ///
+    /// 返り値の `last` は条件を確かめたときに読めた画面。呼び出し側が
+    /// 「送信後に画面が変わったか」を測る基準にする（送信**前**の fingerprint を
+    /// 基準にすると、待っている間の変化だけで `sent` を名乗ってしまう）。
     async fn send_keystrokes(
         &self,
         session_id: u32,
         keys: &[crate::prompt_parser::Keystroke],
     ) -> KeySendResult {
         let mut sent: Vec<String> = Vec::new();
+        let mut last_seen: Option<crate::prompt_parser::ParsedPrompt> = None;
         for (i, key) in keys.iter().enumerate() {
             if i > 0 {
                 tokio::time::sleep(crate::event_delivery::SUBMIT_DELAY).await;
             }
-            // 遷移待ちが要るキーだけ、送る**前**の画面を基準点として取っておく。
-            // 送った後に読むと、送信と読み取りの間に既に遷移し終えている場合があり、
-            // そのフィンガープリントを基準にすると「この先の変化」を待つことになって
-            // 二度と満たされない（実際は届いているのに `unverified` になる）。
-            let baseline_fp = if key.settle_after {
-                match self.inspect_screen(session_id) {
-                    Ok(t) => Some(t.0.fingerprint),
-                    Err(e) => {
-                        // ここを黙って `None`（=待たない）に倒すと、まさに直したい事故
-                        // （未遷移の画面へ本文が届く）を読み取り失敗時にだけ再発させる
-                        // 抜け道になる（差分レビューで検出）。ログを残したうえで、
-                        // 下の分岐で安全側（打ち切り）に倒す
-                        log::warn!(
-                            "[mcp] send_keystrokes: 遷移待ちの基準画面を読めませんでした session_id={} key={} error={}",
-                            session_id, key.label, e
-                        );
-                        None
-                    }
+            if let Some(req) = key.require {
+                let (seen, ok) = self.settle_until(session_id, |p| req.is_satisfied(p)).await;
+                last_seen = seen;
+                if !ok {
+                    return KeySendResult::RequirementUnmet { sent, last: last_seen };
                 }
-            } else {
-                None
-            };
+            }
             if let Err(e) = self
                 .app_handle
                 .state::<PtyManager>()
@@ -4336,21 +4325,8 @@ impl NotifyService {
                 return KeySendResult::WriteFailed { sent, label: key.label.clone(), error: e.to_string() };
             }
             sent.push(key.label.clone());
-            if key.settle_after {
-                match baseline_fp {
-                    Some(fp) => {
-                        let (last, changed) = self.settle_after_keys(session_id, &fp).await;
-                        if !changed {
-                            return KeySendResult::TransitionTimedOut { sent, last };
-                        }
-                    }
-                    // 基準画面を読めず、遷移したかどうかを確認しようがない。
-                    // 残りのキー（本文など）は送らずに打ち切る
-                    None => return KeySendResult::TransitionTimedOut { sent, last: None },
-                }
-            }
         }
-        KeySendResult::Sent(sent)
+        KeySendResult::Sent { keys: sent, last: last_seen }
     }
 
     /// **描き終わった**画面を読む（#264）。
@@ -4674,7 +4650,7 @@ impl NotifyService {
             };
 
             match self.send_keystrokes(session_id, &keys).await {
-                KeySendResult::Sent(labels) => sent.extend(labels),
+                KeySendResult::Sent { keys: labels, .. } => sent.extend(labels),
                 KeySendResult::WriteFailed { sent: partial, label, error } => {
                     sent.extend(partial);
                     let status = if sent.is_empty() { "failed" } else { "pastedOnly" };
@@ -4686,13 +4662,13 @@ impl NotifyService {
                         answered,
                     );
                 }
-                KeySendResult::TransitionTimedOut { sent: partial, last: after_transition } => {
+                KeySendResult::RequirementUnmet { sent: partial, last: seen } => {
                     sent.extend(partial);
                     return outcome(
                         "unverified",
                         sent,
-                        after_transition.as_ref(),
-                        Some("選択肢を確定しましたが、自由入力欄への遷移を確認できませんでした。**本文は送っていません**（未遷移のまま送ると素のチャットメッセージとして吸われます）。ターミナルで状態を確認してください".to_string()),
+                        seen.as_ref(),
+                        Some("自由入力の行へ ❯ が乗ったことを確認できませんでした。**本文は送っていません**（狙っていない行へ打つと選択肢の操作として食われたり、素のチャットメッセージとして飛びます）。ターミナルで状態を確認してください".to_string()),
                         answered,
                     );
                 }
@@ -4805,7 +4781,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json.to_string())]))
     }
 
-    #[tool(description = "oretachi_inspect_prompt で解析した「問い」へ、形状に合ったキー列を送って回答する。返り値の JSON: { status, keysSent, afterShape, afterFingerprint, reason }。kind に \"selectAll\" を指定すると、**複数設問の AskUserQuestion へ option_indices で全問まとめて答えて確認画面の Submit まで確定する**（画面には 1 問ずつしか出ないため、1 問送るごとに画面が次の設問へ進むのを待つ。返り値に answeredCount が付く）。status は \"sent\"(送信して画面が変わった) / \"unverified\"(キーは送ったが画面が変わらず、通ったか分からない) / \"stale\"(**画面が変わっていたので何も送っていない**) / \"unsupported\"(その形状にその回答は送れない。何も送っていない) / \"pastedOnly\"(キー列の途中で失敗。宛先の入力状態が中途半端なので同じ内容を再送してはいけない) / \"failed\"(何も送れていない)。**stale はリトライしないこと** — 画面が変わっているので oretachi_inspect_prompt から取り直す。キーは 1 キー 1 write に分けて猶予を挟む（Claude Code は同じ読み取りチャンクに来た CR を送信として扱わない）。選択は数字キーではなく矢印で ❯ を動かして CR で確定する（実測: 数字キーは確定キーではない）。許可条件は oretachi_write_terminal と同じで、他ワークツリーの端末へ送るには呼び出し元がその宛先を購読していること", annotations(destructive_hint = true))]
+    #[tool(description = "oretachi_inspect_prompt で解析した「問い」へ、形状に合ったキー列を送って回答する。返り値の JSON: { status, keysSent, afterShape, afterFingerprint, reason }。kind に \"selectAll\" を指定すると、**複数設問の AskUserQuestion へ option_indices で全問まとめて答えて確認画面の Submit まで確定する**（画面には 1 問ずつしか出ないため、1 問送るごとに画面が次の設問へ進むのを待つ。返り値に answeredCount が付く）。status は \"sent\"(送信して画面が変わった) / \"unverified\"(キーは送ったが画面が変わらず、通ったか分からない。自由入力では「宛先が本文を受け取れる状態にならなかったので本文を送らずに打ち切った」場合もここに入る) / \"stale\"(**画面が変わっていたので何も送っていない**) / \"unsupported\"(その形状にその回答は送れない。何も送っていない) / \"pastedOnly\"(キー列の途中で失敗。宛先の入力状態が中途半端なので同じ内容を再送してはいけない) / \"failed\"(何も送れていない)。**stale はリトライしないこと** — 画面が変わっているので oretachi_inspect_prompt から取り直す。キーは 1 キー 1 write に分けて猶予を挟む（Claude Code は同じ読み取りチャンクに来た CR を送信として扱わない）。選択は数字キーではなく矢印で ❯ を動かして CR で確定する（実測: 数字キーは確定キーではない）。許可条件は oretachi_write_terminal と同じで、他ワークツリーの端末へ送るには呼び出し元がその宛先を購読していること", annotations(destructive_hint = true))]
     async fn oretachi_answer_prompt(
         &self,
         Parameters(AnswerPromptParams {
@@ -4966,8 +4942,17 @@ impl NotifyService {
         // 1 キー 1 write + 各キー間に猶予。Claude Code は同じ読み取りチャンクに来た CR を
         // 送信として扱わないため、まとめて書くと確定しない
         let mut sent: Vec<String> = Vec::new();
+        // 送信後の検証で「変わったか」を測る基準。`require` を待った経路では
+        // **待っている間に画面が変わっている**ので、送信前の fingerprint を基準にすると
+        // 本文が通っていなくても `sent` を名乗ってしまう（差分レビューで検出）
+        let mut baseline_fp = parsed.fingerprint.clone();
         match self.send_keystrokes(session_id, &keys).await {
-            KeySendResult::Sent(labels) => sent.extend(labels),
+            KeySendResult::Sent { keys: labels, last } => {
+                sent.extend(labels);
+                if let Some(seen) = last {
+                    baseline_fp = seen.fingerprint;
+                }
+            }
             KeySendResult::WriteFailed { sent: partial, label, error } => {
                 sent.extend(partial);
                 // 途中で失敗した場合、既に送ったキーは宛先へ届いている。同じ回答を
@@ -4994,24 +4979,24 @@ impl NotifyService {
                     )),
                 );
             }
-            KeySendResult::TransitionTimedOut { sent: partial, last: after_transition } => {
+            KeySendResult::RequirementUnmet { sent: partial, last: seen } => {
                 sent.extend(partial);
                 log::warn!(
-                    "[mcp] oretachi_answer_prompt: session_id={} status=unverified reason=transition_timeout sent={:?}",
+                    "[mcp] oretachi_answer_prompt: session_id={} status=unverified reason=requirement_unmet sent={:?}",
                     session_id, sent
                 );
                 return outcome(
                     "unverified",
                     sent,
-                    after_transition.as_ref(),
-                    Some("選択肢を確定しましたが、自由入力欄への遷移を確認できませんでした。**本文は送っていません**（未遷移のまま送ると素のチャットメッセージとして吸われます）。ターミナルで状態を確認してから oretachi_inspect_prompt を取り直してください".to_string()),
+                    seen.as_ref(),
+                    Some("宛先が本文を受け取れる状態（自由入力の行に ❯ が乗った / ダイアログが畳まれた）になったことを確認できませんでした。**本文は送っていません**（そのまま送ると狙っていない画面へ届きます）。ターミナルで状態を確認してから oretachi_inspect_prompt を取り直してください".to_string()),
                 );
             }
         }
 
         // 送信後にもう一度解析する。ロックはまだ握っているので、この再解析までの間に
         // 別の write が割り込むことはない
-        let (after, changed) = self.settle_after_keys(session_id, &parsed.fingerprint).await;
+        let (after, changed) = self.settle_after_keys(session_id, &baseline_fp).await;
         let status = if changed { "sent" } else { "unverified" };
         let reason = if changed {
             None

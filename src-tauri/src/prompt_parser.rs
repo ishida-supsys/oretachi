@@ -230,43 +230,77 @@ pub struct ParsedPrompt {
 
 // ─── 送るキー ────────────────────────────────────────────────────────────────
 
+/// そのキーを送る**前に**画面が満たしていなければならない条件（#282）。
+///
+/// **固定待ちでは足りない場面がある。** 自由入力の本文は「宛先が入力を受け取れる状態」
+/// でなければ別の場所（素のチャット欄や、狙っていない選択肢の操作）へ流れ込むので、
+/// 本文の直前だけは「何 ms 待つか」ではなく「画面がこうなっているか」で進む。
+///
+/// **事後条件（直前のキーに付ける）ではなく事前条件にしてある。** 事後条件にすると
+/// 「移動が 0 回で付けるキーが無い」ケース（`❯` が既に狙った行に居る）が素通りし、
+/// **検証なしで本文を打つ穴**が残る（差分レビューで検出）。本文キー自身に付ければ、
+/// 移動の有無によらず必ず 1 回は確かめる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenRequirement {
+    /// `❯` が `option_index` の選択肢に乗っている。
+    ///
+    /// **`Type something.` へ本文を打つ前に必ず確かめる。** 矢印が 1 つ落ちただけで
+    /// カーソルは別の行に留まり、そこへ本文を打つと選択肢のショートカットとして
+    /// 解釈されうる。「動いた」ではなく「狙った行に居る」で判定する。
+    CursorOn { option_index: u32 },
+    /// ダイアログが閉じて素の自由入力欄（`text`）になっている。`EscapeThenText` 用
+    FreeInput,
+}
+
+impl ScreenRequirement {
+    pub fn is_satisfied(self, parsed: &ParsedPrompt) -> bool {
+        match self {
+            ScreenRequirement::CursorOn { option_index } => {
+                parsed.questions.first().and_then(|q| q.cursor_index) == Some(option_index)
+            }
+            ScreenRequirement::FreeInput => parsed.shape == PromptShape::Text,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Keystroke {
     /// 人間可読表現（`"Down"` / `"CR"` / `"text(42文字)"`）。UI のキー列プレビューに出す
     pub label: String,
     pub bytes: Vec<u8>,
-    /// **このキーの直後、次のキーを送る前に「画面が変わった」ことを確認してから進むべきか。**
-    ///
-    /// `Type something.` を選ぶ CR / `EscapeThenText` の ESC など、送った直後に
-    /// Claude Code 側が自由入力欄へ遷移する（=描画が変わる）キーに立てる。ここが
-    /// 固定の `SUBMIT_DELAY`（150ms）だけで次の本文を送っていたため、遷移し切る前に
-    /// 本文が届いて素のチャットメッセージとして吸われる事故があった（#282）。
-    /// 呼び出し側は固定待ちの代わりに `settle_after_keys` 相当のポーリングで待つ。
-    pub settle_after: bool,
+    /// このキーを送る**前に**画面が満たしているべき条件（#282）。
+    /// `None` なら固定の `SUBMIT_DELAY` だけ空けて送る
+    pub require: Option<ScreenRequirement>,
 }
 
 impl Keystroke {
     fn down() -> Self {
-        Self { label: "Down".into(), bytes: b"\x1b[B".to_vec(), settle_after: false }
+        Self { label: "Down".into(), bytes: b"\x1b[B".to_vec(), require: None }
     }
     fn up() -> Self {
-        Self { label: "Up".into(), bytes: b"\x1b[A".to_vec(), settle_after: false }
+        Self { label: "Up".into(), bytes: b"\x1b[A".to_vec(), require: None }
     }
     fn cr() -> Self {
-        Self { label: "CR".into(), bytes: b"\r".to_vec(), settle_after: false }
+        Self { label: "CR".into(), bytes: b"\r".to_vec(), require: None }
     }
     fn esc() -> Self {
-        Self { label: "Esc".into(), bytes: b"\x1b".to_vec(), settle_after: false }
+        Self { label: "Esc".into(), bytes: b"\x1b".to_vec(), require: None }
     }
     fn text(s: &str) -> Self {
         Self {
             label: format!("text({}文字)", s.chars().count()),
             bytes: s.as_bytes().to_vec(),
-            settle_after: false,
+            require: None,
         }
     }
     fn ch(c: char) -> Self {
-        Self { label: c.to_string(), bytes: c.to_string().into_bytes(), settle_after: false }
+        Self { label: c.to_string(), bytes: c.to_string().into_bytes(), require: None }
+    }
+
+    /// 送る前に `req` を確かめるキーにする
+    fn requiring(mut self, req: ScreenRequirement) -> Self {
+        self.require = Some(req);
+        self
     }
 }
 
@@ -275,11 +309,24 @@ impl Keystroke {
 pub enum Answer {
     /// 選択肢を 1 つ選ぶ
     Select { option_index: u32 },
-    /// **自由入力欄を開く選択肢**（`Type something.`）を選んでから本文を送る（#265）。
+    /// **自由入力の選択肢**（`Type something.`）へカーソルを移してから本文を送る（#265）。
     ///
-    /// `Select` + `Text` の 2 回呼びにしないのは、選んだ直後の画面は「ダイアログの中の
-    /// 入力欄」で、`parse_prompt` から見ると形状が変わってしまい `Text` が拒否されるため。
-    /// キー列を 1 本にまとめて一気に流す（`EscapeThenText` と同じ形）。
+    /// # `Enter` で「選んで」から打つのではない（#282）
+    ///
+    /// 実機（Claude Code v2.1.269）で確かめた挙動:
+    /// **`Type something.` の行は、カーソルが乗った時点で既に入力欄になっている。**
+    /// フッタが `ctrl+g to edit in Notepad` 付きに変わるのがその印で、そのまま文字を
+    /// 打てば行の中身が打った本文に変わり、`Enter` で回答として確定する。
+    ///
+    /// **ここで先に `Enter` を送ってはいけない。** 空の入力欄を確定することになり、
+    /// Claude Code は `User declined to answer questions` としてダイアログごと閉じる。
+    /// 閉じたあとに本文を送るので、本文は素のチャットメッセージとして飛ぶ
+    /// （#282 の症状そのもの。当初は「遷移待ちが足りない」と見立てられていたが、
+    /// 実機調査の結果、余計な `Enter` が原因だった）。
+    ///
+    /// `Select` + `Text` の 2 回呼びにしないのは、本文を打った後の画面は
+    /// `parse_prompt` から見ると `text` ではなく `askUserQuestion` のままで、
+    /// `Text` が拒否されるため。キー列を 1 本にまとめて流す（`EscapeThenText` と同じ形）。
     SelectThenText { option_index: u32, text: String },
     /// 自由入力へ本文を送る
     Text { text: String },
@@ -585,7 +632,7 @@ pub fn plan_keys(parsed: &ParsedPrompt, answer: &Answer) -> Result<Vec<Keystroke
             plan_option_keys(parsed, *option_index)
         }
 
-        // **自由入力欄を開く選択肢を選んでから本文を送る（#265）。**
+        // **自由入力の選択肢へカーソルを移してから本文を送る（#265 / #282）。**
         //
         // 選択肢を全部読めていない画面は上の `truncated` 分岐で既に落ちている。
         // ここでは加えて「その番号が本当に `Type something.` か」をラベルで裏取りする:
@@ -618,14 +665,24 @@ pub fn plan_keys(parsed: &ParsedPrompt, answer: &Answer) -> Result<Vec<Keystroke
                     option_index, label
                 )));
             }
-            let mut keys = plan_option_keys(parsed, *option_index)?;
-            // 選択を確定する CR の直後、自由入力欄へ遷移し切るのを確認してから
-            // 本文を送る（#282）。固定待ちだと遷移前に本文が届き、素のチャット
-            // メッセージとして吸われる
-            if let Some(last) = keys.last_mut() {
-                last.settle_after = true;
+            // **確定の CR を挟まない（#282）。** `Type something.` の行はカーソルが
+            // 乗った時点で入力欄なので、ここで CR を送ると空のまま確定してしまい
+            // `User declined to answer questions` でダイアログごと閉じる。
+            // 送るのは「移動 → 本文 → CR」。
+            if parsed.navigation != Navigation::Arrows {
+                return Err(unsupported(
+                    "自由入力の選択肢は矢印で ❯ を動かす画面（Claude Code のダイアログ）でしか扱えません",
+                ));
             }
-            keys.push(Keystroke::text(text));
+            let mut keys = plan_option_navigation(parsed, *option_index)?;
+            // **本文を打つ前に「❯ が狙った行に乗っている」ことを必ず確かめる（#282）。**
+            // 矢印が 1 つ落ちただけでもカーソルは別の行に留まり、そこへ本文を打つと
+            // 選択肢のショートカットとして解釈されうる。移動が 0 回のとき
+            // （既にその行に居るはず）も素通しにはしない
+            keys.push(
+                Keystroke::text(text)
+                    .requiring(ScreenRequirement::CursorOn { option_index: *option_index }),
+            );
             keys.push(Keystroke::cr());
             Ok(keys)
         }
@@ -640,11 +697,14 @@ pub fn plan_keys(parsed: &ParsedPrompt, answer: &Answer) -> Result<Vec<Keystroke
             if parsed.escape_hatch.is_none() {
                 return Err(unsupported("ESC で抜けられる表示 (Esc to cancel) が画面に無く、ESC 後の挙動が読めません"));
             }
-            // ESC の直後、自由入力欄へ遷移し切るのを確認してから本文を送る（#282。
-            // 事情は SelectThenText と同じ）
-            let mut esc = Keystroke::esc();
-            esc.settle_after = true;
-            Ok(vec![esc, Keystroke::text(text), Keystroke::cr()])
+            // **ダイアログが畳まれて入力欄になったことを確かめてから本文を送る（#282）。**
+            // 固定待ちだと畳み切る前に本文が届き、ダイアログのキー操作として
+            // 食われる（`Type something.` で起きていた事故と同じ形）
+            Ok(vec![
+                Keystroke::esc(),
+                Keystroke::text(text).requiring(ScreenRequirement::FreeInput),
+                Keystroke::cr(),
+            ])
         }
 
         (PromptShape::YesNo, Answer::YesNo { yes }) => Ok(vec![
@@ -680,10 +740,23 @@ pub fn plan_keys(parsed: &ParsedPrompt, answer: &Answer) -> Result<Vec<Keystroke
 
 /// 「選択肢 `option_index` を選んで確定する」ぶんのキー列（純粋関数）。
 ///
-/// `Select` と [`Answer::SelectThenText`] の**両方**がここを通る。選び方
-/// （矢印の移動量 / 数字）を 1 か所に閉じておかないと、片方だけ直したときに
+/// 移動ぶんは [`plan_option_navigation`] に閉じてあり、ここは確定の CR を足すだけ。
+/// 選び方（矢印の移動量 / 数字）を 1 か所に閉じておかないと、片方だけ直したときに
 /// 「同じ番号なのに別の選択肢が確定する」経路ができる。
+///
+/// **[`Answer::SelectThenText`] はここを通らない。** 自由入力の行は CR を送ると
+/// 空のまま確定してしまうため、移動ぶん（[`plan_option_navigation`]）だけを使う（#282）。
 fn plan_option_keys(parsed: &ParsedPrompt, option_index: u32) -> Result<Vec<Keystroke>, PlanError> {
+    let mut keys = plan_option_navigation(parsed, option_index)?;
+    keys.push(Keystroke::cr());
+    Ok(keys)
+}
+
+/// 「`❯` を選択肢 `option_index` まで動かす」ぶんだけのキー列（確定の CR を含まない）。
+fn plan_option_navigation(
+    parsed: &ParsedPrompt,
+    option_index: u32,
+) -> Result<Vec<Keystroke>, PlanError> {
     let unsupported = |what: &str| {
         PlanError(format!(
             "画面の形状は '{}' で、{}。キーは送っていません",
@@ -708,7 +781,7 @@ fn plan_option_keys(parsed: &ParsedPrompt, option_index: u32) -> Result<Vec<Keys
     };
 
     match parsed.navigation {
-        // 矢印で `❯` を動かして CR（Claude Code のダイアログ）
+        // 矢印で `❯` を動かす（Claude Code のダイアログ）
         Navigation::Arrows => {
             let target = q
                 .options
@@ -731,18 +804,14 @@ fn plan_option_keys(parsed: &ParsedPrompt, option_index: u32) -> Result<Vec<Keys
             } else {
                 keys.extend(std::iter::repeat_with(Keystroke::up).take(current - target));
             }
-            keys.push(Keystroke::cr());
             Ok(keys)
         }
-        // 素の TUI の番号選択は行入力ベース。矢印ではなく数字 + CR
+        // 素の TUI の番号選択は行入力ベース。矢印ではなく数字
         Navigation::Digits => {
             if !q.options.iter().any(|o| o.index == option_index) {
                 return Err(missing());
             }
-            let mut keys: Vec<Keystroke> =
-                option_index.to_string().chars().map(Keystroke::ch).collect();
-            keys.push(Keystroke::cr());
-            Ok(keys)
+            Ok(option_index.to_string().chars().map(Keystroke::ch).collect())
         }
         Navigation::None => Err(unsupported("選択肢の選び方を読み取れませんでした")),
     }
@@ -2214,52 +2283,125 @@ mod tests {
 
     // ── 自由入力欄を開く選択肢（`Type something.`）。#265 ─────────────────────
 
+    /// **自由入力へは確定の CR を挟まずに打つ（#282）。**
+    ///
+    /// 実機（Claude Code v2.1.269）では `Type something.` の行はカーソルが乗った時点で
+    /// 入力欄になっており、先に CR を送ると空のまま確定して
+    /// `User declined to answer questions` でダイアログごと閉じる。
     #[test]
-    fn select_then_text_moves_to_option_and_types() {
+    fn select_then_text_moves_to_option_and_types_without_a_confirming_cr() {
         let p = parse_prompt(&multi_question_first_screen());
-        // `❯` は 1 番。`3. Type something.` まで 2 つ下がってから本文 + CR
+        // `❯` は 1 番。`3. Type something.` まで 2 つ下がったら、そのまま本文 + CR
         let keys = plan_keys(
             &p,
             &Answer::SelectThenText { option_index: 3, text: "赤でも青でもない".into() },
         )
         .expect("selectThenText");
+        assert_eq!(keys_preview(&keys), vec!["Down", "Down", "text(8文字)", "CR"]);
+    }
+
+    /// **本文キー自身に条件を付ける（#282）。**
+    ///
+    /// 直前のキーに付ける形（事後条件）だと、移動が 0 回のときに付ける先が無く
+    /// 検証なしで本文を打つ穴が残る（差分レビューで検出）。
+    #[test]
+    fn select_then_text_requires_the_cursor_on_the_free_text_row() {
+        let p = parse_prompt(&multi_question_first_screen());
+        let keys = plan_keys(
+            &p,
+            &Answer::SelectThenText { option_index: 3, text: "赤でも青でもない".into() },
+        )
+        .expect("selectThenText");
+        let reqs: Vec<Option<ScreenRequirement>> = keys.iter().map(|k| k.require).collect();
         assert_eq!(
-            keys_preview(&keys),
-            vec!["Down", "Down", "CR", "text(8文字)", "CR"]
+            reqs,
+            vec![None, None, Some(ScreenRequirement::CursorOn { option_index: 3 }), None]
         );
     }
 
-    /// **選択を確定する CR の直後だけ `settle_after` を立てる（#282）。**
-    ///
-    /// ここが立っていないと、遷移待ちをせず固定待ちで本文を送ってしまい、
-    /// 自由入力欄への遷移が間に合わなければ本文が素のチャットメッセージとして吸われる。
+    /// 既にその行へ `❯` が乗っていて移動が 0 回でも、本文の前の検証は消えない。
     #[test]
-    fn select_then_text_marks_the_confirm_cr_for_settle_wait() {
-        let p = parse_prompt(&multi_question_first_screen());
-        let keys = plan_keys(
-            &p,
-            &Answer::SelectThenText { option_index: 3, text: "赤でも青でもない".into() },
-        )
-        .expect("selectThenText");
-        let flags: Vec<bool> = keys.iter().map(|k| k.settle_after).collect();
-        // ["Down", "Down", "CR", "text(...)", "CR"] のうち、選択を確定する CR
-        // （末尾から2番目）だけが立つ
-        assert_eq!(flags, vec![false, false, true, false, false]);
+    fn select_then_text_still_requires_the_cursor_when_no_move_is_needed() {
+        let screen = [
+            "好きな色は?",
+            "",
+            "  1. Red",
+            "  2. Blue",
+            "❯ 3. Type something.",
+            "  4. Chat about this",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        let keys =
+            plan_keys(&p, &Answer::SelectThenText { option_index: 3, text: "むらさき".into() })
+                .expect("selectThenText");
+        assert_eq!(keys_preview(&keys), vec!["text(4文字)", "CR"]);
+        assert_eq!(
+            keys[0].require,
+            Some(ScreenRequirement::CursorOn { option_index: 3 }),
+            "移動が要らなくても本文の前に必ず確かめる"
+        );
     }
 
+    /// ESC は「ダイアログが畳まれて入力欄になった」ことを確かめてから本文を送る。
     #[test]
-    fn escape_then_text_marks_the_esc_for_settle_wait() {
+    fn escape_then_text_requires_the_free_input_box() {
         let p = parse_prompt(&permission_screen("echo hi", "X:\\wt"));
         let keys = plan_keys(&p, &Answer::EscapeThenText { text: "別の方法で".into() }).unwrap();
-        let flags: Vec<bool> = keys.iter().map(|k| k.settle_after).collect();
-        assert_eq!(flags, vec![true, false, false]);
+        let reqs: Vec<Option<ScreenRequirement>> = keys.iter().map(|k| k.require).collect();
+        assert_eq!(reqs, vec![None, Some(ScreenRequirement::FreeInput), None]);
     }
 
     #[test]
-    fn plain_select_never_sets_settle_after() {
+    fn plain_select_never_waits() {
         let p = parse_prompt(&multi_question_first_screen());
         let keys = plan_keys(&p, &Answer::Select { option_index: 2 }).unwrap();
-        assert!(keys.iter().all(|k| !k.settle_after));
+        assert_eq!(keys_preview(&keys), vec!["Down", "CR"]);
+        assert!(keys.iter().all(|k| k.require.is_none()));
+    }
+
+    #[test]
+    fn screen_requirements_read_the_screen() {
+        let p = parse_prompt(&multi_question_first_screen());
+        assert!(ScreenRequirement::CursorOn { option_index: 1 }.is_satisfied(&p));
+        assert!(!ScreenRequirement::CursorOn { option_index: 3 }.is_satisfied(&p));
+        assert!(!ScreenRequirement::FreeInput.is_satisfied(&p));
+
+        let free = parse_prompt(&free_input_screen());
+        assert!(ScreenRequirement::FreeInput.is_satisfied(&free));
+        assert!(!ScreenRequirement::CursorOn { option_index: 1 }.is_satisfied(&free));
+    }
+
+    /// **実機で採取した「`❯` が `Type something.` に乗った状態」の画面（#282）。**
+    ///
+    /// この画面で `CursorOn` が満たせないと、本文を送る前に必ず打ち切ることになり
+    /// `selectThenText` が**常時失敗**する。合成画面だけで固定すると、行が入力欄化して
+    /// 描かれ方が変わったときに気付けないので、実測そのものを置いておく。
+    /// 採取元: Claude Code v2.1.269 / 148 桁。カーソルが乗るとフッタに
+    /// `ctrl+g to edit in Notepad` が増える
+    #[test]
+    fn the_cursor_is_readable_on_the_real_free_text_row() {
+        let screen = [
+            "←  ☐ 飲み物  ☐ 動物  ✔ Submit  →",
+            "",
+            "好きな飲み物は?",
+            "",
+            "  1. Coffee",
+            "     コーヒー",
+            "  2. Tea",
+            "     お茶・紅茶",
+            "❯ 3. Type something.",
+            "  4. Chat about this",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · ctrl+g to edit in Notepad · Esc to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::AskUserQuestion);
+        assert_eq!(p.questions[0].cursor_index, Some(3));
+        assert!(ScreenRequirement::CursorOn { option_index: 3 }.is_satisfied(&p));
     }
 
     /// **番号が `Type something.` 以外を指していたら何も送らない。**
