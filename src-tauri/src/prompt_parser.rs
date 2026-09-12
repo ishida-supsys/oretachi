@@ -1498,12 +1498,20 @@ fn strip_scroll_indicator(s: &str) -> (&str, bool) {
 /// 実測（`/model`）: `… +3 models` / （`/config`）: `↓ 46 more below`。
 /// 選択肢の並びの途中に出るので、**続き行として最後のラベルへ吸い込まない**。
 /// 見つけたら並びはそこで終わりで、かつ**画面に全部は出ていない**。
+/// **`…` だけでは足りない（セルフレビューで検出）。** 折り返した選択肢ラベルの
+/// 続き行が `…` で始まることはありうるので、`…` の後ろに `+件数` を要求する。
+/// 当たると run がそこで切れて `truncated` が立つため、外すと
+/// 「画面に選択肢が 3 つあるのに 1 つ」という #292 の事象そのものが戻る。
 fn is_more_items_line(body: &str) -> bool {
     let t = body.trim_start_matches(['↑', '↓', ' ']).trim();
-    t.starts_with('…')
-        || t.starts_with("...")
-        || contains_ci(t, "more below")
-        || contains_ci(t, "more above")
+    let after_ellipsis = t.strip_prefix('…').or_else(|| t.strip_prefix("..."));
+    if let Some(rest) = after_ellipsis {
+        let rest = rest.trim_start();
+        if let Some(count) = rest.strip_prefix('+') {
+            return count.starts_with(|c: char| c.is_ascii_digit());
+        }
+    }
+    contains_ci(t, "more below") || contains_ci(t, "more above")
 }
 
 /// 番号の連番として成立している選択肢の並び。
@@ -1791,10 +1799,15 @@ fn has_dialog_footer(lines: &[&str]) -> bool {
 ///
 /// 行単位なので折り返したフッタは拾えない。それは [`has_dialog_footer`] の仕事で、
 /// ここは「続き行として吸い込まない」ための保険にすぎない。
+/// `shift+tab` / `⏵⏵` はダイアログのフッタではなく入力欄のステータス行だが、
+/// **選択肢の下に出ることがあるので一緒に塞ぐ**（保険。セルフレビューの指摘）。
+/// 吸い込んでもキーの種類までは狂わないことを確認しているが、ラベルが汚れる。
 fn looks_like_dialog_footer(body: &str) -> bool {
     is_ask_user_question_footer(body)
         || contains_ci(body, "tab to amend")
         || contains_ci(body, "esc to cancel")
+        || contains_ci(body, "shift+tab")
+        || body.contains('⏵')
 }
 
 /// フッタの照合に使う「画面末尾の意味のある数行」。
@@ -1807,12 +1820,18 @@ fn looks_like_dialog_footer(body: &str) -> bool {
 /// **空行を読み飛ばして数えない。** 飛ばすと数える範囲が上へいくらでも伸び、
 /// 行数で絞った意味が無くなる（入力欄の上の余白を越えてスクロールバックへ届く）。
 /// 折り返したフッタは連続した行に出るので、物理行で数えれば足りる。
+///
+/// **入力欄の中身は外す（セルフレビューで検出）。** Claude Code の画面末尾は
+/// 「上罫線 / 入力欄の中身 / 下罫線 / ヒント行」なので、4 物理行には**人の打ちかけが
+/// 必ず入る**。`type to search` と打ちかけている端末が `menu` と判定され、
+/// 返答カードが黙って塞がれて `pendingInput` まで失われる。
 fn footer_region(tail: &[&str]) -> String {
     /// フッタが折り返して占めうる行数。
     const FOOTER_LINES: usize = 4;
-    tail.iter()
-        .skip(tail.len().saturating_sub(FOOTER_LINES))
-        .map(|l| strip_frame(l).0)
+    let start = tail.len().saturating_sub(FOOTER_LINES);
+    (start..tail.len())
+        .filter(|&i| !is_input_box_line(tail, i))
+        .map(|i| strip_frame(tail[i]).0)
         .collect::<Vec<_>>()
         .join(" ")
 }
@@ -2077,7 +2096,23 @@ fn looks_like_free_input(tail: &[&str]) -> Option<FreeInput> {
 /// # 誤爆を塞ぐ 2 つの条件
 ///
 /// 1. **いちばん下の箱を採る。** スクロールバックに残った古い入力欄を拾わない
-/// 2. **箱より下に選択肢行もダイアログのフッタも無いこと。** どちらかがあれば
+/// 2. **箱の真下が補完の候補行であること。** ここを「選択肢行とフッタが無いこと」
+///    だけに緩めると、罫線に挟まれただけの**ただの端末出力**を入力欄と読む
+///    （セルフレビューで実測）:
+///
+///    ```text
+///    Running build...
+///    --------------------------------
+///    > oretachi@0.31.3 build
+///    --------------------------------
+///    src/a.ts compiled
+///    ```
+///
+///    これが `text` になると、`plan_keys` の `(Text, Answer::Text)` を通って
+///    **入力待ちですらない端末へ本文 + CR が飛ぶ。** 候補行を要求すれば、
+///    当てはまらない画面は従来どおり `unknown`（＝何も送らない）に戻るだけで済む。
+///
+/// 3. **箱より下に選択肢行もダイアログのフッタも無いこと。** どちらかがあれば
 ///    ダイアログが開いている。そこを自由入力と誤認して本文 + CR を撃つと
 ///    `❯` の指す選択肢を確定させる（#215 が防ごうとした事象そのもの）
 fn find_input_box_below_popup(tail: &[&str]) -> Option<FreeInput> {
@@ -2085,6 +2120,7 @@ fn find_input_box_below_popup(tail: &[&str]) -> Option<FreeInput> {
         let Some((up, down)) = find_input_box(tail, i) else {
             continue;
         };
+        let mut first_below = true;
         for line in tail.iter().skip(down + 1) {
             let (body, _) = strip_frame(line);
             if body.is_empty() || is_rule_line(&body) {
@@ -2093,10 +2129,40 @@ fn find_input_box_below_popup(tail: &[&str]) -> Option<FreeInput> {
             if parse_option_line(line).is_some() || looks_like_dialog_footer(&body) {
                 return None;
             }
+            // 箱の**真下**が候補行でなければ、これは補完のポップアップではない
+            if first_below {
+                if !is_completion_popup_row(&body) {
+                    return None;
+                }
+                first_below = false;
+            }
+        }
+        // 候補行が 1 行も無い（箱の下が空）なら、そもそもポップアップは出ていない。
+        // 通常の入力欄は末尾寄りにあるので `looks_like_free_input` 側で拾えている
+        if first_below {
+            return None;
         }
         return Some(read_input_box(tail, up, down));
     }
     None
+}
+
+/// 補完のポップアップの候補行か（#292）。
+///
+/// 実測: `/` コマンド補完は `  /copy   Copy Claude's last response …`、
+/// `@` ファイル補完は `  + src/main.ts`。**記号を決め打ちにしてある** ——
+/// 一般化すると「罫線に挟まれた行の下にある任意の出力」が候補に化け、
+/// [`find_input_box_below_popup`] のガードが意味を失う。
+/// 当てはまらなければ `unknown` へ戻るだけなので、外し方は安全側。
+fn is_completion_popup_row(body: &str) -> bool {
+    let mut chars = body.chars();
+    match chars.next() {
+        // `/copy` / `@src/main.ts`: 記号の直後に名前が続くこと（`/ ` や `//` は候補ではない）
+        Some('/') | Some('@') => chars.next().is_some_and(|c| c.is_alphanumeric() || c == '.'),
+        // `+ src/main.ts`: 記号の後ろに空白を挟んでパスが来る
+        Some('+') => chars.next() == Some(' ') && chars.next().is_some(),
+        _ => false,
+    }
 }
 
 /// 罫線 `up` / `down` に挟まれた入力欄の中身を読む（#289）。
@@ -3229,6 +3295,81 @@ mod tests {
         let p = parse_prompt(&at_mention_popup_screen());
         assert_eq!(p.shape, PromptShape::Text);
         assert_eq!(p.pending_input, "@src/ma");
+    }
+
+    /// 罫線に挟まれた**ただの端末出力**を入力欄と読まない（#292。セルフレビューで検出）。
+    ///
+    /// `text` になると `plan_keys` の `(Text, Answer::Text)` を通り、
+    /// **入力待ちですらない端末へ本文 + CR が飛ぶ。**
+    #[test]
+    fn a_framed_build_log_is_not_an_input_box() {
+        let screen = [
+            "Running build...",
+            "--------------------------------",
+            "> oretachi@0.31.3 build",
+            "--------------------------------",
+            "src/a.ts compiled",
+            "src/b.ts compiled",
+            "src/c.ts compiled",
+            "src/d.ts compiled",
+            "src/e.ts compiled",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_ne!(p.shape, PromptShape::Text, "端末出力を自由入力と読んではいけない");
+        assert!(plan_keys(&p, &Answer::Text { text: "hi".into() }).is_err());
+    }
+
+    /// ツール出力が並んだ Claude Code のスクロールバックを打ちかけに化けさせない（#292）。
+    #[test]
+    fn a_scrollback_of_tool_output_is_not_a_pending_draft() {
+        let screen = [
+            "────────────────────────────────────────",
+            "> レポートを作って",
+            "────────────────────────────────────────",
+            "  ⎿  Read 120 lines",
+            "  ⎿  Wrote report.md",
+            "  ⎿  Read 40 lines",
+            "  ⎿  Wrote index.md",
+            "  ⎿  Done",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_ne!(p.shape, PromptShape::Text);
+        assert_eq!(p.pending_input, "");
+    }
+
+    /// `…` で始まる折り返し続き行を「もっとある」行と取り違えない（#292）。
+    ///
+    /// 取り違えると run がそこで切れ、`truncated` が立って選択 UI ごと消える
+    /// ＝ #292 の事象そのものが別の入口から戻る。
+    #[test]
+    fn an_ellipsis_continuation_line_is_not_a_more_items_line() {
+        assert!(is_more_items_line("… +3 models"));
+        assert!(is_more_items_line("↓ 46 more below"));
+        assert!(!is_more_items_line("… なお、この選択肢は既定値です"));
+        assert!(!is_more_items_line("...and then rebuild the project"));
+    }
+
+    /// 入力欄の打ちかけをフッタとして読まない（#292。セルフレビューで検出）。
+    ///
+    /// Claude Code の画面末尾 4 行には**人の打ちかけが必ず入る**ので、
+    /// 除外しないと `type to search` と打っている端末が `menu` に化け、
+    /// 返答カードが黙って塞がれる。
+    #[test]
+    fn a_draft_mentioning_a_picker_footer_is_still_free_input() {
+        let screen = [
+            "  ⎿  Done",
+            "",
+            "────────────────────────────────────────",
+            "❯ type to search の実装を見て",
+            "────────────────────────────────────────",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Text);
+        assert_eq!(p.pending_input, "type to search の実装を見て");
     }
 
     /// ポップアップ探索でダイアログを自由入力に化けさせない（#292 / #215）。
