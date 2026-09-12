@@ -196,6 +196,7 @@ export const ORETACHI_AUTO_APPROVE_TOOLS = [
   "oretachi_get_worktree_status",
   "oretachi_get_app_options",
   "oretachi_show_worktree",
+  "oretachi_show_artifacts",
   "oretachi_list_repository",
   "oretachi_list_workgroups",
   "oretachi_list_terminals",
