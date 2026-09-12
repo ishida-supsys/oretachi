@@ -1530,11 +1530,20 @@ struct OptionRun {
     /// run の外（`find_unnumbered_escape`）でも同じ桁を使うために持ち回る。
     /// 画面全体から探し直すと別のダイアログの残骸の桁を拾う（#264）
     preview_col: Option<usize>,
-    /// **リストがスクロールしている**（＝画面に全項目は出ていない）。#292
+    /// **選択肢を読み切れていない疑いがある**（#292）。立てば `truncated` になる。
     ///
-    /// 手がかりは行頭のスクロールインジケータ（`↓ 2. …`）と、
-    /// 「この先にもっとある」行（`… +3 models`）。どちらかがあれば `truncated` を立てる
-    scrolled: bool,
+    /// 立つのは 3 つ:
+    ///
+    /// - 行頭のスクロールインジケータ（`↓ 2. …`）
+    /// - 「この先にもっとある」行（`… +3 models`）
+    /// - **フッタらしい行で並びを打ち切ったとき**（下の [`looks_like_dialog_footer`] 参照）
+    ///
+    /// 3 つ目が要点で、ここを立て忘れると**打ち切った先に残っていた選択肢が
+    /// 黙って消えたまま `truncated` が false になり、選択が許可される**
+    /// （セルフレビュー 2 周目で検出）。許可ダイアログなら
+    /// `3. No, and tell Claude what to do differently` が消え、
+    /// **承認の選択肢だけが載ったカード**を人に見せることになる
+    incomplete: bool,
 }
 
 /// 画面の**最後の**選択肢の並びを取り出す。
@@ -1602,7 +1611,7 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
         let mut num_cols = vec![first.num_col];
         let mut cursor_index = if first.has_cursor { Some(first.index) } else { None };
         let mut has_marker = first.has_cursor;
-        let mut scrolled = first.scroll_hint;
+        let mut incomplete = first.scroll_hint;
         let mut expected = 2u32;
         let mut current_num_col = first.num_col;
         let mut options = vec![PromptOption { index: first.index, label: first.label }];
@@ -1620,7 +1629,7 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
                     cursor_index = Some(next.index);
                     has_marker = true;
                 }
-                scrolled |= next.scroll_hint;
+                incomplete |= next.scroll_hint;
                 num_cols.push(next.num_col);
                 current_num_col = next.num_col;
                 options.push(PromptOption { index: next.index, label: next.label });
@@ -1635,7 +1644,7 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
             // （吸い込むと最後のラベルが `Opus (1M context) … … +3 models` になる）。
             // 並びはここで終わりで、画面に全項目は出ていない（#292）
             if is_more_items_line(&body) {
-                scrolled = true;
+                incomplete = true;
                 break;
             }
             // 折り返された続き行: 選択肢の**番号の桁より深く**字下げされた非空行。
@@ -1650,11 +1659,20 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
             // 番号の桁より深いことだけを求める。新しい選択肢は番号の桁から始まるので
             // 巻き込まず、ダイアログの外の散文（左寄せ）も落ちる。
             let indented_past_number = offset > current_num_col;
-            if !body.is_empty()
-                && !is_rule_line(&body)
-                && indented_past_number
-                && !looks_like_dialog_footer(&body)
-            {
+            let is_continuation = !body.is_empty() && !is_rule_line(&body) && indented_past_number;
+            // **フッタらしい続き行で打ち切るときは「読み切れていない」印を残す（#292。
+            // セルフレビュー 2 周目で検出）。** ここは「深く字下げされたフッタを
+            // ラベルへ吸い込まない」ための保険だが、続き行が偶然フッタの語
+            // （`shift+tab` など）を含んでいるだけでも当たる。印を残さずに `break` すると
+            // **その下に残っていた選択肢が黙って消えたまま `truncated` が false になり、
+            // 選択が許可される**。許可ダイアログなら
+            // `3. No, and tell Claude what to do differently` が消え、
+            // 承認の選択肢だけが載ったカードを人に見せることになる。
+            if is_continuation && looks_like_dialog_footer(&body) {
+                incomplete = true;
+                break;
+            }
+            if is_continuation {
                 if let Some(last) = options.last_mut() {
                     last.label.push(' ');
                     last.label.push_str(&body);
@@ -1711,7 +1729,7 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
             cursor_index,
             has_marker,
             preview_col,
-            scrolled,
+            incomplete,
         });
         i = end + 1;
     }
@@ -1799,15 +1817,27 @@ fn has_dialog_footer(lines: &[&str]) -> bool {
 ///
 /// 行単位なので折り返したフッタは拾えない。それは [`has_dialog_footer`] の仕事で、
 /// ここは「続き行として吸い込まない」ための保険にすぎない。
-/// `shift+tab` / `⏵⏵` はダイアログのフッタではなく入力欄のステータス行だが、
-/// **選択肢の下に出ることがあるので一緒に塞ぐ**（保険。セルフレビューの指摘）。
-/// 吸い込んでもキーの種類までは狂わないことを確認しているが、ラベルが汚れる。
+/// **入力欄のステータス行（`⏵⏵ accept edits on` / `shift+tab to cycle`）もここに含める。**
+/// ダイアログのフッタではないが、選択肢の下に出るので続き行として吸い込みたくない。
+///
+/// **この関数を「ダイアログが開いているか」の判定に使ってはいけない**
+/// （セルフレビュー 2 周目で検出）。ステータス行は**入力欄の下にも必ず出る**ので、
+/// 補完ポップアップの検出（[`find_input_box_below_popup`]）でこれを見ると、
+/// auto-accept / plan モードの端末では補完ポップアップがまるごと検出できなくなる。
+/// そちらは [`is_open_dialog_footer`] を使う。
 fn looks_like_dialog_footer(body: &str) -> bool {
+    is_open_dialog_footer(body) || contains_ci(body, "shift+tab") || body.contains('⏵')
+}
+
+/// **ダイアログが開いている**ことを示すフッタか（#292）。
+///
+/// [`looks_like_dialog_footer`] と違い、入力欄のステータス行を含まない。
+/// 「ダイアログが開いているなら自由入力ではない」という安全判定に使うので、
+/// **入力欄と共存しうる行を混ぜてはいけない。**
+fn is_open_dialog_footer(body: &str) -> bool {
     is_ask_user_question_footer(body)
         || contains_ci(body, "tab to amend")
         || contains_ci(body, "esc to cancel")
-        || contains_ci(body, "shift+tab")
-        || body.contains('⏵')
 }
 
 /// フッタの照合に使う「画面末尾の意味のある数行」。
@@ -1827,7 +1857,11 @@ fn looks_like_dialog_footer(body: &str) -> bool {
 /// 返答カードが黙って塞がれて `pendingInput` まで失われる。
 fn footer_region(tail: &[&str]) -> String {
     /// フッタが折り返して占めうる行数。
-    const FOOTER_LINES: usize = 4;
+    ///
+    /// **狭いタブでは 5 行以上に割れる**（実測: dev インスタンスの 7 行 13 桁のタブ）。
+    /// 足りないとフッタの先頭（`Type to` / `filter`）が窓から外れてピッカーを取りこぼす。
+    /// 入力欄の中身は上で除外しているので、広げても打ちかけを拾う方向へは効かない。
+    const FOOTER_LINES: usize = 6;
     let start = tail.len().saturating_sub(FOOTER_LINES);
     (start..tail.len())
         .filter(|&i| !is_input_box_line(tail, i))
@@ -2126,7 +2160,11 @@ fn find_input_box_below_popup(tail: &[&str]) -> Option<FreeInput> {
             if body.is_empty() || is_rule_line(&body) {
                 continue;
             }
-            if parse_option_line(line).is_some() || looks_like_dialog_footer(&body) {
+            // **`looks_like_dialog_footer` を使わない（#292。セルフレビュー 2 周目）。**
+            // `⏵⏵ accept edits on` は入力欄のステータス行で、補完ポップアップの
+            // 下にも必ず出る。混ぜると auto-accept / plan モードの端末で
+            // 補完ポップアップがまるごと検出できなくなる
+            if parse_option_line(line).is_some() || is_open_dialog_footer(&body) {
                 return None;
             }
             // 箱の**真下**が候補行でなければ、これは補完のポップアップではない
@@ -2654,7 +2692,7 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     //   **Claude Code 自身が全項目を描いていない**ので、読めたぶんは必ず一部でしかない
     let clipped_at_top = run.start == 0;
     let implausibly_few = has_cc_footer && options.len() < 2;
-    let truncated = clipped_at_top || implausibly_few || run.scrolled;
+    let truncated = clipped_at_top || implausibly_few || run.incomplete;
 
     let allow_other = has_chat_about_this
         || contains_ci(last_label, "tell claude what to do differently")
@@ -3323,6 +3361,76 @@ mod tests {
         let p = parse_prompt(&at_mention_popup_screen());
         assert_eq!(p.shape, PromptShape::Text);
         assert_eq!(p.pending_input, "@src/ma");
+    }
+
+    /// フッタらしい続き行で並びを打ち切ったら、**必ず `truncated` を立てる**
+    /// （#292。セルフレビュー 2 周目で検出）。
+    ///
+    /// 立て忘れると、打ち切った先に残っていた選択肢が黙って消えたまま選択が許可される。
+    /// 許可ダイアログなら拒否の選択肢が消え、**承認の選択肢だけが載ったカード**になる。
+    #[test]
+    fn breaking_the_run_on_a_footer_like_line_marks_it_truncated() {
+        let screen = [
+            "  Which approach?",
+            "",
+            "❯ 1. Alpha",
+            "  2. Beta",
+            "     切り替えは shift+tab です",
+            "  3. Gamma",
+            "  4. Chat about this",
+            "",
+            "  Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert!(
+            p.truncated,
+            "読み切れていないのに truncated が立たないと、消えた選択肢のまま選ばせてしまう"
+        );
+        assert!(plan_keys(&p, &Answer::Select { option_index: 2 }).is_err());
+    }
+
+    /// 入力欄のステータス行を「ダイアログのフッタ」と読まない（#292。セルフレビュー 2 周目）。
+    ///
+    /// `⏵⏵ accept edits on` は補完ポップアップの下にも必ず出る。ここで弾くと
+    /// auto-accept / plan モードの端末では補完ポップアップがまるごと検出できない。
+    #[test]
+    fn a_status_line_below_the_popup_does_not_hide_the_input_box() {
+        let screen = [
+            "────────────────────────────────────────",
+            "❯ @src/ma",
+            "────────────────────────────────────────",
+            "  + src/main.ts",
+            "  + src/monaco-workers.ts",
+            "  + src/utils/fuzzyMatch.ts",
+            "  + src/utils/mermaidTheme.ts",
+            "  + src-tauri/src/main.rs",
+            "  ⏵⏵ accept edits on (shift+tab to cycle)",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Text);
+        assert_eq!(p.pending_input, "@src/ma");
+    }
+
+    /// 狭いタブで折り返したピッカーのフッタも拾う（#292。セルフレビュー 2 周目）。
+    #[test]
+    fn a_wrapped_picker_footer_is_still_a_menu() {
+        let screen = [
+            "  Resume",
+            "  ❯ oretachi issue 292",
+            "    4 seconds",
+            "",
+            "    Ctrl+A to",
+            "    show all",
+            "    projects ·",
+            "    Type to",
+            "    search · Esc",
+            "    to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Menu);
     }
 
     /// 罫線に挟まれた**ただの端末出力**を入力欄と読まない（#292。セルフレビューで検出）。
