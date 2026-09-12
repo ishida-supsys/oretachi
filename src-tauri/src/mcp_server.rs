@@ -5850,8 +5850,11 @@ struct SubscriberIdentity {
 /// - **`oretachi_show_artifacts` は「宛先のアーティファクトウィンドウを開く」ツール（#291）。**
 ///   通知レポートのカードから発信元のアーティファクトを見に行くための導線で、
 ///   `oretachi_show_worktree` と同じ #211 の購読スコープ・同じ引数の絞り方
-///   （`worktree_id` だけを見る）にしてある。開けるのは購読先ワークツリーのビューアだけで、
-///   中身の読み出しはアーティファクト側の JS ではなく人が見る画面の中に留まる。
+///   （`worktree_id` だけを見る）にしてある。**このツール経由で開けるのは購読先だけ**だが、
+///   `artifact://worktree/<id>/<id>` リンク経由の遷移（#265）には同じスコープが掛かって
+///   いない（`ArtifactViewerApp` の `onNavigate` は購読を見ずにビューアを開く）ので、
+///   「任意ワークツリーのビューアを開かせない」という保証はここだけでは成立しない。
+///   どちらの経路でも中身の読み出しはアーティファクト側の JS ではなく人が見る画面に留まる。
 pub(crate) const ARTIFACT_CALLABLE_TOOLS: &[&str] = &[
     "oretachi_write_terminal",
     "oretachi_add_task",

@@ -366,16 +366,24 @@ function WorktreeActions({ n }) {
   const canShow = !!n.worktreeId && n.kind !== 'worktree.closed';
   if (!canShow) return null;
 
+  // `fn` は失敗も `{ ok: false }` で返す約束だが、想定外の throw で `busy` が
+  // 戻らないとボタンが永久に無効化される（カードから両方の導線が死ぬ）ので finally で戻す
   const run = async (which, fn, label) => {
     if (busy) return;
     setBusy(which);
     setError(null);
-    const r = await fn(n);
-    if (!r.ok) setError({ label, detail: r.error });
-    setBusy(null);
+    try {
+      const r = await fn(n);
+      if (!r.ok) setError({ label, detail: r.error });
+    } finally {
+      setBusy(null);
+    }
   };
 
   const openTerminal = () => run('terminal', showTerminal, 'ターミナルを開けませんでした');
+  // 押したらポップアップは畳む（本体 UI の `ArtifactUrlHoverMenu` もラッパの
+  // `@click` で `hideNow` する）。開いたウィンドウが前面に来るので、一覧を残す意味が無い。
+  // 出し直すにはラッパの外へマウスを出して入れ直す（本体 UI も同じ）
   const openArtifacts = () => {
     cancelHide();
     setMenuOpen(false);
