@@ -58,7 +58,28 @@ export function getRecentLines(terminal: Terminal, n: number): string {
  * サンプルと `prompt_parser.rs` のテスト用画面が対応関係にある）。
  */
 export function hasApprovalPrompt(content: string): boolean {
-  return content.split("\n").some((line) => APPROVAL_PROMPT_LINE.test(line));
+  return content
+    .split("\n")
+    .some((line) => !isAutoSuggestionLine(line) && APPROVAL_PROMPT_LINE.test(line));
+}
+
+/**
+ * Claude Code が**入力待ちの入力欄に出す自動候補（ゴーストテキスト）**の行か（#289）。
+ *
+ * 候補は `❯` と中身の間に NBSP (U+00A0) が入る（人が打つと NBSP は上書きされて消える）。
+ * Rust 側 `prompt_parser::INPUT_PLACEHOLDER_GAP` と同じ手がかりで、実機で確認済み。
+ *
+ * **これを除外しないと、候補がたまたま `Yes` だった瞬間に `APPROVAL_PROMPT_LINE` が立つ。**
+ * NBSP は `\s` に含まれるので `❯<NBSP>Yes` は素の `❯ Yes` と区別が付かず、
+ * ダイアログが出ていない入力待ちの端末へ AI 判定 → Enter を送ることになる。
+ *
+ * **限界: 見るのは候補の 1 行目だけ。** 候補が入力欄の幅を超えて折り返すと 2 行目以降に
+ * NBSP が無いので素通しになる（`getRecentLines` は物理行単位なので連結もされない）。
+ * 折り返した後半にたまたま承認プロンプトの形が現れる必要があり、1 行目を塞ぐだけでも
+ * 従来より厳しくなるため、ここは 1 行目に絞っている。
+ */
+export function isAutoSuggestionLine(line: string): boolean {
+  return /^[\s│┃|║]*[❯►>]\u00a0/.test(line);
 }
 
 /**
@@ -114,7 +135,14 @@ const APPROVAL_REGION_TRAIL = 10;
  */
 function extractApprovalRegion(content: string): string | null {
   const lines = content.split("\n");
-  const anchor = lines.findIndex((line) => APPROVAL_PROMPT_LINE.test(line));
+  // 自動候補の行はアンカーにしない（#289）。`getRecentLines` はスクロールバックごと
+  // 見るので、過去フレームに残った `❯<NBSP>Yes` が窓に入るとアンカーがそこへ付く。
+  // 凍結した領域は判定中に変わらないので、**ダイアログが差し替わっても「同じ画面」**
+  // になり、未判定のダイアログへ Enter を送ることになる（`hasApprovalPrompt` /
+  // `detectOretachiToolPrompt` と同じガードをここにも掛ける）。
+  const anchor = lines.findIndex(
+    (line) => !isAutoSuggestionLine(line) && APPROVAL_PROMPT_LINE.test(line)
+  );
   if (anchor === -1) return null;
   const start = Math.max(0, anchor - APPROVAL_REGION_LEAD);
   const end = Math.min(lines.length, anchor + APPROVAL_REGION_TRAIL + 1);
@@ -219,7 +247,11 @@ export function detectOretachiToolPrompt(content: string): string | null {
     // `Do you want to` 行を持つので現状で足り、番号付き `❯ 1. Yes` を足すと
     // アンカーが 1 行下がって `ORETACHI_PROMPT_WINDOW` の上方向カバーが 1 行減る
     // （ツール名の行はプロンプト行の上に出る）。
-    if (/❯\s*Yes|►\s*Yes|Do you want to/i.test(lines[i])) {
+    // 自動候補の行は除外する（`hasApprovalPrompt` と同じ理由。#289）
+    if (
+      !isAutoSuggestionLine(lines[i]) &&
+      /❯\s*Yes|►\s*Yes|Do you want to/i.test(lines[i])
+    ) {
       promptIndex = i;
       break;
     }

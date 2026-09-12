@@ -224,8 +224,34 @@ pub struct ParsedPrompt {
     /// **`❯` の位置も含める** — 位置が動いていたら矢印の移動量が変わるため、
     /// 「一致したら移動量も同じ」を保証する
     pub fingerprint: String,
-    /// 画面末尾。`unknown` のとき人に見せて手動操作へ誘導する
+    /// 画面末尾。`unknown` のとき人に見せて手動操作へ誘導する。
+    ///
+    /// **`shape` が `text` のときだけ**、入力欄に自動候補が出ている行に印を付けてある
+    /// （[`INPUT_PLACEHOLDER_GAP`]）。生のままだと `❯ 進捗どう？` にしか見えず、
+    /// 読んだ側が「ユーザーがそう打ちかけている」と誤読する（#289）。手がかりの NBSP は
+    /// 目に見えないので、文字として明示する。
+    ///
+    /// 他の `shape`（`unknown` など）では**印は付かない**。入力欄をそれと同定できていない
+    /// 画面で当て推量の印を付けると、選択肢行を候補と呼ぶような嘘になるため。
     pub tail: String,
+    /// 入力欄に**人が打ちかけている**テキスト。空なら「未入力の入力欄」（#289）。
+    ///
+    /// **`shape` が `text` のときだけ埋まる。** fingerprint には混ぜない
+    /// （混ぜると人が 1 文字打っただけで送信が常に `stale` になる。[`FreeInputKind`] 参照）。
+    ///
+    /// **受け手が [`FreeInputKind::ShellPrompt`] のときは常に空**（シェルの行編集の中身は
+    /// プロンプト行と区別できない）。「空 = 未入力」と言えるのは Claude Code の入力欄だけで、
+    /// 受け手の種類は `header` に載っている。
+    ///
+    /// **上下を罫線で挟まれた「箱」として同定できなかった `❯` 行でも空になる**
+    /// （[`looks_like_free_input`] の縮退経路。そこは中身を読んでいないので、
+    /// 空は「未入力」ではなく「未読」の意味）。再描画の途中など過渡的な画面で起こる。
+    pub pending_input: String,
+    /// 入力欄に出ている**自動候補（ゴーストテキスト）**。**ユーザー入力ではない**（#289）。
+    ///
+    /// 候補は入力欄が空のときにしか出ないので、これが空でなければ `pending_input` は空。
+    /// 購読側はこれを「ユーザーが打ったテキスト」として扱ってはいけない。
+    pub input_suggestion: String,
 }
 
 // ─── 送るキー ────────────────────────────────────────────────────────────────
@@ -960,6 +986,14 @@ fn strip_cursor_marker(s: &str) -> (&str, bool) {
 /// そこで行単体ではなく**罫線で挟まれた箱**として見て、箱の最初の非空行が
 /// 入力欄の記号で始まっていれば箱の中の行を全部除外する。
 fn is_input_box_line(lines: &[&str], i: usize) -> bool {
+    find_input_box(lines, i).is_some()
+}
+
+/// [`is_input_box_line`] の本体。入力欄だったときに**箱を挟む罫線の位置** `(上, 下)` を返す。
+///
+/// 位置まで返すのは、入力欄の中身（人が打ちかけたテキスト / 自動候補）を読むのに
+/// 箱の範囲が要るため（#289）。判定そのものは [`is_input_box_line`] の説明どおり。
+fn find_input_box(lines: &[&str], i: usize) -> Option<(usize, usize)> {
     /// 入力欄の箱として許す高さ（罫線までの行数）。長すぎるとダイアログを巻き込む
     const INPUT_BOX_MAX_LINES: usize = 8;
     /// 箱の下でフッタを探す行数。
@@ -973,7 +1007,7 @@ fn is_input_box_line(lines: &[&str], i: usize) -> bool {
     let up = (0..i).rev().take(INPUT_BOX_MAX_LINES).find(|&j| rule_at(j));
     let down = (i + 1..lines.len()).take(INPUT_BOX_MAX_LINES).find(|&j| rule_at(j));
     let (Some(up), Some(down)) = (up, down) else {
-        return false;
+        return None;
     };
     // **箱の下に Claude Code のダイアログのフッタがあれば、それはダイアログ。**
     // 見出しの無い枠付きダイアログ（枠のすぐ下が `❯ 1. Yes`）を入力欄と誤認して
@@ -991,11 +1025,11 @@ fn is_input_box_line(lines: &[&str], i: usize) -> bool {
         .unwrap_or(below_box.len());
     let window = &below_box[first_content..];
     if has_dialog_footer(&window[..window.len().min(FOOTER_LOOKAHEAD)]) {
-        return false;
+        return None;
     }
     // 箱の最初の非空行が入力欄の記号（`❯` / `>`）で始まっていること。
     // ダイアログも枠で囲まれることがあるが、その中の先頭行は見出しか設問文になる
-    lines[up + 1..=i]
+    let starts_with_marker = lines[up + 1..=i]
         .iter()
         .find_map(|l| {
             let (b, _) = strip_frame(l);
@@ -1005,7 +1039,8 @@ fn is_input_box_line(lines: &[&str], i: usize) -> bool {
                 Some(matches!(b.chars().next(), Some('❯') | Some('>')))
             }
         })
-        .unwrap_or(false)
+        .unwrap_or(false);
+    starts_with_marker.then_some((up, down))
 }
 
 /// タブバー行（`←  ☒ Color  ☐ Size  ✔ Submit  →`）を解析する（#264）。
@@ -1675,6 +1710,74 @@ impl FreeInputKind {
     }
 }
 
+/// Claude Code が**未入力の入力欄にだけ**描く区切り文字（U+00A0 / NBSP）。
+///
+/// # なぜこれで自動候補を見分けられるのか（実測。#289）
+///
+/// Claude Code は入力待ちの入力欄に**自動候補（ゴーストテキスト）**を出す。ところが
+/// 画面へ流れるバイト列には色も装飾も付いていない（`❯` も候補も既定色 / dim も無し）ので、
+/// **VT エミュレータのセル属性では人が打ったテキストと区別できない**（実測で確認済み:
+/// 候補の直前に出ているのは `ESC [ m` のリセットだけ）。
+///
+/// 唯一の手がかりが記号と中身の間の空白の種類。実機（v2.1.269）では次のように
+/// 描き分けられていた:
+///
+/// ```text
+/// ❯<NBSP>進捗どう？      ← 未入力 + 自動候補。ユーザー入力ではない
+/// ❯<NBSP>                ← 素の未入力
+/// ❯pro                   ← 人が `pro` と打った状態（NBSP は上書きされて消える）
+/// ```
+///
+/// **これを外すと、購読側は「ユーザーが `進捗どう？` と打ちかけている」と読む。**
+/// 親issue #285 が報告した事象がそれで、稼働中の 6 セッション全部の入力欄が
+/// `❯<NBSP>…` になっていた（＝全部が自動候補だった）。
+const INPUT_PLACEHOLDER_GAP: char = '\u{a0}';
+
+/// 入力欄の中身を「人が打ちかけたテキスト」と「自動候補」に分ける（純粋関数）。
+///
+/// `body` は [`strip_frame`] 済みの入力欄 1 行目。返り値は `(打ちかけ, 自動候補)` で、
+/// **どちらも同時に埋まることはない**（候補は未入力のときしか出ない）。
+///
+/// **記号を剥がしたあとに `trim_start()` してはいけない。** NBSP は
+/// `char::is_whitespace()` が真なので、畳むと未入力と打ちかけの区別が消える。
+///
+/// # 既知の限界
+///
+/// **NBSP で始まるテキストを貼り付けると自動候補と読む**（Web からのコピペなど）。
+/// 害の向きが #289 の逆で、購読側は「未入力」と判断して本文を送り、打ちかけの後ろへ
+/// 連結される。画面には色も装飾も残っていないので、これ以上の手がかりが無い。
+///
+/// **行数では救えない。** 「続き行があるなら候補ではない」という救済を入れると、
+/// 枠付きの入力欄で候補が折り返した画面が打ちかけに化けて #289 に逆戻りする
+/// （2 回目のセルフレビューで検出）。候補の折り返しは実際に起こるのに対し、
+/// NBSP 始まりの貼り付けは未観測なので、こちらの向きの誤りを受け入れる。
+fn split_input_box_line(body: &str) -> (String, String) {
+    let mut chars = body.chars();
+    let rest = match chars.next() {
+        Some('❯') | Some('>') => chars.as_str(),
+        _ => body,
+    };
+    match rest.strip_prefix(INPUT_PLACEHOLDER_GAP) {
+        // 未入力。残りがあればそれが自動候補
+        Some(after) => (String::new(), after.trim().to_string()),
+        None => (rest.trim().to_string(), String::new()),
+    }
+}
+
+/// 自由入力の受け手と、入力欄から読み取った中身（#289）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FreeInput {
+    kind: FreeInputKind,
+    /// 人が打ちかけているテキスト。空なら未入力
+    pending: String,
+    /// 入力欄に出ている自動候補（ゴーストテキスト）。**ユーザー入力ではない**
+    suggestion: String,
+    /// 自動候補が乗っている行の添字（`tail` に印を付けるのに使う）。
+    /// 折り返していれば 2 つ以上になる。先頭に印を出し、残りは `tail` から畳む。
+    /// **箱として同定できた入力欄でしか埋まらない**（縮退経路は中身を採らない）
+    suggestion_lines: Vec<usize>,
+}
+
 /// Claude Code の入力欄、またはシェルのプロンプトが出ているか（＝自由入力できる）。
 ///
 /// # 不変条件: 選択肢行は入力欄ではない
@@ -1687,7 +1790,7 @@ impl FreeInputKind {
 ///
 /// そこで**選択肢行として解析できる行は入力欄候補から除外する**。除外した結果
 /// 入力欄が見つからなければ `parse_prompt` は `Unknown` へ倒れ、キーを一切送らない。
-fn looks_like_free_input(tail: &[&str]) -> Option<FreeInputKind> {
+fn looks_like_free_input(tail: &[&str]) -> Option<FreeInput> {
     let mut examined = 0usize;
     for i in (0..tail.len()).rev() {
         let line = tail[i];
@@ -1697,8 +1800,8 @@ fn looks_like_free_input(tail: &[&str]) -> Option<FreeInputKind> {
         }
         // **入力欄の判定を選択肢判定より先に行う。** 実機の入力欄は `❯1. …` のように
         // 選択肢行と同じ形になりうるので、位置（上下が罫線）で先に確定させる
-        if is_input_box_line(tail, i) {
-            return Some(FreeInputKind::ClaudeCodeBox);
+        if let Some((up, down)) = find_input_box(tail, i) {
+            return Some(read_input_box(tail, up, down));
         }
         // 選択肢行は入力欄ではない（上の不変条件）。ここで打ち切って `Unknown` へ倒す
         if parse_option_line(line).is_some() {
@@ -1713,15 +1816,32 @@ fn looks_like_free_input(tail: &[&str]) -> Option<FreeInputKind> {
         {
             return None;
         }
-        // Claude Code の入力欄。`❯` / `>` のあとは入力中のテキスト（空でもよい）。
-        // **中身は捨てる**（人が打っただけで fingerprint が変わると常に stale になる）
+        // Claude Code の入力欄らしき行。ただし**箱として同定できていない**（上下を罫線で
+        // 挟まれていない）ので、ここは縮退経路。
+        //
+        // **中身は採らない（#289。3 回目のセルフレビューで検出）。** この分岐は
+        // `> not really input` のような**ただの端末出力**や starship の `❯ git status` にも
+        // 当たる。ここで `pending_input` を埋めると、購読側は SKILL の指示どおり
+        // 「ユーザーが打ちかけている」と無条件に報告してしまう。箱を同定できた
+        // `read_input_box` のときだけ中身を信用する。折り返した候補も拾えない。
         let first = body.chars().next();
         if matches!(first, Some('❯') | Some('>')) {
-            return Some(FreeInputKind::ClaudeCodeBox);
+            return Some(FreeInput {
+                kind: FreeInputKind::ClaudeCodeBox,
+                pending: String::new(),
+                suggestion: String::new(),
+                suggestion_lines: Vec::new(),
+            });
         }
-        // シェルのプロンプト（`PS X:\...>` / `$` / `#`）。行は安定なのでそのまま持つ
+        // シェルのプロンプト（`PS X:\...>` / `$` / `#`）。行は安定なのでそのまま持つ。
+        // シェルに自動候補の概念は無いので、行そのものを「打ちかけ」として扱わない
         if body.ends_with('>') || body.ends_with('$') || body.ends_with('#') {
-            return Some(FreeInputKind::ShellPrompt(body));
+            return Some(FreeInput {
+                kind: FreeInputKind::ShellPrompt(body),
+                pending: String::new(),
+                suggestion: String::new(),
+                suggestion_lines: Vec::new(),
+            });
         }
         examined += 1;
         if examined > FREE_INPUT_FOOTER_TOLERANCE {
@@ -1729,6 +1849,150 @@ fn looks_like_free_input(tail: &[&str]) -> Option<FreeInputKind> {
         }
     }
     None
+}
+
+/// 罫線 `up` / `down` に挟まれた入力欄の中身を読む（#289）。
+///
+/// **複数行の下書きは全部拾う。** 入力欄は改行で伸びるので、1 行目だけを見ると
+/// 「打ちかけ」が短く見え、購読側が「ほぼ未入力」と誤読する。
+///
+/// **箱の中の空行は落とさない**（下書きの段落区切りが消える）。落とすのは箱の末尾の
+/// 余白と、記号だけの 1 行目（`❯` の行）の 2 つだけ。ただし行頭の空白は
+/// [`strip_frame`] が枠と一緒に落とすので、**インデントは保たれない**
+/// （`pending_input` は表示用で、再送には使わない）。
+///
+/// # 1 行目が自動候補なら、箱の中は全部が候補（2 回目のセルフレビューで検出）
+///
+/// 自動候補は**入力欄が空のときしか出ない**ので、候補行の下に「人の続き行」は
+/// 存在しない。にもかかわらず続き行を打ちかけ扱いにすると、**枠付きの入力欄で
+/// 候補が箱幅を超えて折り返した画面**（`│ … │` は毎行閉じるのでソフトラップにならず、
+/// [`render_logical_screen`] も連結しない）で候補の後半が `pending_input` へ流れ込み、
+/// #289 が直そうとした事象にそのまま戻る。
+///
+/// **折り返しは改行のまま繋ぐ。** 空白無しで連結すると、語間を空白で区切る言語で
+/// 単語がくっつく（`how is the` / `progress` → `how is theprogress`）。`strip_frame` が
+/// 行末の空白を枠ごと落とすので、折り返し境界に空白があったかは復元できず、
+/// 枠の内側の余白と本文の空白も区別できない（3 回目のセルフレビューで検出）。
+/// **文字を足しも引きもしない改行のまま**が画面に忠実で、読む側も折り返しだと分かる。
+fn read_input_box(lines: &[&str], up: usize, down: usize) -> FreeInput {
+    let mut body_lines: Vec<String> = Vec::new();
+    let mut suggestion_lines: Vec<usize> = Vec::new();
+    let mut is_suggestion = false;
+    let mut first = true;
+    for (idx, line) in lines.iter().enumerate().take(down).skip(up + 1) {
+        let (body, _) = strip_frame(line);
+        if first {
+            if body.is_empty() {
+                // 記号の行に届く前の余白
+                continue;
+            }
+            first = false;
+            let (pending, suggestion) = split_input_box_line(&body);
+            if suggestion.is_empty() {
+                body_lines.push(pending);
+            } else {
+                is_suggestion = true;
+                suggestion_lines.push(idx);
+                body_lines.push(suggestion);
+            }
+            continue;
+        }
+        if is_suggestion {
+            suggestion_lines.push(idx);
+        }
+        body_lines.push(body);
+    }
+    // 末尾の余白行だけ落とす（箱は下罫線まで空行で埋まる）
+    while body_lines.last().is_some_and(|l| l.is_empty()) {
+        body_lines.pop();
+        suggestion_lines.pop();
+    }
+    if !is_suggestion {
+        // 記号だけの 1 行目を落とす（`❯` + 続き行で頭に改行が付くのを防ぐ）。
+        // **1 行ぶんだけ。** `while` にすると、その下に人が入れた空行まで食う
+        if body_lines.first().is_some_and(|l| l.is_empty()) {
+            body_lines.remove(0);
+        }
+    }
+    debug_assert!(
+        !is_suggestion || body_lines.len() == suggestion_lines.len(),
+        "候補の行と添字は 1 対 1 で積む（tail の畳み込みがずれる）"
+    );
+    let text = body_lines.join("\n");
+    let (pending, suggestion) = if is_suggestion {
+        (String::new(), text)
+    } else {
+        (text, String::new())
+    };
+    FreeInput {
+        kind: FreeInputKind::ClaudeCodeBox,
+        pending,
+        suggestion,
+        suggestion_lines,
+    }
+}
+
+/// `tail` に載せるときの自動候補の印（#289）。
+///
+/// 行を丸ごと置き換えるので、`│ … │` の枠はその行だけ欠ける。`tail` は人への表示専用で
+/// fingerprint にも入らないため機能影響は無く、印のほうが枠より優先される。
+///
+/// **NBSP は目に見えない。** 生の `❯<NBSP>進捗どう？` をそのまま人や AI に見せると
+/// 「ユーザーが打ちかけたテキスト」としか読めないので、文字として明示する。
+fn mark_suggestion_line(suggestion: &str) -> String {
+    format!("❯ ⟪自動候補（ユーザー入力ではない）: {}⟫", suggestion)
+}
+
+/// `shape: text` の [`ParsedPrompt`] を組む（2 か所から呼ばれる）。
+///
+/// **1 か所にまとめてある。** 片方だけに `pending_input` を足すと、
+/// 「選択肢が見つからない画面」と「選択肢はあるがフッタが無い画面」で
+/// 購読側の読みが食い違う。
+fn text_prompt(
+    free: &FreeInput,
+    tail_lines: &[&str],
+    tail: &str,
+    escape_hatch: Option<String>,
+) -> ParsedPrompt {
+    let tail = match free.suggestion_lines.split_first() {
+        // 候補が折り返していたら、先頭行に全文の印を出して残りの行は畳む
+        // （畳まないと、印の下に生の続き行が並んで「印の外にも本文がある」ように見える）
+        Some((head, rest)) => {
+            let marked = mark_suggestion_line(&free.suggestion);
+            tail_lines
+                .iter()
+                .enumerate()
+                .map(|(j, l)| {
+                    if j == *head {
+                        marked.clone()
+                    } else if rest.contains(&j) {
+                        String::new()
+                    } else {
+                        l.trim_end().to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+                .trim_matches('\n')
+                .to_string()
+        }
+        None => tail.to_string(),
+    };
+    seal(ParsedPrompt {
+        shape: PromptShape::Text,
+        navigation: Navigation::None,
+        // 受け手の種類を載せる（fingerprint に効く。上の `FreeInputKind` 参照）
+        header: free.kind.as_header(),
+        context: String::new(),
+        questions: Vec::new(),
+        tabs: Vec::new(),
+        escape_hatch,
+        truncated: false,
+        fingerprint: String::new(),
+        tail,
+        pending_input: free.pending.clone(),
+        input_suggestion: free.suggestion.clone(),
+    })
 }
 
 /// 画面テキストから問いを解析する（純粋関数）。
@@ -1789,22 +2053,12 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
                 truncated: false,
                 fingerprint: String::new(),
                 tail,
+                pending_input: String::new(),
+                input_suggestion: String::new(),
             });
         }
-        if let Some(kind) = looks_like_free_input(tail_lines) {
-            return seal(ParsedPrompt {
-                shape: PromptShape::Text,
-                navigation: Navigation::None,
-                // 受け手の種類を載せる（fingerprint に効く。上の `FreeInputKind` 参照）
-                header: kind.as_header(),
-                context: String::new(),
-                questions: Vec::new(),
-                tabs: Vec::new(),
-                escape_hatch,
-                truncated: false,
-                fingerprint: String::new(),
-                tail,
-            });
+        if let Some(free) = looks_like_free_input(tail_lines) {
+            return text_prompt(&free, tail_lines, &tail, escape_hatch);
         }
         return seal(ParsedPrompt {
             shape: PromptShape::Unknown,
@@ -1817,6 +2071,8 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
             truncated: false,
             fingerprint: String::new(),
             tail,
+            pending_input: String::new(),
+            input_suggestion: String::new(),
         });
     };
 
@@ -1987,19 +2243,8 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     // `looks_like_free_input` は末尾から見て**選択肢行に当たった時点で false** を返すので、
     // 選択肢が画面最下部にある本物のダイアログではここが true になることはない。
     if !has_cc_footer {
-        if let Some(kind) = looks_like_free_input(tail_lines) {
-            return seal(ParsedPrompt {
-                shape: PromptShape::Text,
-                navigation: Navigation::None,
-                header: kind.as_header(),
-                context: String::new(),
-                questions: Vec::new(),
-                tabs: Vec::new(),
-                escape_hatch,
-                truncated: false,
-                fingerprint: String::new(),
-                tail,
-            });
+        if let Some(free) = looks_like_free_input(tail_lines) {
+            return text_prompt(&free, tail_lines, &tail, escape_hatch);
         }
     }
 
@@ -2095,6 +2340,9 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
         truncated,
         fingerprint: String::new(),
         tail,
+        // ダイアログが開いている画面。入力欄は塞がっているので中身は無い
+        pending_input: String::new(),
+        input_suggestion: String::new(),
     })
 }
 
@@ -2113,6 +2361,9 @@ fn seal(mut parsed: ParsedPrompt) -> ParsedPrompt {
 /// **`❯` の位置を必ず含める。** キー列は「いまの `❯` から目標まで矢印を n 回」なので、
 /// 位置が動いていたら移動量が変わる。fingerprint が一致するなら移動量も同じ、を保証する。
 /// `tail` は含めない（スピナーの 1 コマで毎回変わってしまい、常に `stale` になる）。
+/// **`pending_input` / `input_suggestion` も含めない**（#289）。人が宛先の端末に 1 文字
+/// 打っただけで、あるいは自動候補が差し替わっただけで送信が `stale` になり、
+/// レポートからの返答が一切通らなくなる（[`FreeInputKind`] の説明と同じ理由）。
 fn fingerprint_of(parsed: &ParsedPrompt) -> String {
     let mut hasher = Sha256::new();
     hasher.update(parsed.shape.as_str().as_bytes());
@@ -3843,6 +4094,237 @@ mod tests {
             empty.fingerprint, typed.fingerprint,
             "入力中のテキストで fingerprint が変わると、人が打つだけで送れなくなる"
         );
+    }
+
+    // ── 入力待ちの自動候補（#289）───────────────────────────────────────────
+
+    /// 実機（v2.1.269）の入力欄。`❯` と中身の間の NBSP が唯一の手がかり。
+    fn cc_input_box_screen(line: &str) -> String {
+        [
+            "✻ Baked for 6s · done 21:24",
+            "",
+            "────────────────────────────────────────",
+            line,
+            "────────────────────────────────────────",
+            "  ⏵⏵ auto mode on (shift+tab to cycle) · ← for agents",
+        ]
+        .join("\n")
+    }
+
+    /// **これが #289 の本体。** 自動候補を `pending_input` に入れると、購読側は
+    /// 「ユーザーが `進捗どう？` と打ちかけている」と読む。
+    #[test]
+    fn an_auto_suggestion_is_not_read_as_user_input() {
+        let p = parse_prompt(&cc_input_box_screen("❯\u{a0}進捗どう？"));
+        assert_eq!(p.shape, PromptShape::Text);
+        assert_eq!(p.input_suggestion, "進捗どう？");
+        assert_eq!(
+            p.pending_input, "",
+            "自動候補を打ちかけのテキストとして拾ってはいけない"
+        );
+    }
+
+    #[test]
+    fn typed_text_is_reported_as_pending_input() {
+        // 実測: 人が打つと NBSP は上書きされて消える
+        let p = parse_prompt(&cc_input_box_screen("❯pro"));
+        assert_eq!(p.shape, PromptShape::Text);
+        assert_eq!(p.pending_input, "pro");
+        assert_eq!(p.input_suggestion, "");
+    }
+
+    #[test]
+    fn an_empty_input_box_has_neither() {
+        let p = parse_prompt(&cc_input_box_screen("❯\u{a0}"));
+        assert_eq!(p.shape, PromptShape::Text);
+        assert_eq!(p.pending_input, "");
+        assert_eq!(p.input_suggestion, "");
+    }
+
+    /// 複数行の下書きを 1 行目だけで判定すると、購読側が「ほぼ未入力」と誤読する。
+    #[test]
+    fn a_multi_line_draft_is_collected_whole() {
+        let screen = [
+            "────────────────────────────────────────",
+            "❯1 行目",
+            "  2 行目",
+            "────────────────────────────────────────",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Text);
+        assert_eq!(p.pending_input, "1 行目\n2 行目");
+        assert_eq!(p.input_suggestion, "");
+    }
+
+    /// **NBSP は目に見えない。** `tail` を生のまま見せると、読んだ側は
+    /// `❯ 進捗どう？` を「ユーザーが打ちかけたテキスト」としか読めない。
+    #[test]
+    fn the_auto_suggestion_is_marked_in_the_tail() {
+        let p = parse_prompt(&cc_input_box_screen("❯\u{a0}進捗どう？"));
+        assert!(
+            p.tail.contains("自動候補"),
+            "tail に印が無い: {:?}",
+            p.tail
+        );
+        assert!(
+            !p.tail.contains("❯\u{a0}進捗どう？"),
+            "生の候補行が残っている: {:?}",
+            p.tail
+        );
+        // 打ちかけの画面には印を付けない
+        let typed = parse_prompt(&cc_input_box_screen("❯pro"));
+        assert!(!typed.tail.contains("自動候補"), "{:?}", typed.tail);
+        assert!(typed.tail.contains("❯pro"), "{:?}", typed.tail);
+    }
+
+    /// 候補が差し替わるたびに `stale` になると、レポートからの返答が一切通らなくなる。
+    #[test]
+    fn the_auto_suggestion_does_not_change_the_fingerprint() {
+        let a = parse_prompt(&cc_input_box_screen("❯\u{a0}進捗どう？"));
+        let b = parse_prompt(&cc_input_box_screen("❯\u{a0}別の候補"));
+        let empty = parse_prompt(&cc_input_box_screen("❯\u{a0}"));
+        let typed = parse_prompt(&cc_input_box_screen("❯pro"));
+        assert_eq!(a.fingerprint, b.fingerprint);
+        assert_eq!(a.fingerprint, empty.fingerprint);
+        assert_eq!(a.fingerprint, typed.fingerprint);
+    }
+
+    /// 下書きの段落区切りを落とすと、購読側が人へ見せる本文が原文と違う形になる。
+    #[test]
+    fn a_blank_line_inside_the_draft_survives() {
+        let screen = [
+            "────────────────────────────────────────",
+            "❯1 行目",
+            "",
+            "  3 行目",
+            "",
+            "────────────────────────────────────────",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.pending_input, "1 行目\n\n3 行目", "箱の中の空行が落ちている");
+    }
+
+    /// **枠付きの入力欄では候補が折り返す。** 続き行を打ちかけ扱いにすると、候補の
+    /// 後半が `pending_input` へ流れ込んで #289 に逆戻りする（2 回目のセルフレビューで検出）。
+    #[test]
+    fn a_wrapped_auto_suggestion_stays_a_suggestion() {
+        let screen = [
+            "╭──────────────────────╮",
+            "│ ❯\u{a0}とても長い自動候補のテキスト │",
+            "│ が折り返して 2 行目に続く │",
+            "╰──────────────────────╯",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Text);
+        assert_eq!(
+            p.pending_input, "",
+            "候補の折り返しを打ちかけとして拾ってはいけない"
+        );
+        // 折り返しは改行のまま。空白で繋ぐと語間が壊れ、空白無しで繋ぐと単語がくっつく
+        assert_eq!(
+            p.input_suggestion,
+            "とても長い自動候補のテキスト\nが折り返して 2 行目に続く"
+        );
+        // 続き行は印へ畳む（生のまま残すと印の外にも本文があるように見える）
+        assert!(p.tail.contains("自動候補"), "{:?}", p.tail);
+        assert_eq!(
+            p.tail.matches("が折り返して 2 行目に続く").count(),
+            1,
+            "続き行が畳まれず、候補が印の外にも残っている: {:?}",
+            p.tail
+        );
+    }
+
+    /// 語間を空白で区切る言語では、空白無しの連結が単語をくっつける
+    /// （3 回目のセルフレビューで検出）。
+    #[test]
+    fn a_wrapped_suggestion_does_not_glue_words_together() {
+        let screen = [
+            "╭──────────────────╮",
+            "│ ❯\u{a0}how is the   │",
+            "│ progress         │",
+            "╰──────────────────╯",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.input_suggestion, "how is the\nprogress");
+        assert!(
+            !p.input_suggestion.contains("theprogress"),
+            "折り返し境界で単語がくっついている: {:?}",
+            p.input_suggestion
+        );
+        assert_eq!(p.pending_input, "");
+    }
+
+    /// 箱として同定できない `❯` / `>` 行は**ただの端末出力**でありうる（git の出力・
+    /// 引用・starship のプロンプト）。中身を採ると購読側が「打ちかけ」と誤報告する
+    /// （3 回目のセルフレビューで検出）。
+    #[test]
+    fn a_bare_marker_line_outside_a_box_yields_no_content() {
+        for line in ["> not really input", "❯ git status"] {
+            let screen = ["some output", line, "  ? for shortcuts"].join("\n");
+            let p = parse_prompt(&screen);
+            assert_eq!(p.shape, PromptShape::Text, "{}", line);
+            assert_eq!(p.pending_input, "", "箱でない行の中身を採っている: {}", line);
+            assert_eq!(p.input_suggestion, "", "{}", line);
+            assert!(!p.tail.contains("自動候補"), "{}: {:?}", line, p.tail);
+        }
+    }
+
+    /// 落とすのは記号だけの 1 行目まで。その下に人が入れた空行は本文の一部
+    /// （4 回目のセルフレビューで検出）。
+    #[test]
+    fn a_draft_that_starts_with_a_blank_line_keeps_it() {
+        let screen = [
+            "────────────────────────────────────────",
+            "❯",
+            "",
+            "  3 行目",
+            "────────────────────────────────────────",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.pending_input, "\n3 行目");
+    }
+
+    /// 先頭が記号だけの下書きで `pending_input` の頭に改行が付かないこと。
+    #[test]
+    fn a_draft_starting_on_the_second_line_has_no_leading_newline() {
+        let screen = [
+            "────────────────────────────────────────",
+            "❯",
+            "  2 行目",
+            "────────────────────────────────────────",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.pending_input, "2 行目");
+    }
+
+    /// 既知の限界: NBSP 始まりのテキストを貼り付けると候補と読む。
+    /// 行数で救おうとすると上のテストが壊れるので、この向きの誤りは受け入れる。
+    #[test]
+    fn a_paste_starting_with_nbsp_is_read_as_a_suggestion() {
+        let p = parse_prompt(&cc_input_box_screen("❯\u{a0}貼り付けたテキスト"));
+        assert_eq!(p.input_suggestion, "貼り付けたテキスト");
+        assert_eq!(p.pending_input, "");
+    }
+
+    /// ダイアログが開いている画面では入力欄が塞がっているので、どちらも空のまま。
+    #[test]
+    fn a_dialog_screen_reports_no_input_box_content() {
+        let p = parse_prompt(&permission_screen("Bash(ls)", r"X:\devel"));
+        assert_eq!(p.pending_input, "");
+        assert_eq!(p.input_suggestion, "");
     }
 
     /// スピナーだけが動いた画面で fingerprint が変わると、常に `stale` になって

@@ -107,6 +107,16 @@ describe('hasApprovalPrompt', () => {
     expect(hasApprovalPrompt("   ❯ 2. Yes, and don't ask again for Bash(rm:*) commands")).toBe(false)
   })
 
+  // 入力待ちの自動候補（ゴーストテキスト）。`❯` と中身の間が NBSP になる（#289）
+  it('does NOT detect an auto-suggestion that happens to read "Yes"', () => {
+    expect(hasApprovalPrompt('❯\u00a0Yes')).toBe(false)
+    expect(hasApprovalPrompt('❯\u00a0Do you want to run the tests?')).toBe(false)
+  })
+
+  it('still detects a real dialog line, which uses a plain space', () => {
+    expect(hasApprovalPrompt('❯ Yes')).toBe(true)
+  })
+
   it('does not match a numbered word merely starting with Yes', () => {
     expect(hasApprovalPrompt(' ❯ 1. Yesterday の集計')).toBe(false)
   })
@@ -181,6 +191,19 @@ describe('isSameApprovalScreen', () => {
       'Reactアーティファクトのモジュールを操作する',
       'Write(b.txt)'
     )
+    expect(isSameApprovalScreen(before, after)).toBe(false)
+  })
+
+  // スクロールバックに残った自動候補の行（`❯<NBSP>Yes`）をアンカーにすると、
+  // その領域は判定中に変わらないので**ダイアログが差し替わっても「同じ画面」**になり、
+  // 未判定のダイアログへ Enter を送る（#289）
+  it('does not anchor the compared region on a stale auto-suggestion line', () => {
+    const ghost = '❯\u00a0Yes'
+    // ゴースト行とダイアログの間を `TRAIL` より広く空ける。ゴーストにアンカーが
+    // 付くと比較領域はこの共通の埋め草だけになり、別物のダイアログが同一と判定される
+    const filler = Array.from({ length: 14 }, (_, i) => `log ${i}`)
+    const before = [ghost, ...filler, ccPrompt('Write(a.txt)')].join('\n')
+    const after = [ghost, ...filler, ccPrompt('Bash(rm -rf /)')].join('\n')
     expect(isSameApprovalScreen(before, after)).toBe(false)
   })
 

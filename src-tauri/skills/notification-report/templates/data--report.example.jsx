@@ -153,7 +153,13 @@
 //   escapeHatch  (string)  : "esc" なら ESC で自由入力へ抜けられる
 //   truncated    (boolean) : **必須。落とさないこと。** 画面に収まっていない
 //   fingerprint  (string)  : 画面の同一性キー。**書き換えない**
-//   tail         (string)  : 画面末尾。`shape` が "unknown" のとき人に見せる
+//   tail         (string)  : 画面末尾。`shape` が "unknown" のとき人に見せる。
+//                            `shape: "text"` では自動候補の行に
+//                            `⟪自動候補（ユーザー入力ではない）: …⟫` の印が付く
+//   pendingInput (string)  : 人が入力欄に打ちかけているテキスト。空なら未入力（#289）。
+//                            **`shape: "text"` のときだけ有効**（他は常に空）
+//   inputSuggestion (string): Claude Code の自動候補（ゴーストテキスト）。
+//                            **ユーザー入力ではない**。要約や summary に混ぜないこと
 //   detectedAtMs (number)  : 解析した時刻（epoch ms）
 //
 // ── 1 セッションにつきキー操作カードは 1 枚だけ ──────────────────────────
