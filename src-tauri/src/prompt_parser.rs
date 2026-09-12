@@ -1984,7 +1984,14 @@ fn picker_footer_start(tail: &[&str]) -> Option<usize> {
 /// - 本物のダイアログには絞り込み欄が無いので、奪われない
 /// - ピッカーには必ず在るので、スクロールバックに何が残っていても見つかる
 ///
-/// 絞り込み欄を持たないピッカーは従来どおりの判定（並びが無ければ `menu`）に落ちる。
+/// # **この関数だけ窓を持たない**（8 周目のセルフレビューの指摘）
+///
+/// 他の手がかりは `TAIL_WINDOW` / `FOOTER_LINES` / `CONTEXT_WINDOW` で範囲が絞られているが、
+/// ここは画面全体を走査する。ピッカーの箱は一覧の上にあり、項目数が多ければ
+/// `TAIL_WINDOW` の外へ出るため。帰結として、**画面のどこにある `⌕` でも効く** ——
+/// `rg ⌕` の出力や、Esc で抜けたピッカーの残骸でも当たる。
+/// だから呼び出し側は、これ単独で何かを決めてはいけない
+/// （ピッカーのフッタと組でしか使わない。[`parse_prompt`] 参照）。
 fn picker_search_box_row(lines: &[&str]) -> Option<usize> {
     lines.iter().rposition(|l| strip_frame(l).0.starts_with('⌕'))
 }
@@ -2552,8 +2559,16 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     // どう比べても区別が付かない（7 周目のセルフレビューで critical）。
     // 行単位のフッタ判定は折り返しに原理的に追従できないので、
     // **そもそも並びをピッカーの領域へ入れない**ことで塞ぐ。
+    // **クランプするのはピッカーのフッタが出ているときだけ（8 周目のセルフレビューで
+    // critical）。** `picker_search_box_row` は窓を持たず画面全体を走査するので、
+    // `rg ⌕` の出力や `/resume` を Esc で抜けた残骸に `⌕` が 1 行あるだけで、
+    // その下の**本物のダイアログの選択肢が丸ごと読めなくなる**（実測で
+    // permission / plan / askUserQuestion / 確認画面がすべて `unknown` に落ちた）。
+    // ピッカーの印が 2 つ揃っている画面に限る。
     let search_box_row = picker_search_box_row(&lines);
-    let run = find_last_option_run(&lines[..search_box_row.unwrap_or(lines.len())]);
+    let picker_footer_row = picker_footer_start(tail_lines).map(|row| tail_start + row);
+    let clamp = picker_footer_row.and(search_box_row);
+    let run = find_last_option_run(&lines[..clamp.unwrap_or(lines.len())]);
 
     let last_meaningful = tail_lines
         .iter()
@@ -2591,9 +2606,31 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     // フッタの語だけでは足りず、位置だけでも足りない（上の [`picker_search_box_row`]）。
     // **語と絞り込み欄の両方**が要る。選択肢の並びが残っているなら、それは
     // スクロールバックの残骸なので絞り込み欄より上にあるはず。
-    let has_picker_footer = picker_footer_start(tail_lines).is_some();
-    let is_picker = has_picker_footer
-        && search_box_row.is_some_and(|s| run.as_ref().is_none_or(|r| s > r.end));
+    // 絞り込み欄が可視グリッドに残っていれば、それがいちばん確かな印。
+    let has_picker_footer = picker_footer_row.is_some();
+    let box_below_run = search_box_row.is_some_and(|s| run.as_ref().is_none_or(|r| s > r.end));
+
+    // **絞り込み欄が画面外へ流れることもある（8 周目のセルフレビューで critical）。**
+    // 低いタブの `/config` では箱が上へ流れ、残骸の番号リストが「画面の選択肢」として
+    // 採用されて**数字 + CR が飛ぶ**（CR はハイライト中の設定を確定するので、
+    // ユーザー設定が書き換わる）。そこで箱が無いときの逃げ道を 1 本だけ残す。
+    //
+    // 条件は 2 つとも要る:
+    //
+    // - **ピッカーのフッタが並びより下にある。** 上や中にあるなら、それは
+    //   ダイアログの承認対象・設問文・選択肢ラベルに語が混ざっているだけ
+    //   （素の番号リストの見出しに `Type to filter` がある画面で確認）
+    // - **フッタがダイアログのフッタに見えない。** Claude Code のダイアログには
+    //   必ず自前のフッタ（`Esc to cancel` / `Tab to amend` / `Enter to select … navigate`）
+    //   が出る。出ているならダイアログであってピッカーではない
+    //   （`ヒント: Type` / `to search で…` が行をまたいで語を作る画面で確認）
+    let footer_text = join_from(tail_lines, footer_window_start(tail_lines));
+    let footer_says_dialog = is_open_dialog_footer(&footer_text);
+    let footer_below_run = picker_footer_row
+        .is_some_and(|row| run.as_ref().is_none_or(|r| row > r.end));
+
+    let is_picker =
+        has_picker_footer && (box_below_run || (footer_below_run && !footer_says_dialog));
     // **並びがある画面だけここで倒す。** 並びが無い画面は y/n → ページャの順を
     // 崩さないよう、従来どおり下のブロックで見る（`(y/N)` がピッカーに奪われると
     // y/n に答えられなくなる。5 周目のセルフレビュー）
@@ -3826,6 +3863,61 @@ mod tests {
             " ╰──────────────╯",
             "   Auto-compact      true",
             " Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Menu);
+        assert!(plan_keys(&p, &Answer::Select { option_index: 2 }).is_err());
+    }
+
+    /// 画面のどこかに `⌕` が 1 行あるだけで、その下のダイアログを読めなくしない
+    /// （#292。8 周目のセルフレビューで critical）。
+    ///
+    /// `picker_search_box_row` は窓を持たず画面全体を走査するので、`rg ⌕` の出力や
+    /// `/resume` を Esc で抜けた残骸に `⌕` があるだけでクランプが効いてしまい、
+    /// **本物のダイアログの選択肢が丸ごと読めなくなる**（`unknown` に落ちて返答不能）。
+    #[test]
+    fn a_stray_search_glyph_does_not_hide_a_real_dialog() {
+        let screen = [
+            "$ rg ⌕ src",
+            "  ⌕ Search…",
+            "",
+            "Bash command",
+            "echo hi",
+            "",
+            "Do you want to proceed?",
+            "",
+            "❯ 1. Yes",
+            "  2. No, and tell Claude what to do differently (esc)",
+            "",
+            "  Esc to cancel · Tab to amend",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Permission);
+        assert_eq!(p.questions[0].options.len(), 2);
+        assert!(plan_keys(&p, &Answer::Select { option_index: 2 }).is_ok());
+    }
+
+    /// 絞り込み欄が画面外へ流れた `/config` でも乗っ取られない
+    /// （#292。8 周目のセルフレビューで critical）。
+    ///
+    /// 低いタブでは `⌕` の箱が上へ流れる。残骸の番号リストが「画面の選択肢」として
+    /// 採用されると**数字 + CR が飛び、CR がハイライト中の設定を確定する**
+    /// （＝ユーザー設定が書き換わる）。
+    #[test]
+    fn a_config_picker_without_its_search_box_is_not_hijacked() {
+        let screen = [
+            "$ claude",
+            "  やることは次の3つです:",
+            "  1. まず設計する",
+            "  2. 次に実装する",
+            "  3. 最後にテストする",
+            "",
+            "    Auto-compact                  true",
+            "    Show tips                     true",
+            "",
+            "  Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear",
         ]
         .join("\n");
         let p = parse_prompt(&screen);
