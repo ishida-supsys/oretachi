@@ -3286,6 +3286,34 @@ mod tests {
         assert!(plan_keys(&p, &Answer::Text { text: "q".into() }).is_err());
     }
 
+    /// 実機の `/` コマンド補完。候補は**入力欄の下**に出て、説明が折り返す。
+    fn slash_command_popup_screen() -> String {
+        [
+            "────────────────────────────────────────",
+            "❯/co",
+            "────────────────────────────────────────",
+            "  /copy       Copy Claude's last response to clipboard",
+            "  /color      Set the prompt bar color for this session",
+            "  /config     Open settings",
+            "  /compact    Free up context by summarizing the conversation so far",
+            "  /context    Visualize current context usage as a colored grid",
+            "  /code-review  Review the current diff, or a PR number/branch/path target,",
+            "                for correctness bugs and reuse/simplification cleanups",
+        ]
+        .join("\n")
+    }
+
+    /// `/` コマンド補完でも入力欄を読めること（#292）。
+    ///
+    /// **候補行の記号（`/`）を決め打ちにしているので、ここを取りこぼすと C の対応が
+    /// まるごと効かなくなる**（安全側へ倒れるだけなので静かに壊れる）。
+    #[test]
+    fn a_slash_command_popup_keeps_the_input_box_readable() {
+        let p = parse_prompt(&slash_command_popup_screen());
+        assert_eq!(p.shape, PromptShape::Text);
+        assert_eq!(p.pending_input, "/co");
+    }
+
     /// 入力欄の下に補完のポップアップが出ていても `text` のまま読む（#292）。
     ///
     /// `unknown` へ倒れると `pendingInput` が読めず、**打ちかけのテキストが残っている
@@ -5118,4 +5146,93 @@ mod tests {
             assert!(screen.contains("hello"), "rows={} cols={} screen={:?}", rows, cols, screen);
         }
     }
+
+    #[test]
+    fn probe_r2() {
+        // P1: 実機の @ 補完 + その下に CC のステータス行 (accept edits)
+        let p1 = [
+            "────────────────────────────────────────",
+            "❯ @src/ma",
+            "────────────────────────────────────────",
+            "  + src/main.ts",
+            "  + src/monaco-workers.ts",
+            "  + src/utils/fuzzyMatch.ts",
+            "  + src/utils/mermaidTheme.ts",
+            "  + src-tauri/src/main.rs",
+            "  ⏵⏵ accept edits on (shift+tab to cycle)",
+        ].join("\n");
+        let r = parse_prompt(&p1);
+        eprintln!("P1 shape={:?} pending={:?}", r.shape, r.pending_input);
+
+        // P2: shift+tab だけ（plan mode 行）
+        let p2 = [
+            "────────────────────────────────────────",
+            "❯ /mo",
+            "────────────────────────────────────────",
+            "  /model      Set model",
+            "  /mcp        MCP servers",
+            "  /memory     Edit memory",
+            "  /migrate    Migrate",
+            "  /monitor    Monitor",
+            "  ⏸ plan mode on (shift+tab to cycle)",
+        ].join("\n");
+        let r = parse_prompt(&p2);
+        eprintln!("P2 shape={:?} pending={:?}", r.shape, r.pending_input);
+
+        // P3: 補完の選択行に ❯ マーカーが描かれる場合
+        let p3 = [
+            "────────────────────────────────────────",
+            "❯ /mo",
+            "────────────────────────────────────────",
+            "❯ /model      Set model",
+            "  /mcp        MCP servers",
+            "  /memory     Edit memory",
+            "  /migrate    Migrate",
+            "  /monitor    Monitor",
+        ].join("\n");
+        let r = parse_prompt(&p3);
+        eprintln!("P3 shape={:?} pending={:?}", r.shape, r.pending_input);
+
+        // P4: @ 補完で候補がパスだけ（+ が無い）
+        let p4 = [
+            "────────────────────────────────────────",
+            "❯ @src/ma",
+            "────────────────────────────────────────",
+            "  src/main.ts",
+            "  src/monaco-workers.ts",
+            "  src/utils/fuzzyMatch.ts",
+            "  src/utils/mermaidTheme.ts",
+            "  src-tauri/src/main.rs",
+        ].join("\n");
+        let r = parse_prompt(&p4);
+        eprintln!("P4 shape={:?} pending={:?}", r.shape, r.pending_input);
+
+        // P5: 選択肢ラベルの続き行がステータス行より下（⏵ を含む選択肢）
+        let p5 = [
+            "Do you want to proceed?",
+            "❯ 1. Yes",
+            "  2. Yes, and run ⏵ playback",
+            "     ⏵ の再生を許可します",
+            "  3. No (esc)",
+            "",
+            "Esc to cancel",
+        ].join("\n");
+        let r = parse_prompt(&p5);
+        eprintln!("P5 opts={:?}", r.questions.get(0).map(|q| q.options.iter().map(|o| o.label.clone()).collect::<Vec<_>>()));
+
+        // P6: ピッカー判定がまだ効くか
+        eprintln!("P6 resume={:?} config={:?}",
+            parse_prompt(&resume_picker_screen()).shape,
+            parse_prompt(&config_picker_screen()).shape);
+
+        // P7: /model の … +3 models
+        let r = parse_prompt(&scrolling_model_picker_screen());
+        eprintln!("P7 opts={} trunc={}", r.questions[0].options.len(), r.truncated);
+
+        // P8: is_more_items_line バリエーション
+        for t in ["… +3 models", "…  +12 items", "…+3 models", "... +2 more", "… 3 more", "↓ 46 more below", "… +three"] {
+            eprintln!("P8 {:?} -> {}", t, is_more_items_line(t));
+        }
+    }
+
 }
