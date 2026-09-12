@@ -73,7 +73,9 @@ export const ARTIFACT_LINK_INTERCEPT_JS =
   // ページ内アンカーだけは素通しする（同じ文書内のジャンプで表示は壊れない）
   "    if(href.charAt(0)==='#')return;" +
   // preventDefault だけで遷移は止まる。stopPropagation まで広げると capture 段階で
-  // 握り潰すことになり、アーティファクト自身の onClick / デリゲーションが死ぬ
+  // 握り潰すことになり、アーティファクト自身の onClick / デリゲーションが死ぬ。
+  // なお capture で先に preventDefault するので、アーティファクト側が
+  // event.defaultPrevented を見て早期 return する実装だけは動かなくなる
   "    e.preventDefault();" +
   "    if(!/^artifact:/i.test(href))return;" +
   "    e.stopPropagation();" +

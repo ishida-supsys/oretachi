@@ -198,7 +198,7 @@ function onLinkClick(e: MouseEvent) {
   // URL ボタンへフォーカスを移す。マウスならポップアップへカーソルを動かせばよいが、
   // ポップアップは body へ teleport されるので Tab では辿り着けないため
   if (e.detail === 0) {
-    linkPopup.value?.focusOpen();
+    linkPopup.value?.focusOpen(href ?? "");
     return;
   }
   // マウスでは何もしない。ポップアップは閉じない（押した直後に URL を出したまま残し、

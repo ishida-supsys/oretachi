@@ -21,11 +21,13 @@ import type { ArtifactLinkRect } from "../../utils/artifactFrameLink";
  * 開けるのは `resolveExternalLink` が通す http(s) だけで、`artifact:` や相対パスは
  * テキストとコピーのみになる。
  *
- * ただし html / react ビューの URL と座標は iframe 内のスクリプトの自己申告である
- * （アーティファクトの JS と同じレルムで動く）。ホバーしていなくても任意の URL の
- * 「開く」ボタンをカーソル直下へ出せてしまうため、`selfDeclared` で来たものは
- * 押しても即座には開かず、実 URL を見せる確認ダイアログを挟む。href を `<a>` から
- * 直接読む markdown ビューだけは、押した対象＝開く URL が保証されるのでそのまま開く。
+ * 押す前に確認ダイアログを挟むのは次の2つだけ。それ以外は1クリックで開く。
+ * - `selfDeclared`（html / react ビュー）: URL も座標も iframe 内のスクリプトの自己申告で
+ *   （アーティファクトの JS と同じレルムで動く）、ホバーしていなくても任意の URL の
+ *   「開く」ボタンをカーソル直下へ出せてしまう。
+ * - URL が長くて表示が打ち切られているとき: 見えている範囲に安全なホスト名だけを置いて
+ *   実ホストを隠す小細工（`https://safe.example/...@evil.example/`）が通ってしまうため、
+ *   全文が見えていないなら「押した対象＝開く URL」が成立しない。
  *
  * 座標は呼び出し側がリンクのビューポート座標で渡す。position: fixed で body へ
  * teleport するのは、markdown ビューの overflow や iframe の枠で切られないため。
@@ -33,6 +35,10 @@ import type { ArtifactLinkRect } from "../../utils/artifactFrameLink";
  * 叩くだけでよい（ArtifactUrlHoverMenu と同じ持ち方）。
  */
 const { t } = useI18n();
+// externalLink.* はグローバル定義。ローカル <i18n> ブロックを持つコンポーネントの t は
+// ローカルスコープなので、そのまま引くと（フォールバックは効くが）dev で毎回
+// "[intlify] Not found key" が出る。グローバルスコープの t を別に取っておく
+const { t: gt } = useI18n({ useScope: "global" });
 
 /** リンク → ポップアップへマウスを移す間に閉じないための猶予。ArtifactUrlHoverMenu と同値 */
 const GRACE_MS = 180;
@@ -59,6 +65,8 @@ const openBtnRef = ref<HTMLButtonElement | null>(null);
 const href = ref("");
 /** 表示中の URL が iframe の自己申告か（true なら開く前に確認ダイアログを挟む） */
 const selfDeclared = ref(false);
+/** URL の表示が max-height で打ち切られているか（ArtifactLinkUrlText が通知する） */
+const truncated = ref(false);
 /** ポップアップ自身にマウスが乗っているか。iframe からの閉じる要求と競合するため必要 */
 const hovering = ref(false);
 /** ポップアップ内にフォーカスがあるか。キーボードで URL ボタンへ移る間に閉じないため */
@@ -68,6 +76,8 @@ const copied = ref(false);
 const left = ref(0);
 const top = ref(0);
 
+/** focusOpen でフォーカスを奪う前に居た要素。閉じるときはここへ戻す */
+let returnFocusEl: HTMLElement | null = null;
 let hideTimer: ReturnType<typeof setTimeout> | null = null;
 let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -86,9 +96,15 @@ function retained(): boolean {
 /** 明示的に閉じる（コンテンツ差し替え・スクロールなど）。ホバー中でも閉じる */
 function hideNow() {
   cancelHide();
+  const hadFocus = focusedInside.value;
   hovering.value = false;
   focusedInside.value = false;
   visible.value = false;
+  // 中にフォーカスがあったまま消すと body へ落ちる。Teleport 先は本文の外なので
+  // Tab では戻れず、辿っていた位置を見失う
+  const el = returnFocusEl;
+  returnFocusEl = null;
+  if (hadFocus && el && document.contains(el)) el.focus();
 }
 
 /**
@@ -120,6 +136,9 @@ function showFor(rawHref: string, rect: ArtifactLinkRect, options?: ShowOptions)
   selfDeclared.value = options?.selfDeclared === true;
   // 別のリンクへ移ったらコピー済み表示は持ち越さない（別 URL なのに「コピーしました」に見える）
   if (url !== href.value) {
+    // 実測は ArtifactLinkUrlText が nextTick で返す。それまでは「打ち切られている」側に
+    // 倒しておく（確認ダイアログが1回余計に出るだけで、隠れた URL を無確認で開かない）
+    truncated.value = true;
     copied.value = false;
     if (copyTimer) {
       clearTimeout(copyTimer);
@@ -174,12 +193,26 @@ function onFocusOut() {
  * 「開く」ボタンへフォーカスを移す。移せたら true。
  * キーボードでリンクを辿っている間に外部 URL を開く唯一の経路で、呼び出し側は
  * リンク上での Enter をここへ振り替える（もう一度 Enter で開く = 2段階の明示操作）。
+ *
+ * `expectedHref` を照合するのは、フォーカスしているリンクと表示中の URL がずれうるため
+ * （キーボードでリンク B を辿っている間にマウスがリンク A の上へ入ると、ホバーが
+ * ポップアップを A で上書きする）。ずれていたら移さない = 呼び出し側は何もしない。
  */
-function focusOpen(): boolean {
+function focusOpen(expectedHref: string): boolean {
   const btn = openBtnRef.value;
-  if (!visible.value || !btn) return false;
+  if (!visible.value || !btn || href.value !== expectedHref.trim()) return false;
+  // 閉じたときにリンクへ戻れるよう、来た場所を覚えておく
+  returnFocusEl = document.activeElement as HTMLElement | null;
   btn.focus();
   return true;
+}
+
+/**
+ * 押しっぱなしの Enter を無視する。リンク上の Enter で focusOpen がフォーカスを移すと、
+ * キーリピートの2発目がそのままボタンへ届き、2段階の明示操作を経ずに開いてしまう
+ */
+function onOpenKeydown(e: KeyboardEvent) {
+  if (e.repeat && (e.key === "Enter" || e.key === " ")) e.preventDefault();
 }
 
 /** ポップアップの URL を押して外部ブラウザで開けるか（http(s) のみ） */
@@ -188,16 +221,15 @@ const openTarget = computed(() => resolveExternalLink(href.value));
 async function open() {
   const url = openTarget.value;
   if (!url) return;
-  const needsConfirm = selfDeclared.value;
+  // 全文が見えていない / 自己申告の URL は、実 URL を見せて同意を取ってから外に出す
+  const needsConfirm = selfDeclared.value || truncated.value;
   // 開いたらポップアップの役目は終わり。残すと他ウィンドウへフォーカスが移った先で
   // 前面に浮いたままになる
   hideNow();
   try {
-    // iframe の自己申告 URL は、ホバーしていなくてもカーソル直下へ出せてしまう。
-    // 実 URL を見せて同意を取ってから外に出す
     if (needsConfirm) {
-      const ok = await ask(t("externalLink.confirm", { url }), {
-        title: t("externalLink.title"),
+      const ok = await ask(gt("externalLink.confirm", { url }), {
+        title: gt("externalLink.title"),
         kind: "warning",
       });
       if (!ok) return;
@@ -265,6 +297,7 @@ defineExpose({ showFor, scheduleHide, cancelHide, hideNow, focusOpen });
       @mouseleave="onLeave"
       @focusin="onFocusIn"
       @focusout="onFocusOut"
+      @keydown.escape.stop="hideNow"
     >
       <!-- URL 文字列そのものが「開く」ボタン。押した対象と開く URL を一致させるため、
            見た目はテキストのままにしてアイコンは足さない。
@@ -274,12 +307,16 @@ defineExpose({ showFor, scheduleHide, cancelHide, hideNow, focusOpen });
         ref="openBtnRef"
         type="button"
         class="link-hover-open"
-        :aria-label="t('open')"
         @click.prevent="open"
+        @keydown="onOpenKeydown"
       >
-        <ArtifactLinkUrlText :href="href" />
+        <!-- aria-label は置かない。ボタンのアクセシブルネームを URL そのものにしておかないと
+             「押した対象＝開く URL を確かめる」という機能が支援技術で成立しない。
+             用途は視覚的に隠したテキストで後ろから補う -->
+        <ArtifactLinkUrlText :href="href" @update:truncated="truncated = $event" />
+        <span class="link-hover-open-hint">{{ t("open") }}</span>
       </button>
-      <ArtifactLinkUrlText v-else :href="href" />
+      <ArtifactLinkUrlText v-else :href="href" @update:truncated="truncated = $event" />
       <button
         type="button"
         class="link-hover-copy"
@@ -332,6 +369,19 @@ defineExpose({ showFor, scheduleHide, cancelHide, hideNow, focusOpen });
 .link-hover-open:focus-visible :deep(.link-hover-url) {
   color: #89b4fa;
   text-decoration: underline;
+}
+
+/* 支援技術にだけ読ませる補足。見た目には出さない */
+.link-hover-open-hint {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
 }
 
 .link-hover-copy {

@@ -14,6 +14,12 @@ import { ref, computed, watch, nextTick, onMounted } from "vue";
  */
 const props = defineProps<{ href: string }>();
 
+/**
+ * 打ち切られているかを親へ伝える。親（ポップアップ）はこれを見て、
+ * 全文が見えていない URL を開くときだけ確認ダイアログを挟む
+ */
+const emit = defineEmits<{ (e: "update:truncated", value: boolean): void }>();
+
 /** ツールチップを出すまでの待ち。WorktreeHeader のタスクツールチップと同値 */
 const TOOLTIP_DELAY_MS = 300;
 
@@ -32,6 +38,7 @@ function measure() {
   const el = spanRef.value;
   // 端数の丸めで 1px 差が出るので余裕を持たせる
   truncated.value = !!el && el.scrollHeight > el.clientHeight + 1;
+  emit("update:truncated", truncated.value);
 }
 
 onMounted(measure);
