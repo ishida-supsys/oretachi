@@ -60,9 +60,11 @@
 //!   描き、末尾に `… +3 models` を出す。インジケータを剥がして並びは読むが、
 //!   **`truncated` を必ず立てる** —— Claude Code 自身が全項目を描いていない
 //!   （[`strip_scroll_indicator`] / [`is_more_items_line`]）
-//! - **番号の無い `❯` リスト**（`/resume` / `/config`）→ [`PromptShape::Menu`]。
-//!   絞り込み欄の箱を持つので、**自由入力より先に判定しないと設定の絞り込み欄へ
-//!   本文 + CR を撃ち込む**（[`is_picker_footer`]）
+//! - **番号の無い `❯` リスト**（`/resume` / `/config`）は `unknown` のまま。
+//!   ただし**自由入力と誤認させない**（[`is_picker_footer`]）。誤認すると
+//!   ピッカーのハイライト行が入力欄に見え、**設定の絞り込み欄へ本文 + CR を撃ち込む。**
+//!   これ自体を `menu` として名指しする案は #292 で 11 周のセルフレビューを重ねても
+//!   収束しなかったので、仕組みから設計し直す別 issue へ回した
 //! - **ページャ**（`less` / `git log`）→ [`PromptShape::Pager`]（[`is_pager_line`]）
 //! - **入力欄の下に出る補完ポップアップ**（`/` コマンド / `@` ファイル）。入力欄は
 //!   生きているので `text` のまま読む。`unknown` へ倒すと `pending_input` が読めず、
@@ -128,14 +130,6 @@ pub enum PromptShape {
     /// Claude Code 以外の TUI の番号選択リスト（`1) foo`）
     #[serde(rename = "numbered")]
     Numbered,
-    /// 番号の無い `❯` リスト（Claude Code の `/resume` / `/config` などのピッカー）。#292
-    ///
-    /// **キーを送ってはいけない。** 番号が無いので「何番目を選ぶ」という指定が成立せず、
-    /// 画面に見えている項目も検索欄で絞り込まれた一部でしかない。`unknown` と違って
-    /// 「何の画面か」は分かっているので、カードは「ピッカーなのでターミナルで操作を」と
-    /// 名指しで案内できる
-    #[serde(rename = "menu")]
-    Menu,
     /// ページャ（`less` / `git log`）が開いている。#292
     ///
     /// **キーを送ってはいけない。** 入力待ちではあるが「問い」ではないので、
@@ -156,7 +150,6 @@ impl PromptShape {
             PromptShape::AskUserQuestion => "askUserQuestion",
             PromptShape::YesNo => "yesno",
             PromptShape::Numbered => "numbered",
-            PromptShape::Menu => "menu",
             PromptShape::Pager => "pager",
             PromptShape::Unknown => "unknown",
         }
@@ -790,11 +783,7 @@ pub fn plan_keys(parsed: &ParsedPrompt, answer: &Answer) -> Result<Vec<Keystroke
             s.as_str()
         ))),
 
-        // ピッカー / ページャは「何の画面か」が分かっている代わりに、**送れるキーが無い**。
-        // 番号が無いので選択を指定できず、絞り込み欄へ本文を撃つと画面が別物になる（#292）
-        (PromptShape::Menu, _) => Err(PlanError(
-            "画面は番号の無い ❯ リスト (menu。Claude Code の /resume・/config などのピッカー) です。番号が無いため「何番目を選ぶ」を指定できず、絞り込み欄へ本文を送ると画面が別物になるため、何も送りません。ターミナルを開いて直接操作してもらってください".to_string(),
-        )),
+        // ページャは「何の画面か」が分かっている代わりに、**送れるキーが無い**（#292）
         (PromptShape::Pager, _) => Err(PlanError(
             "画面はページャ (pager。less / git log など) が開いた状態です。問いではないので答える対象がなく、キーを送るとページャの操作として食われるため、何も送りません。ターミナルを開いて閉じてもらってください".to_string(),
         )),
@@ -1890,100 +1879,6 @@ fn is_open_dialog_footer(body: &str) -> bool {
         || contains_ci(body, "esc to cancel")
 }
 
-/// 画面の**いちばん下に描かれている UI のフッタ**（#292）。
-///
-/// # なぜ「いちばん下」で決まるのか
-///
-/// Claude Code は代替画面バッファを使わずインラインで描くので、可視グリッドには
-/// **いま出ている UI とスクロールバックが混ざる。** ただし描画は下へ進むので、
-/// **いま出ている UI は必ずいちばん下にある。** そこで下端の連続した非空行だけを
-/// 見れば「いま何が描かれているか」が分かる。
-///
-/// # なぜ位置の比較をやめたのか（9 周目のセルフレビューまでの経緯）
-///
-/// 「フッタらしい語が画面末尾の数行にあるか」＋「それが選択肢の並びより下か」で
-/// 決めようとして、6〜9 周目まで毎周 critical / warning が出た:
-///
-/// - 窓の開始行を位置として使うと、**画面の総行数や空行の数という問いと無関係な
-///   要因で判定が反転する**
-/// - 狭いタブでフッタが折り返すと**行単位の判定では原理的に追従できず**、
-///   フッタが選択肢のラベルへ吸われて位置そのものが狂う
-/// - 絞り込み欄（`⌕`）の有無を足すと、条件が**恒真 / 恒偽に退化**して
-///   どちらかの方向が黙って死ぬ
-///
-/// 位置を比べる限り、比べる 2 つの値のどちらも「折り返し」と「残骸」で汚れる。
-/// **下端のブロックだけを見れば、比べる必要が無くなる。**
-///
-/// # 選択肢行はフッタではない
-///
-/// ブロックの中に選択肢行があれば**その下だけ**を採る。素の TUI は見出しと選択肢と
-/// 入力欄の間に空行を置かないので、これが無いと見出しや選択肢ラベルまでフッタとして
-/// 読んでしまう（実測: `Type to filter the list below` / `1) staging` / `Selection:`）。
-///
-/// # 入力欄の中身は外す
-///
-/// Claude Code の画面末尾は「上罫線 / 入力欄の中身 / 下罫線 / ヒント行」なので、
-/// 外さないと**人の打ちかけがフッタに混ざる。** `type to search` と打ちかけている
-/// 端末が `menu` と判定され、カードが黙って塞がれて `pendingInput` まで失われる。
-/// # フッタの**下**に何かあってもよい（10 周目のセルフレビューで critical）
-///
-/// 「最終行から連続する非空ブロック」にすると、フッタの下に 1 行でも何かあった時点で
-/// ブロックが空になり、判定が黙って倒れる。実測では
-/// **空白だけの行 1 本**（`strip_frame` が trim するので空に見えるが `render_logical_screen`
-/// は落とさない）や `⏵⏵ accept edits on` が末尾に付くだけで、開いている `/resume` へ
-/// 矢印 + CR が飛んだ。フッタではありえない行は**行数上限つきで読み飛ばす。**
-///
-/// 戻り値は `(下端ブロック, その最終行)`。最終行を別に返すのは、
-/// 「ダイアログのフッタか」の判定を**ブロック全体に掛けてはいけない**ため
-/// （10 周目の critical 2 件目。ピッカーの直上に残骸のダイアログのフッタがあるだけで
-/// 判定が反転し、空行 1 本の有無で結果が変わった）。
-fn bottom_footer(tail: &[&str]) -> (String, String) {
-    /// フッタの下に出うる行数の上限。
-    const TRAILING_SLACK: usize = 3;
-    // フッタではありえない行（空白 / 罫線 / 入力欄のステータス行）を読み飛ばす
-    let mut end = tail.len();
-    let mut skipped = 0usize;
-    while end > 0 && skipped < TRAILING_SLACK {
-        let (body, _) = strip_frame(tail[end - 1]);
-        if !is_below_footer_noise(&body) {
-            break;
-        }
-        end -= 1;
-        skipped += 1;
-    }
-    // そこから上へ、空行 / 罫線に当たるまでが「いま描かれている UI の下端ブロック」
-    let mut start = end;
-    while start > 0 {
-        let (body, _) = strip_frame(tail[start - 1]);
-        if body.is_empty() || is_rule_line(&body) {
-            break;
-        }
-        start -= 1;
-    }
-    // ブロックの中に選択肢行があれば、フッタはその下だけ
-    let from = tail[start..end]
-        .iter()
-        .rposition(|line| parse_option_line(line).is_some())
-        .map_or(start, |offset| start + offset + 1);
-    let lines: Vec<String> = (from..end)
-        .filter(|&i| !is_input_box_line(tail, i))
-        .map(|i| strip_frame(tail[i]).0)
-        .collect();
-    let last = lines.last().cloned().unwrap_or_default();
-    (lines.join(" "), last)
-}
-
-/// フッタより**下**に出うる行（＝フッタではありえない行）か（#292）。
-///
-/// 空白だけの行・罫線のほか、入力欄のステータス行（`⏵⏵ accept edits on` /
-/// `? for shortcuts`）がピッカーやダイアログの下に残ることがある。
-fn is_below_footer_noise(body: &str) -> bool {
-    body.is_empty()
-        || is_rule_line(body)
-        || body.contains('\u{23f5}')
-        || contains_ci(body, "shift+tab")
-        || contains_ci(body, "for shortcuts")
-}
 /// 番号の無い `❯` リスト（ピッカー）のフッタか（#292）。
 ///
 /// 実測:
@@ -1997,30 +1892,6 @@ fn is_below_footer_noise(body: &str) -> bool {
 /// 「絞り込み欄がある」という構造をそのまま指しており、設問には出ない。
 fn is_picker_footer(s: &str) -> bool {
     contains_ci(s, "type to search") || contains_ci(s, "type to filter")
-}
-
-/// **ダイアログにしか出ない**フッタの語（#292）。
-///
-/// `Esc to cancel` は**ピッカーと共有されている**（`/resume` のフッタは
-/// `Ctrl+A to show all projects · … · Type to search · Esc to cancel`）ので、
-/// 「ダイアログである」の根拠にはできない。これで切ろうとしたところ、
-/// 条件が `/resume` に対して**恒偽**になって逃げ道が丸ごと死んだ
-/// （9 周目のセルフレビューで critical）。
-///
-/// 共有されていないのはこの 2 つだけ:
-///
-/// - `Tab to amend` … 許可ダイアログ固有
-/// - `Enter to select` + `to navigate` … `AskUserQuestion` 固有。
-///   `/config` の `Enter/↓ to select · ↑ to tabs` は `to navigate` を含まないので当たらない
-fn is_dialog_only_footer(s: &str) -> bool {
-    contains_ci(s, "tab to amend")
-        || is_ask_user_question_footer(s)
-        // **実機の `AskUserQuestion` には `to navigate` を含まない版がある**
-        // （`Enter to select \u{b7} Tab to switch questions \u{b7} Esc to cancel`。
-        // 同ファイルの実機フィクスチャ `wrapped_label_preview_screen` がこれ）。
-        // 10 周目のセルフレビューで、この画面がピッカー語 1 つで `menu` に
-        // 化けて返答不能になることが実測された
-        || contains_ci(s, "tab to switch questions")
 }
 
 /// ページャ（`less` / `more`）が入力待ちで止まっている画面の最終行か（#292）。
@@ -2203,6 +2074,20 @@ fn looks_like_free_input(tail: &[&str]) -> Option<FreeInput> {
         // 開いている。`escape_hatch` のように末尾 12 行を広く見ると、スクロールバックに
         // 残った古いダイアログの残骸でも立って自由入力を塞いでしまうので、ここだけに絞る
         if is_open_dialog_footer(&body) {
+            return None;
+        }
+        // **ピッカー（`/resume` / `/config`）も自由入力ではない（#292）。**
+        //
+        // `/config` のフッタは `Esc to clear` で終わるので上のガードに当たらない。
+        // 素通りすると、ピッカーのハイライト行（`❯ Auto-compact   true`）が
+        // 下の「箱として同定できていない `❯`」の縮退経路に当たって `text` になり、
+        // **レポートからの返答本文 + CR が設定の絞り込み欄へ撃ち込まれる**
+        // （11 周目のセルフレビューで実測。`plan_keys` が `Ok` を返すので下流に安全弁は無い）。
+        //
+        // ピッカーを `menu` として名指しする案は収束しなかったので外したが、
+        // **この 1 本のガードだけは残す** —— 名指しできなくても、
+        // 誤って撃つのだけは止まる（`unknown` に倒れてキーを一切送らない）。
+        if is_picker_footer(&body) {
             return None;
         }
         // Claude Code の入力欄らしき行。ただし**箱として同定できていない**（上下を罫線で
@@ -2579,30 +2464,6 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
         .map(|l| strip_frame(l).0)
         .find(|b| !b.is_empty() && !is_rule_line(b));
 
-    // ── ピッカーか（#292）────────────────────────────────────────────────
-    //
-    // **いちばん下のフッタにピッカー固有の語があるか、それだけで決める。**
-    // 位置を比べる設計は 6〜9 周目まで毎周穴が出た（[`bottom_footer`] 参照）。
-    //
-    // スクロールバックに番号付きリストが残ったまま `/resume` / `/config` が開く形は
-    // 現実に起こる（Claude Code はインラインで描く）。並びを優先すると、
-    // **残骸由来の選択肢を提示して矢印 + CR / 数字 + CR をピッカーへ撃つ。**
-    // 逆に語が画面のどこかにあるだけで倒すと、`rg "Type to search"` の出力が
-    // 残っている**本物のダイアログを奪って返答不能にする。**
-    // 下端のフッタだけを見れば、どちらの向きにも転ばない。
-    // **否定項は下端ブロック全体ではなく「最終行」に掛ける**（10 周目で critical）。
-    // ブロックは空行に当たるまで上へ伸びるので、ピッカーの直上に残骸のダイアログの
-    // フッタがあるだけで判定が反転し、**空行 1 本の有無で結果が変わっていた。**
-    let (footer_block, footer_last_line) = bottom_footer(tail_lines);
-    let is_picker =
-        is_picker_footer(&footer_block) && !is_dialog_only_footer(&footer_last_line);
-    // **並びがある画面だけここで倒す。** 並びが無い画面は y/n → ページャの順を
-    // 崩さないよう、従来どおり下のブロックで見る（`(y/N)` がピッカーに奪われると
-    // y/n に答えられなくなる。5 周目のセルフレビュー）
-    if run.is_some() && is_picker {
-        return seal(quiet_prompt(PromptShape::Menu, escape_hatch, tail));
-    }
-
     let Some(run) = run else {
         // 選択肢が無い画面。y/n → ページャ → ピッカー → 自由入力 → unknown の順で倒す。
         //
@@ -2637,9 +2498,6 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
         }
         if last_meaningful.as_deref().is_some_and(is_pager_line) {
             return seal(quiet_prompt(PromptShape::Pager, escape_hatch, tail));
-        }
-        if is_picker {
-            return seal(quiet_prompt(PromptShape::Menu, escape_hatch, tail));
         }
         if let Some(free) = looks_like_free_input(tail_lines) {
             return text_prompt(&free, tail_lines, &tail, escape_hatch);
@@ -3386,40 +3244,9 @@ mod tests {
     }
 
     /// 実機の `/resume`。番号が無く、絞り込み欄の箱を持つ。
-    fn resume_picker_screen() -> String {
-        [
-            "  Resume session (1 of 33)",
-            "  ╭────────────────────────────────────────╮",
-            "  │ ⌕ Search…                              │",
-            "  ╰────────────────────────────────────────╯",
-            "",
-            "  ❯ oretachi issue 292",
-            "    4 seconds ago · worktree/issue-292 · 1.5MB",
-            "",
-            "    Ctrl+A to show all projects · Space to preview · Type to search · Esc to cancel",
-        ]
-        .join("\n")
-    }
-
-    /// 実機の `/config`。**`Esc to cancel` が出ない**ので、ピッカーだと分かる
+        /// 実機の `/config`。**`Esc to cancel` が出ない**ので、ピッカーだと分かる
     /// 手がかりはフッタの `Type to filter` だけ。
-    fn config_picker_screen() -> String {
-        [
-            "  ╭────────────────────────────────────────╮",
-            "  │ ⌕ Search settings…                     │",
-            "  ╰────────────────────────────────────────╯",
-            "",
-            "    Auto-compact                               true",
-            "    Continue automatically at usage limit      true",
-            "    Show tips                                  true",
-            "  ↓ 46 more below",
-            "",
-            "  Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear",
-        ]
-        .join("\n")
-    }
-
-    /// 実機の `@` ファイル補完。一覧は**入力欄の下**に出る。
+        /// 実機の `@` ファイル補完。一覧は**入力欄の下**に出る。
     fn at_mention_popup_screen() -> String {
         [
             "────────────────────────────────────────",
@@ -3468,27 +3295,6 @@ mod tests {
         assert!(!last.label.contains("+3 models"), "label={:?}", last.label);
     }
 
-    /// 番号の無い `❯` リストは `menu`（#292）。
-    #[test]
-    fn an_unnumbered_picker_is_a_menu() {
-        let p = parse_prompt(&resume_picker_screen());
-        assert_eq!(p.shape, PromptShape::Menu);
-        assert_eq!(p.navigation, Navigation::None);
-        assert!(p.questions.is_empty(), "画面に無い選択肢を作らない");
-        assert!(plan_keys(&p, &Answer::Select { option_index: 1 }).is_err());
-    }
-
-    /// **絞り込み欄を自由入力と取り違えない（#292）。**
-    ///
-    /// `/config` には `Esc to cancel` が無いので、自由入力の判定を先に通すと
-    /// `⌕ Search settings…` の箱が入力欄に見え、**設定の絞り込み欄へ本文 + CR を撃つ**。
-    #[test]
-    fn a_settings_picker_is_not_a_free_input_box() {
-        let p = parse_prompt(&config_picker_screen());
-        assert_eq!(p.shape, PromptShape::Menu);
-        assert!(plan_keys(&p, &Answer::Text { text: "hello".into() }).is_err());
-    }
-
     /// スクロールバックに残った `Type to search` でピッカー扱いにしない（#292）。
     ///
     /// 画面末尾の**フッタ**だけを見る。末尾 12 行を丸ごと見ると、直前のコマンドの
@@ -3509,6 +3315,72 @@ mod tests {
         .join("\n");
         let p = parse_prompt(&screen);
         assert_eq!(p.shape, PromptShape::Text);
+    }
+
+    /// **ピッカーを自由入力と誤認しない（#292）。**
+    ///
+    /// `/config` のフッタは `Esc to clear` で終わるのでダイアログのフッタ判定に当たらず、
+    /// 素通りするとハイライト行 `❯ Auto-compact` が縮退した `❯` 経路で入力欄に見える。
+    /// そうなると **`plan_keys` が `Ok` を返し、返答本文 + CR が設定の絞り込み欄へ飛ぶ。**
+    /// 下流に安全弁は無いので、ここで止めるしかない。
+    #[test]
+    fn a_picker_is_never_mistaken_for_free_input() {
+        // 末尾に何が付いても倒れないこと（ステータス行はピッカーの下にも出る）
+        let trailers: [&[&str]; 4] =
+            [&[], &["", "  ⏸ manual mode on"], &["   "], &["", "  ⏵⏵ accept edits on"]];
+        for trailer in trailers {
+            let mut screen: Vec<String> = vec![
+                "  ╭────────────────────────────────────╮".into(),
+                "  │ ⌕ Search settings…                 │".into(),
+                "  ╰────────────────────────────────────╯".into(),
+                "".into(),
+                "  ❯ Auto-compact                    true".into(),
+                "    Show tips                       true".into(),
+                "".into(),
+                "  Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear".into(),
+            ];
+            screen.extend(trailer.iter().map(|s| (*s).to_string()));
+            let p = parse_prompt(&screen.join("\n"));
+            assert_ne!(p.shape, PromptShape::Text, "trailer={:?}", trailer);
+            assert!(
+                plan_keys(&p, &Answer::Text { text: "hello".into() }).is_err(),
+                "trailer={:?}",
+                trailer
+            );
+        }
+
+        // `/resume` も同じ（こちらは `Esc to cancel` でも止まるが、二重に確かめる）
+        let resume = [
+            "  Resume session (1 of 33)",
+            "  ╭────────────────╮",
+            "  │ ⌕ Search…      │",
+            "  ╰────────────────╯",
+            "  ❯ oretachi issue 292",
+            "    4 seconds ago",
+            "",
+            "  Ctrl+A to show all projects · Type to search · Esc to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&resume);
+        assert_ne!(p.shape, PromptShape::Text);
+        assert!(plan_keys(&p, &Answer::Text { text: "hello".into() }).is_err());
+    }
+
+    /// ピッカーの語が打ちかけにあるだけの入力欄は塞がない（#292）。
+    #[test]
+    fn a_draft_mentioning_a_picker_footer_is_still_free_input_after_the_guard() {
+        let screen = [
+            "  ⎿  Done",
+            "",
+            "────────────────────────────────────────",
+            "❯ type to search の実装を見て",
+            "────────────────────────────────────────",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Text);
+        assert_eq!(p.pending_input, "type to search の実装を見て");
     }
 
     /// ページャは `pager`（#292）。`unknown` だと git log のダンプがカードに載る。
@@ -3630,436 +3502,6 @@ mod tests {
         assert!(plan_keys(&p, &Answer::Select { option_index: 3 }).is_ok());
     }
 
-    /// スクロールバックに残った番号付きリストにピッカー判定を乗っ取らせない
-    /// （#292。4 周目のセルフレビューで検出）。
-    ///
-    /// Claude Code は代替画面バッファを使わずインラインで描くので、直前の出力の
-    /// `1. …` が残ったまま `/resume` が開く形は現実に起こる。判定が run の有無の
-    /// 後ろにあると、**残骸の選択肢を提示して矢印 + CR をピッカーへ撃つ**。
-    #[test]
-    fn a_stale_numbered_list_does_not_hijack_the_picker() {
-        let screen = [
-            "  やることは次の3つです:",
-            "  1. まず設計する",
-            "  2. 次に実装する",
-            "  3. 最後にテストする",
-            "",
-            "  Resume session (1 of 33)",
-            "  ╭────────────────╮",
-            "  │ ⌕ Search…      │",
-            "  ╰────────────────╯",
-            "  ❯ oretachi issue 292",
-            "    4 seconds ago",
-            "",
-            "    Type to search · Esc to cancel",
-        ]
-        .join("\n");
-        let p = parse_prompt(&screen);
-        assert_eq!(p.shape, PromptShape::Menu, "残骸の選択肢を提示してはいけない");
-        assert!(plan_keys(&p, &Answer::Select { option_index: 1 }).is_err());
-    }
-
-    /// **ピッカーの語が画面に残っているだけで本物の問いを奪わない**
-    /// （#292。5 周目のセルフレビューで検出）。
-    ///
-    /// 実機の Claude Code のダイアログには**罫線が無い**ので `footer_region` の窓は
-    /// 切られず、承認対象・設問文・選択肢ラベル・直前の出力がそのまま窓に入る。
-    /// `rg "Type to search"` の出力が残っているだけで `menu` に化けると、
-    /// 答えるべき問いに返答できなくなる（しかも `tail` を出さない約束なので、
-    /// 人は「ピッカーなのでターミナルで」という**事実と異なる案内**しか読めない）。
-    #[test]
-    fn a_picker_word_near_a_real_dialog_does_not_steal_it() {
-        // 設問文に含まれる
-        let aq = [
-            "←  ☐ Mode  ✔ Submit  →",
-            "Type to filter の実装をどう直しますか？",
-            "",
-            "❯ 1. 正規表現にする",
-            "  2. 前方一致にする",
-            "",
-            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
-        ]
-        .join("\n");
-        assert_eq!(parse_prompt(&aq).shape, PromptShape::AskUserQuestion);
-
-        // 選択肢ラベルに含まれる
-        let perm = [
-            "Bash command",
-            "rg \"Type to search\" src",
-            "",
-            "Do you want to proceed?",
-            "",
-            "❯ 1. Yes",
-            "  2. Yes, and don't ask again for rg commands",
-            "  3. No, and tell Claude what to do differently (esc)",
-            "",
-            "  Esc to cancel · Tab to amend",
-        ]
-        .join("\n");
-        assert_eq!(parse_prompt(&perm).shape, PromptShape::Permission);
-
-        // 直前の出力に残っているだけの y/n プロンプト
-        let yn = [
-            "$ rg \"Type to search\" src",
-            "src/a.rs:12:  // Type to search",
-            "Continue? (y/N) ",
-        ]
-        .join("\n");
-        assert_eq!(parse_prompt(&yn).shape, PromptShape::YesNo);
-
-        // 見出しに残っているだけの素の番号 TUI
-        let numbered =
-            ["Type to filter the list below", "  1) staging", "  2) production", "Selection: "]
-                .join("\n");
-        assert_eq!(parse_prompt(&numbered).shape, PromptShape::Numbered);
-
-        // 既存のフィクスチャも従来どおり
-        assert_eq!(
-            parse_prompt(&permission_screen("echo probe-292", "Print a probe")).shape,
-            PromptShape::Permission
-        );
-        assert_eq!(parse_prompt(&multi_question_first_screen()).shape, PromptShape::AskUserQuestion);
-    }
-
-    /// ピッカー判定が**画面の行間隔や総行数で反転しない**（#292。6 周目のセルフレビュー）。
-    ///
-    /// 窓の開始行を位置として使っていたときは、
-    ///
-    /// - 残骸の末尾が画面下端から 6 行以内にあるだけで乗っ取られる方向が復活し
-    /// - 総行数がちょうど `TAIL_WINDOW` になるアラインメントでは本物のダイアログが奪われた
-    ///
-    /// どちらも**問いと無関係な要因**なので、振っても結果が変わらないことを固定する。
-    #[test]
-    fn the_picker_decision_does_not_depend_on_line_spacing() {
-        // ── 乗っ取られる方向: 残骸の番号リスト + ピッカー。常に Menu ──
-        for pad in 0..8 {
-            for gap in 0..5 {
-                let mut screen: Vec<String> =
-                    (0..pad).map(|i| format!("  出力 {}", i)).collect();
-                screen.push("  1. まず設計する".into());
-                screen.push("  2. 次に実装する".into());
-                screen.push("  3. 最後にテストする".into());
-                for _ in 0..gap {
-                    screen.push(String::new());
-                }
-                screen.push("  Resume session (1 of 33)".into());
-                screen.push("  ╭────────────────╮".into());
-                screen.push("  │ ⌕ Search…      │".into());
-                screen.push("  ╰────────────────╯".into());
-                screen.push("  ❯ oretachi issue 292".into());
-                screen.push("    Type to search · Esc to cancel".into());
-                let p = parse_prompt(&screen.join("\n"));
-                assert_eq!(p.shape, PromptShape::Menu, "pad={} gap={}", pad, gap);
-                assert!(
-                    plan_keys(&p, &Answer::Select { option_index: 2 }).is_err(),
-                    "pad={} gap={}",
-                    pad,
-                    gap
-                );
-            }
-        }
-
-        // ── 奪われる方向: 本物の許可ダイアログ + 画面に残ったピッカー語。常に Permission ──
-        for pad in 0..8 {
-            for gap in 0..5 {
-                let mut screen: Vec<String> =
-                    (0..pad).map(|i| format!("  出力 {}", i)).collect();
-                screen.push("Bash command".into());
-                screen.push("rg \"Type to search\" src".into());
-                screen.push(String::new());
-                screen.push("Do you want to proceed?".into());
-                screen.push(String::new());
-                screen.push("❯ 1. Yes".into());
-                screen.push("  2. No, and tell Claude what to do differently (esc)".into());
-                for _ in 0..gap {
-                    screen.push(String::new());
-                }
-                screen.push("  Esc to cancel · Tab to amend".into());
-                let p = parse_prompt(&screen.join("\n"));
-                assert_eq!(p.shape, PromptShape::Permission, "pad={} gap={}", pad, gap);
-                assert_eq!(p.navigation, Navigation::Arrows, "pad={} gap={}", pad, gap);
-            }
-        }
-    }
-
-    /// **狭いタブで折り返したフッタでも乗っ取られない**（#292。7 周目で critical）。
-    ///
-    /// 行単位のフッタ判定は折り返しに原理的に追従できない（`Type to` / `search ·` /
-    /// `Esc to` / `cancel` のどれも単独では当たらない）ので、フッタ全行が最後の
-    /// 選択肢のラベルへ吸われて `run.end` が画面最終行まで下がる。位置をどう比べても
-    /// 区別が付かなくなるため、**そもそも並びを絞り込み欄より下へ入れない**ことで塞ぐ。
-    #[test]
-    fn a_wrapped_picker_footer_is_not_hijacked_by_a_stale_list() {
-        let screen = [
-            "$ cc",
-            "1. 設計",
-            "2. 実装",
-            "3. テスト",
-            "  ╭──────╮",
-            "  │ ⌕ Sea… │",
-            "  ╰──────╯",
-            "  ❯ issue",
-            "    292",
-            "  Type to",
-            "  search ·",
-            "  Esc to",
-            "  cancel",
-        ]
-        .join("\n");
-        let p = parse_prompt(&screen);
-        assert_eq!(p.shape, PromptShape::Menu);
-        assert!(plan_keys(&p, &Answer::Select { option_index: 2 }).is_err());
-    }
-
-    /// `/config` のフッタ（`Esc to clear` で終わる）でも乗っ取られない（#292。7 周目で critical）。
-    ///
-    /// このフッタは `is_open_dialog_footer` のどの語にも当たらないので、
-    /// 安全弁に `is_picker_footer` を足さないと続き行として吸い込まれる。
-    #[test]
-    fn the_config_footer_is_not_swallowed_as_a_wrapped_label() {
-        assert!(looks_like_dialog_footer("Type to filter · Enter/↓ to select · Esc to clear"));
-        let screen = [
-            "$ claude",
-            "1. まず設計する",
-            "2. 次に実装する",
-            "3. 最後にテストする",
-            " ╭──────────────╮",
-            " │ ⌕ Search settings… │",
-            " ╰──────────────╯",
-            "   Auto-compact      true",
-            " Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear",
-        ]
-        .join("\n");
-        let p = parse_prompt(&screen);
-        assert_eq!(p.shape, PromptShape::Menu);
-        assert!(plan_keys(&p, &Answer::Select { option_index: 2 }).is_err());
-    }
-
-    /// 画面のどこかに `⌕` が 1 行あるだけで、その下のダイアログを読めなくしない
-    /// （#292。8 周目のセルフレビューで critical）。
-    ///
-    /// `⌕` は窓を持たない走査で拾われていたので、`rg ⌕` の出力や
-    /// `/resume` を Esc で抜けた残骸に `⌕` があるだけでクランプが効いてしまい、
-    /// **本物のダイアログの選択肢が丸ごと読めなくなる**（`unknown` に落ちて返答不能）。
-    #[test]
-    fn a_stray_search_glyph_does_not_hide_a_real_dialog() {
-        let screen = [
-            "$ rg ⌕ src",
-            "  ⌕ Search…",
-            "",
-            "Bash command",
-            "echo hi",
-            "",
-            "Do you want to proceed?",
-            "",
-            "❯ 1. Yes",
-            "  2. No, and tell Claude what to do differently (esc)",
-            "",
-            "  Esc to cancel · Tab to amend",
-        ]
-        .join("\n");
-        let p = parse_prompt(&screen);
-        assert_eq!(p.shape, PromptShape::Permission);
-        assert_eq!(p.questions[0].options.len(), 2);
-        assert!(plan_keys(&p, &Answer::Select { option_index: 2 }).is_ok());
-    }
-
-    /// 絞り込み欄が画面外へ流れた `/config` でも乗っ取られない
-    /// （#292。8 周目のセルフレビューで critical）。
-    ///
-    /// 低いタブでは `⌕` の箱が上へ流れる。残骸の番号リストが「画面の選択肢」として
-    /// 採用されると**数字 + CR が飛び、CR がハイライト中の設定を確定する**
-    /// （＝ユーザー設定が書き換わる）。
-    #[test]
-    fn a_config_picker_without_its_search_box_is_not_hijacked() {
-        let screen = [
-            "$ claude",
-            "  やることは次の3つです:",
-            "  1. まず設計する",
-            "  2. 次に実装する",
-            "  3. 最後にテストする",
-            "",
-            "    Auto-compact                  true",
-            "    Show tips                     true",
-            "",
-            "  Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear",
-        ]
-        .join("\n");
-        let p = parse_prompt(&screen);
-        assert_eq!(p.shape, PromptShape::Menu);
-        assert!(plan_keys(&p, &Answer::Select { option_index: 2 }).is_err());
-    }
-
-    /// **フッタの下に何があっても判定が倒れない**（#292。10 周目で critical）。
-    ///
-    /// 「最終行から連続する非空ブロック」にしていたので、空白だけの行 1 本や
-    /// `⏵⏵ accept edits on` が末尾に付くだけでブロックが空になり、
-    /// 開いている `/resume` へ矢印 + CR が飛んでいた。
-    ///
-    /// **残骸側にダイアログのフッタを持たせる軸も振る**（10 周目の指摘）。
-    /// 否定項を下端ブロック全体へ掛けていたときは、これで判定が反転した。
-    #[test]
-    fn the_picker_decision_does_not_depend_on_what_follows_the_footer() {
-        let trailers: [&[&str]; 5] = [
-            &[],
-            &["   "],
-            &[""],
-            &["", "  ⏵⏵ accept edits on (shift+tab to cycle)"],
-            &["────────────────"],
-        ];
-        // 残骸のダイアログ（自前のフッタ付き）が上に残ったまま /resume が開いている
-        for trailer in trailers {
-            for gap in 0..3 {
-                let mut screen: Vec<String> = vec![
-                    "● Bash(git log)".into(),
-                    "  Do you want to proceed?".into(),
-                    "❯ 1. Yes".into(),
-                    "  2. No, and tell Claude what to do differently (esc)".into(),
-                    "  Esc to cancel · Tab to amend".into(),
-                ];
-                for _ in 0..gap {
-                    screen.push(String::new());
-                }
-                screen.push("  ❯ oretachi issue 292".into());
-                screen.push(
-                    "  Ctrl+A to show all projects · Type to search · Esc to cancel".into(),
-                );
-                screen.extend(trailer.iter().map(|s| (*s).to_string()));
-                let p = parse_prompt(&screen.join("\n"));
-                assert_eq!(p.shape, PromptShape::Menu, "trailer={:?} gap={}", trailer, gap);
-                assert!(
-                    plan_keys(&p, &Answer::Select { option_index: 2 }).is_err(),
-                    "trailer={:?} gap={}",
-                    trailer,
-                    gap
-                );
-            }
-        }
-        // 逆向き: 本物のダイアログは、下に何が付いても奪われない
-        for trailer in trailers {
-            let mut screen: Vec<String> = vec![
-                "Bash command".into(),
-                "rg \"Type to search\" src".into(),
-                "".into(),
-                "Do you want to proceed?".into(),
-                "".into(),
-                "❯ 1. Yes".into(),
-                "  2. No, and tell Claude what to do differently (esc)".into(),
-                "".into(),
-                "  Esc to cancel · Tab to amend".into(),
-            ];
-            screen.extend(trailer.iter().map(|s| (*s).to_string()));
-            let p = parse_prompt(&screen.join("\n"));
-            assert_eq!(p.shape, PromptShape::Permission, "trailer={:?}", trailer);
-        }
-    }
-
-    /// `to navigate` を含まない実機の `AskUserQuestion` フッタでも奪われない
-    /// （#292。10 周目で warning）。
-    #[test]
-    fn an_ask_user_question_footer_without_navigate_is_still_a_dialog() {
-        assert!(is_dialog_only_footer("Enter to select · Tab to switch questions · Esc to cancel"));
-        // 実機フィクスチャのフッタにピッカーの語が 1 つ混ざっても化けない
-        let mut screen = wrapped_label_preview_screen();
-        screen = screen.replace("通知フック未設定リポジトリ", "Type to filter 未設定リポジトリ");
-        assert_eq!(parse_prompt(&screen).shape, PromptShape::AskUserQuestion);
-    }
-
-    /// 絞り込み欄が見えない `/resume` でも乗っ取られない（#292。9 周目で critical）。
-    ///
-    /// `/resume` のフッタは `Esc to cancel` を含むので、それを「ダイアログである」の
-    /// 根拠にすると条件が `/resume` に対して**恒偽**になり、逃げ道が丸ごと死ぬ。
-    /// 実際に矢印 + CR が一覧へ飛び、ハイライト中のセッションを確定していた。
-    #[test]
-    fn a_resume_picker_without_its_search_box_is_not_hijacked() {
-        let screen = [
-            "● Bash(git log)",
-            "  Do you want to proceed?",
-            "❯ 1. Yes",
-            "  2. Yes, and don't ask again",
-            "  3. No, and tell Claude what to do differently (esc)",
-            "",
-            "  ~/proj/one    2h ago",
-            "  ~/proj/two    3h ago",
-            "  Ctrl+A to show all projects · Type to search · Esc to cancel",
-        ]
-        .join("\n");
-        let p = parse_prompt(&screen);
-        assert_eq!(p.shape, PromptShape::Menu);
-        assert!(plan_keys(&p, &Answer::Select { option_index: 3 }).is_err());
-    }
-
-    /// `⌕` と語が同時に画面に残っていても、下のダイアログを奪わない
-    /// （#292。9 周目で warning）。
-    #[test]
-    fn a_search_glyph_and_a_picker_word_above_a_dialog_do_not_steal_it() {
-        let screen = [
-            "⌕ Search…",
-            "type to search",
-            "Which color?",
-            "❯ 1. Red",
-            "  2. Blue",
-            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
-        ]
-        .join("\n");
-        let p = parse_prompt(&screen);
-        assert_eq!(p.shape, PromptShape::AskUserQuestion);
-        assert!(plan_keys(&p, &Answer::Select { option_index: 2 }).is_ok());
-    }
-
-    /// **判定の各条件が恒真 / 恒偽に退化していないこと**（#292。9 周目で検出）。
-    ///
-    /// 位置を比べる設計では `box_below_run` が恒真・`footer_says_dialog` が
-    /// `/resume` に対して恒偽になり、**片方向が黙って死んでいた**。
-    /// 条件そのものが両方の値を取ることを固定しておく。
-    #[test]
-    fn the_picker_predicates_are_not_vacuous() {
-        // ピッカーのフッタ: 実測の 2 つはどちらも真
-        assert!(is_picker_footer("Ctrl+A to show all projects · Type to search · Esc to cancel"));
-        assert!(is_picker_footer("Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear"));
-        // ダイアログのフッタは偽
-        assert!(!is_picker_footer("Esc to cancel · Tab to amend"));
-        assert!(!is_picker_footer("Enter to select · Tab/Arrow keys to navigate · Esc to cancel"));
-
-        // ダイアログ固有の語: `Esc to cancel` は**ピッカーと共有**なので根拠にしない
-        assert!(!is_dialog_only_footer("Ctrl+A to show all projects · Type to search · Esc to cancel"));
-        assert!(!is_dialog_only_footer("Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear"));
-        assert!(is_dialog_only_footer("Esc to cancel · Tab to amend"));
-        assert!(is_dialog_only_footer("Enter to select · Tab/Arrow keys to navigate · Esc to cancel"));
-
-        // 下端ブロック: 選択肢行より下だけを採る
-        let dialog =
-            ["Do you want to proceed?", "❯ 1. Yes", "  2. No", "  Esc to cancel · Tab to amend"];
-        assert_eq!(bottom_footer(&dialog).0, "Esc to cancel · Tab to amend");
-        // 空行で切れる
-        let spaced = ["  Type to search が本文にある", "", "  Esc to cancel · Tab to amend"];
-        assert_eq!(bottom_footer(&spaced).0, "Esc to cancel · Tab to amend");
-        // フッタの**下**に何かあっても読み飛ばす（10 周目の critical）
-        let trailing = ["  Esc to cancel · Tab to amend", "   ", "  ⏵⏵ accept edits on"];
-        assert_eq!(bottom_footer(&trailing).0, "Esc to cancel · Tab to amend");
-    }
-
-    /// 絞り込み欄を持たない画面は、語があっても本物の問いを奪わない（#292。7 周目 warning）。
-    ///
-    /// フッタの照合は行を空白で連結するので、行をまたいで語ができることがある
-    /// （`ヒント: Type` / `to search で…`）。位置だけを見ていたときはこれで奪われた。
-    #[test]
-    fn a_picker_word_split_across_lines_does_not_steal_a_dialog() {
-        let screen = [
-            "Do you want to proceed?",
-            "",
-            "❯ 1. Yes",
-            "  2. No, and tell Claude what to do differently (esc)",
-            "  ヒント: Type",
-            "  to search で絞り込めます",
-            "  Esc to cancel · Tab to amend",
-        ]
-        .join("\n");
-        let p = parse_prompt(&screen);
-        assert_eq!(p.shape, PromptShape::Permission);
-        assert_eq!(p.navigation, Navigation::Arrows);
-    }
-
     /// 拡張子もスラッシュも無い実在ファイル名を候補行として落とさない
     /// （#292。5 周目のセルフレビュー）。
     #[test]
@@ -4080,27 +3522,6 @@ mod tests {
         // パスらしさがあれば通る
         assert!(is_completion_popup_row("+ src/main.ts"));
         assert!(is_completion_popup_row("+ README.md"));
-    }
-
-    /// スクロールバックの語でピッカー誤判定しない（#292。3 周目のセルフレビュー）。
-    ///
-    /// 窓を行数だけで切ると、標準レイアウト（罫線 / 入力欄 / 罫線 / ヒント行）では
-    /// スクロールバックへ届く。**このリポジトリの SKILL.md 自身が `Type to filter` を
-    /// 含む**ので、読んだ直後の画面で普通に踏む。
-    #[test]
-    fn scrollback_above_the_input_box_never_reaches_the_footer_region() {
-        let screen = [
-            "  ⎿  Read SKILL.md (120 lines)",
-            "  ⎿  | `menu` | Type to filter / Type to search |",
-            "  ⎿  Done",
-            "────────────────",
-            "❯",
-            "────────────────",
-            "  ? for shortcuts",
-        ]
-        .join("\n");
-        let p = parse_prompt(&screen);
-        assert_eq!(p.shape, PromptShape::Text);
     }
 
     /// 入力欄のステータス行を「ダイアログのフッタ」と読まない（#292。セルフレビュー 2 周目）。
@@ -4124,26 +3545,6 @@ mod tests {
         let p = parse_prompt(&screen);
         assert_eq!(p.shape, PromptShape::Text);
         assert_eq!(p.pending_input, "@src/ma");
-    }
-
-    /// 狭いタブで折り返したピッカーのフッタも拾う（#292。セルフレビュー 2 周目）。
-    #[test]
-    fn a_wrapped_picker_footer_is_still_a_menu() {
-        let screen = [
-            "  Resume",
-            "  ❯ oretachi issue 292",
-            "    4 seconds",
-            "",
-            "    Ctrl+A to",
-            "    show all",
-            "    projects ·",
-            "    Type to",
-            "    search · Esc",
-            "    to cancel",
-        ]
-        .join("\n");
-        let p = parse_prompt(&screen);
-        assert_eq!(p.shape, PromptShape::Menu);
     }
 
     /// 罫線に挟まれた**ただの端末出力**を入力欄と読まない（#292。セルフレビューで検出）。

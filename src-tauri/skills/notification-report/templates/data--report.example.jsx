@@ -141,7 +141,7 @@
 // 何も送れなくなる）。**表示には使わない**（表示は上の本文と `request` から組む）。
 //
 //   shape        (string)  : "text" / "permission" / "plan" / "askUserQuestion" /
-//                            "yesno" / "numbered" / "menu" / "pager" / "unknown"
+//                            "yesno" / "numbered" / "pager" / "unknown"
 //   navigation   (string)  : "arrows" / "digits" / "none"
 //   header       (string)  : 問いの見出し
 //   context      (string)  : 承認対象。`shape` が "text" 以外のとき画面から取れる範囲
