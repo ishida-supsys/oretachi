@@ -1925,9 +1925,34 @@ fn is_open_dialog_footer(body: &str) -> bool {
 /// Claude Code の画面末尾は「上罫線 / 入力欄の中身 / 下罫線 / ヒント行」なので、
 /// 外さないと**人の打ちかけがフッタに混ざる。** `type to search` と打ちかけている
 /// 端末が `menu` と判定され、カードが黙って塞がれて `pendingInput` まで失われる。
-fn bottom_footer(tail: &[&str]) -> String {
-    // 下端から上へ、空行 / 罫線に当たるまでが「いま描かれている UI の下端ブロック」
-    let mut start = tail.len();
+/// # フッタの**下**に何かあってもよい（10 周目のセルフレビューで critical）
+///
+/// 「最終行から連続する非空ブロック」にすると、フッタの下に 1 行でも何かあった時点で
+/// ブロックが空になり、判定が黙って倒れる。実測では
+/// **空白だけの行 1 本**（`strip_frame` が trim するので空に見えるが `render_logical_screen`
+/// は落とさない）や `⏵⏵ accept edits on` が末尾に付くだけで、開いている `/resume` へ
+/// 矢印 + CR が飛んだ。フッタではありえない行は**行数上限つきで読み飛ばす。**
+///
+/// 戻り値は `(下端ブロック, その最終行)`。最終行を別に返すのは、
+/// 「ダイアログのフッタか」の判定を**ブロック全体に掛けてはいけない**ため
+/// （10 周目の critical 2 件目。ピッカーの直上に残骸のダイアログのフッタがあるだけで
+/// 判定が反転し、空行 1 本の有無で結果が変わった）。
+fn bottom_footer(tail: &[&str]) -> (String, String) {
+    /// フッタの下に出うる行数の上限。
+    const TRAILING_SLACK: usize = 3;
+    // フッタではありえない行（空白 / 罫線 / 入力欄のステータス行）を読み飛ばす
+    let mut end = tail.len();
+    let mut skipped = 0usize;
+    while end > 0 && skipped < TRAILING_SLACK {
+        let (body, _) = strip_frame(tail[end - 1]);
+        if !is_below_footer_noise(&body) {
+            break;
+        }
+        end -= 1;
+        skipped += 1;
+    }
+    // そこから上へ、空行 / 罫線に当たるまでが「いま描かれている UI の下端ブロック」
+    let mut start = end;
     while start > 0 {
         let (body, _) = strip_frame(tail[start - 1]);
         if body.is_empty() || is_rule_line(&body) {
@@ -1936,15 +1961,28 @@ fn bottom_footer(tail: &[&str]) -> String {
         start -= 1;
     }
     // ブロックの中に選択肢行があれば、フッタはその下だけ
-    let from = tail[start..]
+    let from = tail[start..end]
         .iter()
         .rposition(|line| parse_option_line(line).is_some())
         .map_or(start, |offset| start + offset + 1);
-    (from..tail.len())
+    let lines: Vec<String> = (from..end)
         .filter(|&i| !is_input_box_line(tail, i))
         .map(|i| strip_frame(tail[i]).0)
-        .collect::<Vec<_>>()
-        .join(" ")
+        .collect();
+    let last = lines.last().cloned().unwrap_or_default();
+    (lines.join(" "), last)
+}
+
+/// フッタより**下**に出うる行（＝フッタではありえない行）か（#292）。
+///
+/// 空白だけの行・罫線のほか、入力欄のステータス行（`⏵⏵ accept edits on` /
+/// `? for shortcuts`）がピッカーやダイアログの下に残ることがある。
+fn is_below_footer_noise(body: &str) -> bool {
+    body.is_empty()
+        || is_rule_line(body)
+        || body.contains('\u{23f5}')
+        || contains_ci(body, "shift+tab")
+        || contains_ci(body, "for shortcuts")
 }
 /// 番号の無い `❯` リスト（ピッカー）のフッタか（#292）。
 ///
@@ -1958,8 +1996,7 @@ fn bottom_footer(tail: &[&str]) -> String {
 /// 答えられなくする。`Type to search` / `Type to filter` はピッカー固有の
 /// 「絞り込み欄がある」という構造をそのまま指しており、設問には出ない。
 fn is_picker_footer(s: &str) -> bool {
-    (contains_ci(s, "type to search") || contains_ci(s, "type to filter"))
-        && !is_dialog_only_footer(s)
+    contains_ci(s, "type to search") || contains_ci(s, "type to filter")
 }
 
 /// **ダイアログにしか出ない**フッタの語（#292）。
@@ -1976,7 +2013,14 @@ fn is_picker_footer(s: &str) -> bool {
 /// - `Enter to select` + `to navigate` … `AskUserQuestion` 固有。
 ///   `/config` の `Enter/↓ to select · ↑ to tabs` は `to navigate` を含まないので当たらない
 fn is_dialog_only_footer(s: &str) -> bool {
-    contains_ci(s, "tab to amend") || is_ask_user_question_footer(s)
+    contains_ci(s, "tab to amend")
+        || is_ask_user_question_footer(s)
+        // **実機の `AskUserQuestion` には `to navigate` を含まない版がある**
+        // （`Enter to select \u{b7} Tab to switch questions \u{b7} Esc to cancel`。
+        // 同ファイルの実機フィクスチャ `wrapped_label_preview_screen` がこれ）。
+        // 10 周目のセルフレビューで、この画面がピッカー語 1 つで `menu` に
+        // 化けて返答不能になることが実測された
+        || contains_ci(s, "tab to switch questions")
 }
 
 /// ページャ（`less` / `more`）が入力待ちで止まっている画面の最終行か（#292）。
@@ -2546,7 +2590,12 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     // 逆に語が画面のどこかにあるだけで倒すと、`rg "Type to search"` の出力が
     // 残っている**本物のダイアログを奪って返答不能にする。**
     // 下端のフッタだけを見れば、どちらの向きにも転ばない。
-    let is_picker = is_picker_footer(&bottom_footer(tail_lines));
+    // **否定項は下端ブロック全体ではなく「最終行」に掛ける**（10 周目で critical）。
+    // ブロックは空行に当たるまで上へ伸びるので、ピッカーの直上に残骸のダイアログの
+    // フッタがあるだけで判定が反転し、**空行 1 本の有無で結果が変わっていた。**
+    let (footer_block, footer_last_line) = bottom_footer(tail_lines);
+    let is_picker =
+        is_picker_footer(&footer_block) && !is_dialog_only_footer(&footer_last_line);
     // **並びがある画面だけここで倒す。** 並びが無い画面は y/n → ページャの順を
     // 崩さないよう、従来どおり下のブロックで見る（`(y/N)` がピッカーに奪われると
     // y/n に答えられなくなる。5 周目のセルフレビュー）
@@ -3841,6 +3890,81 @@ mod tests {
         assert!(plan_keys(&p, &Answer::Select { option_index: 2 }).is_err());
     }
 
+    /// **フッタの下に何があっても判定が倒れない**（#292。10 周目で critical）。
+    ///
+    /// 「最終行から連続する非空ブロック」にしていたので、空白だけの行 1 本や
+    /// `⏵⏵ accept edits on` が末尾に付くだけでブロックが空になり、
+    /// 開いている `/resume` へ矢印 + CR が飛んでいた。
+    ///
+    /// **残骸側にダイアログのフッタを持たせる軸も振る**（10 周目の指摘）。
+    /// 否定項を下端ブロック全体へ掛けていたときは、これで判定が反転した。
+    #[test]
+    fn the_picker_decision_does_not_depend_on_what_follows_the_footer() {
+        let trailers: [&[&str]; 5] = [
+            &[],
+            &["   "],
+            &[""],
+            &["", "  ⏵⏵ accept edits on (shift+tab to cycle)"],
+            &["────────────────"],
+        ];
+        // 残骸のダイアログ（自前のフッタ付き）が上に残ったまま /resume が開いている
+        for trailer in trailers {
+            for gap in 0..3 {
+                let mut screen: Vec<String> = vec![
+                    "● Bash(git log)".into(),
+                    "  Do you want to proceed?".into(),
+                    "❯ 1. Yes".into(),
+                    "  2. No, and tell Claude what to do differently (esc)".into(),
+                    "  Esc to cancel · Tab to amend".into(),
+                ];
+                for _ in 0..gap {
+                    screen.push(String::new());
+                }
+                screen.push("  ❯ oretachi issue 292".into());
+                screen.push(
+                    "  Ctrl+A to show all projects · Type to search · Esc to cancel".into(),
+                );
+                screen.extend(trailer.iter().map(|s| (*s).to_string()));
+                let p = parse_prompt(&screen.join("\n"));
+                assert_eq!(p.shape, PromptShape::Menu, "trailer={:?} gap={}", trailer, gap);
+                assert!(
+                    plan_keys(&p, &Answer::Select { option_index: 2 }).is_err(),
+                    "trailer={:?} gap={}",
+                    trailer,
+                    gap
+                );
+            }
+        }
+        // 逆向き: 本物のダイアログは、下に何が付いても奪われない
+        for trailer in trailers {
+            let mut screen: Vec<String> = vec![
+                "Bash command".into(),
+                "rg \"Type to search\" src".into(),
+                "".into(),
+                "Do you want to proceed?".into(),
+                "".into(),
+                "❯ 1. Yes".into(),
+                "  2. No, and tell Claude what to do differently (esc)".into(),
+                "".into(),
+                "  Esc to cancel · Tab to amend".into(),
+            ];
+            screen.extend(trailer.iter().map(|s| (*s).to_string()));
+            let p = parse_prompt(&screen.join("\n"));
+            assert_eq!(p.shape, PromptShape::Permission, "trailer={:?}", trailer);
+        }
+    }
+
+    /// `to navigate` を含まない実機の `AskUserQuestion` フッタでも奪われない
+    /// （#292。10 周目で warning）。
+    #[test]
+    fn an_ask_user_question_footer_without_navigate_is_still_a_dialog() {
+        assert!(is_dialog_only_footer("Enter to select · Tab to switch questions · Esc to cancel"));
+        // 実機フィクスチャのフッタにピッカーの語が 1 つ混ざっても化けない
+        let mut screen = wrapped_label_preview_screen();
+        screen = screen.replace("通知フック未設定リポジトリ", "Type to filter 未設定リポジトリ");
+        assert_eq!(parse_prompt(&screen).shape, PromptShape::AskUserQuestion);
+    }
+
     /// 絞り込み欄が見えない `/resume` でも乗っ取られない（#292。9 周目で critical）。
     ///
     /// `/resume` のフッタは `Esc to cancel` を含むので、それを「ダイアログである」の
@@ -3904,11 +4028,15 @@ mod tests {
         assert!(is_dialog_only_footer("Enter to select · Tab/Arrow keys to navigate · Esc to cancel"));
 
         // 下端ブロック: 選択肢行より下だけを採る
-        let dialog = ["Do you want to proceed?", "❯ 1. Yes", "  2. No", "  Esc to cancel · Tab to amend"];
-        assert_eq!(bottom_footer(&dialog), "Esc to cancel · Tab to amend");
+        let dialog =
+            ["Do you want to proceed?", "❯ 1. Yes", "  2. No", "  Esc to cancel · Tab to amend"];
+        assert_eq!(bottom_footer(&dialog).0, "Esc to cancel · Tab to amend");
         // 空行で切れる
         let spaced = ["  Type to search が本文にある", "", "  Esc to cancel · Tab to amend"];
-        assert_eq!(bottom_footer(&spaced), "Esc to cancel · Tab to amend");
+        assert_eq!(bottom_footer(&spaced).0, "Esc to cancel · Tab to amend");
+        // フッタの**下**に何かあっても読み飛ばす（10 周目の critical）
+        let trailing = ["  Esc to cancel · Tab to amend", "   ", "  ⏵⏵ accept edits on"];
+        assert_eq!(bottom_footer(&trailing).0, "Esc to cancel · Tab to amend");
     }
 
     /// 絞り込み欄を持たない画面は、語があっても本物の問いを奪わない（#292。7 周目 warning）。
