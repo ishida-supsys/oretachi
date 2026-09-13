@@ -6,6 +6,30 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.31.4] - 2026-09-13
+
+### Added
+- レポートカードからアーティファクトウィンドウを開けるようにした (#291)
+- 1 レポートに載せるカードの上限を 20 枚にした (#301)
+
+### Fixed
+- 報告カードの発信元ワークツリーにもトレイ通知クリアを撃つようにした (#294)
+- ピッカー画面を絞り込み欄 (⌕) のフッタで判定するようにし、選択肢の取りこぼしと誤送信を防いだ (#292)
+- 報告カードだけのレポートを連続生成せず蓄積するようにした (#301)
+- 通知フック未設定のリポジトリでも approval を握りつぶさないようにした (#286)
+- 入力待ちの自動候補をユーザー入力と誤認しないようにした (#289)
+- アーティファクト本文の URL リンクの直接クリックを不発にし、ポップアップから開くようにした (#297)
+- notification-report で `!` 始まりの候補をコマンドとして実行するようにした (#288)
+- 回答済みの通知を未回答扱いせず ack するようにした (#287)
+
+### Changed
+- prompt-parser のピッカー判定を「下端のフッタ」1 本に集約した (#292)
+- teamwork-child の description セット義務を取りこぼしにくくした (#293)
+- automerge ラベルの AI による付与を条件付きで許可した (#300)
+
+### Documentation
+- notification-report で delivery=passive の購読を検出・回避する手順を追記した (#284)
+
 ## [0.31.3] - 2026-09-12
 
 ### Added
@@ -779,7 +803,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.31.3...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.31.4...HEAD
+[0.31.4]: https://github.com/ishida-supsys/oretachi/compare/0.31.3...0.31.4
 [0.31.3]: https://github.com/ishida-supsys/oretachi/compare/0.31.2...0.31.3
 [0.31.2]: https://github.com/ishida-supsys/oretachi/compare/0.31.1...0.31.2
 [0.31.1]: https://github.com/ishida-supsys/oretachi/compare/0.31.0...0.31.1
