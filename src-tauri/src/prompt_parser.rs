@@ -45,6 +45,30 @@
 //! 選択肢に `preview` が付くと**右へプレビュー枠が並ぶ横並びレイアウト**になり、
 //! ラベルの右に枠線が食い込む（実測: `"Grid    ┌────────┐"`）。
 //! プレビュー枠の桁を見つけてラベルを切る（[`find_preview_column`]）。
+//!
+//! **ラベルが折り返した続き行は、ラベルの桁より浅く字下げされる**（実測 #292:
+//! ラベルが 5 桁目・続き行が 3 桁目）。続き行の判定はラベルの桁ではなく
+//! **番号の桁**を基準にする（[`scan_option_runs`]）。ここを間違えると続き行で
+//! 並びが切れ、**その下にある 2 番目以降の選択肢を丸ごと落とす。**
+//!
+//! # Claude Code のダイアログ以外の入力待ち画面（実測。#292）
+//!
+//! 「答えられないが入力待ち」の画面は `unknown` に一括りにせず、**名指しできるものは
+//! 名指しする**。カードが「何をすればよいか」を書けるかどうかがここで決まる。
+//!
+//! - **スクロールするリスト**（`/model`）。画面に入り切らないと `❯` と同じ桁に `↓` を
+//!   描き、末尾に `… +3 models` を出す。インジケータを剥がして並びは読むが、
+//!   **`truncated` を必ず立てる** —— Claude Code 自身が全項目を描いていない
+//!   （[`strip_scroll_indicator`] / [`is_more_items_line`]）
+//! - **番号の無い `❯` リスト**（`/resume` / `/config`）は `unknown` のまま。
+//!   ただし**自由入力と誤認させない**（[`is_picker_footer`]）。誤認すると
+//!   ピッカーのハイライト行が入力欄に見え、**設定の絞り込み欄へ本文 + CR を撃ち込む。**
+//!   これ自体を `menu` として名指しする案は #292 で 11 周のセルフレビューを重ねても
+//!   収束しなかったので、仕組みから設計し直す別 issue へ回した
+//! - **ページャ**（`less` / `git log`）→ [`PromptShape::Pager`]（[`is_pager_line`]）
+//! - **入力欄の下に出る補完ポップアップ**（`/` コマンド / `@` ファイル）。入力欄は
+//!   生きているので `text` のまま読む。`unknown` へ倒すと `pending_input` が読めず、
+//!   **打ちかけが残っていることをカードで警告できない**（[`find_input_box_below_popup`]）
 
 use serde::Serialize;
 use sha2::{Digest, Sha256};
@@ -61,6 +85,12 @@ use sha2::{Digest, Sha256};
 pub const REPLAY_BYTES: usize = 65_536;
 
 /// カーソル移動やフッタを探すときに画面末尾から見る行数。
+///
+/// **補完のポップアップ（#292）はこの窓をほぼ使い切る。** 実測: 候補一覧は端末に
+/// 余白があっても 7〜8 行で頭打ちになるので、入力欄の箱 3 行 + 候補 8 行 = 11 行で
+/// **余りは 1 行しかない**。候補の下に行が増えると
+/// [`find_input_box_below_popup`] が箱へ届かず `unknown` へ落ちる（安全側だが、
+/// 打ちかけの警告は出せなくなる）。減らすときはここを思い出すこと。
 const TAIL_WINDOW: usize = 12;
 
 /// 選択肢の上にある「何を承認するのか」を拾う最大行数。
@@ -100,6 +130,12 @@ pub enum PromptShape {
     /// Claude Code 以外の TUI の番号選択リスト（`1) foo`）
     #[serde(rename = "numbered")]
     Numbered,
+    /// ページャ（`less` / `git log`）が開いている。#292
+    ///
+    /// **キーを送ってはいけない。** 入力待ちではあるが「問い」ではないので、
+    /// `unknown` として画面末尾を出すと git log のダンプがカードに載る
+    #[serde(rename = "pager")]
+    Pager,
     /// 分類できなかった。**キーを送ってはいけない**
     #[serde(rename = "unknown")]
     Unknown,
@@ -114,6 +150,7 @@ impl PromptShape {
             PromptShape::AskUserQuestion => "askUserQuestion",
             PromptShape::YesNo => "yesno",
             PromptShape::Numbered => "numbered",
+            PromptShape::Pager => "pager",
             PromptShape::Unknown => "unknown",
         }
     }
@@ -746,6 +783,11 @@ pub fn plan_keys(parsed: &ParsedPrompt, answer: &Answer) -> Result<Vec<Keystroke
             s.as_str()
         ))),
 
+        // ページャは「何の画面か」が分かっている代わりに、**送れるキーが無い**（#292）
+        (PromptShape::Pager, _) => Err(PlanError(
+            "画面はページャ (pager。less / git log など) が開いた状態です。問いではないので答える対象がなく、キーを送るとページャの操作として食われるため、何も送りません。ターミナルを開いて閉じてもらってください".to_string(),
+        )),
+
         (PromptShape::Unknown, _) => Err(PlanError(
             "画面の形状を分類できませんでした (unknown)。推測でキーを送ると別のダイアログの既定選択を確定しうるため、何も送りません。tail を人に見せてターミナルで直接操作してもらってください".to_string(),
         )),
@@ -1364,15 +1406,17 @@ fn cut_at_column(line: &str, col: usize) -> String {
 
 /// 選択肢行（`❯ 1. Yes` / `  2) foo`）を解析する。
 ///
-/// 返すのは `(番号, ラベル, ❯ が付いているか, ラベルが始まる桁, 番号が始まる桁)`。
-/// 最後の「番号が始まる桁」は `❯` が描かれなかったときのカーソル推定に使う
-/// （[`find_last_option_run`] 参照。#264）。
-fn parse_option_line(line: &str) -> Option<(u32, String, bool, usize, usize)> {
+fn parse_option_line(line: &str) -> Option<OptionLine> {
     let (body, frame_offset) = strip_frame(line);
     if body.is_empty() {
         return None;
     }
     let (after_marker, has_cursor) = strip_cursor_marker(&body);
+    let (after_marker, scroll_hint) = match has_cursor {
+        // `❯` と `↓` は同じ桁に描かれる（排他）。カーソルが居る行に `↓` は付かない
+        true => (after_marker, false),
+        false => strip_scroll_indicator(after_marker),
+    };
     let consumed_by_marker = body.chars().count() - after_marker.chars().count();
 
     let digits: String = after_marker.chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -1394,13 +1438,79 @@ fn parse_option_line(line: &str) -> Option<(u32, String, bool, usize, usize)> {
     if label.is_empty() {
         return None;
     }
-    let label_col = frame_offset
-        + consumed_by_marker
-        + digits.len()
-        + 1
-        + (after_sep.chars().count() - after_sep.trim_start().chars().count());
     let index = digits.parse::<u32>().ok()?;
-    Some((index, label, has_cursor, label_col, frame_offset + consumed_by_marker))
+    Some(OptionLine {
+        index,
+        label,
+        has_cursor,
+        scroll_hint,
+        num_col: frame_offset + consumed_by_marker,
+    })
+}
+
+/// 選択肢行を解析した結果。
+struct OptionLine {
+    index: u32,
+    label: String,
+    /// `❯` が描かれていた（＝いまカーソルが当たっている）
+    has_cursor: bool,
+    /// 行頭にスクロールインジケータ（`↑` / `↓`）が描かれていた（#292）
+    scroll_hint: bool,
+    /// 番号が始まる表示桁。`❯` が描かれなかったときのカーソル推定
+    /// （[`find_last_option_run`] 参照。#264）と、折り返し続き行の判定に使う
+    num_col: usize,
+}
+
+/// 行頭のスクロールインジケータ（`↑` / `↓`）を剥がした残りを返す。剥がしたかも返す（#292）。
+///
+/// # なぜ要るか
+///
+/// Claude Code のリストは画面に入り切らないと、`❯` と同じ桁に「この先にも項目がある」
+/// という矢印を描く（実測 `/model`）:
+///
+/// ```text
+/// ❯ 1. Default (recommended) ✔  Opus 5 with 1M context …
+/// ↓ 2. Opus (1M context)        Opus 5 with 1M context …
+///    … +3 models
+/// ```
+///
+/// 剥がさないと `2.` の行が選択肢として解析できず、**並びが 1 件で終わる**。
+/// `truncated` が立つので危険は無いが、人は画面に出ているぶんすら読めない。
+///
+/// **カーソルマーカーとは別に扱う。** `↓` は「下にもっとある」であって
+/// 「この行が選ばれている」ではない。混ぜると矢印の移動量の起点を取り違える。
+fn strip_scroll_indicator(s: &str) -> (&str, bool) {
+    for marker in ['↑', '↓'] {
+        if let Some(rest) = s.strip_prefix(marker) {
+            return (rest.trim_start(), true);
+        }
+    }
+    (s, false)
+}
+
+/// 「この先にもっと項目がある」ことだけを示す行か（#292）。
+///
+/// 実測（`/model`）: `… +3 models` / （`/config`）: `↓ 46 more below`。
+/// 選択肢の並びの途中に出るので、**続き行として最後のラベルへ吸い込まない**。
+/// 見つけたら並びはそこで終わりで、かつ**画面に全部は出ていない**。
+/// **`…` だけでは足りない（セルフレビューで検出）。** 折り返した選択肢ラベルの
+/// 続き行が `…` で始まることはありうるので、`…` の後ろに `+件数` を要求する。
+/// 当たると run がそこで切れて `truncated` が立つため、外すと
+/// 「画面に選択肢が 3 つあるのに 1 つ」という #292 の事象そのものが戻る。
+/// 逆に**狭めすぎても静かに壊れる**（2 周目のセルフレビュー）: 拾えなかった行は
+/// 続き行として最後のラベルへ吸い込まれ、`Sonnet … 3 more` のようなラベルが
+/// `truncated` も立たないまま人に出る。実機で観測できているのは `… +3 models` と
+/// `↓ 46 more below` の 2 形式だけなので、`+件数` と `more` の**どちらか**を認める。
+fn is_more_items_line(body: &str) -> bool {
+    let t = body.trim_start_matches(['↑', '↓', ' ']).trim();
+    if let Some(rest) = t.strip_prefix('…').or_else(|| t.strip_prefix("...")) {
+        let rest = rest.trim_start();
+        let counted = rest
+            .strip_prefix('+')
+            .is_some_and(|c| c.starts_with(|c: char| c.is_ascii_digit()));
+        return counted || contains_ci(rest, "more");
+    }
+    contains_ci(t, "more below") || contains_ci(t, "more above")
 }
 
 /// 番号の連番として成立している選択肢の並び。
@@ -1419,6 +1529,20 @@ struct OptionRun {
     /// run の外（`find_unnumbered_escape`）でも同じ桁を使うために持ち回る。
     /// 画面全体から探し直すと別のダイアログの残骸の桁を拾う（#264）
     preview_col: Option<usize>,
+    /// **選択肢を読み切れていない疑いがある**（#292）。立てば `truncated` になる。
+    ///
+    /// 立つのは 3 つ:
+    ///
+    /// - 行頭のスクロールインジケータ（`↓ 2. …`）
+    /// - 「この先にもっとある」行（`… +3 models`）
+    /// - **フッタらしい行で並びを打ち切ったとき**（下の [`looks_like_dialog_footer`] 参照）
+    ///
+    /// 3 つ目が要点で、ここを立て忘れると**打ち切った先に残っていた選択肢が
+    /// 黙って消えたまま `truncated` が false になり、選択が許可される**
+    /// （セルフレビュー 2 周目で検出）。許可ダイアログなら
+    /// `3. No, and tell Claude what to do differently` が消え、
+    /// **承認の選択肢だけが載ったカード**を人に見せることになる
+    incomplete: bool,
 }
 
 /// 画面の**最後の**選択肢の並びを取り出す。
@@ -1472,50 +1596,87 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
             i += 1;
             continue;
         }
-        let Some((index, label, has_cursor, label_col, num_col)) = parse_option_line(&cut(lines[i]))
-        else {
+        let Some(first) = parse_option_line(&cut(lines[i])) else {
             i += 1;
             continue;
         };
         // 連番は 1 から始まるものだけを選択肢の並びとみなす。`2.` から始まる断片を
         // 拾うと、選択肢の一部だけを見て移動量を誤る
-        if index != 1 {
+        if first.index != 1 {
             i += 1;
             continue;
         }
         let start = i;
-        let mut options = vec![PromptOption { index, label }];
-        let mut num_cols = vec![num_col];
-        let mut cursor_index = if has_cursor { Some(index) } else { None };
-        let mut has_marker = has_cursor;
+        let mut num_cols = vec![first.num_col];
+        let mut cursor_index = if first.has_cursor { Some(first.index) } else { None };
+        let mut has_marker = first.has_cursor;
+        let mut incomplete = first.scroll_hint;
         let mut expected = 2u32;
-        let mut current_label_col = label_col;
+        let mut current_num_col = first.num_col;
+        let mut options = vec![PromptOption { index: first.index, label: first.label }];
         let mut end = i;
         let mut j = i + 1;
         // 罫線をまたいで連番が続くことがある（実測: `3. Type something.` の下に
         // 罫線が引かれ、その下に `4. Chat about this` が来る）。またげるのは 1 回だけ
         let mut skipped_rule = false;
         while j < lines.len() {
-            if let Some((idx, label, has_cursor, col, ncol)) = parse_option_line(&cut(lines[j])) {
-                if idx != expected {
+            if let Some(next) = parse_option_line(&cut(lines[j])) {
+                if next.index != expected {
+                    // 番号が飛んでいる（`1. / 2. / 4.`）＝ 間の選択肢を読めていない。
+                    // **`index == 1` は新しい並びの始まり**なので区別する（#292）
+                    if next.index > expected {
+                        incomplete = true;
+                    }
                     break;
                 }
-                if has_cursor {
-                    cursor_index = Some(idx);
+                if next.has_cursor {
+                    cursor_index = Some(next.index);
                     has_marker = true;
                 }
-                options.push(PromptOption { index: idx, label });
-                num_cols.push(ncol);
+                incomplete |= next.scroll_hint;
+                num_cols.push(next.num_col);
+                current_num_col = next.num_col;
+                options.push(PromptOption { index: next.index, label: next.label });
                 expected += 1;
-                current_label_col = col;
                 end = j;
                 j += 1;
                 skipped_rule = false;
                 continue;
             }
             let (body, offset) = strip_frame(&cut(lines[j]));
-            // 折り返された続き行: ラベルの桁位置以上に字下げされた非空行
-            if !body.is_empty() && !is_rule_line(&body) && offset >= current_label_col {
+            // 「この先にもっとある」行（`… +3 models`）。**続き行として吸い込まない**
+            // （吸い込むと最後のラベルが `Opus (1M context) … … +3 models` になる）。
+            // 並びはここで終わりで、画面に全項目は出ていない（#292）
+            if is_more_items_line(&body) {
+                incomplete = true;
+                break;
+            }
+            // 折り返された続き行: 選択肢の**番号の桁より深く**字下げされた非空行。
+            //
+            // **ラベルの桁を要求してはいけない（#292）。** 実測（`preview` 付きの
+            // `AskUserQuestion`、ラベルが 5 桁目・続き行が 3 桁目）では、折り返された
+            // 続き行はラベルより浅く字下げされる。ラベルの桁を要求すると続き行で
+            // `break` し、**その下にある 2 番目以降の選択肢を丸ごと落とす**
+            // （画面に 3 つある選択肢がカードでは 1 つになり、`truncated` が立って
+            // 「ターミナルで直接選べ」に落ちる）。
+            //
+            // 番号の桁より深いことだけを求める。新しい選択肢は番号の桁から始まるので
+            // 巻き込まず、ダイアログの外の散文（左寄せ）も落ちる。
+            let indented_past_number = offset > current_num_col;
+            let is_continuation = !body.is_empty() && !is_rule_line(&body) && indented_past_number;
+            // **フッタらしい続き行で打ち切るときは「読み切れていない」印を残す（#292。
+            // セルフレビュー 2 周目で検出）。** ここは「深く字下げされたフッタを
+            // ラベルへ吸い込まない」ための保険だが、続き行が偶然フッタの語
+            // （`shift+tab` など）を含んでいるだけでも当たる。印を残さずに `break` すると
+            // **その下に残っていた選択肢が黙って消えたまま `truncated` が false になり、
+            // 選択が許可される**。許可ダイアログなら
+            // `3. No, and tell Claude what to do differently` が消え、
+            // 承認の選択肢だけが載ったカードを人に見せることになる。
+            if is_continuation && looks_like_dialog_footer(&body) {
+                incomplete = true;
+                break;
+            }
+            if is_continuation {
                 if let Some(last) = options.last_mut() {
                     last.label.push(' ');
                     last.label.push_str(&body);
@@ -1532,6 +1693,33 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
                 continue;
             }
             break;
+        }
+        // ── 打ち切った先に次の番号が残っていないか（#292。3 周目のセルフレビュー）──
+        //
+        // またげる区切りは 1 回だけ（#264）なので、**区切りが 2 つ続くとそこで
+        // run が終わる**。実測:
+        //
+        // ```text
+        //   3. Type something.
+        // ────────────────
+        //                      ← ここで skip を使い切っている
+        //   4. Chat about this
+        // ```
+        //
+        // 印を残さずに終わると `4. Chat about this`（＝自由入力への逃げ道）が
+        // 消えたまま `truncated` が false になり、選択が許可される。
+        //
+        // **「区切りを使い切ったら印」では広すぎる。** プレビュー枠の閉じ罫線 +
+        // 空行という**正常な終わり方**まで拾って、読めているダイアログを
+        // 選べなくしてしまう（既存のフィクスチャで確認）。そこで
+        // 「**次の番号が実際に下にあるか**」だけを見る
+        const DROPPED_OPTION_LOOKAHEAD: usize = 6;
+        if !incomplete {
+            let from = end + 1;
+            let to = (from + DROPPED_OPTION_LOOKAHEAD).min(lines.len());
+            incomplete = lines[from.min(lines.len())..to]
+                .iter()
+                .any(|l| parse_option_line(&cut(l)).is_some_and(|o| o.index == expected));
         }
         // `❯` が 1 つも描かれていないとき、選択中の行だけマーカーぶん左へ寄っている
         // ことを手がかりにする（#264）。複数設問でタブが自動で進んだ直後、Claude Code は
@@ -1565,7 +1753,15 @@ fn scan_option_runs(lines: &[&str], preview_col: Option<usize>) -> Option<Option
                 }
             }
         }
-        runs.push(OptionRun { start, end, options, cursor_index, has_marker, preview_col });
+        runs.push(OptionRun {
+            start,
+            end,
+            options,
+            cursor_index,
+            has_marker,
+            preview_col,
+            incomplete,
+        });
         i = end + 1;
     }
     runs.pop()
@@ -1637,9 +1833,76 @@ fn has_dialog_footer(lines: &[&str]) -> bool {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ");
-    is_ask_user_question_footer(&joined)
-        || contains_ci(&joined, "tab to amend")
-        || contains_ci(&joined, "esc to cancel")
+    is_open_dialog_footer(&joined)
+}
+
+/// その 1 行が Claude Code のダイアログのフッタか（#292）。
+///
+/// 折り返し続き行の判定でだけ使う安全弁。続き行の閾値をラベルの桁から番号の桁へ
+/// 緩めたぶん、**深めに字下げされたフッタを最後の選択肢のラベルへ吸い込む**余地ができた。
+/// 吸い込むと `below_text` からフッタが消えて「Claude Code のダイアログである」という
+/// 印を 1 つ失う（実測のフッタは 0〜2 桁目なので現に起きてはいないが、
+/// 失うと形状の推定が素の番号リストへ落ちる）。
+///
+/// 行単位なので折り返したフッタは拾えない。それは [`has_dialog_footer`] の仕事で、
+/// ここは「続き行として吸い込まない」ための保険にすぎない。
+/// **入力欄のステータス行（`⏵⏵ accept edits on` / `shift+tab to cycle`）もここに含める。**
+/// ダイアログのフッタではないが、選択肢の下に出るので続き行として吸い込みたくない。
+///
+/// **この関数を「ダイアログが開いているか」の判定に使ってはいけない**
+/// （セルフレビュー 2 周目で検出）。ステータス行は**入力欄の下にも必ず出る**ので、
+/// 補完ポップアップの検出（[`find_input_box_below_popup`]）でこれを見ると、
+/// auto-accept / plan モードの端末では補完ポップアップがまるごと検出できなくなる。
+/// そちらは [`is_open_dialog_footer`] を使う。
+fn looks_like_dialog_footer(body: &str) -> bool {
+    is_open_dialog_footer(body)
+        // `/config` のフッタは `Esc to clear` で終わり、`is_open_dialog_footer` の
+        // どの語にも当たらない。足さないと最後の選択肢のラベルへ吸い込まれる（#292）
+        || is_picker_footer(body)
+        || contains_ci(body, "shift+tab")
+        || body.contains('⏵')
+}
+
+/// **ダイアログが開いている**ことを示すフッタか（#292）。
+///
+/// [`looks_like_dialog_footer`] と違い、入力欄のステータス行を含まない。
+/// 「ダイアログが開いているなら自由入力ではない」という安全判定に使うので、
+/// **入力欄と共存しうる行を混ぜてはいけない。**
+///
+/// **この判定はここ 1 か所に集約する（3 周目のセルフレビューの指摘）。**
+/// [`has_dialog_footer`] と [`looks_like_free_input`] にも同じ 3 語が散っていたが、
+/// 語を 1 つ足したときに片方だけ取り残されると、**同じ画面が呼ぶ場所によって
+/// 「ダイアログが開いている / いない」に分かれる。**
+fn is_open_dialog_footer(body: &str) -> bool {
+    is_ask_user_question_footer(body)
+        || contains_ci(body, "tab to amend")
+        || contains_ci(body, "esc to cancel")
+}
+
+/// 番号の無い `❯` リスト（ピッカー）のフッタか（#292）。
+///
+/// 実測:
+///
+/// - `/resume`: `Ctrl+A to show all projects · … · Type to search · Esc to cancel`
+/// - `/config`: `Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear`
+///
+/// **文言を決め打ちにしてある。** `to select` だけで拾うと `AskUserQuestion` の
+/// フッタ（`Enter to select · … to navigate`）と衝突し、本物の設問をピッカー扱いにして
+/// 答えられなくする。`Type to search` / `Type to filter` はピッカー固有の
+/// 「絞り込み欄がある」という構造をそのまま指しており、設問には出ない。
+fn is_picker_footer(s: &str) -> bool {
+    contains_ci(s, "type to search") || contains_ci(s, "type to filter")
+}
+
+/// ページャ（`less` / `more`）が入力待ちで止まっている画面の最終行か（#292）。
+///
+/// 実測: `git -c core.pager=less log` の画面末尾は `:` 1 文字だけ。
+/// **決め打ちで narrow に見る。** 広げると普通のコマンド出力の行を拾って
+/// 「ページャが開いている」と誤って言うことになる（キーは送らないので害は
+/// 「カードの見出しが嘘になる」ことだが、嘘は嘘）。
+fn is_pager_line(s: &str) -> bool {
+    let t = s.trim();
+    t == ":" || t == "(END)" || contains_ci(t, "--more--")
 }
 
 /// `AskUserQuestion` のフッタ（実測: `Enter to select · Tab/Arrow keys to navigate · Esc to cancel`）。
@@ -1810,10 +2073,21 @@ fn looks_like_free_input(tail: &[&str]) -> Option<FreeInput> {
         // Claude Code のダイアログのフッタが**直近の意味のある行**なら、ダイアログが
         // 開いている。`escape_hatch` のように末尾 12 行を広く見ると、スクロールバックに
         // 残った古いダイアログの残骸でも立って自由入力を塞いでしまうので、ここだけに絞る
-        if is_ask_user_question_footer(&body)
-            || contains_ci(&body, "tab to amend")
-            || contains_ci(&body, "esc to cancel")
-        {
+        if is_open_dialog_footer(&body) {
+            return None;
+        }
+        // **ピッカー（`/resume` / `/config`）も自由入力ではない（#292）。**
+        //
+        // `/config` のフッタは `Esc to clear` で終わるので上のガードに当たらない。
+        // 素通りすると、ピッカーのハイライト行（`❯ Auto-compact   true`）が
+        // 下の「箱として同定できていない `❯`」の縮退経路に当たって `text` になり、
+        // **レポートからの返答本文 + CR が設定の絞り込み欄へ撃ち込まれる**
+        // （11 周目のセルフレビューで実測。`plan_keys` が `Ok` を返すので下流に安全弁は無い）。
+        //
+        // ピッカーを `menu` として名指しする案は収束しなかったので外したが、
+        // **この 1 本のガードだけは残す** —— 名指しできなくても、
+        // 誤って撃つのだけは止まる（`unknown` に倒れてキーを一切送らない）。
+        if is_picker_footer(&body) {
             return None;
         }
         // Claude Code の入力欄らしき行。ただし**箱として同定できていない**（上下を罫線で
@@ -1845,10 +2119,139 @@ fn looks_like_free_input(tail: &[&str]) -> Option<FreeInput> {
         }
         examined += 1;
         if examined > FREE_INPUT_FOOTER_TOLERANCE {
-            return None;
+            // 入力欄の**下**に補完のポップアップが出ている可能性（#292）。
+            // 行数の許容では届かないので、箱そのものを探し直す
+            return find_input_box_below_popup(tail);
         }
     }
     None
+}
+
+/// 補完のポップアップに隠れた入力欄を探す（#292）。
+///
+/// # なぜ要るか
+///
+/// `/` コマンド補完と `@` ファイル補完は**入力欄の下**に一覧を描く（実測）:
+///
+/// ```text
+/// ────────────────────────────
+/// ❯ @src/ma
+/// ────────────────────────────
+///   + src/main.ts
+///   + src/monaco-workers.ts
+///   …（8 行前後）
+/// ```
+///
+/// [`FREE_INPUT_FOOTER_TOLERANCE`]（4 行）では入力欄に届かず `unknown` へ倒れる。
+/// `unknown` はキーを送らないので安全側ではあるが、**`pending_input` が読めなくなる**のが痛い。
+/// 打ちかけのテキスト（`@src/ma`）が残っていることをカードで警告できず、
+/// そこへレポートから本文を送ると**打ちかけの後ろへ連結されて送信される**。
+///
+/// # 誤爆を塞ぐ 2 つの条件
+///
+/// 1. **いちばん下の箱を採る。** スクロールバックに残った古い入力欄を拾わない
+/// 2. **箱の真下が補完の候補行であること。** ここを「選択肢行とフッタが無いこと」
+///    だけに緩めると、罫線に挟まれただけの**ただの端末出力**を入力欄と読む
+///    （セルフレビューで実測）:
+///
+///    ```text
+///    Running build...
+///    --------------------------------
+///    > oretachi@0.31.3 build
+///    --------------------------------
+///    src/a.ts compiled
+///    ```
+///
+///    これが `text` になると、`plan_keys` の `(Text, Answer::Text)` を通って
+///    **入力待ちですらない端末へ本文 + CR が飛ぶ。** 候補行を要求すれば、
+///    当てはまらない画面は従来どおり `unknown`（＝何も送らない）に戻るだけで済む。
+///
+/// 3. **箱より下に選択肢行もダイアログのフッタも無いこと。** どちらかがあれば
+///    ダイアログが開いている。そこを自由入力と誤認して本文 + CR を撃つと
+///    `❯` の指す選択肢を確定させる（#215 が防ごうとした事象そのもの）
+fn find_input_box_below_popup(tail: &[&str]) -> Option<FreeInput> {
+    for i in (0..tail.len()).rev() {
+        let Some((up, down)) = find_input_box(tail, i) else {
+            continue;
+        };
+        let mut first_below = true;
+        for line in tail.iter().skip(down + 1) {
+            let (body, _) = strip_frame(line);
+            if body.is_empty() || is_rule_line(&body) {
+                continue;
+            }
+            // **`looks_like_dialog_footer` を使わない（#292。セルフレビュー 2 周目）。**
+            // `⏵⏵ accept edits on` は入力欄のステータス行で、補完ポップアップの
+            // 下にも必ず出る。混ぜると auto-accept / plan モードの端末で
+            // 補完ポップアップがまるごと検出できなくなる
+            if parse_option_line(line).is_some() || is_open_dialog_footer(&body) {
+                return None;
+            }
+            // 箱の**真下**が候補行でなければ、これは補完のポップアップではない
+            if first_below {
+                if !is_completion_popup_row(&body) {
+                    return None;
+                }
+                first_below = false;
+            }
+        }
+        // 候補行が 1 行も無い（箱の下が空）なら、そもそもポップアップは出ていない。
+        // 通常の入力欄は末尾寄りにあるので `looks_like_free_input` 側で拾えている
+        if first_below {
+            return None;
+        }
+        return Some(read_input_box(tail, up, down));
+    }
+    None
+}
+
+/// 補完のポップアップの候補行か（#292）。
+///
+/// 実測: `/` コマンド補完は `  /copy   Copy Claude's last response …`、
+/// `@` ファイル補完は `  + src/main.ts`。**記号を決め打ちにしてある** ——
+/// 一般化すると「罫線に挟まれた行の下にある任意の出力」が候補に化け、
+/// [`find_input_box_below_popup`] のガードが意味を失う。
+/// 当てはまらなければ `unknown` へ戻るだけなので、外し方は安全側。
+/// **記号だけでは足りない（2 周目のセルフレビューで検出）。** 記号だけを見ると
+/// `+ added line`（git diff）や `/usr/bin/env: ...`（コマンドの出力）が候補行に化け、
+/// 罫線に挟まれたコマンド行の下にそれらが来る画面が `text` のまま通ってしまう。
+/// 形まで見る:
+///
+/// - `/copy` / `/code-review` / `/plugin:skill` … **最初のトークンに `/` は 1 つだけ**。
+///   `/usr/bin/env:` は 2 つ目の `/` で落ちる
+/// - `+ src/main.ts` / `@src/ma` … 記号の後ろは**空白を含まない 1 トークン**。
+///   `+ added line` は空白で落ちる
+fn is_completion_popup_row(body: &str) -> bool {
+    let mut chars = body.chars();
+    match chars.next() {
+        Some('/') => {
+            let name = body.split_whitespace().next().unwrap_or_default();
+            let name = &name[1..];
+            !name.is_empty() && !name.contains('/')
+        }
+        // `@src/ma`: 記号の直後からパスが続く（空白を挟まない）
+        Some('@') => {
+            let rest: String = chars.collect();
+            !rest.starts_with(' ') && rest.split_whitespace().count() == 1
+        }
+        // `+ src/main.ts`: 記号の後ろに空白を 1 つ挟んでパスが来る。
+        //
+        // **1 トークンであることだけでは足りない（4 周目のセルフレビュー）。**
+        // git diff のハンク行 `+ }` / `+ });` も 1 トークンなので通ってしまい、
+        // 罫線に挟まれた `>` 始まりのブロックの下に diff が来る画面が `text` に化ける。
+        //
+        // **かといって「`/` か `.` を含む」は狭すぎる（5 周目のセルフレビュー）。**
+        // `+ Dockerfile` / `+ Makefile` / `+ LICENSE` が落ち、候補の先頭が
+        // それらのポップアップで `pending_input` の警告が効かなくなる。
+        // 弾きたいのは記号だけのハンク行なので、**英数字を 1 文字以上**求める
+        Some('+') => {
+            let rest: String = chars.collect();
+            rest.starts_with(' ')
+                && rest.split_whitespace().count() == 1
+                && rest.chars().any(|c| c.is_alphanumeric())
+        }
+        _ => false,
+    }
 }
 
 /// 罫線 `up` / `down` に挟まれた入力欄の中身を読む（#289）。
@@ -1995,6 +2398,28 @@ fn text_prompt(
     })
 }
 
+/// 「入力待ちではあるが、こちらからは何も送れない」画面（#292）。
+///
+/// `menu` / `pager` 用。設問も選択肢も持たず、人へ渡せるのは `tail` だけ。
+/// `unknown` との違いは**何の画面かを名指しできる**ことで、カードは
+/// 「ピッカーなのでターミナルで」「ページャが開いている」と書ける。
+fn quiet_prompt(shape: PromptShape, escape_hatch: Option<String>, tail: String) -> ParsedPrompt {
+    ParsedPrompt {
+        shape,
+        navigation: Navigation::None,
+        header: String::new(),
+        context: String::new(),
+        questions: Vec::new(),
+        tabs: Vec::new(),
+        escape_hatch,
+        truncated: false,
+        fingerprint: String::new(),
+        tail,
+        pending_input: String::new(),
+        input_suggestion: String::new(),
+    }
+}
+
 /// 画面テキストから問いを解析する（純粋関数）。
 pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     let lines: Vec<&str> = screen.lines().collect();
@@ -2024,15 +2449,29 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
         None
     };
 
+    // ── 絞り込み欄より下はピッカー自身の描画。選択肢の並びをそこへ伸ばさない（#292）──
+    //
+    // 伸びると、**狭いタブで折り返したフッタが最後の選択肢のラベルへ吸われて**
+    // `run.end` が画面最終行まで下がる。そうなるとフッタの位置と並びの位置を
+    // どう比べても区別が付かない（7 周目のセルフレビューで critical）。
+    // 行単位のフッタ判定は折り返しに原理的に追従できないので、
+    // **そもそも並びをピッカーの領域へ入れない**ことで塞ぐ。
     let run = find_last_option_run(&lines);
 
+    let last_meaningful = tail_lines
+        .iter()
+        .rev()
+        .map(|l| strip_frame(l).0)
+        .find(|b| !b.is_empty() && !is_rule_line(b));
+
     let Some(run) = run else {
-        // 選択肢が無い画面。y/n → 自由入力 → unknown の順で倒す
-        let last_meaningful = tail_lines
-            .iter()
-            .rev()
-            .map(|l| strip_frame(l).0)
-            .find(|b| !b.is_empty() && !is_rule_line(b));
+        // 選択肢が無い画面。y/n → ページャ → ピッカー → 自由入力 → unknown の順で倒す。
+        //
+        // **ページャとピッカーは自由入力より先に見る（#292）。** どちらも「罫線で
+        // 挟まれた箱」を持つことがあり（`/resume` / `/config` の `⌕ Search…` 欄）、
+        // 先に自由入力へ倒すと**絞り込み欄へ本文 + CR を撃ち込む**ことになる。
+        // **y/n はさらに先**（`(y/N)` の画面にピッカーの語が残っているだけで
+        // `menu` に化けると、y/n に答えられなくなる）。
         if last_meaningful.as_deref().is_some_and(is_yesno_line) {
             let header = last_meaningful.unwrap_or_default();
             return seal(ParsedPrompt {
@@ -2056,6 +2495,9 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
                 pending_input: String::new(),
                 input_suggestion: String::new(),
             });
+        }
+        if last_meaningful.as_deref().is_some_and(is_pager_line) {
+            return seal(quiet_prompt(PromptShape::Pager, escape_hatch, tail));
         }
         if let Some(free) = looks_like_free_input(tail_lines) {
             return text_prompt(&free, tail_lines, &tail, escape_hatch);
@@ -2299,9 +2741,12 @@ pub fn parse_prompt(screen: &str) -> ParsedPrompt {
     // - 選択肢が画面の先頭行から始まっている（＝その上にあったはずの枠と見出しが無い）
     // - Claude Code のダイアログなのに選択肢が 1 つしか無い（実物は必ず 2 つ以上ある。
     //   `Yes` だけの許可ダイアログは存在しない）
+    //
+    // - リストがスクロールしている（#292）。`↓ 2. …` / `… +3 models` が出ている画面は
+    //   **Claude Code 自身が全項目を描いていない**ので、読めたぶんは必ず一部でしかない
     let clipped_at_top = run.start == 0;
     let implausibly_few = has_cc_footer && options.len() < 2;
-    let truncated = clipped_at_top || implausibly_few;
+    let truncated = clipped_at_top || implausibly_few || run.incomplete;
 
     let allow_other = has_chat_about_this
         || contains_ci(last_label, "tell claude what to do differently")
@@ -2701,6 +3146,556 @@ mod tests {
     fn select_then_text_requires_option_index() {
         assert!(Answer::from_parts("selectThenText", None, Some("hi"), None).is_err());
         assert!(Answer::from_parts("selectThenText", Some(3), None, None).is_err());
+    }
+
+
+    /// 実機（#292）。選択肢のラベルが折り返した画面。
+    fn wrapped_label_preview_screen() -> String {
+        [
+            "←  ☐ 破棄の方針  ✔ Submit  →",
+            "通知フック未設定リポジトリで、approval 通知をどう扱いますか？",
+            "",
+            "❯ 1. approval だけ例外的に通す     ┌──────────────────────┐",
+            "   （推奨）                        │ if payload.kind {    │",
+            "  2. home のみ全 kind を通す       │   if let Some(w) {   │",
+            "  3. 破棄そのものを撤廃            │     return OK;       │",
+            "                                   │   }                  │",
+            "                                   └──────────────────────┘",
+            "",
+            "                                   Notes: press n to add notes",
+            "",
+            "────────────────────────────────────────",
+            "  Chat about this",
+            "",
+            "Enter to select · Tab to switch questions · Esc to cancel",
+        ]
+        .join("\n")
+    }
+
+    /// 折り返した続き行で選択肢の並びを打ち切らない（#292）。
+    ///
+    /// 打ち切ると 1 つ目しか読めず、`truncated` が立って選択 UI ごと消える。
+    /// **画面には 3 つあるのにカードでは選べない**という形で出た。
+    #[test]
+    fn a_wrapped_option_label_does_not_end_the_option_run() {
+        let p = parse_prompt(&wrapped_label_preview_screen());
+        assert_eq!(p.shape, PromptShape::AskUserQuestion);
+        let labels: Vec<&str> = p.questions[0].options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "approval だけ例外的に通す （推奨）",
+                "home のみ全 kind を通す",
+                "破棄そのものを撤廃",
+                "Chat about this",
+            ]
+        );
+        assert!(!p.truncated, "画面に収まっているのに truncated が立ってはいけない");
+        assert_eq!(p.questions[0].cursor_index, Some(1));
+        assert_eq!(p.navigation, Navigation::Arrows);
+        // 3 つ目まで矢印で届く
+        let keys = plan_keys(&p, &Answer::Select { option_index: 3 }).expect("select");
+        assert_eq!(keys_preview(&keys), vec!["Down", "Down", "CR"]);
+    }
+
+    /// 深めに字下げされたフッタを最後の選択肢のラベルへ吸い込まない（#292）。
+    ///
+    /// 吸い込むと `below_text` からフッタが消え、Claude Code のダイアログである
+    /// という印を落として素の番号リストへ falls back する。
+    #[test]
+    fn an_indented_footer_is_not_swallowed_as_a_wrapped_label() {
+        let screen = [
+            "Bash command",
+            "echo hi",
+            "",
+            "Do you want to proceed?",
+            "",
+            "❯ 1. Yes",
+            "  2. No, and tell Claude what to do differently (esc)",
+            "",
+            "    Esc to cancel · Tab to amend",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Permission);
+        let labels: Vec<&str> = p.questions[0].options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels, vec!["Yes", "No, and tell Claude what to do differently (esc)"]);
+        assert_eq!(p.navigation, Navigation::Arrows);
+    }
+
+    // ── スクロール / ピッカー / ページャ / 補完ポップアップ（#292。すべて実機の画面から採った）──
+
+    /// 実機の `/model`。画面に入り切らないリストは `❯` と同じ桁に `↓` を描き、
+    /// 末尾に `… +N models` を出す。
+    fn scrolling_model_picker_screen() -> String {
+        [
+            "  Select model",
+            "  Switch between Claude models. Your pick becomes the default for new sessions.",
+            "",
+            "  ❯ 1. Default (recommended) ✔  Opus 5 with 1M context",
+            "  ↓ 2. Opus (1M context)        Opus 5 with 1M context",
+            "     … +3 models",
+            "",
+            "  ◐ Medium effort ←/→ to adjust",
+            "",
+            "  Enter to set as default · s to use this session only · Esc to cancel",
+        ]
+        .join("\n")
+    }
+
+    /// 実機の `/resume`。番号が無く、絞り込み欄の箱を持つ。
+        /// 実機の `/config`。**`Esc to cancel` が出ない**ので、ピッカーだと分かる
+    /// 手がかりはフッタの `Type to filter` だけ。
+        /// 実機の `@` ファイル補完。一覧は**入力欄の下**に出る。
+    fn at_mention_popup_screen() -> String {
+        [
+            "────────────────────────────────────────",
+            "❯ @src/ma",
+            "────────────────────────────────────────",
+            "  + src/main.ts",
+            "  + src/monaco-workers.ts",
+            "  + src/utils/fuzzyMatch.ts",
+            "  + src/utils/mermaidTheme.ts",
+            "  + src-tauri/src/main.rs",
+            "  + src/components/ArtifactIcon.vue",
+            "  + src/components/ArchiveTable.vue",
+        ]
+        .join("\n")
+    }
+
+    /// 行頭の `↓` を剥がして並びを続ける（#292）。
+    ///
+    /// 剥がさないと `2.` が選択肢として読めず、並びが 1 件で終わる。
+    #[test]
+    fn a_scroll_indicator_does_not_end_the_option_run() {
+        let p = parse_prompt(&scrolling_model_picker_screen());
+        let labels: Vec<&str> = p.questions[0].options.iter().map(|o| o.label.as_str()).collect();
+        assert_eq!(labels.len(), 2, "options={:?}", labels);
+        assert!(labels[1].starts_with("Opus (1M context)"), "labels={:?}", labels);
+        // `↓` はカーソルではない。起点は `❯` の居る 1 番のまま
+        assert_eq!(p.questions[0].cursor_index, Some(1));
+    }
+
+    /// スクロールしているリストは **`truncated` を立てる**（#292）。
+    ///
+    /// Claude Code 自身が全項目を描いていないので、読めたぶんは必ず一部でしかない。
+    /// 立てないと「2 つしか無い」と誤認させて選ばせることになる。
+    #[test]
+    fn a_scrolling_list_is_always_truncated() {
+        let p = parse_prompt(&scrolling_model_picker_screen());
+        assert!(p.truncated);
+        assert!(plan_keys(&p, &Answer::Select { option_index: 2 }).is_err());
+    }
+
+    /// `… +3 models` を最後のラベルへ吸い込まない（#292）。
+    #[test]
+    fn a_more_items_line_is_not_a_wrapped_label() {
+        let p = parse_prompt(&scrolling_model_picker_screen());
+        let last = p.questions[0].options.last().expect("option");
+        assert!(!last.label.contains("+3 models"), "label={:?}", last.label);
+    }
+
+    /// スクロールバックに残った `Type to search` でピッカー扱いにしない（#292）。
+    ///
+    /// 画面末尾の**フッタ**だけを見る。末尾 12 行を丸ごと見ると、直前のコマンドの
+    /// 出力に同じ語が出ているだけで返答できるカードが黙って塞がれる。
+    #[test]
+    fn a_stale_picker_footer_in_the_scrollback_does_not_block_free_input() {
+        let screen = [
+            "  Type to search · Esc to cancel",
+            "  ⎿ (前のコマンドの出力)",
+            "",
+            "",
+            "",
+            "────────────────────────────────────────",
+            "❯",
+            "────────────────────────────────────────",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Text);
+    }
+
+    /// **ピッカーを自由入力と誤認しない（#292）。**
+    ///
+    /// `/config` のフッタは `Esc to clear` で終わるのでダイアログのフッタ判定に当たらず、
+    /// 素通りするとハイライト行 `❯ Auto-compact` が縮退した `❯` 経路で入力欄に見える。
+    /// そうなると **`plan_keys` が `Ok` を返し、返答本文 + CR が設定の絞り込み欄へ飛ぶ。**
+    /// 下流に安全弁は無いので、ここで止めるしかない。
+    #[test]
+    fn a_picker_is_never_mistaken_for_free_input() {
+        // 末尾に何が付いても倒れないこと（ステータス行はピッカーの下にも出る）
+        let trailers: [&[&str]; 4] =
+            [&[], &["", "  ⏸ manual mode on"], &["   "], &["", "  ⏵⏵ accept edits on"]];
+        for trailer in trailers {
+            let mut screen: Vec<String> = vec![
+                "  ╭────────────────────────────────────╮".into(),
+                "  │ ⌕ Search settings…                 │".into(),
+                "  ╰────────────────────────────────────╯".into(),
+                "".into(),
+                "  ❯ Auto-compact                    true".into(),
+                "    Show tips                       true".into(),
+                "".into(),
+                "  Type to filter · Enter/↓ to select · ↑ to tabs · Esc to clear".into(),
+            ];
+            screen.extend(trailer.iter().map(|s| (*s).to_string()));
+            let p = parse_prompt(&screen.join("\n"));
+            assert_ne!(p.shape, PromptShape::Text, "trailer={:?}", trailer);
+            assert!(
+                plan_keys(&p, &Answer::Text { text: "hello".into() }).is_err(),
+                "trailer={:?}",
+                trailer
+            );
+        }
+
+        // `/resume` も同じ（こちらは `Esc to cancel` でも止まるが、二重に確かめる）
+        let resume = [
+            "  Resume session (1 of 33)",
+            "  ╭────────────────╮",
+            "  │ ⌕ Search…      │",
+            "  ╰────────────────╯",
+            "  ❯ oretachi issue 292",
+            "    4 seconds ago",
+            "",
+            "  Ctrl+A to show all projects · Type to search · Esc to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&resume);
+        assert_ne!(p.shape, PromptShape::Text);
+        assert!(plan_keys(&p, &Answer::Text { text: "hello".into() }).is_err());
+    }
+
+    /// ピッカーの語が打ちかけにあるだけの入力欄は塞がない（#292）。
+    #[test]
+    fn a_draft_mentioning_a_picker_footer_is_still_free_input_after_the_guard() {
+        let screen = [
+            "  ⎿  Done",
+            "",
+            "────────────────────────────────────────",
+            "❯ type to search の実装を見て",
+            "────────────────────────────────────────",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Text);
+        assert_eq!(p.pending_input, "type to search の実装を見て");
+    }
+
+    /// ページャは `pager`（#292）。`unknown` だと git log のダンプがカードに載る。
+    #[test]
+    fn an_open_pager_is_reported_as_a_pager() {
+        let screen = ["abc1234 first commit", "def5678 second commit", ":"].join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Pager);
+        assert!(plan_keys(&p, &Answer::Text { text: "q".into() }).is_err());
+    }
+
+    /// 実機の `/` コマンド補完。候補は**入力欄の下**に出て、説明が折り返す。
+    fn slash_command_popup_screen() -> String {
+        [
+            "────────────────────────────────────────",
+            "❯/co",
+            "────────────────────────────────────────",
+            "  /copy       Copy Claude's last response to clipboard",
+            "  /color      Set the prompt bar color for this session",
+            "  /config     Open settings",
+            "  /compact    Free up context by summarizing the conversation so far",
+            "  /context    Visualize current context usage as a colored grid",
+            "  /code-review  Review the current diff, or a PR number/branch/path target,",
+            "                for correctness bugs and reuse/simplification cleanups",
+        ]
+        .join("\n")
+    }
+
+    /// `/` コマンド補完でも入力欄を読めること（#292）。
+    ///
+    /// **候補行の記号（`/`）を決め打ちにしているので、ここを取りこぼすと C の対応が
+    /// まるごと効かなくなる**（安全側へ倒れるだけなので静かに壊れる）。
+    #[test]
+    fn a_slash_command_popup_keeps_the_input_box_readable() {
+        let p = parse_prompt(&slash_command_popup_screen());
+        assert_eq!(p.shape, PromptShape::Text);
+        assert_eq!(p.pending_input, "/co");
+    }
+
+    /// 入力欄の下に補完のポップアップが出ていても `text` のまま読む（#292）。
+    ///
+    /// `unknown` へ倒れると `pendingInput` が読めず、**打ちかけのテキストが残っている
+    /// ことをカードで警告できない**（送った本文が打ちかけの後ろへ連結される）。
+    #[test]
+    fn a_completion_popup_below_the_input_box_keeps_it_readable() {
+        let p = parse_prompt(&at_mention_popup_screen());
+        assert_eq!(p.shape, PromptShape::Text);
+        assert_eq!(p.pending_input, "@src/ma");
+    }
+
+    /// フッタらしい続き行で並びを打ち切ったら、**必ず `truncated` を立てる**
+    /// （#292。セルフレビュー 2 周目で検出）。
+    ///
+    /// 立て忘れると、打ち切った先に残っていた選択肢が黙って消えたまま選択が許可される。
+    /// 許可ダイアログなら拒否の選択肢が消え、**承認の選択肢だけが載ったカード**になる。
+    #[test]
+    fn breaking_the_run_on_a_footer_like_line_marks_it_truncated() {
+        let screen = [
+            "  Which approach?",
+            "",
+            "❯ 1. Alpha",
+            "  2. Beta",
+            "     切り替えは shift+tab です",
+            "  3. Gamma",
+            "  4. Chat about this",
+            "",
+            "  Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert!(
+            p.truncated,
+            "読み切れていないのに truncated が立たないと、消えた選択肢のまま選ばせてしまう"
+        );
+        assert!(plan_keys(&p, &Answer::Select { option_index: 2 }).is_err());
+    }
+
+    /// 区切りが 2 つ続いて run が切れたら `truncated` を立てる（#292。3 周目のセルフレビュー）。
+    ///
+    /// またげる区切りは 1 回だけなので、罫線 + 空行が続くとそこで並びが終わる。
+    /// 印を残さないと `4. Chat about this`（＝自由入力への逃げ道）が消えたまま
+    /// 選択が許可される。
+    #[test]
+    fn a_second_separator_that_drops_an_option_marks_it_truncated() {
+        let screen = [
+            "←  ☐ Color  ✔ Submit  →",
+            "Which color?",
+            "",
+            "❯ 1. Red",
+            "  2. Blue",
+            "  3. Type something.",
+            "────────────────",
+            "",
+            "  4. Chat about this",
+            "",
+            "Enter to select · Tab/Arrow keys to navigate · Esc to cancel",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert!(p.truncated, "落とした 4. Chat about this のぶん truncated が要る");
+        assert!(plan_keys(&p, &Answer::Select { option_index: 2 }).is_err());
+    }
+
+    /// 番号が飛んでいたら `truncated` を立てる（#292。3 周目のセルフレビュー）。
+    #[test]
+    fn a_gap_in_the_numbering_marks_it_truncated() {
+        let screen = ["❯ 1. Red", "  2. Blue", "  4. Green", "", "  Esc to cancel"].join("\n");
+        let p = parse_prompt(&screen);
+        assert!(p.truncated);
+    }
+
+    /// プレビュー枠の閉じ罫線 + 空行という**正常な終わり方**では立てない（#292）。
+    ///
+    /// 「区切りを使い切ったら印」にすると、読めているダイアログまで選べなくなる。
+    #[test]
+    fn a_normal_run_ending_is_not_marked_truncated() {
+        let p = parse_prompt(&wrapped_label_preview_screen());
+        assert!(!p.truncated, "読めているダイアログを選べなくしてはいけない");
+        assert!(plan_keys(&p, &Answer::Select { option_index: 3 }).is_ok());
+    }
+
+    /// 拡張子もスラッシュも無い実在ファイル名を候補行として落とさない
+    /// （#292。5 周目のセルフレビュー）。
+    #[test]
+    fn an_extensionless_filename_is_still_a_completion_popup_row() {
+        assert!(is_completion_popup_row("+ Dockerfile"));
+        assert!(is_completion_popup_row("+ Makefile"));
+        assert!(is_completion_popup_row("+ LICENSE"));
+        // 記号だけの diff ハンク行は落ちたまま
+        assert!(!is_completion_popup_row("+ }"));
+        assert!(!is_completion_popup_row("+ });"));
+    }
+
+    /// git diff のハンク行を候補行として通さない（#292。4 周目のセルフレビュー）。
+    #[test]
+    fn a_diff_hunk_line_is_not_a_completion_popup_row() {
+        assert!(!is_completion_popup_row("+ }"));
+        assert!(!is_completion_popup_row("+ });"));
+        // パスらしさがあれば通る
+        assert!(is_completion_popup_row("+ src/main.ts"));
+        assert!(is_completion_popup_row("+ README.md"));
+    }
+
+    /// 入力欄のステータス行を「ダイアログのフッタ」と読まない（#292。セルフレビュー 2 周目）。
+    ///
+    /// `⏵⏵ accept edits on` は補完ポップアップの下にも必ず出る。ここで弾くと
+    /// auto-accept / plan モードの端末では補完ポップアップがまるごと検出できない。
+    #[test]
+    fn a_status_line_below_the_popup_does_not_hide_the_input_box() {
+        let screen = [
+            "────────────────────────────────────────",
+            "❯ @src/ma",
+            "────────────────────────────────────────",
+            "  + src/main.ts",
+            "  + src/monaco-workers.ts",
+            "  + src/utils/fuzzyMatch.ts",
+            "  + src/utils/mermaidTheme.ts",
+            "  + src-tauri/src/main.rs",
+            "  ⏵⏵ accept edits on (shift+tab to cycle)",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Text);
+        assert_eq!(p.pending_input, "@src/ma");
+    }
+
+    /// 罫線に挟まれた**ただの端末出力**を入力欄と読まない（#292。セルフレビューで検出）。
+    ///
+    /// `text` になると `plan_keys` の `(Text, Answer::Text)` を通り、
+    /// **入力待ちですらない端末へ本文 + CR が飛ぶ。**
+    #[test]
+    fn a_framed_build_log_is_not_an_input_box() {
+        let screen = [
+            "Running build...",
+            "--------------------------------",
+            "> oretachi@0.31.3 build",
+            "--------------------------------",
+            "src/a.ts compiled",
+            "src/b.ts compiled",
+            "src/c.ts compiled",
+            "src/d.ts compiled",
+            "src/e.ts compiled",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_ne!(p.shape, PromptShape::Text, "端末出力を自由入力と読んではいけない");
+        assert!(plan_keys(&p, &Answer::Text { text: "hi".into() }).is_err());
+    }
+
+    /// 候補行の判定を記号だけで済ませない（#292。2 周目のセルフレビューで検出）。
+    ///
+    /// 記号だけだと git diff の `+ added line` やコマンド出力の `/usr/bin/env:` が
+    /// 候補行に化け、罫線に挟まれたコマンド行の下にそれらが来る画面が `text` で通る。
+    #[test]
+    fn command_output_is_not_a_completion_popup_row() {
+        // 本物の候補行
+        assert!(is_completion_popup_row("/copy       Copy Claude's last response"));
+        assert!(is_completion_popup_row("/code-review  Review the current diff"));
+        assert!(is_completion_popup_row("/oretachi:background-command  dev サーバ"));
+        assert!(is_completion_popup_row("+ src/main.ts"));
+        assert!(is_completion_popup_row("@src/ma"));
+        // 端末の出力
+        assert!(!is_completion_popup_row("+ added line"));
+        assert!(!is_completion_popup_row("/usr/bin/env: no such file"));
+        assert!(!is_completion_popup_row("+"));
+        assert!(!is_completion_popup_row("/"));
+    }
+
+    /// 罫線に挟まれたコマンド行 + git diff の出力を入力欄と読まない（#292）。
+    #[test]
+    fn a_framed_git_diff_is_not_an_input_box() {
+        let screen = [
+            "────────────────────────────────────────",
+            "> git diff",
+            "────────────────────────────────────────",
+            "+ added line",
+            "+ another added line",
+            "- removed line",
+            "  context line",
+            "  more context",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_ne!(p.shape, PromptShape::Text);
+        assert!(plan_keys(&p, &Answer::Text { text: "hi".into() }).is_err());
+    }
+
+    /// `+` 無しの「もっとある」行も拾う（#292。2 周目のセルフレビューで検出）。
+    ///
+    /// 拾えないと続き行として最後のラベルへ吸い込まれ、`Sonnet … 3 more` のような
+    /// ラベルが `truncated` も立たないまま人に出る。
+    #[test]
+    fn a_more_items_line_without_a_count_is_still_recognised() {
+        assert!(is_more_items_line("… 3 more"));
+        assert!(is_more_items_line("… more"));
+        assert!(is_more_items_line("... and more"));
+        // 散文の続き行は当たらないまま
+        assert!(!is_more_items_line("… なお、この選択肢は既定値です"));
+        assert!(!is_more_items_line("...and then rebuild the project"));
+    }
+
+    /// ツール出力が並んだ Claude Code のスクロールバックを打ちかけに化けさせない（#292）。
+    #[test]
+    fn a_scrollback_of_tool_output_is_not_a_pending_draft() {
+        let screen = [
+            "────────────────────────────────────────",
+            "> レポートを作って",
+            "────────────────────────────────────────",
+            "  ⎿  Read 120 lines",
+            "  ⎿  Wrote report.md",
+            "  ⎿  Read 40 lines",
+            "  ⎿  Wrote index.md",
+            "  ⎿  Done",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_ne!(p.shape, PromptShape::Text);
+        assert_eq!(p.pending_input, "");
+    }
+
+    /// `…` で始まる折り返し続き行を「もっとある」行と取り違えない（#292）。
+    ///
+    /// 取り違えると run がそこで切れ、`truncated` が立って選択 UI ごと消える
+    /// ＝ #292 の事象そのものが別の入口から戻る。
+    #[test]
+    fn an_ellipsis_continuation_line_is_not_a_more_items_line() {
+        assert!(is_more_items_line("… +3 models"));
+        assert!(is_more_items_line("↓ 46 more below"));
+        assert!(!is_more_items_line("… なお、この選択肢は既定値です"));
+        assert!(!is_more_items_line("...and then rebuild the project"));
+    }
+
+    /// 入力欄の打ちかけをフッタとして読まない（#292。セルフレビューで検出）。
+    ///
+    /// Claude Code の画面末尾 4 行には**人の打ちかけが必ず入る**ので、
+    /// 除外しないと `type to search` と打っている端末が `menu` に化け、
+    /// 返答カードが黙って塞がれる。
+    #[test]
+    fn a_draft_mentioning_a_picker_footer_is_still_free_input() {
+        let screen = [
+            "  ⎿  Done",
+            "",
+            "────────────────────────────────────────",
+            "❯ type to search の実装を見て",
+            "────────────────────────────────────────",
+            "  ? for shortcuts",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_eq!(p.shape, PromptShape::Text);
+        assert_eq!(p.pending_input, "type to search の実装を見て");
+    }
+
+    /// ポップアップ探索でダイアログを自由入力に化けさせない（#292 / #215）。
+    ///
+    /// 箱より下に選択肢行があればダイアログが開いている。そこを `text` と読むと
+    /// 本文 + CR が `❯` の指す選択肢の確定になる。
+    #[test]
+    fn an_option_list_below_the_input_box_is_never_free_input() {
+        let screen = [
+            "────────────────────────────────────────",
+            "❯ draft text",
+            "────────────────────────────────────────",
+            "  filler one",
+            "  filler two",
+            "  filler three",
+            "  filler four",
+            "  filler five",
+            "❯ 1. Yes",
+            "  2. No",
+        ]
+        .join("\n");
+        let p = parse_prompt(&screen);
+        assert_ne!(p.shape, PromptShape::Text, "ダイアログを自由入力と読んではいけない");
+        assert!(plan_keys(&p, &Answer::Text { text: "hi".into() }).is_err());
     }
 
     #[test]

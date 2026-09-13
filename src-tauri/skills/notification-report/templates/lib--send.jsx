@@ -93,6 +93,7 @@ const SHAPE_LABEL = {
   askUserQuestion: '設問',
   yesno: 'y/n 確認',
   numbered: '番号選択',
+  pager: 'ページャ',
   unknown: '分類不能',
 };
 
@@ -623,6 +624,14 @@ function blockedReason(n, conflicts) {
       `'${n.worktreeName}' の画面を分類できませんでした（何かの入力待ちですが形状が不明）。` +
       '推測でキーを送ると意図しない選択を確定しうるため、このカードからは送信できません。' +
       'ターミナルを開いて直接操作してください'
+    );
+  }
+  // ページャは**何の画面かは分かっている**（#292）。`unknown` と同じく送れないが、
+  // 理由を名指しできるぶん人がターミナルで何をすればよいか分かる
+  if (shapeOf(n) === 'pager') {
+    return (
+      `'${n.worktreeName}' はページャ（less / git log など）が開いた状態で止まっています。` +
+      '問いではないので答える対象がありません。ターミナルを開いて閉じてください'
     );
   }
   // `request.questions` はあるのに 1 問も使えない（全部 options 空）。黙って

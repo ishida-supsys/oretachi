@@ -141,7 +141,7 @@
 // 何も送れなくなる）。**表示には使わない**（表示は上の本文と `request` から組む）。
 //
 //   shape        (string)  : "text" / "permission" / "plan" / "askUserQuestion" /
-//                            "yesno" / "numbered" / "unknown"
+//                            "yesno" / "numbered" / "pager" / "unknown"
 //   navigation   (string)  : "arrows" / "digits" / "none"
 //   header       (string)  : 問いの見出し
 //   context      (string)  : 承認対象。`shape` が "text" 以外のとき画面から取れる範囲
@@ -151,7 +151,8 @@
 //   tabs         (array)   : [{ label, answered, isSubmit }]。複数設問のタブバー（#264）。
 //                            `☐` が未回答 / `☒` が回答済み / `✔ Submit` が確定タブ
 //   escapeHatch  (string)  : "esc" なら ESC で自由入力へ抜けられる
-//   truncated    (boolean) : **必須。落とさないこと。** 画面に収まっていない
+//   truncated    (boolean) : **必須。落とさないこと。** 画面に収まっていない、または
+//                            リストがスクロールしていて全項目が描かれていない（#292）
 //   fingerprint  (string)  : 画面の同一性キー。**書き換えない**
 //   tail         (string)  : 画面末尾。`shape` が "unknown" のとき人に見せる。
 //                            `shape: "text"` では自動候補の行に
