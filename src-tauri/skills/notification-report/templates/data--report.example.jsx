@@ -35,10 +35,10 @@
 // `kind` が `worktree.created` / `worktree.closed` のカードは**報告カード**で、
 // 人の判断を必要としない（返答 UI が出ない）。判定は `lib/send` の `isReportOnly`
 // が `kind` から機械的にやるので、**この配列にフラグを足す必要は無い**。
-// 報告カードで埋めるのは次の 6 つだけ:
+// 報告カードで埋めるのは次の 7 つだけ:
 //
-//   id / inboxIds / worktreeName / kind / at / paragraphs
-//   （+ 任意で branchName / worktreeId / issueRef / links）
+//   id / inboxIds / worktreeName / worktreeId / kind / at / paragraphs
+//   （+ 任意で branchName / issueRef / links）
 //
 // **報告カードでは `sessionId` / `subscribed` / `prompt` / `request` / `desc` /
 // `descFallback` / `phase` / `phaseSummary` / `readAt` / `choices` を集めない。**
@@ -55,10 +55,11 @@
 //   inboxIds      (string[]) : このカードが束ねる inbox メッセージ ID。**生成時（Step 5.5）に
 //                              ack 済み**の記録で、レポート側からは ack しない（#219）
 //   worktreeName  (string)   : 発信元ワークツリー名（= 送信先）
-//   worktreeId    (string)   : 発信元ワークツリーID。**要返答カードでは必須**。購読の突合と、
-//                              生成時のトレイ通知クリア（oretachi_clear_worktree_notification）
-//                              に使う。oretachi_poll_inbox の sourceWorktreeId を
-//                              そのまま入れる（表示はしない）。**報告カードでは任意**
+//   worktreeId    (string)   : 発信元ワークツリーID。**報告カードも含め全カードで必須**
+//                              （#294）。購読の突合と、生成時のトレイ通知クリア
+//                              （oretachi_clear_worktree_notification）に使う。
+//                              oretachi_poll_inbox の sourceWorktreeId をそのまま入れる
+//                              （表示はしない）。worktree.closed でも null にならない
 //   sessionId     (number)   : 送信先の PTY セッションID。**null 可**（稼働中 AI 端末なし）。
 //                              （このサンプルの `99xxx` は実在しない値。**例をそのまま
 //                              動かしても本物の端末へ書き込まないため**にわざと外してある）
