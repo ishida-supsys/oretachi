@@ -252,6 +252,18 @@ function isCommandChoice(s) {
 }
 
 /**
+ * 「保留」候補か（#313）。
+ *
+ * この候補に特別な処理は無い。押すと他の候補と同じ経路で「保留」という文字列を
+ * 宛先へ返答として送り、このカードを送信済み扱いにするだけ。ボタンの見た目が
+ * 他の候補と同じだと、「処理そのものが保留される／あとで再度出てくる」と
+ * 誤解されやすいので、カード側で見た目と注記を変える（動作ロジック自体は変えない）。
+ */
+function isHoldChoice(s) {
+  return String(s == null ? '' : s).trim() === '保留';
+}
+
+/**
  * 下書き / 送信記録がコマンド実行なら、宛先へそのまま流す `!` 込みの 1 行を返す。
  * コマンドでなければ null。
  *
@@ -1129,6 +1141,7 @@ exports.SHAPE_LABEL = SHAPE_LABEL;
 exports.flatten = flatten;
 exports.flattenCommand = flattenCommand;
 exports.isCommandChoice = isCommandChoice;
+exports.isHoldChoice = isHoldChoice;
 exports.commandOf = commandOf;
 exports.commandTooLong = commandTooLong;
 exports.commandExecuted = commandExecuted;

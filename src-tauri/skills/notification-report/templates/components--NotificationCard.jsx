@@ -40,6 +40,7 @@ const {
   isAnsweredAt,
   flatten,
   isCommandChoice,
+  isHoldChoice,
   commandOf,
   commandTooLong,
   commandExecuted,
@@ -275,23 +276,30 @@ function ChoiceChip({ label, selected, disabled, other, onClick }) {
   // コマンド実行の候補（`!` 始まり）は等幅 + 橙で見分けが付くようにする（#288）。
   // 押すと宛先のターミナルでそのまま走るので、「AI への返答」と同じ見た目にしない
   const command = !other && isCommandChoice(label);
+  // 「保留」は他の候補と同じ経路で文字列を送るだけで、処理を保留する特別な動作は無い
+  // （#313）。見た目まで他候補と揃えると「押すと何かが保留される」と誤解されるので、
+  // 破線 + 注意色にして区別する
+  const hold = !other && !command && isHoldChoice(label);
   const accent = command ? '#fab387' : '#89b4fa';
   return (
     <button
       type="button"
-      title={command ? '宛先のターミナルでこのコマンドをそのまま実行します' : undefined}
+      title={command
+        ? '宛先のターミナルでこのコマンドをそのまま実行します'
+        : (hold ? '特別な処理はありません。「保留」という返答を送信し、このカードを送信済みにします（自動では再度出てきません）' : undefined)}
       disabled={disabled}
       onClick={onClick}
       style={{
-        border: (other ? '1px dashed ' : '1px solid ') + (selected ? accent : (command ? '#fab38766' : '#45475a')),
+        border: (other || hold ? '1px dashed ' : '1px solid ') +
+          (selected ? (hold ? '#f9e2af' : accent) : (command ? '#fab38766' : (hold ? '#f9e2af66' : '#45475a'))),
         borderRadius: 999,
         padding: '6px 14px',
-        background: selected ? accent : 'transparent',
-        color: disabled ? '#45475a' : (selected ? '#181825' : (other ? '#9399b2' : (command ? '#fab387' : '#cdd6f4'))),
+        background: selected ? (hold ? '#f9e2af' : accent) : 'transparent',
+        color: disabled ? '#45475a' : (selected ? '#181825' : (other ? '#9399b2' : (command ? '#fab387' : (hold ? '#f9e2af' : '#cdd6f4')))),
         fontSize: 12, fontWeight: 600, fontFamily: command ? MONO : FONT,
         cursor: disabled ? 'default' : 'pointer', whiteSpace: 'nowrap',
       }}
-    >{label}</button>
+    >{hold ? `${label}（送信済みにするだけ）` : label}</button>
   );
 }
 
@@ -1247,6 +1255,15 @@ function NotificationCard({ n, meta, answer, draft, blocked, canSend, inflight, 
               selected={d.choice === OTHER}
               onClick={() => onPick(d.choice === OTHER ? null : OTHER)} />
           </div>
+
+          {/* 「保留」は処理を保留する特別なボタンではない（#313）。押すと他の候補と
+              同じく「保留」という返答を送って送信済みにするだけなので、その旨を明示する */}
+          {(n.choices || []).some(isHoldChoice) && (
+            <div style={{ fontSize: 11, color: '#9399b2', fontFamily: FONT, lineHeight: 1.7 }}>
+              「保留」は処理を保留するボタンではありません。押すと「保留」という返答を送信し、
+              このカードは送信済みになります（自動的に再度出てくることはありません）。
+            </div>
+          )}
 
           {/* 補足プロンプト。「その他」選択時は必須。
               **コマンドの候補を選んでいる間は塞ぐ**（#288）— 後ろに足した文字は
