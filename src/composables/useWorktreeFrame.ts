@@ -49,6 +49,20 @@ export function useWorktreeFrame(options: {
     return getAllLeafs().filter((l) => l.terminalIds.length > 0);
   }
 
+  /**
+   * 各 leaf の「現在可視状態のアクティブ端末」だけを対象に handleTabActivated を実行する。
+   * 非表示のバックグラウンドタブは対象外（次にアクティブ化される際に switchTerminal 経由で
+   * 再フィットされるため先回り不要）。leaf 単位で独立なので Promise.all で並列化する。
+   */
+  async function activateVisibleTerminals(): Promise<void> {
+    const targets = getLeafsWithTerminals()
+      .map((l) => l.activeTerminalId)
+      .filter((id): id is number => id !== null)
+      .map((id) => terminalRefs.get(id))
+      .filter((t): t is NonNullable<typeof t> => !!t);
+    await Promise.all(targets.map((t) => t.handleTabActivated()));
+  }
+
   function resolveLeafId(
     preferredLeafId?: string | null,
     options?: { foregroundOnly?: boolean }
@@ -111,11 +125,7 @@ export function useWorktreeFrame(options: {
 
     await nextTick();
     mountTerminalsToHosts();
-
-    for (const [tid] of terminalEntries) {
-      const t = terminalRefs.get(tid);
-      if (t) await t.handleTabActivated();
-    }
+    await activateVisibleTerminals();
 
     // 削除後にアクティブなターミナルにフォーカス
     const leafs = getLeafsWithTerminals();
@@ -139,10 +149,7 @@ export function useWorktreeFrame(options: {
     lastFocusedLeafId.value = newLeaf.id;
     await nextTick();
     mountTerminalsToHosts();
-    for (const [tid] of terminalEntries) {
-      const term = terminalRefs.get(tid);
-      if (term) await term.handleTabActivated();
-    }
+    await activateVisibleTerminals();
     return newLeaf;
   }
 
@@ -174,11 +181,7 @@ export function useWorktreeFrame(options: {
 
     await nextTick();
     mountTerminalsToHosts();
-
-    for (const [tid] of terminalEntries) {
-      const term = terminalRefs.get(tid);
-      if (term) await term.handleTabActivated();
-    }
+    await activateVisibleTerminals();
     const movedTerm = terminalRefs.get(terminalId);
     if (movedTerm) movedTerm.focus();
   }
@@ -201,11 +204,7 @@ export function useWorktreeFrame(options: {
 
     await nextTick();
     mountTerminalsToHosts();
-
-    for (const [tid] of terminalEntries) {
-      const term = terminalRefs.get(tid);
-      if (term) await term.handleTabActivated();
-    }
+    await activateVisibleTerminals();
     const movedTerm = terminalRefs.get(terminalId);
     if (movedTerm) movedTerm.focus();
   }
