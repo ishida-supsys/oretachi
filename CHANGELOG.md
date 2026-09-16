@@ -6,6 +6,12 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.31.5] - 2026-09-16
+
+### Fixed
+- 多数端末時に閉じる/分割/ドロップした後の再フィットを可視端末のみに限定し、UI ハングを防いだ (#316)
+- notification-report の「保留」候補ボタンが文字列を送るだけである旨を明示した (#313)
+
 ## [0.31.4] - 2026-09-13
 
 ### Added
@@ -803,7 +809,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.31.4...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.31.5...HEAD
+[0.31.5]: https://github.com/ishida-supsys/oretachi/compare/0.31.4...0.31.5
 [0.31.4]: https://github.com/ishida-supsys/oretachi/compare/0.31.3...0.31.4
 [0.31.3]: https://github.com/ishida-supsys/oretachi/compare/0.31.2...0.31.3
 [0.31.2]: https://github.com/ishida-supsys/oretachi/compare/0.31.1...0.31.2
