@@ -3638,7 +3638,7 @@ dependencies = [
 
 [[package]]
 name = "oretachi"
-version = "0.31.5"
+version = "0.31.6"
 dependencies = [
  "axum",
  "base64 0.22.1",

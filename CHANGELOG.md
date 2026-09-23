@@ -6,6 +6,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.31.6] - 2026-09-24
+
+### Added
+- トレイ通知を all/need_input/off の3値設定に拡張した (#319)
+
+### Fixed
+- 通知フックの event 単位判定で Notification フックの抜け道を塞いだ (#318)
+
 ## [0.31.5] - 2026-09-16
 
 ### Fixed
@@ -809,7 +817,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.31.5...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.31.6...HEAD
+[0.31.6]: https://github.com/ishida-supsys/oretachi/compare/0.31.5...0.31.6
 [0.31.5]: https://github.com/ishida-supsys/oretachi/compare/0.31.4...0.31.5
 [0.31.4]: https://github.com/ishida-supsys/oretachi/compare/0.31.3...0.31.4
 [0.31.3]: https://github.com/ishida-supsys/oretachi/compare/0.31.2...0.31.3
