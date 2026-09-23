@@ -3,6 +3,7 @@ import {
   type NotifyKind,
   type NotificationKindSetting,
   type NotificationSoundSettings,
+  type TrayNotificationMode,
 } from "../types/settings";
 
 /** 通知種別ごとの設定（issue #140）の解決とマイグレーション。
@@ -52,18 +53,27 @@ export function showsBadge(kind: NotifyKind): boolean {
   return !kind.startsWith("worktree.");
 }
 
-/** トレイ通知オフ（`tray: false`）のワークツリーでも提示する種別か（#225）。
+/** トレイ通知モード(`trayMode`)ごとに、その種別の通知を提示してよいか（issue #319）。
  *
- *  `tray: false` が載るのは「フック由来 かつ `resolveTrayNotification === false`」のときだけ
- *  （`mcp_server.rs` の `/notify`）。これを kind を問わず落としていたため、
- *  `PermissionRequest` 由来の `approval`（ツール許可 / プラン承認 / AskUserQuestion）も
- *  消えてしまい、**人の入力を待って止まったことが誰にも伝わらなかった**。
+ *  `trayMode` は「フック由来 かつ `resolve_tray_notification_mode`」の結果
+ *  （`mcp_server.rs` の `/notify`）。3モード×4kind(実際に通知が飛ぶのは
+ *  `hook`/`approval`/`completed`/`general`)の真偽表:
  *
- *  通すのは `approval` だけに絞る。teamwork-parent がトレイ通知をオフにする狙いは
- *  `Stop` → `completed` や高頻度な `hook` のノイズを止めることなので、そこは従来どおり
- *  抑制したまま「人待ちだけは通す」形にする。 */
-export function passesTrayOff(kind: NotifyKind): boolean {
-  return kind === "approval";
+ *  | mode         | approval | completed | hook / general |
+ *  |--------------|----------|-----------|-----------------|
+ *  | `all`        | ○        | ○         | ○               |
+ *  | `need_input` | ○        | ○         | ✕               |
+ *  | `off`        | ○        | ✕         | ✕               |
+ *
+ *  `approval`（`PermissionRequest` 由来 = ツール許可 / プラン承認 / AskUserQuestion）は
+ *  どのモードでも通す（#225）。**人の入力を待って止まったことが誰にも伝わらない**事態を
+ *  避けるための例外で、teamwork-parent 等がノイズを止める狙い（`hook`/`general` の抑制）
+ *  とは独立に維持する。 */
+export function shouldNotifyForMode(mode: TrayNotificationMode, kind: NotifyKind): boolean {
+  if (mode === "all") return true;
+  if (kind === "approval") return true;
+  if (mode === "need_input") return kind === "completed";
+  return false;
 }
 
 /** その種別の設定を解決する（未設定なら既定値）。 */

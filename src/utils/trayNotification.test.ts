@@ -1,14 +1,15 @@
 import { describe, it, expect } from "vitest";
 import {
-  resolveTrayNotification,
-  buildTrayNotificationMap,
+  resolveTrayNotificationMode,
+  buildTrayNotificationModeMap,
   initialTrayNotification,
 } from "./trayNotification";
 import type { AppSettings, Workgroup, WorktreeEntry } from "../types/settings";
 
 const groups: Workgroup[] = [
-  { id: "g-first", trayNotification: false },
-  { id: "g-on", trayNotification: true },
+  { id: "g-first", trayNotification: "off" },
+  { id: "g-on", trayNotification: "all" },
+  { id: "g-need-input", trayNotification: "need_input" },
   { id: "g-unset" },
 ];
 
@@ -32,14 +33,15 @@ const baseWorktree: WorktreeEntry = {
   branchName: "main",
 };
 
-describe("resolveTrayNotification", () => {
+describe("resolveTrayNotificationMode", () => {
   it("ワークツリー個別の値がそのまま実効値になる", () => {
-    expect(resolveTrayNotification({ trayNotification: true })).toBe(true);
-    expect(resolveTrayNotification({ trayNotification: false })).toBe(false);
+    expect(resolveTrayNotificationMode({ trayNotification: "all" })).toBe("all");
+    expect(resolveTrayNotificationMode({ trayNotification: "need_input" })).toBe("need_input");
+    expect(resolveTrayNotificationMode({ trayNotification: "off" })).toBe("off");
   });
 
-  it("個別未設定なら true（既存 settings.json との後方互換）", () => {
-    expect(resolveTrayNotification({})).toBe(true);
+  it("個別未設定なら all（既存 settings.json との後方互換）", () => {
+    expect(resolveTrayNotificationMode({})).toBe("all");
   });
 
   // #171: ワークグループの trayNotification は「作成時の初期値」であり、
@@ -50,47 +52,60 @@ describe("resolveTrayNotification", () => {
       // 引数の型からも workgroupId は落ちているが、呼び出し側は WorktreeEntry を
       // そのまま渡すため、余計なプロパティがあっても無視されることを確かめる
       const wt: WorktreeEntry = { ...baseWorktree, workgroupId };
-      expect(resolveTrayNotification(wt)).toBe(true);
+      expect(resolveTrayNotificationMode(wt)).toBe("all");
     }
   });
 
   // settings.rs の Option フィールドには skip_serializing_if が無いため、get_settings は
   // 未設定を undefined ではなく null で返す（既存 settings.json の "autoApproval": null と同じ形）。
-  // 型上は boolean | undefined なので type-check では拾えない。
   it("Rust 由来の null は未設定として扱う", () => {
     const nulled = { trayNotification: null } as unknown as Partial<WorktreeEntry>;
-    expect(resolveTrayNotification(nulled)).toBe(true);
+    expect(resolveTrayNotificationMode(nulled)).toBe("all");
+  });
+
+  // Rust は読み込み時に旧 bool を all/off へ正規化して返すため通常は文字列しか来ないが、
+  // 念のため bool もここで吸収する（型上は TrayNotificationMode | boolean | null | undefined）。
+  it("旧形式の bool も all/off へ正規化する", () => {
+    expect(resolveTrayNotificationMode({ trayNotification: true as unknown as never })).toBe("all");
+    expect(resolveTrayNotificationMode({ trayNotification: false as unknown as never })).toBe("off");
+  });
+
+  it("未知の文字列は未設定(all)として扱う", () => {
+    expect(resolveTrayNotificationMode({ trayNotification: "bogus" as unknown as never })).toBe("all");
   });
 });
 
-describe("buildTrayNotificationMap", () => {
-  it("ワークツリー ID ごとの実効値を返す", () => {
+describe("buildTrayNotificationModeMap", () => {
+  it("ワークツリー ID ごとの実効モードを返す", () => {
     const settings = {
       workgroups: groups,
       worktrees: [
-        // 先頭グループが false でも、個別未設定なら true のまま（#171）
+        // 先頭グループが off でも、個別未設定なら all のまま（#171）
         { id: "a", workgroupId: "g-first" },
-        { id: "b", workgroupId: "g-first", trayNotification: true },
-        { id: "c", workgroupId: "g-first", trayNotification: false },
+        { id: "b", workgroupId: "g-first", trayNotification: "all" },
+        { id: "c", workgroupId: "g-first", trayNotification: "off" },
         { id: "d" },
+        { id: "e", workgroupId: "g-first", trayNotification: "need_input" },
       ],
     } as unknown as AppSettings;
 
-    const map = buildTrayNotificationMap(settings);
-    expect(map.get("a")).toBe(true);
-    expect(map.get("b")).toBe(true);
-    expect(map.get("c")).toBe(false);
-    expect(map.get("d")).toBe(true);
+    const map = buildTrayNotificationModeMap(settings);
+    expect(map.get("a")).toBe("all");
+    expect(map.get("b")).toBe("all");
+    expect(map.get("c")).toBe("off");
+    expect(map.get("d")).toBe("all");
+    expect(map.get("e")).toBe("need_input");
   });
 });
 
 describe("initialTrayNotification", () => {
   it("グループが明示設定していればその値を焼き込む", () => {
-    expect(initialTrayNotification({ workgroupId: "g-first" }, groupOf)).toBe(false);
-    expect(initialTrayNotification({ workgroupId: "g-on" }, groupOf)).toBe(true);
+    expect(initialTrayNotification({ workgroupId: "g-first" }, groupOf)).toBe("off");
+    expect(initialTrayNotification({ workgroupId: "g-on" }, groupOf)).toBe("all");
+    expect(initialTrayNotification({ workgroupId: "g-need-input" }, groupOf)).toBe("need_input");
   });
 
-  it("グループ未設定なら undefined（キーを書かない = 実効値 true）", () => {
+  it("グループ未設定なら undefined（キーを書かない = 実効値 all）", () => {
     expect(initialTrayNotification({ workgroupId: "g-unset" }, groupOf)).toBeUndefined();
     // グループが 1 つも無い（先頭グループも取れない）ケース
     expect(initialTrayNotification({}, makeGroupOf([]))).toBeUndefined();
@@ -100,7 +115,7 @@ describe("initialTrayNotification", () => {
   // UI 上は先頭グループのカードに並ぶため、ここも先頭グループの初期値を焼き込む。
   it("workgroupId が未設定・空文字・不明なら先頭グループの値を焼き込む", () => {
     for (const workgroupId of [undefined, "", "no-such-group"]) {
-      expect(initialTrayNotification({ workgroupId }, groupOf)).toBe(false);
+      expect(initialTrayNotification({ workgroupId }, groupOf)).toBe("off");
     }
   });
 

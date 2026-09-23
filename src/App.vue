@@ -34,7 +34,7 @@ import { useTrayPopup } from "./composables/useTrayPopup";
 import { useWindowFocus } from "./composables/useWindowFocus";
 import { useTasks } from "./composables/useTasks";
 import type { TrayWorktreeData, TrayTerminalData } from "./composables/useTrayPopup";
-import type { NotifyKind, WorktreeEntry } from "./types/settings";
+import type { NotifyKind, TrayNotificationMode, WorktreeEntry } from "./types/settings";
 import type { SavedTerminal } from "./types/worktree";
 import type { UrlArtifactEntry } from "./types/artifact";
 import { extractUrlArtifacts } from "./utils/artifactUrl";
@@ -76,7 +76,7 @@ import type { SpawnTerminalRequest } from "./types/event";
 import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { cancelApproval } from "./utils/autoApproval";
-import { buildTrayNotificationMap, initialTrayNotification } from "./utils/trayNotification";
+import { buildTrayNotificationModeMap, initialTrayNotification } from "./utils/trayNotification";
 import { useUpdater } from "./composables/useUpdater";
 import Toast from "primevue/toast";
 import Popover from "primevue/popover";
@@ -529,16 +529,15 @@ const {
 // ワークグループ
 const { activeWorkgroupId, cycleWorkgroup, resolvedGroupId, groupOf, deleteWorkgroupRecord, displayName: workgroupDisplayName } = useWorkgroups();
 
-// トレイ通知の実効値（worktree > true）。ワークグループの trayNotification は
+// トレイ通知モードの実効値（worktree > all）。ワークグループの trayNotification は
 // 新規ワークツリー作成時に initialTrayNotification で焼き込まれる初期値でしかなく、
-// ここでは参照しない（Rust の settings::resolve_tray_notification と同規則 / #171）。
-const trayNotificationMap = computed(() => buildTrayNotificationMap(settings.value));
+// ここでは参照しない（Rust の settings::resolve_tray_notification_mode と同規則 / #171）。
+const trayNotificationMap = computed(() => buildTrayNotificationModeMap(settings.value));
 
-function onToggleTrayNotification(worktreeId: string) {
+function setTrayNotificationMode(worktreeId: string, mode: TrayNotificationMode) {
   const entry = settings.value.worktrees.find((w) => w.id === worktreeId);
   if (!entry) return;
-  // 実効値の反転を個別設定として明示的に書く（3値 UI にはしない）
-  entry.trayNotification = !(trayNotificationMap.value.get(worktreeId) ?? true);
+  entry.trayNotification = mode;
   scheduleSave();
 }
 
@@ -1693,7 +1692,7 @@ onMounted(async () => {
   // MCP (oretachi_set_tray_notification) からのトレイ通知トグル。
   // 永続化と UI 反映をここで一本化する（Rust 側で settings を直接書き換えると
   // フロントが持つ settings と食い違い、次の save で巻き戻るため）。
-  await listen<{ worktree: string; worktreeId: string; trayNotification?: boolean | null }>(
+  await listen<{ worktree: string; worktreeId: string; trayNotification?: TrayNotificationMode | null }>(
     "set-worktree-tray-notification",
     (event) => {
       const { worktree, worktreeId, trayNotification } = event.payload;
@@ -1705,7 +1704,7 @@ onMounted(async () => {
         logDebug(`[TrayNotification] worktree not found: ${worktree} (${worktreeId})`);
         return;
       }
-      // null / undefined は「未設定に戻す」= 実効値 true（ワークグループへは
+      // null / undefined は「未設定に戻す」= 実効値 all（ワークグループへは
       // フォールバックしない / #171）。キー自体を消して save 時に JSON から落とす
       // （Rust 側の None と一致させる）。
       if (trayNotification === null || trayNotification === undefined) {
@@ -1714,7 +1713,7 @@ onMounted(async () => {
         entry.trayNotification = trayNotification;
       }
       scheduleSave();
-      logDebug(`[TrayNotification] set for worktree=${worktree}: ${trayNotification ?? "unset (=true)"}`);
+      logDebug(`[TrayNotification] set for worktree=${worktree}: ${trayNotification ?? "unset (=all)"}`);
     },
   );
 
@@ -2753,10 +2752,10 @@ onMounted(async () => {
       v-if="worktreeSettingsTarget"
       :worktree="worktreeSettingsTarget"
       :auto-approval="autoApprovalMap.get(worktreeSettingsTarget.id) ?? false"
-      :tray-notification="trayNotificationMap.get(worktreeSettingsTarget.id) ?? true"
+      :tray-notification-mode="trayNotificationMap.get(worktreeSettingsTarget.id) ?? 'all'"
       :hotkey-char="hotkeyChars.get(worktreeSettingsTarget.id)"
       @toggle-auto-approval="onToggleAutoApproval"
-      @toggle-tray-notification="onToggleTrayNotification"
+      @set-tray-notification-mode="setTrayNotificationMode"
       @set-hotkey-char="onSetHotkeyChar"
       @close="worktreeSettingsTargetId = ''"
     />

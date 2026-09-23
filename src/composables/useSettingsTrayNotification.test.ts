@@ -30,17 +30,17 @@ function settingsWith(groups: Workgroup[]): AppSettings {
 // migrateWorkgroups が先頭グループへ割り当てた後もグループ既定値を継承できず、
 // リポジトリを追加するたびに通知オンの擬似ワークツリーが増える。
 describe("擬似ワークツリー生成時の trayNotification 焼き込み", () => {
-  it("先頭グループが false ならホーム / リポジトリ擬似ワークツリーへ焼き込む", () => {
-    const loaded = settingsWith([{ id: "g-first", trayNotification: false }, { id: "g-2" }]);
+  it("先頭グループが off ならホーム / リポジトリ擬似ワークツリーへ焼き込む", () => {
+    const loaded = settingsWith([{ id: "g-first", trayNotification: "off" }, { id: "g-2" }]);
 
     expect(migrateHomeWorktree(loaded)).toBe(true);
     expect(migrateRepositoryWorktrees(loaded).changed).toBe(true);
 
-    expect(loaded.worktrees.find(isHomeWorktree)?.trayNotification).toBe(false);
-    expect(loaded.worktrees.find(isRepositoryWorktree)?.trayNotification).toBe(false);
+    expect(loaded.worktrees.find(isHomeWorktree)?.trayNotification).toBe("off");
+    expect(loaded.worktrees.find(isRepositoryWorktree)?.trayNotification).toBe("off");
   });
 
-  it("先頭グループが未設定ならキーを書かない（実効値 true のまま）", () => {
+  it("先頭グループが未設定ならキーを書かない（実効値 all のまま）", () => {
     const loaded = settingsWith([{ id: "g-first" }]);
 
     migrateHomeWorktree(loaded);
@@ -63,16 +63,16 @@ describe("擬似ワークツリー生成時の trayNotification 焼き込み", (
   // 冪等性: 2 回目以降の migrate は生成が走らないので、ユーザーが後から個別に変えた値を
   // グループ既定値で踏み直さない。
   it("既存の擬似ワークツリーの値はグループ既定値で上書きしない", () => {
-    const loaded = settingsWith([{ id: "g-first", trayNotification: false }]);
+    const loaded = settingsWith([{ id: "g-first", trayNotification: "off" }]);
     migrateHomeWorktree(loaded);
     migrateRepositoryWorktrees(loaded);
 
     // ユーザーが個別にオンへ戻す
-    for (const wt of loaded.worktrees) wt.trayNotification = true;
+    for (const wt of loaded.worktrees) wt.trayNotification = "all";
 
     expect(migrateHomeWorktree(loaded)).toBe(false);
     expect(migrateRepositoryWorktrees(loaded).changed).toBe(false);
-    expect(loaded.worktrees.every((w) => w.trayNotification === true)).toBe(true);
+    expect(loaded.worktrees.every((w) => w.trayNotification === "all")).toBe(true);
   });
 });
 
@@ -89,40 +89,51 @@ describe("migrateTrayNotification（一度きりの移行焼き込み）", () =>
         { id: "a", workgroupId: "g-off" },
         { id: "b", workgroupId: "g-on" },
       ],
-      [{ id: "g-off", trayNotification: false }, { id: "g-on", trayNotification: true }],
+      [{ id: "g-off", trayNotification: "off" }, { id: "g-on", trayNotification: "all" }],
     );
 
     expect(migrateTrayNotification(loaded)).toBe(true);
-    expect(loaded.worktrees[0].trayNotification).toBe(false);
-    expect(loaded.worktrees[1].trayNotification).toBe(true);
+    expect(loaded.worktrees[0].trayNotification).toBe("off");
+    expect(loaded.worktrees[1].trayNotification).toBe("all");
   });
 
   it("個別に設定済みの値は上書きしない", () => {
     const loaded = loadedWith(
       [
-        { id: "a", workgroupId: "g-off", trayNotification: true },
-        { id: "b", workgroupId: "g-off", trayNotification: false },
+        { id: "a", workgroupId: "g-off", trayNotification: "all" },
+        { id: "b", workgroupId: "g-off", trayNotification: "off" },
       ],
-      [{ id: "g-off", trayNotification: false }],
+      [{ id: "g-off", trayNotification: "off" }],
     );
 
     migrateTrayNotification(loaded);
-    expect(loaded.worktrees[0].trayNotification).toBe(true);
-    expect(loaded.worktrees[1].trayNotification).toBe(false);
+    expect(loaded.worktrees[0].trayNotification).toBe("all");
+    expect(loaded.worktrees[1].trayNotification).toBe("off");
+  });
+
+  // issue #319 で新設した need_input も「個別に設定済み」として扱われ、上書きされない。
+  it("need_input も個別設定として上書きしない", () => {
+    const loaded = loadedWith(
+      [{ id: "a", workgroupId: "g-off", trayNotification: "need_input" }],
+      [{ id: "g-off", trayNotification: "off" }],
+    );
+
+    migrateTrayNotification(loaded);
+    expect(loaded.worktrees[0].trayNotification).toBe("need_input");
   });
 
   // 旧仕様の groupOf と同じく「workgroupId 未設定 / 不明なら先頭グループ」
   it("workgroupId 未設定・不明なら先頭グループの値を焼き込む", () => {
     const loaded = loadedWith(
       [{ id: "a" }, { id: "b", workgroupId: "" }, { id: "c", workgroupId: "deleted" }],
-      [{ id: "g-first", trayNotification: false }, { id: "g-2", trayNotification: true }],
+      [{ id: "g-first", trayNotification: "off" }, { id: "g-2", trayNotification: "all" }],
     );
 
     migrateTrayNotification(loaded);
-    expect(loaded.worktrees.every((w) => w.trayNotification === false)).toBe(true);
+    expect(loaded.worktrees.every((w) => w.trayNotification === "off")).toBe(true);
   });
 
-  it("グループが未設定なら何も書かない（実効値 true のまま）", () => {
+  it("グループが未設定なら何も書かない（実効値 all のまま）", () => {
     const loaded = loadedWith([{ id: "a", workgroupId: "g" }], [{ id: "g" }]);
 
     expect(migrateTrayNotification(loaded)).toBe(true); // フラグ永続化のため true
@@ -134,24 +145,24 @@ describe("migrateTrayNotification（一度きりの移行焼き込み）", () =>
   it("Rust 由来の null は未設定として扱う", () => {
     const loaded = loadedWith(
       [{ id: "a", workgroupId: "g", trayNotification: null } as unknown as WorktreeEntry],
-      [{ id: "g", trayNotification: false }],
+      [{ id: "g", trayNotification: "off" }],
     );
 
     migrateTrayNotification(loaded);
-    expect(loaded.worktrees[0].trayNotification).toBe(false);
+    expect(loaded.worktrees[0].trayNotification).toBe("off");
   });
 
   // **一度きり**であることが要。毎回走ると oretachi_set_tray_notification の
-  // enabled 省略呼び出し（キー削除 = 未設定に戻す）が次回起動で無言に巻き戻る。
+  // enabled/mode 省略呼び出し（キー削除 = 未設定に戻す）が次回起動で無言に巻き戻る。
   it("2回目以降は走らない — 未設定へ戻した値をグループ既定値で再適用しない", () => {
     const loaded = loadedWith(
       [{ id: "a", workgroupId: "g-off" }],
-      [{ id: "g-off", trayNotification: false }],
+      [{ id: "g-off", trayNotification: "off" }],
     );
     migrateTrayNotification(loaded);
     expect(loaded.trayNotificationMigrated).toBe(true);
 
-    // MCP の enabled 省略呼び出し相当（キーを消して未設定へ戻す）
+    // MCP の mode/enabled 省略呼び出し相当（キーを消して未設定へ戻す）
     delete loaded.worktrees[0].trayNotification;
 
     expect(migrateTrayNotification(loaded)).toBe(false);

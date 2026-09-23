@@ -4,6 +4,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { message } from "@tauri-apps/plugin-dialog";
 import { useI18n } from "vue-i18n";
 import type { Worktree } from "../types/worktree";
+import type { TrayNotificationMode } from "../types/settings";
 import { useSettings, applyPluginConfig } from "../composables/useSettings";
 
 const { t } = useI18n();
@@ -12,15 +13,15 @@ const props = defineProps<{
   worktree: Worktree;
   /** 自動承認の現在値 */
   autoApproval: boolean;
-  /** トレイ通知の実効値（ワークツリー個別 > true で解決済み） */
-  trayNotification: boolean;
+  /** トレイ通知モードの実効値（ワークツリー個別 > all で解決済み） */
+  trayNotificationMode: TrayNotificationMode;
   /** 割り当て済みホットキー文字（未割り当てなら undefined） */
   hotkeyChar?: string;
 }>();
 
 const emit = defineEmits<{
   toggleAutoApproval: [worktreeId: string];
-  toggleTrayNotification: [worktreeId: string];
+  setTrayNotificationMode: [worktreeId: string, mode: TrayNotificationMode];
   setHotkeyChar: [worktreeId: string];
   close: [];
 }>();
@@ -87,15 +88,18 @@ async function onReapplyPluginConfig() {
 
       <!-- トレイ通知 -->
       <div class="field">
-        <label class="checkbox-label">
-          <input
-            type="checkbox"
-            :checked="trayNotification"
-            @change="emit('toggleTrayNotification', worktree.id)"
-          />
-          <span class="entry-text">{{ t('trayNotification.label') }}</span>
-        </label>
-        <p class="hint">{{ t('trayNotification.desc') }}</p>
+        <label class="select-label" for="tray-notification-mode">{{ t('trayNotification.label') }}</label>
+        <select
+          id="tray-notification-mode"
+          class="select-input"
+          :value="trayNotificationMode"
+          @change="emit('setTrayNotificationMode', worktree.id, ($event.target as HTMLSelectElement).value as TrayNotificationMode)"
+        >
+          <option value="all">{{ t('trayNotification.modes.all') }}</option>
+          <option value="need_input">{{ t('trayNotification.modes.needInput') }}</option>
+          <option value="off">{{ t('trayNotification.modes.off') }}</option>
+        </select>
+        <p class="hint">{{ t(`trayNotification.desc.${trayNotificationMode}`) }}</p>
       </div>
 
       <div class="divider" />
@@ -195,6 +199,23 @@ async function onReapplyPluginConfig() {
   cursor: pointer;
 }
 
+.select-label {
+  display: block;
+  font-size: 13px;
+  color: #cdd6f4;
+  margin-bottom: 4px;
+}
+
+.select-input {
+  background: #313244;
+  color: #cdd6f4;
+  border: 1px solid #45475a;
+  border-radius: 4px;
+  padding: 5px 8px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
 .entry-text {
   font-size: 13px;
   color: #cdd6f4;
@@ -278,7 +299,16 @@ async function onReapplyPluginConfig() {
     },
     "trayNotification": {
       "label": "Tray notification",
-      "desc": "Shows a desktop notification from the tray when this worktree needs attention. Turning it off no longer suppresses approval waits (tool permission, plan approval, AskUserQuestion); what it suppresses is completion (Stop) and the high-frequency lifecycle hooks. Repositories with no notification hooks configured stay silent either way."
+      "modes": {
+        "all": "All",
+        "needInput": "Needs input",
+        "off": "Off"
+      },
+      "desc": {
+        "all": "Shows a desktop notification from the tray for every hook-driven event: approval waits, completion (Stop), and high-frequency lifecycle hooks.",
+        "need_input": "Shows approval waits and completion (Stop), but suppresses the high-frequency lifecycle hooks.",
+        "off": "Shows only approval waits (tool permission, plan approval, AskUserQuestion); completion (Stop) and lifecycle hooks are suppressed. Repositories with no notification hooks configured stay silent regardless of mode."
+      }
     },
     "hotkey": {
       "assign": "Assign hotkey",
@@ -304,7 +334,16 @@ async function onReapplyPluginConfig() {
     },
     "trayNotification": {
       "label": "トレイ通知",
-      "desc": "このワークツリーが応答待ちになったとき、トレイからデスクトップ通知を出します。オフにしても承認待ち（ツール許可・プラン承認・AskUserQuestion）は抑制されません。止まるのは作業完了（Stop）と高頻度なライフサイクルフックの通知です。なお通知フックを設定していないリポジトリでは、オン・オフによらずフック由来の通知は出ません。"
+      "modes": {
+        "all": "すべて",
+        "needInput": "要入力のみ",
+        "off": "オフ"
+      },
+      "desc": {
+        "all": "承認待ち・作業完了（Stop）・高頻度なライフサイクルフックまで、フック由来の通知をすべてトレイに出します。",
+        "need_input": "承認待ちと作業完了（Stop）はトレイに出しますが、高頻度なライフサイクルフックの通知は抑制します。",
+        "off": "承認待ち（ツール許可・プラン承認・AskUserQuestion）だけをトレイに出します。作業完了（Stop）とライフサイクルフックの通知は抑制されます。なお通知フックを設定していないリポジトリでは、モードによらずフック由来の通知は出ません。"
+      }
     },
     "hotkey": {
       "assign": "ホットキーを割り当て",
