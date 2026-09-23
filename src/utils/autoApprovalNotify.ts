@@ -7,7 +7,7 @@
  * その経路で通知が黙って消えないよう、判定中に届いたイベントをここで預かる。
  */
 
-import { isNotifyKind, passesTrayOff } from "./notificationKinds";
+import { isNotifyKind, shouldNotifyForMode } from "./notificationKinds";
 
 /**
  * 判定中に預かった通知 1 ワークツリー分。
@@ -70,14 +70,15 @@ export function shouldNotifyAfterJudge(params: {
 
 /** `notify-worktree` ペイロードの `tray` を真偽値に正規化する（未指定は表示）。
  *
- * `kind` を渡した場合は `passesTrayOff` の例外を適用する（#225）。`tray: false` でも
- * `approval` は「人の入力待ち」なので提示する。`useNotifications` 側の判定と
- * 同じ規則を使うため、両方から同じ関数を引く。
+ * `payload.tray === false` になるのは `trayMode: "off"` のときだけ（issue #319。
+ * `mcp_server.rs` の `/notify` を参照）。`kind` を渡した場合は `shouldNotifyForMode("off", kind)`
+ * の例外を適用する（#225）。`tray: false` でも `approval` は「人の入力待ち」なので提示する。
+ * `useNotifications` 側の判定と同じ規則を使うため、両方から同じ関数を引く。
  *
  * `kind` を持たないペイロード（`sub-try-auto-approve` / `sub-auto-approve-result`）は
  * **メイン側で解決済みの `tray` を持ち回っている**ので、ここで例外を再適用する必要はない。
  */
 export function trayOf(payload: { tray?: boolean; kind?: string }): boolean {
   if (payload.tray !== false) return true;
-  return payload.kind !== undefined && isNotifyKind(payload.kind) && passesTrayOff(payload.kind);
+  return payload.kind !== undefined && isNotifyKind(payload.kind) && shouldNotifyForMode("off", payload.kind);
 }

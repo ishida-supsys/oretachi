@@ -44,6 +44,12 @@ export interface Repository {
   branchNamePattern?: string; // タスク追加時のブランチ名パターン (例: "{feature|fix}/<task>"、未記入なら "worktree/<task>")
 }
 
+/**
+ * トレイ通知の3値モード（issue #319）。`all`(旧`true`) / `need_input`(新設) / `off`(旧`false`)。
+ * kind ごとの通知可否判定は `shouldNotifyForMode`（utils/notificationKinds.ts）を参照。
+ */
+export type TrayNotificationMode = "all" | "need_input" | "off";
+
 export interface WorktreeEntry {
   id: string;
   name: string;
@@ -55,15 +61,16 @@ export interface WorktreeEntry {
   autoApproval?: boolean;
   autoApprovalPrompt?: string;
   /**
-   * フック由来通知をトレイ通知として出すか。未設定 = true（解決はバックエンドの
-   * resolve_tray_notification / フロントの resolveTrayNotification）。所属ワークグループの
+   * フック由来通知をトレイ通知として出すモード。未設定 = "all"（解決はバックエンドの
+   * resolve_tray_notification_mode / フロントの resolveTrayNotificationMode）。所属ワークグループの
    * 既定値は**作成時に一度だけ焼き込まれる**ので、実効値を決めるのはここだけ。
-   * false でもイベント自体は流れるため自動承認は動き、
+   * "off" でもイベント自体は流れるため自動承認は動き、
    * MCP notify_worktree による明示的な通知も常にトレイへ出る。
    * さらに `approval`（PermissionRequest 由来 = ツール許可 / プラン承認 /
-   * AskUserQuestion）は false でも提示する（#225。`passesTrayOff` を参照）。
+   * AskUserQuestion）はどのモードでも提示する（#225。`shouldNotifyForMode` を参照）。
+   * 旧 settings.json の `true`/`false` はバックエンドが読み込み時に `all`/`off` へ正規化する。
    */
-  trayNotification?: boolean;
+  trayNotification?: TrayNotificationMode | null;
   description?: string; // 作業全体の目的を表す1行説明（ExitPlanMode hookのAI要約、または MCP oretachi_set_description で直接セット）
   descriptionOpen?: boolean; // ホームカードの description 開閉状態（ワークツリー毎）
   workgroupId?: string; // 所属するワークグループのID（未設定は先頭グループにフォールバック）
@@ -95,7 +102,7 @@ export interface Workgroup {
   claudeCodeMode?: ClaudeCodeMode;  // Claude Code モード（既定: plan）
   execPrompt?: string;              // 実行プロンプトテンプレート（置換タグ {{PROMPT}}）
   systemPrompt?: string;            // Claude Code セッションに常時注入（SessionStart フック経由。/clear 後も維持）
-  trayNotification?: boolean;       // 新規ワークツリー作成時のトレイ通知初期値。既存ワークツリーには影響しない（未設定 = 焼き込まない = 実効値 true）
+  trayNotification?: TrayNotificationMode | null; // 新規ワークツリー作成時のトレイ通知初期値。既存ワークツリーには影響しない（未設定 = 焼き込まない = 実効値 all）
 }
 
 export interface TerminalSettings {

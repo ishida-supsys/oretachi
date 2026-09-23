@@ -9,8 +9,8 @@ import { useWorkgroups } from "./useWorkgroups";
 import { useWorktrees } from "./useWorktrees";
 import { useAutoReturnHome } from "./useAutoReturnHome";
 import { useNotifications, playSoundForKind, sendOsNotification } from "./useNotifications";
-import { resolveKindSetting } from "../utils/notificationKinds";
-import { buildTrayNotificationMap } from "../utils/trayNotification";
+import { resolveKindSetting, shouldNotifyForMode } from "../utils/notificationKinds";
+import { buildTrayNotificationModeMap } from "../utils/trayNotification";
 import { HOME_WORKTREE_ID, isHomeWorktree } from "../utils/homeWorktree";
 import type { TaskCode, TaskProcessCode } from "../types/task";
 
@@ -289,10 +289,11 @@ export function useAddTaskDialog(executeStep: StepExecutor, autoReturnHome?: Aut
    */
   async function notifyTaskFailure(taskId: string, detail: string): Promise<void> {
     try {
-      // 種別ごとの ON/OFF と、通知先ワークツリーの trayNotification を尊重する
+      // 種別ごとの ON/OFF と、通知先ワークツリーの trayNotification モードを尊重する
       if (!resolveKindSetting(settings.value.notificationSound, "general").enabled) return;
       const worktreeId = resolveFailureWorktreeId(taskId);
-      if (!(buildTrayNotificationMap(settings.value).get(worktreeId) ?? true)) return;
+      const trayMode = buildTrayNotificationModeMap(settings.value).get(worktreeId) ?? "all";
+      if (!shouldNotifyForMode(trayMode, "general")) return;
       addNotification(worktreeId, "general");
       playSoundForKind("general");
       // クリック時のフォーカス先は**名前**で解決されるので名前を渡し、本文だけ理由に差し替える。

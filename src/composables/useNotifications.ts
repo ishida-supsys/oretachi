@@ -10,13 +10,13 @@ import {
 import { playNotificationSound } from "../utils/notificationSound";
 import {
   isNotifyKind,
-  passesTrayOff,
+  shouldNotifyForMode,
   resolveKindSetting,
   shouldPlaySound,
   shouldSendOsNotification,
   showsBadge,
 } from "../utils/notificationKinds";
-import type { NotifyKind, NotificationSoundSettings } from "../types/settings";
+import type { NotifyKind, NotificationSoundSettings, TrayNotificationMode } from "../types/settings";
 
 export interface NotifyWorktreeEvent {
   worktree_name: string;
@@ -24,8 +24,12 @@ export interface NotifyWorktreeEvent {
   body?: string;
   agent?: string;
   /** false のとき通知系（トレイバッジ / ポップアップ / 通知音 / OS通知）を抑制する。
-   *  例外は `approval` で、`false` でも提示する（#225。`passesTrayOff` を参照）。 */
+   *  例外は `approval` で、`false` でも提示する（#225）。後方互換のため残す
+   *  （kind ごとの正確な可否判定は `trayMode` + `shouldNotifyForMode` を使うこと）。 */
   tray?: boolean;
+  /** トレイ通知モード（issue #319）。Rust 側 `NotifyWorktreeEvent` は camelCase 変換をしないため
+   *  wire 上のキーは `tray_mode`（他フィールドと同じ snake_case）。未設定は "all" 扱い。 */
+  tray_mode?: TrayNotificationMode;
 }
 
 /** `worktree.*` の発火を発火元ワークツリーへ伝えるイベント（#140）。
@@ -150,11 +154,15 @@ export function useNotifications() {
       // 種別ごとの ON/OFF（#140）。`hook` は既定 OFF だが、明示的に ON にすれば
       // 他の種別と同様に通知される（統合前は無条件でスキップしていた）。
       if (!resolveKindSetting(getSoundSettings?.(), kind).enabled) return;
-      // trayNotification オフのワークツリー由来。自動承認は notify-worktree を別途購読しており、
-      // そちらは `tray` をイベント単位で持ち回って判定する（#168）ので、ここだけ止める。
-      // ただし `approval`（ツール許可 / プラン承認 / AskUserQuestion）は
-      // 「人の入力を待って止まった」ことを伝える唯一のフック経路なので通す（#225）。
-      if (event.payload.tray === false && !passesTrayOff(kind)) return;
+      // trayNotification モードによる抑制（issue #319）。自動承認は notify-worktree を
+      // 別途購読しており、そちらは `tray`(bool) をイベント単位で持ち回って判定する
+      // （#168）ので、ここだけ `trayMode` を見て kind ごとに判定する。
+      // `all` なら常に通り、`need_input` は completed も通り、`off` は approval のみ
+      // （ツール許可 / プラン承認 / AskUserQuestion。#225）。
+      // `tray_mode` を持たない旧ペイロード（テスト・MCP ブロードキャスト経路）は
+      // 従来どおり `tray` bool から補う（false のみ "off"、それ以外は "all"）。
+      const trayMode = event.payload.tray_mode ?? (event.payload.tray === false ? "off" : "all");
+      if (!shouldNotifyForMode(trayMode, kind)) return;
       const id = resolveWorktreeId(worktreeName);
       if (id) {
         if (shouldHold?.(id, kind)) return;

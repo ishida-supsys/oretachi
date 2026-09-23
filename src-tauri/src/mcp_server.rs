@@ -19,7 +19,9 @@ use tokio::sync::{broadcast, oneshot, watch, RwLock};
 use crate::git_worktree::get_git_remotes;
 use crate::pty_manager::PtyManager;
 use crate::event_db::NotifyKind;
-use crate::settings::{resolve_tray_notification, AppSettings, SettingsManager, Workgroup, WorktreeEntry};
+use crate::settings::{
+    resolve_tray_notification_mode, AppSettings, SettingsManager, TrayNotificationMode, Workgroup, WorktreeEntry,
+};
 
 /// artifact / artifact_module の read-modify-write を直列化するグローバルロック。
 /// これらのツールは read_only_hint = true を宣言しているため Claude Code 側が
@@ -798,7 +800,9 @@ pub struct SetWorktreeDescriptionParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SetTrayNotificationParams {
-    #[schemars(description = "true=フック由来通知をトレイに出す / false=出さない / **省略時は「未設定」に戻して所属ワークグループの既定値（無ければ true）へフォールバックする**")]
+    #[schemars(description = "トレイ通知モード: \"all\"(全通知) / \"need_input\"(承認待ち・完了通知のみ) / \"off\"(承認待ちのみ)。指定時は enabled より優先される")]
+    pub mode: Option<String>,
+    #[schemars(description = "後方互換用の旧パラメータ。true=\"all\" / false=\"off\" として扱う。mode 指定時は無視される。**mode・enabled とも省略時は「未設定」に戻る（実効値 all）**")]
     pub enabled: Option<bool>,
     #[schemars(description = "ワークツリーのルートディレクトリ絶対パス（通常は自分の作業ディレクトリ）。worktree_name/worktree_id 未指定時はこれでワークツリーを特定する")]
     pub project_dir: Option<String>,
@@ -815,11 +819,13 @@ pub struct SetTrayNotificationParams {
 pub struct SetTrayNotificationEvent {
     pub worktree: String,
     pub worktree_id: String,
-    /// `None` = 未設定へ戻す（ワークグループ既定値へフォールバック）
-    pub tray_notification: Option<bool>,
+    /// `None` = 未設定へ戻す（実効値 `all`。ワークグループへはフォールバックしない）
+    pub tray_notification: Option<TrayNotificationMode>,
 }
 
 fn default_true() -> bool { true }
+
+fn default_tray_mode_all() -> String { TrayNotificationMode::All.to_string() }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct NotifyWorktreeEvent {
@@ -827,16 +833,22 @@ pub struct NotifyWorktreeEvent {
     pub kind: String,
     pub body: Option<String>,
     pub agent: Option<String>,
-    /// トレイ通知として提示してよいか。`false` はフック由来通知を
-    /// `trayNotification: false` のワークツリーで抑制するケースのみ。
+    /// トレイ通知として提示してよいか。`false` はフック由来通知を `trayNotification: off`
+    /// のワークツリーで抑制するケースのみ（issue #319: `need_input` は `all` と同じく
+    /// `true` を載せる。kind ごとの細かい可否は `trayMode` を見てフロントが判定する）。
     /// **`false` でも `kind: "approval"` はフロントで提示される**（#225。
-    /// `notificationKinds.ts` の `passesTrayOff`）。人の入力を待って止まった
+    /// `notificationKinds.ts` の `shouldNotifyForMode`）。人の入力を待って止まった
     /// ことを伝える経路まで潰すと、誰も気付けないまま止まり続けるため。
     /// **イベント自体は drop しない**（自動承認が `notify-worktree` をトリガにしている）。
     /// MCP ブロードキャスト経路の `from_str::<NotifyWorktreeEvent>` との後方互換のため
     /// `default` が必須。
     #[serde(default = "default_true")]
     pub tray: bool,
+    /// トレイ通知モード（issue #319）。kind ごとの可否判定はフロントの
+    /// `shouldNotifyForMode(trayMode, kind)` が担う。旧ペイロード（`trayMode` を持たない）
+    /// との後方互換のため `default` = `"all"`。
+    #[serde(default = "default_tray_mode_all")]
+    pub tray_mode: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -2415,6 +2427,7 @@ impl NotifyService {
             // 明示有無・trayNotification にかかわらず常にトレイへ出す。
             // トレイ通知をオフにしていてもユーザー判断を仰げる唯一の経路。
             tray: true,
+            tray_mode: TrayNotificationMode::All.to_string(),
         };
         // 通知トーストを送ったかどうかにかかわらず、イベント発行の結果は必ず返す
         // （debounce で落ちても購読配送は成立しているため、"ok" だけ返すと嘘になる）。
@@ -2528,10 +2541,10 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "ワークツリーのトレイ通知（フック由来の承認待ち・作業完了通知）のオン/オフを切り替える。enabled=true で通知する / enabled=false で通知しない / **enabled を省略すると「未設定」に戻る（= 通知する。実効値は true）**。ワークグループの設定は新規ワークツリー作成時の初期値でしかなく、フォールバック先にはならない。オフで止まるのは `Stop` → `completed` や高頻度な `hook` などのノイズで、**`approval`(既定では `PermissionRequest` 由来 = ツール許可 / プラン承認 / AskUserQuestion) は抑制されない**ため、ユーザーの判断を仰ぐ経路は残る。ツール `notify_worktree` による明示通知はこの設定に一切左右されず常にトレイへ出るので、確実に呼び戻したいときはそちらを使うこと(フック由来の通知は、リポジトリに通知フックが1件も設定されていなければ `approval` を含めて出ない)。teamwork-parent のような進行管理セッションが自分自身のノイズを止める用途を想定している。他人のワークツリーを勝手にオフにしないこと")]
+    #[tool(description = "ワークツリーのトレイ通知（フック由来の承認待ち・作業完了通知）のモードを設定する。mode=\"all\" で全通知 / mode=\"need_input\" で承認待ち・完了通知のみ / mode=\"off\" で承認待ちのみ。**mode 指定時は enabled より優先される。mode・enabled とも省略すると「未設定」に戻る（= 通知する。実効値は all）**。ワークグループの設定は新規ワークツリー作成時の初期値でしかなく、フォールバック先にはならない。`off`/`need_input` で止まるのは高頻度な `hook` などのノイズで（`need_input` は `Stop` → `completed` は通す）、**`approval`(既定では `PermissionRequest` 由来 = ツール許可 / プラン承認 / AskUserQuestion) はどのモードでも抑制されない**ため、ユーザーの判断を仰ぐ経路は残る。ツール `notify_worktree` による明示通知はこの設定に一切左右されず常にトレイへ出るので、確実に呼び戻したいときはそちらを使うこと(フック由来の通知は、リポジトリに通知フックが1件も設定されていなければ `approval` を含めて出ない)。teamwork-parent のような進行管理セッションが自分自身のノイズを止める用途を想定している。他人のワークツリーを勝手にオフにしないこと")]
     fn oretachi_set_tray_notification(
         &self,
-        Parameters(SetTrayNotificationParams { enabled, project_dir, worktree_name, worktree_id }): Parameters<SetTrayNotificationParams>,
+        Parameters(SetTrayNotificationParams { mode, enabled, project_dir, worktree_name, worktree_id }): Parameters<SetTrayNotificationParams>,
     ) -> Result<CallToolResult, McpError> {
         let settings_manager = self.app_handle.state::<SettingsManager>();
         let settings = settings_manager.get();
@@ -2546,13 +2559,30 @@ impl NotifyService {
         )?;
 
         let previous = wt.tray_notification;
-        let previous_effective = resolve_tray_notification(wt);
+        let previous_effective = resolve_tray_notification_mode(wt);
+
+        // mode 優先。mode 未指定なら enabled(旧形式bool)から変換。両方未指定なら
+        // 「未設定に戻す」(= None、実効値 all)。
+        // **mode が指定されて値が不正なら黙って enabled/未設定へフォールバックしない。**
+        // 他の MCP パラメータ（artifact コマンド等）と同じく、不正値は invalid_params で
+        // 明示的に弾く。ここだけ黙って握り潰すと、typo で意図せず設定がリセットされても
+        // 呼び出し元がレスポンス JSON を見返すまで気付けない。
+        let new_mode = match mode.as_deref() {
+            Some(m) => Some(TrayNotificationMode::parse(m).ok_or_else(|| {
+                McpError::invalid_params(
+                    format!("不明な mode '{}'. all / need_input / off のいずれかを指定してください", m),
+                    None,
+                )
+            })?),
+            None => enabled.map(|b| if b { TrayNotificationMode::All } else { TrayNotificationMode::Off }),
+        };
+
         // 変更後の実効値は自前で `unwrap_or` せず、新しい値を載せたエントリを
-        // resolve_tray_notification に通して求める（解決規則の二重実装を避ける）。
+        // resolve_tray_notification_mode に通して求める（解決規則の二重実装を避ける）。
         let new_effective = {
             let mut probe = wt.clone();
-            probe.tray_notification = enabled;
-            resolve_tray_notification(&probe)
+            probe.tray_notification = new_mode;
+            resolve_tray_notification_mode(&probe)
         };
 
         // 永続化と UI 反映はフロント（App.vue）に任せる。Rust 側の SettingsManager を
@@ -2560,14 +2590,14 @@ impl NotifyService {
         let event = SetTrayNotificationEvent {
             worktree: wt.name.clone(),
             worktree_id: wt.id.clone(),
-            tray_notification: enabled,
+            tray_notification: new_mode,
         };
         self.app_handle
             .emit("set-worktree-tray-notification", &event)
             .map_err(|e: tauri::Error| McpError::internal_error(e.to_string(), None))?;
         log::info!(
             "[mcp] oretachi_set_tray_notification: worktree={} {:?} -> {:?} (effective {} -> {})",
-            wt.name, previous, enabled, previous_effective, new_effective
+            wt.name, previous, new_mode, previous_effective, new_effective
         );
 
         let json = serde_json::json!({
@@ -2575,7 +2605,7 @@ impl NotifyService {
             "worktree": wt.name,
             "previous": previous,
             "previousEffective": previous_effective,
-            "new": enabled,
+            "new": new_mode,
             "newEffective": new_effective,
         });
         Ok(CallToolResult::success(vec![Content::text(
@@ -2583,7 +2613,7 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "登録済みワークツリーのステータス一覧を取得する。各エントリはルートパス(path)・1行説明(description)・ブランチ名・所属ワークグループ(workgroupId / workgroupName)・isHome・isRepository を含む。isHome / isRepository が true のものは git ワークツリーではない擬似エントリなので、作業割り当てや削除の候補からは外すこと。query で name / branchName / description の部分一致検索ができる。未確認通知の件数(notificationCount) / 種別(notificationKind) も含む（0 件なら通知なし。oretachi_clear_worktree_notification でリセットできる）。トレイ通知設定は生値(trayNotification: true/false/null。**null は「無効」ではなく未設定 = 通知する**)と実効値(trayNotificationEffective)の両方を返す。返るのはアクティブなワークツリーのみで、クローズ済みのものは oretachi_list_archives を使う", annotations(read_only_hint = true))]
+    #[tool(description = "登録済みワークツリーのステータス一覧を取得する。各エントリはルートパス(path)・1行説明(description)・ブランチ名・所属ワークグループ(workgroupId / workgroupName)・isHome・isRepository を含む。isHome / isRepository が true のものは git ワークツリーではない擬似エントリなので、作業割り当てや削除の候補からは外すこと。query で name / branchName / description の部分一致検索ができる。未確認通知の件数(notificationCount) / 種別(notificationKind) も含む（0 件なら通知なし。oretachi_clear_worktree_notification でリセットできる）。トレイ通知設定は生値(trayNotification: \"all\"/\"need_input\"/\"off\"/null。**null は「無効」ではなく未設定 = 実効値 all**)と実効値(trayNotificationEffective)の両方を返す。返るのはアクティブなワークツリーのみで、クローズ済みのものは oretachi_list_archives を使う", annotations(read_only_hint = true))]
     fn oretachi_get_worktree_status(
         &self,
         Parameters(GetWorktreeStatusParams { query }): Parameters<GetWorktreeStatusParams>,
@@ -2638,7 +2668,7 @@ impl NotifyService {
                     // 生値は三値（null = 未設定）。null を「無効」と読み違えられないよう、
                     // 実効値も併記する（set_tray_notification の previous / previousEffective と同じ対）。
                     "trayNotification": wt.tray_notification,
-                    "trayNotificationEffective": resolve_tray_notification(wt),
+                    "trayNotificationEffective": resolve_tray_notification_mode(wt),
                     "notificationCount": notification.map_or(0, |n| n.count),
                     "notificationKind": notification.map(|n| n.kind.as_str()),
                     "firstNotifiedAt": notification.map(|n| n.first_notified_at),
@@ -6824,23 +6854,29 @@ async fn notify_handler(
         return StatusCode::OK;
     }
 
-    // トレイ通知の可否（#153）。フック由来（event 指定・kind 明示なし）かつ
-    // `resolve_tray_notification == false` のときだけ `tray: false` を載せる。
+    // トレイ通知モードの解決（#153, issue #319）。フック由来（event 指定・kind 明示なし）
+    // のときだけ `resolve_tray_notification_mode` を適用する。
     // **イベント自体は drop しない** —— `useAppAutoApproval.ts` / `SubWindowApp.vue` の
     // 自動承認が `notify-worktree` をトリガにしているため、ここで落とすと
     // トレイ通知をオフにしたワークツリーで自動承認が止まる。
     //
-    // `tray: false` を「提示しない」と読み替えるのはフロント側の責務で、そこには
-    // `approval` の例外がある（#225）。ここは「トレイ通知設定がオフだった」という
-    // 事実だけを載せる層なので、kind による分岐は入れない。
-    let tray = if payload.kind.is_none() && payload.event.is_some() {
+    // `trayMode` を見て kind ごとに「提示しない」へ読み替えるのはフロント側の責務
+    // （`shouldNotifyForMode`。そこには `approval` を必ず通す例外がある、#225）。
+    // ここは「トレイ通知設定がどのモードだったか」という事実だけを載せる層なので、
+    // kind による分岐は入れない。
+    //
+    // 後方互換の `tray: bool` は `mode != off` として求める（旧 `true`/`false` は
+    // `all`/`off` に完全一致し、新設の `need_input` は旧仕様の「オンにしたとき」と
+    // 同じ非抑制側に倒す。自動承認のトレイ表示ゲートが誤って止まらないようにするため）。
+    let tray_mode = if payload.kind.is_none() && payload.event.is_some() {
         match worktree {
-            Some(w) => resolve_tray_notification(w),
-            None => true,
+            Some(w) => resolve_tray_notification_mode(w),
+            None => TrayNotificationMode::All,
         }
     } else {
-        true
+        TrayNotificationMode::All
     };
+    let tray = tray_mode != TrayNotificationMode::Off;
 
     // kind: 明示指定(旧形式/MCP) > event からの解決 > "general"
     // 明示指定が不正な値だった場合は落とさずに event からの解決へ落とす（旧形式の
@@ -6928,6 +6964,7 @@ async fn notify_handler(
         body: payload.body,
         agent: payload.agent,
         tray,
+        tray_mode: tray_mode.to_string(),
     };
     log::info!(
         "[notify] worktree={} kind={} tray={} terminal={:?}",
@@ -8199,13 +8236,14 @@ mod tests {
         assert!(!should_skip_subagent_notify(Some("cc"), None, None));
     }
 
-    /// MCP ブロードキャスト経路（`listen("notify-worktree")` → `from_str`）は `tray` を
-    /// 持たない旧ペイロードも受け取る。default で落とすと全通知が抑制扱いになる (#153)。
+    /// MCP ブロードキャスト経路（`listen("notify-worktree")` → `from_str`）は `tray`/`trayMode`
+    /// を持たない旧ペイロードも受け取る。default で落とすと全通知が抑制扱いになる (#153)。
     #[test]
     fn test_notify_worktree_event_tray_defaults_to_true() {
         let legacy = r#"{"worktree_name":"wt","kind":"hook","body":null,"agent":null}"#;
         let event: NotifyWorktreeEvent = serde_json::from_str(legacy).unwrap();
         assert!(event.tray);
+        assert_eq!(event.tray_mode, "all");
     }
 
     #[test]
@@ -8216,10 +8254,12 @@ mod tests {
             body: None,
             agent: None,
             tray: false,
+            tray_mode: "off".into(),
         };
         let restored: NotifyWorktreeEvent =
             serde_json::from_str(&serde_json::to_string(&event).unwrap()).unwrap();
         assert!(!restored.tray);
+        assert_eq!(restored.tray_mode, "off");
     }
 
     // ─── #140: kind 統合 ──────────────────────────────────────────────────────
@@ -8667,20 +8707,20 @@ mod tests {
         assert_eq!(v["trayNotification"], serde_json::Value::Null);
         assert_eq!(v["worktreeId"], "id");
 
-        let ev = SetTrayNotificationEvent { tray_notification: Some(false), ..ev };
+        let ev = SetTrayNotificationEvent { tray_notification: Some(TrayNotificationMode::Off), ..ev };
         let v: serde_json::Value = serde_json::to_value(&ev).unwrap();
-        assert_eq!(v["trayNotification"], serde_json::Value::Bool(false));
+        assert_eq!(v["trayNotification"], serde_json::Value::String("off".into()));
     }
 
-    /// 変更後の実効値は新しい値を載せた probe を `resolve_tray_notification` に通して求める。
-    /// `enabled` 省略（= None）は「未設定に戻す」＝ 実効値 `true`。所属ワークグループが
-    /// `trayNotification: false` でも、そこへはフォールバックしない（#171）。
+    /// 変更後の実効値は新しい値を載せた probe を `resolve_tray_notification_mode` に通して求める。
+    /// `mode`/`enabled` 省略（= None）は「未設定に戻す」＝ 実効値 `all`。所属ワークグループが
+    /// `trayNotification: off` でも、そこへはフォールバックしない（#171）。
     #[test]
     fn set_tray_notification_new_effective_ignores_workgroup_default() {
         let mut settings = AppSettings::default();
         settings.workgroups.push(Workgroup {
             id: "g".into(),
-            tray_notification: Some(false),
+            tray_notification: Some(TrayNotificationMode::Off),
             ..Default::default()
         });
         let wt = WorktreeEntry {
@@ -8696,21 +8736,25 @@ mod tests {
             description: None,
             description_open: None,
             workgroup_id: Some("g".into()),
-            tray_notification: Some(true),
+            tray_notification: Some(TrayNotificationMode::All),
             is_home: false,
             is_repository: false,
         };
-        assert!(resolve_tray_notification(&wt));
-        assert_eq!(settings.workgroups[0].tray_notification, Some(false));
+        assert_eq!(resolve_tray_notification_mode(&wt), TrayNotificationMode::All);
+        assert_eq!(settings.workgroups[0].tray_notification, Some(TrayNotificationMode::Off));
 
-        // enabled 省略 (= None) で未設定へ戻すと、グループ既定値 false ではなく true になる
+        // mode/enabled 省略 (= None) で未設定へ戻すと、グループ既定値 off ではなく all になる
         let mut probe = wt.clone();
         probe.tray_notification = None;
-        assert!(resolve_tray_notification(&probe));
+        assert_eq!(resolve_tray_notification_mode(&probe), TrayNotificationMode::All);
 
-        // 明示 false は当然 false
-        probe.tray_notification = Some(false);
-        assert!(!resolve_tray_notification(&probe));
+        // 明示 off は当然 off
+        probe.tray_notification = Some(TrayNotificationMode::Off);
+        assert_eq!(resolve_tray_notification_mode(&probe), TrayNotificationMode::Off);
+
+        // 新設の need_input も素通りする
+        probe.tray_notification = Some(TrayNotificationMode::NeedInput);
+        assert_eq!(resolve_tray_notification_mode(&probe), TrayNotificationMode::NeedInput);
     }
 
     /// Claude Code は plan モードで `readOnlyHint` が立っていない MCP ツールを

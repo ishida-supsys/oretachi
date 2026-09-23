@@ -2,7 +2,7 @@
 import { ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { AI_AGENT_LABELS, ALL_AGENT_KINDS } from "../constants/aiAgents";
-import type { AiAgentKind, ClaudeCodeMode, Workgroup } from "../types/settings";
+import type { AiAgentKind, ClaudeCodeMode, TrayNotificationMode, Workgroup } from "../types/settings";
 
 const { t } = useI18n();
 
@@ -34,8 +34,8 @@ const taskAddAgent = ref<AiAgentKind | "">(props.group.taskAddAgent ?? "");
 const claudeCodeMode = ref<ClaudeCodeMode>(props.group.claudeCodeMode ?? "plan");
 const execPrompt = ref(props.group.execPrompt ?? "");
 const systemPrompt = ref(props.group.systemPrompt ?? "");
-// 新規ワークツリー作成時の初期値。未設定 = 通知する（true）
-const trayNotification = ref(props.group.trayNotification ?? true);
+// 新規ワークツリー作成時の初期値。未設定 = 通知する（all）
+const trayNotificationMode = ref<TrayNotificationMode>(props.group.trayNotification ?? "all");
 
 function save() {
   emit("save", {
@@ -47,9 +47,10 @@ function save() {
     claudeCodeMode: claudeCodeMode.value,
     execPrompt: execPrompt.value.trim() || undefined,
     systemPrompt: systemPrompt.value.trim() || undefined,
-    // 既定どおり（通知する）のときはキーを落として settings.json をクリーンに保つ。
-    // 未設定なら新規ワークツリーへ何も焼き込まない（実効値 true）。
-    trayNotification: trayNotification.value ? undefined : false,
+    // 常に明示的なモード文字列を書く。`Option<TrayNotificationMode>` の `None`(未設定)は
+    // 「テンプレートが存在しない」ケース向けで、UI で選んだ時点では常に具体値がある
+    // （現行の「オンなら undefined を送る」挙動と実効値・後方互換とも同じ）。
+    trayNotification: trayNotificationMode.value,
   });
 }
 </script>
@@ -130,11 +131,13 @@ function save() {
         <p class="hint">{{ t('systemPromptHint') }}</p>
       </div>
 
-      <div class="field checkbox-field">
-        <label class="checkbox-label">
-          <input v-model="trayNotification" type="checkbox" />
-          {{ t('trayNotification') }}
-        </label>
+      <div class="field">
+        <label class="label">{{ t('trayNotification') }}</label>
+        <select v-model="trayNotificationMode" class="select">
+          <option value="all">{{ t('trayNotificationModes.all') }}</option>
+          <option value="need_input">{{ t('trayNotificationModes.needInput') }}</option>
+          <option value="off">{{ t('trayNotificationModes.off') }}</option>
+        </select>
         <p class="hint">{{ t('trayNotificationHint') }}</p>
       </div>
 
@@ -366,7 +369,8 @@ function save() {
     "execPromptPlaceholder": "e.g. Work on the following task.\n\n{'{{PROMPT}}'}",
     "execPromptHint": "{'{{PROMPT}}'} is replaced with the task prompt. Empty = task prompt only.",
     "trayNotification": "Tray notification",
-    "trayNotificationHint": "Initial value applied when a worktree is created in this group. Changing it never affects existing worktrees — switch those from each worktree's own menu. Turning it off does not suppress approval waits, and explicit MCP notify_worktree calls always reach the tray.",
+    "trayNotificationModes": { "all": "All", "needInput": "Needs input", "off": "Off" },
+    "trayNotificationHint": "Initial value applied when a worktree is created in this group. Changing it never affects existing worktrees — switch those from each worktree's own menu. No mode suppresses approval waits, and explicit MCP notify_worktree calls always reach the tray.",
     "systemPrompt": "System prompt",
     "systemPromptPlaceholder": "e.g. Always respond in Japanese.",
     "systemPromptHint": "Injected into every Claude Code session in this group. Persists across /clear and restarts. Claude Code only.",
@@ -391,7 +395,8 @@ function save() {
     "execPromptPlaceholder": "例: 以下のタスクに取り組んでください。\n\n{'{{PROMPT}}'}",
     "execPromptHint": "{'{{PROMPT}}'} がタスク実行プロンプトに置換されます。未指定ならプロンプトのみと等価。",
     "trayNotification": "トレイ通知",
-    "trayNotificationHint": "このグループで新規ワークツリーを作成したときの初期値です。変更しても既存のワークツリーには影響しません（既存はワークツリー個別のメニューから切り替えてください）。オフにしても承認待ち（ツール許可・プラン承認・AskUserQuestion）は抑制されません。MCP notify_worktree による明示的な通知は常にトレイへ出ます。",
+    "trayNotificationModes": { "all": "すべて", "needInput": "要入力のみ", "off": "オフ" },
+    "trayNotificationHint": "このグループで新規ワークツリーを作成したときの初期値です。変更しても既存のワークツリーには影響しません（既存はワークツリー個別のメニューから切り替えてください）。どのモードでも承認待ち（ツール許可・プラン承認・AskUserQuestion）は抑制されません。MCP notify_worktree による明示的な通知は常にトレイへ出ます。",
     "systemPrompt": "システムプロンプト",
     "systemPromptPlaceholder": "例: 常に日本語で応答してください。",
     "systemPromptHint": "このグループの Claude Code セッションに常時注入されます。/clear や再起動後も維持。Claude Code のみ対応。",

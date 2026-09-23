@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { NOTIFY_KINDS, HOOK_NOTIFY_KINDS, type NotificationSoundSettings } from "../types/settings";
+import {
+  NOTIFY_KINDS,
+  HOOK_NOTIFY_KINDS,
+  type NotificationSoundSettings,
+  type TrayNotificationMode,
+} from "../types/settings";
 import {
   migrateNotificationSound,
   resolveKindSetting,
@@ -7,7 +12,7 @@ import {
   shouldSendOsNotification,
   showsBadge,
   isNotifyKind,
-  passesTrayOff,
+  shouldNotifyForMode,
 } from "./notificationKinds";
 
 describe("NOTIFY_KINDS", () => {
@@ -155,20 +160,46 @@ describe("resolveKindSetting / shouldPlaySound / shouldSendOsNotification", () =
   });
 });
 
-describe("passesTrayOff", () => {
-  /** #225: `tray: false` を kind を問わず落としていたため、`PermissionRequest` 由来の
-   *  `approval`（ツール許可 / プラン承認 / AskUserQuestion）まで消えていた。 */
-  it("approval だけがトレイ通知オフを突き抜ける", () => {
-    expect(passesTrayOff("approval")).toBe(true);
-    for (const kind of NOTIFY_KINDS.filter((k) => k !== "approval")) {
-      expect(passesTrayOff(kind)).toBe(false);
+describe("shouldNotifyForMode", () => {
+  const MODES: readonly TrayNotificationMode[] = ["all", "need_input", "off"];
+  const KINDS = ["hook", "approval", "completed", "general"] as const;
+
+  /** issue #319 の真偽表(3モード×4kind)をそのまま固定する。 */
+  it.each([
+    ["all", "hook", true],
+    ["all", "approval", true],
+    ["all", "completed", true],
+    ["all", "general", true],
+    ["need_input", "hook", false],
+    ["need_input", "approval", true],
+    ["need_input", "completed", true],
+    ["need_input", "general", false],
+    ["off", "hook", false],
+    ["off", "approval", true],
+    ["off", "completed", false],
+    ["off", "general", false],
+  ] satisfies Array<[TrayNotificationMode, (typeof KINDS)[number], boolean]>)(
+    "%s × %s -> %s",
+    (mode, kind, expected) => {
+      expect(shouldNotifyForMode(mode, kind)).toBe(expected);
+    },
+  );
+
+  /** #225: `off` を kind を問わず落としていたため、`PermissionRequest` 由来の
+   *  `approval`（ツール許可 / プラン承認 / AskUserQuestion）まで消えていた。
+   *  approval はどのモードでも必ず通ることを網羅的に固定する。 */
+  it("approval はどのモードでも突き抜ける", () => {
+    for (const mode of MODES) {
+      expect(shouldNotifyForMode(mode, "approval")).toBe(true);
     }
   });
 
-  /** teamwork-parent がオフにする狙い（Stop → completed / 高頻度な hook のノイズ抑制）を
-   *  壊していないこと。ここが true になったら #225 の前提が崩れている。 */
-  it("completed / hook は抑制されたまま", () => {
-    expect(passesTrayOff("completed")).toBe(false);
-    expect(passesTrayOff("hook")).toBe(false);
+  /** worktree.* 系はどのモードでも hook/general と同じ扱い（all のみ通る）。 */
+  it("worktree.* 系も真偽表に従う", () => {
+    for (const kind of ["worktree.message", "worktree.created", "worktree.closed"] as const) {
+      expect(shouldNotifyForMode("all", kind)).toBe(true);
+      expect(shouldNotifyForMode("need_input", kind)).toBe(false);
+      expect(shouldNotifyForMode("off", kind)).toBe(false);
+    }
   });
 });

@@ -154,8 +154,8 @@ export function migrateTrayNotification(loaded: AppSettings): boolean {
     groups.find((g) => g.id === wt.workgroupId) ?? groups[0];
 
   for (const wt of loaded.worktrees) {
-    // 既に個別値があるものは触らない（null は Rust 由来の「未設定」なので対象）
-    if (wt.trayNotification === true || wt.trayNotification === false) continue;
+    // 既に個別値があるものは触らない（null/undefined は Rust 由来の「未設定」なので対象）
+    if (wt.trayNotification != null) continue;
     const inherited = initialTrayNotification(wt, groupOf);
     if (inherited !== undefined) wt.trayNotification = inherited;
   }
