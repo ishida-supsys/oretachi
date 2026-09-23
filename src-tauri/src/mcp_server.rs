@@ -6624,28 +6624,39 @@ fn resolve_workgroup_target(
     }
 }
 
-/// リポジトリに通知フックが1件以上設定されているか。
+/// リポジトリの通知フックに、指定した event が登録されているか（#318）。
+///
+/// **「1件でもあれば全event通す」という非空判定ではない。** イベントごとに
+/// `notification_hooks` を1件ずつ登録する設計（`resolve_kind_for_event` も同じ
+/// `event` 一致で kind を引く）なので、ここも同じ粒度で見る。さもないと
+/// 「`Stop` にしか hook 通知を設定していないのに `Notification` まで一緒に通る」
+/// という抜け道になる（#318: 自動承認ONでも Notification フック由来のトーストが
+/// PermissionRequest の判定より先に出てしまうバグの原因）。
 ///
 /// **リポジトリが引けなければ false（＝未設定）に倒れる。** home 擬似ワークツリーは
 /// `repositoryId` が空文字なので必ずここに落ちる（`homeWorktree.ts` の
 /// `makeHomeWorktreeEntry`）。リポジトリ擬似ワークツリー（`isRepository`）は実リポジトリの
 /// ID を持つので、親リポジトリの設定をそのまま共有する。
-fn repo_has_notification_hooks(settings: &AppSettings, worktree: &WorktreeEntry) -> bool {
+fn repo_has_notification_hook_for_event(
+    settings: &AppSettings,
+    worktree: &WorktreeEntry,
+    event: &str,
+) -> bool {
     settings
         .repositories
         .iter()
         .find(|r| r.id == worktree.repository_id)
         .and_then(|r| r.notification_hooks.as_ref())
-        .map_or(false, |h| !h.is_empty())
+        .is_some_and(|hooks| hooks.iter().any(|h| h.event == event))
 }
 
-/// ライフサイクルフック由来の通知トーストを破棄すべきか（#286）。
+/// ライフサイクルフック由来の通知トーストを破棄すべきか（#286, #318）。
 ///
 /// プラグインの hooks は全ワークツリーへ無条件で注入される（`claude_plugin.rs` の
 /// `build_hooks_json`。SessionStart 注入と MCP を使わせるためにプラグイン自体を
-/// 常時有効化している）。そのため、通知フックを1件も設定していないリポジトリの通知挙動を
-/// 従来（プラグイン無効＝通知なし）へ揃える層がここになる。`kind` 明示指定
-/// （旧形式 / MCP 経由）は意図的な通知なので最初から対象外。
+/// 常時有効化している）。そのため、その event を通知フックとして設定していない
+/// リポジトリの通知挙動を従来（プラグイン無効＝通知なし）へ揃える層がここになる。
+/// `kind` 明示指定（旧形式 / MCP 経由）は意図的な通知なので最初から対象外。
 ///
 /// **`approval` だけは破棄しない（#286）。** 理由は2つ:
 ///   - home 擬似ワークツリーには通知フックを設定する場所が無い（`setup_home_claude_dir` は
@@ -6665,10 +6676,15 @@ fn should_drop_hook_toast(
     event: Option<&str>,
     kind: NotifyKind,
 ) -> bool {
-    if kind_explicit || event.is_none() || kind == NotifyKind::Approval {
+    let Some(event) = event else {
+        return false;
+    };
+    if kind_explicit || kind == NotifyKind::Approval {
         return false;
     }
-    worktree.map_or(false, |w| !repo_has_notification_hooks(settings, w))
+    worktree.map_or(false, |w| {
+        !repo_has_notification_hook_for_event(settings, w, event)
+    })
 }
 
 /// イベント名の既定 kind。ユーザー設定 (repo.notification_hooks) が無い場合のフォールバック。
@@ -8327,7 +8343,7 @@ mod tests {
         );
     }
 
-    /// フック由来トーストの破棄（#286）。通知フック未設定リポジトリでも `approval` は通す。
+    /// フック由来トーストの破棄（#286, #318）。通知フック未設定リポジトリでも `approval` は通す。
     #[test]
     fn should_drop_hook_toast_keeps_approval_when_repo_has_no_hooks() {
         let mut settings = target_settings();
@@ -8348,10 +8364,22 @@ mod tests {
         // ワークツリーを引けなかった場合は破棄しない（従来どおり）
         assert!(!should_drop_hook_toast(&settings, None, false, Some("PostToolUse"), NotifyKind::Hook));
 
-        // 通知フックが1件でもあるリポジトリは全 kind 通す
+        // #318: 登録した event だけ通り、登録していない event は引き続き破棄される
+        // （「リポジトリに1件でもあれば全 event 通す」の非空判定が抜け道になっていたバグ）
         settings.repositories[0].notification_hooks =
             Some(vec![serde_json::from_str(r#"{"event":"Stop","kind":"general"}"#).unwrap()]);
-        assert!(!should_drop_hook_toast(&settings, Some(&wt), false, Some("PostToolUse"), NotifyKind::Hook));
+        assert!(
+            !should_drop_hook_toast(&settings, Some(&wt), false, Some("Stop"), NotifyKind::General),
+            "Stop は登録済みなので通す"
+        );
+        assert!(
+            should_drop_hook_toast(&settings, Some(&wt), false, Some("Notification"), NotifyKind::Hook),
+            "Notification は未登録なので、Stop が登録済みでも破棄する（#318）"
+        );
+        assert!(
+            should_drop_hook_toast(&settings, Some(&wt), false, Some("PostToolUse"), NotifyKind::Hook),
+            "PostToolUse も未登録なので破棄する"
+        );
     }
 
     /// `repository_id` がどのリポジトリにも一致しないワークツリー（#286）。
