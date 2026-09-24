@@ -101,13 +101,17 @@ async function open(entry: UrlArtifactEntry) {
   flex-direction: column;
   min-width: 180px;
   max-width: 420px;
+  max-height: calc(4.5 * 36px); /* 5件目以降はスクロール。非整数の画面拡大率での丸め誤差対策に0.5件分の余裕を持たせる */
+  overflow-y: auto;
 }
 
 .popup-item {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 12px;
+  height: 36px;
+  padding: 0 12px;
+  box-sizing: border-box;
   background: none;
   border: none;
   color: var(--p-text-color);
