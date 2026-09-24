@@ -5,8 +5,9 @@ export interface PtyOutputChunk {
 }
 
 /**
- * `pty-output` イベントの payload。Rust は 16ms 周期で出力のあった全セッション分を
- * 1 回の emit にまとめて送る（セッション毎 emit は多端末時に UI スレッドを飽和させるため）。
+ * `pty-output` イベントの payload。Rust は 16ms 周期で出力のあった複数セッション分を
+ * 1 回の emit に詰めて送る（セッション毎 emit は多端末時に UI スレッドを飽和させるため）。
+ * 1 周期の合計が大きいときは複数回に分かれるが、同じセッションは 1 payload に高々 1 回。
  */
 export interface PtyOutputBatchPayload {
   chunks: PtyOutputChunk[];

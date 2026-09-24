@@ -89,10 +89,9 @@ fn sweep_exited(map: &mut HashMap<u32, PtySession>) {
 }
 
 /// 1 回の flush で 1 セッションから drain する保留出力の上限。これを超えた分は次周期へ持ち越す（バックプレッシャ）。
+/// 1 回の emit（= 1 回の eval）に載せる合計の上限も兼ねる。巨大な eval がメインスレッドを
+/// 長時間占有するのを防ぐため、合計がこれを超える周期は複数回の emit に分割する。
 const MAX_FLUSH_BYTES: usize = 256 * 1024;
-/// 1 回の flush（= 1 回の emit）に載せる全セッション合計の上限。
-/// 1 回の eval が巨大になって WebView2 のメインスレッドを長時間占有するのを防ぐ。
-const MAX_BATCH_BYTES: usize = 1024 * 1024;
 /// 未配送バッファ（`output_pending`）が保持する最大バイト数。
 /// drain 速度（256KB/16ms ≒ 16MB/s）を持続的に上回る出力ではバッファが無制限に増大して
 /// メモリを食い潰すため、上限超過時は最古を捨てる。直近の出力は `output_history`（64KB）が
@@ -117,44 +116,42 @@ const INPUT_QUEUE_MAX_CHUNKS: usize = 1024;
 /// セッション毎の `output_pending` ロックは drain の間だけ持つので reader の append は待たされない。
 static FLUSH_EMIT_LOCK: Mutex<()> = Mutex::new(());
 
-/// 渡されたセッション群の保留出力を drain し、**1 回の** `pty-output` emit にまとめて送る。
+/// 渡されたセッション群の保留出力を各最大 `MAX_FLUSH_BYTES` drain し、`pty-output` emit に
+/// まとめて送る。
 ///
 /// emit は購読中の webview ごとに 1 回の eval（= tao メインスレッドへのメッセージ投函 1 件）に
 /// なるため、セッション毎に emit すると「出力中のセッション数 × 62 回/秒 × webview 数」の
 /// メッセージがメインスレッドに積まれ、多端末で AI を並列に走らせると捌き切れずに
-/// UI スレッドが飽和する (#316)。周期毎に 1 回へまとめて頻度をセッション数と無関係にする。
-///
-/// 合計 `MAX_BATCH_BYTES` を超える分は次周期へ持ち越す。`start` から巡回して詰めるので、
-/// 呼び出し側が周期毎に `start` をずらせば特定セッションが恒常的に後回しにされない。
-fn flush_outputs(app: &AppHandle, pendings: &[(u32, Arc<Mutex<VecDeque<u8>>>)], start: usize) {
+/// UI スレッドが飽和する (#316)。複数セッションを 1 回の emit に詰め、emit 回数を
+/// セッション数ではなく出力量（合計 / `MAX_FLUSH_BYTES`）に比例させる。
+/// 通常の AI 出力では 1 周期 1 回、1 回の eval は最大 `MAX_FLUSH_BYTES` に収まる。
+fn flush_outputs(app: &AppHandle, pendings: &[(u32, Arc<Mutex<VecDeque<u8>>>)]) {
     let _guard = FLUSH_EMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    flush_outputs_locked(app, pendings, start);
+    flush_outputs_locked(app, pendings);
 }
 
 /// `flush_outputs` の本体。呼び出し側が `FLUSH_EMIT_LOCK` を保持していること。
-fn flush_outputs_locked(
-    app: &AppHandle,
-    pendings: &[(u32, Arc<Mutex<VecDeque<u8>>>)],
-    start: usize,
-) {
+fn flush_outputs_locked(app: &AppHandle, pendings: &[(u32, Arc<Mutex<VecDeque<u8>>>)]) {
     use base64::Engine;
-    let n = pendings.len();
-    let mut budget = MAX_BATCH_BYTES;
     let mut chunks = Vec::new();
-    for i in 0..n {
-        if budget == 0 {
-            break;
-        }
-        let (session_id, pending) = &pendings[(start + i) % n];
+    let mut batch_bytes = 0usize;
+    for (session_id, pending) in pendings {
         let chunk: Vec<u8> = {
             let mut pend = pending.lock().unwrap_or_else(|e| e.into_inner());
             if pend.is_empty() {
                 continue;
             }
-            let take = pend.len().min(MAX_FLUSH_BYTES).min(budget);
+            let take = pend.len().min(MAX_FLUSH_BYTES);
             pend.drain(..take).collect()
         };
-        budget -= chunk.len();
+        if batch_bytes + chunk.len() > MAX_FLUSH_BYTES && !chunks.is_empty() {
+            let _ = app.emit(
+                "pty-output",
+                PtyOutputBatchPayload { chunks: std::mem::take(&mut chunks) },
+            );
+            batch_bytes = 0;
+        }
+        batch_bytes += chunk.len();
         chunks.push(PtyOutputPayload {
             session_id: *session_id,
             data: base64::engine::general_purpose::STANDARD.encode(&chunk),
@@ -416,15 +413,14 @@ impl PtyManagerCore {
         }
     }
 
-    /// 全セッションの保留出力を 16ms 周期で 1 回の emit にまとめて送る flush ループを起動する。
-    /// emit 頻度を出力量・セッション数と無関係に約 62 回/秒へ上限化して、
+    /// 全セッションの保留出力を 16ms 周期でまとめて emit する flush ループを起動する。
+    /// emit 頻度をセッション数と無関係にし（通常は約 62 回/秒）、
     /// WebView2 IPC / tao メインスレッドの飽和（ハング）を防ぐ。
     pub fn start_output_flush(&self, app_handle: AppHandle) {
         let sessions_arc = self.sessions.clone();
         let polling_alive = self.polling_alive.clone();
 
         std::thread::spawn(move || {
-            let mut start: usize = 0;
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(16));
 
@@ -444,10 +440,7 @@ impl PtyManagerCore {
                         .collect()
                 };
 
-                if !pendings.is_empty() {
-                    start = (start + 1) % pendings.len();
-                    flush_outputs(&app_handle, &pendings, start);
-                }
+                flush_outputs(&app_handle, &pendings);
             }
         });
     }
@@ -966,7 +959,7 @@ impl PtyManagerCore {
                     if remaining == 0 {
                         break;
                     }
-                    flush_outputs_locked(&app_handle_reader, &pendings, 0);
+                    flush_outputs_locked(&app_handle_reader, &pendings);
                 }
                 let _ = app_handle_reader.emit("pty-exit", PtyExitPayload { session_id });
             }
