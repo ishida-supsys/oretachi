@@ -8,7 +8,7 @@ import type { WorktreeEntry, Repository, AppSettings, ClaudeCodeMode } from "../
 import type { Worktree } from "../types/worktree";
 import type { AddWorktreeTaskCode, AgentWorktreeTaskCode } from "../types/task";
 import type { WebSessionInfo } from "../types/terminal";
-import { decodePtyOutput } from "../utils/decodePtyOutput";
+import { decodePtyOutput, type PtyOutputBatchPayload } from "../utils/decodePtyOutput";
 import { useWorkgroups } from "./useWorkgroups";
 import { initialTrayNotification } from "../utils/trayNotification";
 
@@ -171,9 +171,10 @@ export function useTaskExecution(deps: {
       unlistenFn?.();
     }, 30_000);
 
-    listen<{ sessionId: number; data: string }>("pty-output", (event) => {
-      if (event.payload.sessionId !== targetSessionId) return;
-      const chunk = new TextDecoder().decode(decodePtyOutput(event.payload.data));
+    listen<PtyOutputBatchPayload>("pty-output", (event) => {
+      const hit = event.payload.chunks.find((c) => c.sessionId === targetSessionId);
+      if (!hit) return;
+      const chunk = new TextDecoder().decode(decodePtyOutput(hit.data));
       // ANSI エスケープシーケンスを除去
       buffer += chunk.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, "").replace(/\x1b\][^\x07]*\x07/g, "");
       // 長くなりすぎたら先頭を切り捨て
@@ -212,9 +213,10 @@ export function useTaskExecution(deps: {
         resolve();
       }, timeoutMs);
 
-      listen<{ sessionId: number; data: string }>("pty-output", (event) => {
-        if (event.payload.sessionId !== targetSid) return;
-        const text = new TextDecoder().decode(decodePtyOutput(event.payload.data));
+      listen<PtyOutputBatchPayload>("pty-output", (event) => {
+        const hit = event.payload.chunks.find((c) => c.sessionId === targetSid);
+        if (!hit) return;
+        const text = new TextDecoder().decode(decodePtyOutput(hit.data));
         if (/\x1b\]777;exit_code;\d+/.test(text)) {
           clearTimeout(timer);
           unlistenFn?.();

@@ -1,5 +1,5 @@
 import { listen } from "@tauri-apps/api/event";
-import { decodePtyOutput } from "../utils/decodePtyOutput";
+import { decodePtyOutput, type PtyOutputBatchPayload } from "../utils/decodePtyOutput";
 import { logDebug } from "../utils/log";
 
 /**
@@ -8,11 +8,6 @@ import { logDebug } from "../utils/log";
  * 超過時は最古チャンクから破棄する (無制限蓄積によるヒープ肥大の防止)。
  */
 const MAX_PENDING_BUFFER_BYTES = 8 * 1024 * 1024;
-
-interface PtyOutputPayload {
-  sessionId: number;
-  data: string;
-}
 
 interface PtyExitPayload {
   sessionId: number;
@@ -32,34 +27,40 @@ async function init() {
   if (initialized) return;
   initialized = true;
 
-  await listen<PtyOutputPayload>("pty-output", (event) => {
-    const { sessionId, data } = event.payload;
-    dirtySessionIds.add(sessionId);
-    const bytes = decodePtyOutput(data);
-    const handler = outputHandlers.get(sessionId);
-    if (handler) {
-      handler(bytes);
-    } else {
-      let buf = pendingBuffers.get(sessionId);
-      if (!buf) {
-        buf = [];
-        pendingBuffers.set(sessionId, buf);
+  await listen<PtyOutputBatchPayload>("pty-output", (event) => {
+    for (const { sessionId, data } of event.payload.chunks) {
+      // 1 バッチに複数セッションが載るため、1 セッションの失敗で残りを落とさない
+      try {
+        dirtySessionIds.add(sessionId);
+        const bytes = decodePtyOutput(data);
+        const handler = outputHandlers.get(sessionId);
+        if (handler) {
+          handler(bytes);
+        } else {
+          let buf = pendingBuffers.get(sessionId);
+          if (!buf) {
+            buf = [];
+            pendingBuffers.set(sessionId, buf);
+          }
+          buf.push(bytes);
+          let total = (pendingBufferBytes.get(sessionId) ?? 0) + bytes.length;
+          // 上限超過時は最古チャンクから破棄する
+          let droppedBytes = 0;
+          while (total > MAX_PENDING_BUFFER_BYTES && buf.length > 1) {
+            const dropped = buf.shift()!;
+            total -= dropped.length;
+            droppedBytes += dropped.length;
+          }
+          if (droppedBytes > 0) {
+            logDebug(
+              `[PtyDispatcher] pending buffer overflow sid=${sessionId} dropped=${droppedBytes}B kept=${total}B`
+            );
+          }
+          pendingBufferBytes.set(sessionId, total);
+        }
+      } catch (e) {
+        logDebug(`[PtyDispatcher] output dispatch failed sid=${sessionId}: ${e}`);
       }
-      buf.push(bytes);
-      let total = (pendingBufferBytes.get(sessionId) ?? 0) + bytes.length;
-      // 上限超過時は最古チャンクから破棄する
-      let droppedBytes = 0;
-      while (total > MAX_PENDING_BUFFER_BYTES && buf.length > 1) {
-        const dropped = buf.shift()!;
-        total -= dropped.length;
-        droppedBytes += dropped.length;
-      }
-      if (droppedBytes > 0) {
-        logDebug(
-          `[PtyDispatcher] pending buffer overflow sid=${sessionId} dropped=${droppedBytes}B kept=${total}B`
-        );
-      }
-      pendingBufferBytes.set(sessionId, total);
     }
   });
 

@@ -88,7 +88,9 @@ fn sweep_exited(map: &mut HashMap<u32, PtySession>) {
     });
 }
 
-/// 1 回の flush で emit する保留出力の上限。これを超えた分は次周期へ持ち越す（バックプレッシャ）。
+/// 1 回の flush で 1 セッションから drain する保留出力の上限。これを超えた分は次周期へ持ち越す（バックプレッシャ）。
+/// 1 回の emit（= 1 回の eval）に載せる合計の上限も兼ねる。巨大な eval がメインスレッドを
+/// 長時間占有するのを防ぐため、合計がこれを超える周期は複数回の emit に分割する。
 const MAX_FLUSH_BYTES: usize = 256 * 1024;
 /// 未配送バッファ（`output_pending`）が保持する最大バイト数。
 /// drain 速度（256KB/16ms ≒ 16MB/s）を持続的に上回る出力ではバッファが無制限に増大して
@@ -102,31 +104,62 @@ const MAX_PENDING_BYTES: usize = 8 * 1024 * 1024;
 /// バックプレッシャをエラーとして可視化する）。
 const INPUT_QUEUE_MAX_CHUNKS: usize = 1024;
 
-/// セッションの保留バッファを最大 `MAX_FLUSH_BYTES` drain し、base64 エンコードして
-/// `pty-output` を 1 回 emit する。保留が空なら何もしない。
-/// flush ループと reader 終了時の最終 flush の双方から呼ばれる。
+/// flush ループと reader 終了時の最終 flush の drain〜emit を直列化するロック。
 ///
-/// drain と emit を **同一の lock critical section で行う**。flush ループと reader 最終 flush は
-/// 同じ session の `output_pending` に対して並行に本関数を呼びうるため、drain だけをロックで
-/// 直列化して emit をロック外に出すと「A が先に drain・B が先に emit」となり出力チャンクの
-/// 順序が逆転する／drain 済みだが未 emit のチャンクを残したまま reader が `pty-exit` を
-/// 先行 emit してしまう。lock を emit まで保持すれば FIFO の drain 順 = emit 順が保証され、
-/// reader が `remaining == 0` を観測した時点で全 drain 済みチャンクは emit 済みになる。
-fn flush_session_output(app: &AppHandle, session_id: u32, pending: &Arc<Mutex<VecDeque<u8>>>) {
-    let mut pend = match pending.lock() {
-        Ok(p) => p,
-        Err(e) => e.into_inner(),
-    };
-    if pend.is_empty() {
-        return;
-    }
-    let take = pend.len().min(MAX_FLUSH_BYTES);
-    let chunk: Vec<u8> = pend.drain(..take).collect();
+/// 両者は同じセッションの `output_pending` を並行に drain しうる。drain と emit の間に
+/// 相手が割り込むと「A が先に drain・B が先に emit」となってチャンク順が逆転したり、
+/// drain 済み・未 emit のチャンクを残したまま reader が `pty-exit` を先行 emit したりする。
+/// drain〜emit をこのロック内で行えば drain 順 = emit 順が保証される。
+/// reader の最終 flush は `remaining == 0` の確認と `pty-exit` の emit まで**このロックを持ったまま**
+/// 行うこと。flush ループは drain 後にセッションのロックを離してから emit するため、
+/// ロック外で `remaining == 0` を見ると drain 済み・未 emit のチャンクより先に `pty-exit` が出る。
+/// セッション毎の `output_pending` ロックは drain の間だけ持つので reader の append は待たされない。
+static FLUSH_EMIT_LOCK: Mutex<()> = Mutex::new(());
+
+/// 渡されたセッション群の保留出力を各最大 `MAX_FLUSH_BYTES` drain し、`pty-output` emit に
+/// まとめて送る。
+///
+/// emit は購読中の webview ごとに 1 回の eval（= tao メインスレッドへのメッセージ投函 1 件）に
+/// なるため、セッション毎に emit すると「出力中のセッション数 × 62 回/秒 × webview 数」の
+/// メッセージがメインスレッドに積まれ、多端末で AI を並列に走らせると捌き切れずに
+/// UI スレッドが飽和する (#316)。複数セッションを 1 回の emit に詰め、emit 回数を
+/// セッション数ではなく出力量（合計 / `MAX_FLUSH_BYTES`）に比例させる。
+/// 通常の AI 出力では 1 周期 1 回、1 回の eval は最大 `MAX_FLUSH_BYTES` に収まる。
+fn flush_outputs(app: &AppHandle, pendings: &[(u32, Arc<Mutex<VecDeque<u8>>>)]) {
+    let _guard = FLUSH_EMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    flush_outputs_locked(app, pendings);
+}
+
+/// `flush_outputs` の本体。呼び出し側が `FLUSH_EMIT_LOCK` を保持していること。
+fn flush_outputs_locked(app: &AppHandle, pendings: &[(u32, Arc<Mutex<VecDeque<u8>>>)]) {
     use base64::Engine;
-    let data = base64::engine::general_purpose::STANDARD.encode(&chunk);
-    // lock 保持中に emit して drain↔emit を不可分にする（順序保証のため）。
-    // emit はイベントをキューに載せるだけで pty_manager に同期再入しないため、deadlock しない。
-    let _ = app.emit("pty-output", PtyOutputPayload { session_id, data });
+    let mut chunks = Vec::new();
+    let mut batch_bytes = 0usize;
+    for (session_id, pending) in pendings {
+        let chunk: Vec<u8> = {
+            let mut pend = pending.lock().unwrap_or_else(|e| e.into_inner());
+            if pend.is_empty() {
+                continue;
+            }
+            let take = pend.len().min(MAX_FLUSH_BYTES);
+            pend.drain(..take).collect()
+        };
+        if batch_bytes + chunk.len() > MAX_FLUSH_BYTES && !chunks.is_empty() {
+            let _ = app.emit(
+                "pty-output",
+                PtyOutputBatchPayload { chunks: std::mem::take(&mut chunks) },
+            );
+            batch_bytes = 0;
+        }
+        batch_bytes += chunk.len();
+        chunks.push(PtyOutputPayload {
+            session_id: *session_id,
+            data: base64::engine::general_purpose::STANDARD.encode(&chunk),
+        });
+    }
+    if !chunks.is_empty() {
+        let _ = app.emit("pty-output", PtyOutputBatchPayload { chunks });
+    }
 }
 
 #[derive(Clone)]
@@ -194,6 +227,12 @@ pub struct PtyOutputPayload {
     /// base64 エンコードした PTY 出力。number[] (Vec<u8>) のままだと巨大な eval 文字列に
     /// なり WebView2 IPC を飽和させるため、サイズを 1/3〜1/4 に圧縮して送る。
     pub data: String,
+}
+
+/// `pty-output` イベントの payload。1 回の flush で出力のあった全セッション分を運ぶ。
+#[derive(serde::Serialize, Clone)]
+pub struct PtyOutputBatchPayload {
+    pub chunks: Vec<PtyOutputPayload>,
 }
 
 #[derive(serde::Serialize, Clone)]
@@ -374,9 +413,9 @@ impl PtyManagerCore {
         }
     }
 
-    /// 各セッションの保留出力を 16ms 周期でまとめて emit する flush ループを起動する。
-    /// reader スレッドのチャンク毎 emit を置き換え、emit 頻度を出力量と無関係に
-    /// 約 62 回/秒/セッションへ上限化して WebView2 IPC の飽和（ハング）を防ぐ。
+    /// 全セッションの保留出力を 16ms 周期でまとめて emit する flush ループを起動する。
+    /// emit 頻度をセッション数と無関係にし（通常は約 62 回/秒）、
+    /// WebView2 IPC / tao メインスレッドの飽和（ハング）を防ぐ。
     pub fn start_output_flush(&self, app_handle: AppHandle) {
         let sessions_arc = self.sessions.clone();
         let polling_alive = self.polling_alive.clone();
@@ -401,9 +440,7 @@ impl PtyManagerCore {
                         .collect()
                 };
 
-                for (session_id, pending) in pendings {
-                    flush_session_output(&app_handle, session_id, &pending);
-                }
+                flush_outputs(&app_handle, &pendings);
             }
         });
     }
@@ -909,17 +946,23 @@ impl PtyManagerCore {
             }
             // EOF / エラーで reader を抜ける前に、保留分を全て flush し切ってから exit を通知する
             // （flush ループより先に pty-exit が届いて末尾出力が失われる／順序が乱れるのを防ぐ）。
-            loop {
-                let remaining = pending_for_reader
-                    .lock()
-                    .map(|p| p.len())
-                    .unwrap_or(0);
-                if remaining == 0 {
-                    break;
+            // 残量確認〜pty-exit まで FLUSH_EMIT_LOCK を保持し、flush ループが drain 済み・未 emit の
+            // チャンクを抱えている間に pty-exit を追い越させない。
+            {
+                let _guard = FLUSH_EMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                let pendings = [(session_id, pending_for_reader.clone())];
+                loop {
+                    let remaining = pending_for_reader
+                        .lock()
+                        .map(|p| p.len())
+                        .unwrap_or(0);
+                    if remaining == 0 {
+                        break;
+                    }
+                    flush_outputs_locked(&app_handle_reader, &pendings);
                 }
-                flush_session_output(&app_handle_reader, session_id, &pending_for_reader);
+                let _ = app_handle_reader.emit("pty-exit", PtyExitPayload { session_id });
             }
-            let _ = app_handle_reader.emit("pty-exit", PtyExitPayload { session_id });
         });
 
         // writer スレッド: 入力キューを順番に ConPTY 入力パイプへ書き込む。
