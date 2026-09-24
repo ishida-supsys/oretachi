@@ -6,6 +6,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.31.7] - 2026-09-25
+
+### Fixed
+- PTY出力のemitを周期ごとに全セッション1回へまとめ、メインスレッド飽和を防いだ (#323)
+- 1回のemitを256KBに収め、超過分は分割してemitするようにした (#323)
+- pty-exitが末尾出力を追い越す競合など bug-review 指摘に対応した (#323)
+- URLアーティファクトポップアップに高さ上限とスクロールを追加した (#322)
+
 ## [0.31.6] - 2026-09-24
 
 ### Added
@@ -817,7 +825,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.31.6...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.31.7...HEAD
+[0.31.7]: https://github.com/ishida-supsys/oretachi/compare/0.31.6...0.31.7
 [0.31.6]: https://github.com/ishida-supsys/oretachi/compare/0.31.5...0.31.6
 [0.31.5]: https://github.com/ishida-supsys/oretachi/compare/0.31.4...0.31.5
 [0.31.4]: https://github.com/ishida-supsys/oretachi/compare/0.31.3...0.31.4
