@@ -29,32 +29,37 @@ async function init() {
 
   await listen<PtyOutputBatchPayload>("pty-output", (event) => {
     for (const { sessionId, data } of event.payload.chunks) {
-      dirtySessionIds.add(sessionId);
-      const bytes = decodePtyOutput(data);
-      const handler = outputHandlers.get(sessionId);
-      if (handler) {
-        handler(bytes);
-      } else {
-        let buf = pendingBuffers.get(sessionId);
-        if (!buf) {
-          buf = [];
-          pendingBuffers.set(sessionId, buf);
+      // 1 バッチに複数セッションが載るため、1 セッションの失敗で残りを落とさない
+      try {
+        dirtySessionIds.add(sessionId);
+        const bytes = decodePtyOutput(data);
+        const handler = outputHandlers.get(sessionId);
+        if (handler) {
+          handler(bytes);
+        } else {
+          let buf = pendingBuffers.get(sessionId);
+          if (!buf) {
+            buf = [];
+            pendingBuffers.set(sessionId, buf);
+          }
+          buf.push(bytes);
+          let total = (pendingBufferBytes.get(sessionId) ?? 0) + bytes.length;
+          // 上限超過時は最古チャンクから破棄する
+          let droppedBytes = 0;
+          while (total > MAX_PENDING_BUFFER_BYTES && buf.length > 1) {
+            const dropped = buf.shift()!;
+            total -= dropped.length;
+            droppedBytes += dropped.length;
+          }
+          if (droppedBytes > 0) {
+            logDebug(
+              `[PtyDispatcher] pending buffer overflow sid=${sessionId} dropped=${droppedBytes}B kept=${total}B`
+            );
+          }
+          pendingBufferBytes.set(sessionId, total);
         }
-        buf.push(bytes);
-        let total = (pendingBufferBytes.get(sessionId) ?? 0) + bytes.length;
-        // 上限超過時は最古チャンクから破棄する
-        let droppedBytes = 0;
-        while (total > MAX_PENDING_BUFFER_BYTES && buf.length > 1) {
-          const dropped = buf.shift()!;
-          total -= dropped.length;
-          droppedBytes += dropped.length;
-        }
-        if (droppedBytes > 0) {
-          logDebug(
-            `[PtyDispatcher] pending buffer overflow sid=${sessionId} dropped=${droppedBytes}B kept=${total}B`
-          );
-        }
-        pendingBufferBytes.set(sessionId, total);
+      } catch (e) {
+        logDebug(`[PtyDispatcher] output dispatch failed sid=${sessionId}: ${e}`);
       }
     }
   });

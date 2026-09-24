@@ -110,8 +110,10 @@ const INPUT_QUEUE_MAX_CHUNKS: usize = 1024;
 /// 両者は同じセッションの `output_pending` を並行に drain しうる。drain と emit の間に
 /// 相手が割り込むと「A が先に drain・B が先に emit」となってチャンク順が逆転したり、
 /// drain 済み・未 emit のチャンクを残したまま reader が `pty-exit` を先行 emit したりする。
-/// drain〜emit をこのロック内で行えば drain 順 = emit 順が保証され、reader が
-/// `remaining == 0` を観測した時点で全 drain 済みチャンクは emit 済みになる。
+/// drain〜emit をこのロック内で行えば drain 順 = emit 順が保証される。
+/// reader の最終 flush は `remaining == 0` の確認と `pty-exit` の emit まで**このロックを持ったまま**
+/// 行うこと。flush ループは drain 後にセッションのロックを離してから emit するため、
+/// ロック外で `remaining == 0` を見ると drain 済み・未 emit のチャンクより先に `pty-exit` が出る。
 /// セッション毎の `output_pending` ロックは drain の間だけ持つので reader の append は待たされない。
 static FLUSH_EMIT_LOCK: Mutex<()> = Mutex::new(());
 
@@ -125,8 +127,17 @@ static FLUSH_EMIT_LOCK: Mutex<()> = Mutex::new(());
 /// 合計 `MAX_BATCH_BYTES` を超える分は次周期へ持ち越す。`start` から巡回して詰めるので、
 /// 呼び出し側が周期毎に `start` をずらせば特定セッションが恒常的に後回しにされない。
 fn flush_outputs(app: &AppHandle, pendings: &[(u32, Arc<Mutex<VecDeque<u8>>>)], start: usize) {
-    use base64::Engine;
     let _guard = FLUSH_EMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    flush_outputs_locked(app, pendings, start);
+}
+
+/// `flush_outputs` の本体。呼び出し側が `FLUSH_EMIT_LOCK` を保持していること。
+fn flush_outputs_locked(
+    app: &AppHandle,
+    pendings: &[(u32, Arc<Mutex<VecDeque<u8>>>)],
+    start: usize,
+) {
+    use base64::Engine;
     let n = pendings.len();
     let mut budget = MAX_BATCH_BYTES;
     let mut chunks = Vec::new();
@@ -942,21 +953,23 @@ impl PtyManagerCore {
             }
             // EOF / エラーで reader を抜ける前に、保留分を全て flush し切ってから exit を通知する
             // （flush ループより先に pty-exit が届いて末尾出力が失われる／順序が乱れるのを防ぐ）。
-            loop {
-                let remaining = pending_for_reader
-                    .lock()
-                    .map(|p| p.len())
-                    .unwrap_or(0);
-                if remaining == 0 {
-                    break;
+            // 残量確認〜pty-exit まで FLUSH_EMIT_LOCK を保持し、flush ループが drain 済み・未 emit の
+            // チャンクを抱えている間に pty-exit を追い越させない。
+            {
+                let _guard = FLUSH_EMIT_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+                let pendings = [(session_id, pending_for_reader.clone())];
+                loop {
+                    let remaining = pending_for_reader
+                        .lock()
+                        .map(|p| p.len())
+                        .unwrap_or(0);
+                    if remaining == 0 {
+                        break;
+                    }
+                    flush_outputs_locked(&app_handle_reader, &pendings, 0);
                 }
-                flush_outputs(
-                    &app_handle_reader,
-                    &[(session_id, pending_for_reader.clone())],
-                    0,
-                );
+                let _ = app_handle_reader.emit("pty-exit", PtyExitPayload { session_id });
             }
-            let _ = app_handle_reader.emit("pty-exit", PtyExitPayload { session_id });
         });
 
         // writer スレッド: 入力キューを順番に ConPTY 入力パイプへ書き込む。
