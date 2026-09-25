@@ -35,10 +35,13 @@ vi.mock("../i18n", () => ({ setLocale: vi.fn(), i18n: { global: { t: () => "" } 
 
 import { useWorkgroups } from "./useWorkgroups";
 import { useSettings } from "./useSettings";
+import { useNotifications } from "./useNotifications";
 import type { AppSettings } from "../types/settings";
 
-const { updateWorkgroup, deleteWorkgroupRecord } = useWorkgroups();
+const { updateWorkgroup, deleteWorkgroupRecord, notifiedGroupIds, repositoryNotified } =
+  useWorkgroups();
 const { settings } = useSettings();
+const { addNotification, clearNotification } = useNotifications();
 
 /** 直近の `save_settings` で実際にディスクへ渡った内容 */
 function lastSaved(): AppSettings | undefined {
@@ -56,6 +59,10 @@ beforeEach(() => {
     workgroups: [{ id: "wg-1" }, { id: "wg-2" }],
     terminal: { fontSize: 14 },
   } as unknown as AppSettings;
+  // `notifications` はモジュール共有の reactive Map なので、テスト間で持ち越さないよう都度クリアする
+  clearNotification("repo-x");
+  clearNotification("wt-1");
+  clearNotification("wt-2");
 });
 
 // 編集ダイアログの「保存」は明示的な確定操作なので、デバウンスを待たずに書き込む（#261）。
@@ -99,5 +106,40 @@ describe("useWorkgroups.deleteWorkgroupRecord", () => {
 
     expect(savedSnapshots).toHaveLength(1);
     expect(lastSaved()?.workgroups?.map((g) => g.id)).toEqual(["wg-2"]);
+  });
+});
+
+// リポジトリ擬似ワークツリーの通知が先頭（デフォルト）ワークグループへ誤表示される件（#325）
+describe("useWorkgroups.notifiedGroupIds / repositoryNotified", () => {
+  it("リポジトリ擬似ワークツリーの通知は notifiedGroupIds に含めず、repositoryNotified を立てる", () => {
+    settings.value.worktrees = [
+      { id: "repo-x", isRepository: true, name: "repo-x" },
+    ] as AppSettings["worktrees"];
+
+    addNotification("repo-x");
+
+    expect(notifiedGroupIds.value.size).toBe(0);
+    expect(repositoryNotified.value).toBe(true);
+  });
+
+  it("通常ワークツリーの通知は所属グループへ、repositoryNotified は立てない", () => {
+    settings.value.worktrees = [
+      { id: "wt-1", workgroupId: "wg-2", name: "wt-1" },
+    ] as AppSettings["worktrees"];
+
+    addNotification("wt-1");
+
+    expect(notifiedGroupIds.value.has("wg-2")).toBe(true);
+    expect(repositoryNotified.value).toBe(false);
+  });
+
+  it("workgroupId 未設定の通常ワークツリーは従来通り先頭グループへフォールバックする", () => {
+    settings.value.worktrees = [
+      { id: "wt-1", name: "wt-1" },
+    ] as AppSettings["worktrees"];
+
+    addNotification("wt-1");
+
+    expect(notifiedGroupIds.value.has("wg-1")).toBe(true);
   });
 });

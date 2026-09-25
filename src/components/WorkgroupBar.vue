@@ -37,6 +37,7 @@ const {
   displayName,
   worktreeCount,
   notifiedGroupIds,
+  repositoryNotified,
   addWorkgroup,
   updateWorkgroup,
   reorderWorkgroup,
@@ -161,7 +162,7 @@ function onDragEnd() {
          アイコン・固定色の左罫・直後の区切り線でグループと区別する -->
     <button
       class="wg-chip wg-chip-repository"
-      :class="{ active: repositoryActive }"
+      :class="{ active: repositoryActive, notified: repositoryNotified }"
       :title="t('repositoryChipTitle')"
       @click="onRepositoryChipClick"
     >

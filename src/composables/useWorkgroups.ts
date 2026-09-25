@@ -4,7 +4,7 @@ import { useWorktrees } from "./useWorktrees";
 import { useNotifications } from "./useNotifications";
 import { useHomePanel } from "./useHomePanel";
 import { i18n } from "../i18n";
-import { isPseudoWorktree } from "../utils/repositoryWorktree";
+import { isPseudoWorktree, isRepositoryWorktree } from "../utils/repositoryWorktree";
 import type { Workgroup } from "../types/settings";
 
 const { settings, scheduleSave, flushSave } = useSettings();
@@ -84,14 +84,23 @@ function worktreeCount(groupId: string): number {
   ).length;
 }
 
-/** 通知有りのワークツリーを 1 つ以上含むグループの ID 集合 */
+/** 通知有りのワークツリーを 1 つ以上含むグループの ID 集合（ホーム/リポジトリの擬似ワークツリーは対象外） */
 const notifiedGroupIds = computed<Set<string>>(() => {
   const set = new Set<string>();
   for (const id of notifications.keys()) {
     const wt = settings.value.worktrees.find((w) => w.id === id);
-    if (wt) set.add(resolvedGroupId(wt.workgroupId));
+    if (wt && !isPseudoWorktree(wt)) set.add(resolvedGroupId(wt.workgroupId));
   }
   return set;
+});
+
+/** リポジトリ擬似ワークツリーに未確認通知が1件でもあるか（リポジトリチップの赤枠表示用、#325） */
+const repositoryNotified = computed<boolean>(() => {
+  for (const id of notifications.keys()) {
+    const wt = settings.value.worktrees.find((w) => w.id === id);
+    if (isRepositoryWorktree(wt)) return true;
+  }
+  return false;
 });
 
 /** 新しいグループを追加して選択状態にする */
@@ -169,6 +178,7 @@ export function useWorkgroups() {
     displayName,
     worktreeCount,
     notifiedGroupIds,
+    repositoryNotified,
     addWorkgroup,
     updateWorkgroup,
     deleteWorkgroupRecord,
