@@ -89,7 +89,7 @@ const toast = useToast();
 
 // ウィンドウのフォーカス状態
 const { isWindowFocused } = useWindowFocus();
-const { checkForUpdate, downloadAndInstall } = useUpdater();
+const { checkForUpdate, downloadAndInstall, setBeforeInstallHook } = useUpdater();
 
 // サブウィンドウフォーカス状態: ワークツリー ID → フォーカス中か (useSubWindowEvents で管理)
 
@@ -2264,6 +2264,73 @@ onMounted(async () => {
     }
   }, 1000);
 
+  // ウィンドウ状態・ターミナルセッションの永続化。
+  // アプリ終了時（onCloseRequested）に加え、アップデート適用前（Windowsでは
+  // process::exit(0) されJS側のclose経路を通らないため）にも呼ばれる。
+  const persistSessionState = async () => {
+    // 1. 全ウィンドウの位置・サイズをプラグインで保存
+    await saveWindowState(StateFlags.ALL);
+
+    // 2. サブウィンドウ化しているワークツリーIDを設定に保存
+    settings.value.detachedWorktreeIds = Array.from(detachedWorktrees);
+    await invoke("save_settings", { settings: settings.value });
+
+    // 3. サブウィンドウのターミナルセッションを保存（closeAllSubWindows より前）
+    for (const wt of worktrees.value) {
+      if (!isDetached(wt.id)) continue;
+      try {
+        const response = await new Promise<{ terminals: SavedTerminal[] } | null>((resolve) => {
+          const timeout = setTimeout(() => { unlisten(); resolve(null); }, 3000);
+          let unlisten = () => {};
+          listen<{ worktreeId: string; terminals: SavedTerminal[] }>(
+            "sub-session-save-response",
+            (event) => {
+              if (event.payload.worktreeId === wt.id) {
+                clearTimeout(timeout);
+                unlisten();
+                resolve({ terminals: event.payload.terminals });
+              }
+            }
+          ).then((fn) => { unlisten = fn; });
+          emitTo(`sub-${wt.id}`, "sub-session-save-request", {}).catch(() => {
+            clearTimeout(timeout);
+            unlisten();
+            resolve(null);
+          });
+        });
+        if (response && response.terminals.length > 0) {
+          await saveTerminalSession(wt.id, response.terminals);
+        }
+      } catch {
+        // セッション保存失敗は無視
+      }
+    }
+
+    // 4. メインウィンドウのターミナルセッションを保存
+    for (const wt of worktrees.value) {
+      if (isDetached(wt.id)) continue;
+      try {
+        const bundle = worktreeFrameBundles.get(wt.id);
+        const terminals: SavedTerminal[] = wt.terminals.map((t) => {
+          const termRef = bundle?.terminalRefs.get(t.id) ?? getTerminalRef(t.id);
+          return {
+            title: t.title,
+            buffer: termRef?.serializeBuffer() ?? "",
+            aiSession: terminalAiSessions.get(t.id),
+          };
+        }).filter((t) => t.buffer !== "");
+        if (terminals.length > 0) {
+          await saveTerminalSession(wt.id, terminals);
+        }
+      } catch {
+        // セッション保存失敗は無視
+      }
+    }
+  };
+
+  // アップデート適用直前にもセッションを保存する（downloadAndInstall 参照）
+  setBeforeInstallHook(persistSessionState);
+
   // メインウィンドウ閉じ時: 全サブウィンドウを閉じてからアプリ終了
   await getCurrentWindow().onCloseRequested(async (event) => {
     event.preventDefault();
@@ -2276,64 +2343,8 @@ onMounted(async () => {
         await waitForBusyOperations();
       }
 
-      // 1. 全ウィンドウの位置・サイズをプラグインで保存
-      await saveWindowState(StateFlags.ALL);
-
-      // 2. サブウィンドウ化しているワークツリーIDを設定に保存
-      settings.value.detachedWorktreeIds = Array.from(detachedWorktrees);
-      await invoke("save_settings", { settings: settings.value });
-
-      // 3. サブウィンドウのターミナルセッションを保存（closeAllSubWindows より前）
-      for (const wt of worktrees.value) {
-        if (!isDetached(wt.id)) continue;
-        try {
-          const response = await new Promise<{ terminals: SavedTerminal[] } | null>((resolve) => {
-            const timeout = setTimeout(() => { unlisten(); resolve(null); }, 3000);
-            let unlisten = () => {};
-            listen<{ worktreeId: string; terminals: SavedTerminal[] }>(
-              "sub-session-save-response",
-              (event) => {
-                if (event.payload.worktreeId === wt.id) {
-                  clearTimeout(timeout);
-                  unlisten();
-                  resolve({ terminals: event.payload.terminals });
-                }
-              }
-            ).then((fn) => { unlisten = fn; });
-            emitTo(`sub-${wt.id}`, "sub-session-save-request", {}).catch(() => {
-              clearTimeout(timeout);
-              unlisten();
-              resolve(null);
-            });
-          });
-          if (response && response.terminals.length > 0) {
-            await saveTerminalSession(wt.id, response.terminals);
-          }
-        } catch {
-          // セッション保存失敗は無視
-        }
-      }
-
-      // 4. メインウィンドウのターミナルセッションを保存
-      for (const wt of worktrees.value) {
-        if (isDetached(wt.id)) continue;
-        try {
-          const bundle = worktreeFrameBundles.get(wt.id);
-          const terminals: SavedTerminal[] = wt.terminals.map((t) => {
-            const termRef = bundle?.terminalRefs.get(t.id) ?? getTerminalRef(t.id);
-            return {
-              title: t.title,
-              buffer: termRef?.serializeBuffer() ?? "",
-              aiSession: terminalAiSessions.get(t.id),
-            };
-          }).filter((t) => t.buffer !== "");
-          if (terminals.length > 0) {
-            await saveTerminalSession(wt.id, terminals);
-          }
-        } catch {
-          // セッション保存失敗は無視
-        }
-      }
+      // 1〜4. ウィンドウ状態・ターミナルセッションの保存
+      await persistSessionState();
 
       // 5. 既存のシャットダウン処理
       await Promise.all([
