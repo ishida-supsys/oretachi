@@ -3,9 +3,11 @@ import { check } from "@tauri-apps/plugin-updater";
 import { logError, logInfo } from "../utils/log";
 import { invoke } from "@tauri-apps/api/core";
 
-// インストール直前に一度だけ呼ばれるフック。Windows では downloadAndInstall 内で
-// process::exit(0) されアプリの通常終了経路（onCloseRequested）を通らないため、
-// セッション保存等をここに登録して確実に実行させる。
+// ダウンロード完了後・インストール直前に一度だけ呼ばれるフック。Windows では
+// インストール実行時に process::exit(0) されアプリの通常終了経路
+// （onCloseRequested）を通らないため、セッション保存等をここに登録して確実に
+// 実行させる。ダウンロードより前に呼ぶとダウンロード中に進んだセッション変更が
+// 保存されないため、Rust 側の処理を download/install の2コマンドに分けている。
 let beforeInstallHook: (() => Promise<void>) | null = null;
 
 /** アップデートインストール直前に実行する処理を登録する（呼び出し側は1つのみ想定）。 */
@@ -41,7 +43,13 @@ export function useUpdater() {
     if (!update) return;
     isDownloading.value = true;
     try {
-      // インストール前フック（セッション保存等）。失敗しても更新は続行する。
+      // チェック・ダウンロードを Rust 側コマンドで実施する（download_update）。
+      // ここで得た Update とダウンロード済みバイト列は Rust 側で保持し、
+      // install_downloaded_update に引き継ぐ。
+      const hasUpdate = await invoke<boolean>("download_update");
+      if (!hasUpdate) return; // ダウンロード時点で更新が無くなっていた場合
+
+      // インストール直前フック（セッション保存等）。失敗しても更新は続行する。
       if (beforeInstallHook) {
         try {
           await beforeInstallHook();
@@ -49,11 +57,12 @@ export function useUpdater() {
           logError(`アップデート前処理エラー: ${e}`);
         }
       }
-      // チェック・ダウンロード・インストールを Rust 側コマンドで実施する。
-      // Windows ではインストーラ起動直前に Job の KILL_ON_JOB_CLOSE を解除する
-      // 必要があり、プラグインの downloadAndInstall では process::exit され
-      // JS に戻らないためフックを差し込めない（巻き込み終了でアップデート不発）。
-      await invoke("download_and_install_update");
+
+      // インストールを実施する。Windows ではインストーラ起動直前に Job の
+      // KILL_ON_JOB_CLOSE を解除する必要があり、プラグインの downloadAndInstall
+      // では process::exit され JS に戻らないためフックを差し込めない
+      // （巻き込み終了でアップデート不発）。そのため独自コマンドを使う。
+      await invoke("install_downloaded_update");
       // Windows ではプロセスが置き換わるためここに戻らない。
     } catch (e) {
       logError(`アップデートインストールエラー: ${e}`);

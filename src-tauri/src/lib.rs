@@ -630,8 +630,13 @@ async fn restart_mcp_server(app_handle: tauri::AppHandle) -> Result<mcp_server::
     Ok(manager.get_status())
 }
 
+/// ダウンロード済みだがまだインストールしていない更新。JS 側がセッション保存等の
+/// 前処理を挟めるよう、ダウンロードとインストールをコマンド単位で分離するために保持する。
+#[derive(Default)]
+struct PendingUpdate(tokio::sync::Mutex<Option<(tauri_plugin_updater::Update, Vec<u8>)>>);
+
 #[tauri::command]
-async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), String> {
+async fn download_update(app: tauri::AppHandle) -> Result<bool, String> {
     use tauri_plugin_updater::UpdaterExt;
 
     // 自前の on_before_exit を設定した Updater を構築する。
@@ -659,13 +664,28 @@ async fn download_and_install_update(app: tauri::AppHandle) -> Result<(), String
         .map_err(|e| e.to_string())?;
 
     let Some(update) = updater.check().await.map_err(|e| e.to_string())? else {
-        return Ok(()); // 更新なし
+        return Ok(false); // 更新なし
     };
 
     let bytes = update
         .download(|_, _| {}, || {})
         .await
         .map_err(|e| e.to_string())?;
+
+    let state = app.state::<PendingUpdate>();
+    *state.0.lock().await = Some((update, bytes));
+    Ok(true)
+}
+
+#[tauri::command]
+async fn install_downloaded_update(app: tauri::AppHandle) -> Result<(), String> {
+    // download_update で確認・ダウンロード済みの更新を取り出す。JS 側は
+    // download_update が true を返した後にのみこのコマンドを呼ぶ想定。
+    let state = app.state::<PendingUpdate>();
+    let pending = state.0.lock().await.take();
+    let Some((update, bytes)) = pending else {
+        return Err("no downloaded update to install".to_string());
+    };
 
     // install() は Windows では成功時に on_before_exit→process::exit(0) され戻らない。
     // 失敗 (extract 失敗等、インストーラ起動前) 時のみ Err を返す。ここで MCP を止めて
@@ -2201,6 +2221,7 @@ pub fn run() {
         .manage(task_executor::TaskGenerateManager::new())
         .manage(FsWatcherManager::new())
         .manage(SystemMetricsState::new())
+        .manage(PendingUpdate::default())
         // ReportPool は setup() 内で非同期初期化するため、ここでは登録しない
         .invoke_handler(tauri::generate_handler![
             pty_spawn,
@@ -2256,7 +2277,8 @@ pub fn run() {
             mcp_server::sync_notification_state,
             mcp_server::mcp_close_worktree_result,
             mcp_server::mcp_import_worktree_result,
-            download_and_install_update,
+            download_update,
+            install_downloaded_update,
             ai_judge::judge_approval,
             ai_judge::cancel_approval,
             ai_commit_message::generate_commit_message,
