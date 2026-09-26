@@ -11,6 +11,7 @@ import Badge from "primevue/badge";
 import type { UrlArtifactEntry } from "../types/artifact";
 import { subscriptionCounts } from "../composables/useEventSubscriptions";
 import { EMPTY_SUBSCRIPTION_COUNTS } from "../utils/subscriptionCounts";
+import { resumePendingTerminals } from "../composables/useAiResumePending";
 
 const { t } = useI18n();
 
@@ -71,6 +72,7 @@ const terminalList = computed(() =>
     id: term.id,
     title: term.title,
     imageUrl: props.thumbnailUrls.get(term.id) ?? null,
+    resumePendingAgent: resumePendingTerminals.get(term.id) ?? null,
   })),
 );
 
@@ -204,6 +206,7 @@ function withMenuHidden<T>(fn: () => T): T {
         :title="item.title"
         :image-url="item.imageUrl"
         :is-active="false"
+        :resume-pending-agent="item.resumePendingAgent"
         @click="onThumbnailClick(item.id)"
       />
     </div>
