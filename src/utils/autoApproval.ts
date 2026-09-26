@@ -327,15 +327,45 @@ export async function analyzeForApproval(
   }
 }
 
-/** 全ターミナルを走査し最初に承認できたものでEnterを送信する */
+/**
+ * 全ターミナルを走査し最初に承認できたものでEnterを送信する。
+ *
+ * **プロンプトが1件も見えなければ、判定へ入る前に短い間隔で再走査する（#326）。**
+ * `waitMs` / `waitIntervalMs` はテスト用の差し替え口。
+ */
 export async function runApprovalLoop(
   terminals: TerminalForApproval[],
   worktreeId: string,
   cwd: string,
   additionalPrompt?: string,
+  waitMs: number = APPROVAL_PROMPT_WAIT_MS,
+  waitIntervalMs: number = APPROVAL_PROMPT_WAIT_INTERVAL_MS,
 ): Promise<ApprovalLoopResult> {
   let approved = false;
   let lastCommand: string | undefined;
+
+  const anyPromptVisible = (): boolean =>
+    terminals.some((t) => {
+      const terminal = t.getTerminal();
+      return terminal ? hasApprovalPrompt(getRecentLines(terminal, APPROVAL_SCAN_LINES)) : false;
+    });
+
+  if (!anyPromptVisible()) {
+    const deadline = Date.now() + waitMs;
+    while (Date.now() < deadline && !anyPromptVisible()) {
+      await sleep(waitIntervalMs);
+    }
+    if (!anyPromptVisible()) {
+      logDebug(`[AutoApproval] no prompt found after ${waitMs}ms wait, giving up`);
+      for (const t of terminals) {
+        const terminal = t.getTerminal();
+        if (terminal) {
+          logDebug(`[AutoApproval] tid=${t.id} tail=${getRecentLines(terminal, 5)}`);
+        }
+      }
+      return { approved, lastCommand };
+    }
+  }
 
   for (const termRef of terminals) {
     const terminal = termRef.getTerminal();
@@ -384,6 +414,26 @@ export async function runApprovalLoop(
   }
 
   return { approved, lastCommand };
+}
+
+/** プロンプト出現待ちの再走査間隔(ms) */
+const APPROVAL_PROMPT_WAIT_INTERVAL_MS = 200;
+
+/**
+ * プロンプト出現待ちの上限(ms)。既定値（#326）。
+ *
+ * `PermissionRequest` フックの発火は許可ダイアログの描画とほぼ同時（か先行）で、
+ * PTY 出力が xterm バッファへ反映される前に notify-worktree が届くことがある。
+ * その瞬間に1回だけ走査すると `hasApprovalPrompt` が偽になり、AI 判定を経ずに
+ * 「未承認」として即座に通知が飛ぶ（自動承認 ON なのに承認待ちの表示にならない）。
+ * 呼び出し元（`useAppAutoApproval.handleNotify` / `SubWindowApp.vue`）は判定中の間
+ * `aiJudgingWorktrees` に入れて自動処理中の表示に倒すので、ここで多少待っても
+ * 「自動承認が固まって見える」ことにはならない。
+ */
+const APPROVAL_PROMPT_WAIT_MS = 2000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /** 進行中のAI判定をキャンセル */

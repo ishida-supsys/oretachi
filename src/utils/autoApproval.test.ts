@@ -515,6 +515,34 @@ describe('runApprovalLoop', () => {
     expect(writes).toEqual([])
   })
 
+  // #326: PermissionRequest フックの発火が PTY 出力の xterm 反映より先行すると、
+  // notify 到着直後の1回だけの走査ではプロンプトが見えない。出現待ちで拾えることを確認する
+  it('waits briefly for the prompt to appear before judging', async () => {
+    let screen = 'still running...\n'
+    setTimeout(() => {
+      screen = paddedPrompt('Write(a.txt)')
+    }, 15)
+    vi.mocked(invoke).mockResolvedValue({ safe: true, command: 'Write(a.txt)' })
+    const { ref, writes } = fakeTermRef(1, () => screen)
+
+    const result = await runApprovalLoop([ref], 'wt-1', 'X:/devel/worktree/x', undefined, 200, 10)
+
+    expect(result.approved).toBe(true)
+    expect(writes).toEqual(['\r'])
+  })
+
+  // 出現待ちの上限を超えてもプロンプトが見えなければ、AI 判定を走らせず未承認で終わる
+  // (= 呼び出し元が通知する。これは正当な「承認待ちではなかった」ケースの帰結)
+  it('gives up without judging if the prompt never appears within the wait window', async () => {
+    const { ref, writes } = fakeTermRef(1, () => 'no prompt here\n')
+
+    const result = await runApprovalLoop([ref], 'wt-1', 'X:/devel/worktree/x', undefined, 30, 10)
+
+    expect(invoke).not.toHaveBeenCalled()
+    expect(result.approved).toBe(false)
+    expect(writes).toEqual([])
+  })
+
   // プラン承認ダイアログは検出対象外。AI 判定 (CLI コマンドの危険性しか見ない) を
   // 走らせてはいけない
   it('never judges the plan approval dialog', async () => {
@@ -528,7 +556,9 @@ describe('runApprovalLoop', () => {
     ].join('\n')
     const { ref, writes } = fakeTermRef(1, () => plan)
 
-    const result = await runApprovalLoop([ref], 'wt-1', 'X:/devel/worktree/x')
+    // プラン承認は `hasApprovalPrompt` 自体が偽 (`Yes,` が行末固定に一致しない) なので
+    // 出現待ちが満了するまで判定へ進まない。待ち時間を短くして高速に確認する
+    const result = await runApprovalLoop([ref], 'wt-1', 'X:/devel/worktree/x', undefined, 30, 10)
 
     expect(invoke).not.toHaveBeenCalled()
     expect(result.approved).toBe(false)
