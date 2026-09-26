@@ -350,7 +350,9 @@ export async function runApprovalLoop(
       return terminal ? hasApprovalPrompt(getRecentLines(terminal, APPROVAL_SCAN_LINES)) : false;
     });
 
-  if (!anyPromptVisible()) {
+  // 端末が1つも無ければ待っても何も現れない。待機せず即座に返す
+  // (待つと呼び出し元の判定中表示だけが無意味に waitMs 分伸びる)
+  if (terminals.length > 0 && !anyPromptVisible()) {
     const deadline = Date.now() + waitMs;
     while (Date.now() < deadline && !anyPromptVisible()) {
       await sleep(waitIntervalMs);

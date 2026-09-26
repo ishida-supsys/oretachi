@@ -543,6 +543,14 @@ describe('runApprovalLoop', () => {
     expect(writes).toEqual([])
   })
 
+  // 端末が1つも無ければ出現待ちをせず即座に返す (待っても何も現れないため)
+  it('returns immediately without waiting when there are no terminals', async () => {
+    const result = await runApprovalLoop([], 'wt-1', 'X:/devel/worktree/x', undefined, 5000, 10)
+
+    expect(invoke).not.toHaveBeenCalled()
+    expect(result.approved).toBe(false)
+  })
+
   // プラン承認ダイアログは検出対象外。AI 判定 (CLI コマンドの危険性しか見ない) を
   // 走らせてはいけない
   it('never judges the plan approval dialog', async () => {
