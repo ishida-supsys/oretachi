@@ -4,6 +4,7 @@ import type { Ref } from "vue";
 import type { Worktree } from "../types/worktree";
 import type { SubWindowLayoutTerminal, WebSessionInfo } from "../types/terminal";
 import type { SubLayoutResponse } from "./useSubWindows";
+import { clearResumePending } from "./useAiResumePending";
 
 interface UseSubWindowEventsDeps {
   worktrees: Ref<Worktree[]>;
@@ -56,6 +57,12 @@ export function useSubWindowEvents(deps: UseSubWindowEventsDeps) {
       deps.thumbnailUrls.delete(terminalId);
       deps.terminalAgentStatus.delete(terminalId);
       deps.terminalWebSessions.delete(terminalId);
+      clearResumePending(terminalId);
+    });
+
+    // サブウィンドウでの AI resume 投入が確定した通知（成功/対象外/失敗いずれも #328 の表示を解く）
+    await listen<{ terminalId: number }>("sub-ai-resume-consumed", (event) => {
+      clearResumePending(event.payload.terminalId);
     });
 
     // サブウィンドウからのサムネイル受信

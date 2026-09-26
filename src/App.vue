@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, reactive, nextTick, onMounted, computed, watch } from "vue";
 import { renderToDataUrl } from "./composables/useTerminalThumbnail";
+import { markResumePending, clearResumePending } from "./composables/useAiResumePending";
 import { isDirty, clearDirty } from "./composables/usePtyDispatcher";
 import { listen, emitTo, emit } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -234,7 +235,10 @@ const {
   removeTerminal,
   clearNotification,
   onTerminalActivated: (terminalId) => maybeInjectAiResume(terminalId),
-  onTerminalCleanup: (terminalId) => pendingAiRestore.delete(terminalId),
+  onTerminalCleanup: (terminalId) => {
+    pendingAiRestore.delete(terminalId);
+    clearResumePending(terminalId);
+  },
 });
 
 const { setup: setupCodeReviewChatListener } = useCodeReviewChatListener({
@@ -300,7 +304,11 @@ async function maybeInjectAiResume(terminalId: number) {
   // 再投入を防ぐため、成否によらず先にマーカーを落とす
   pendingAiRestore.delete(terminalId);
   const command = buildResumeCommand(info.agentType, info.sessionId);
-  if (!command) return;
+  if (!command) {
+    // resume 非対応の種別: このタブでは投入自体が発生しないので表示上も待ちを解く
+    clearResumePending(terminalId);
+    return;
+  }
   try {
     const ready = await waitForTerminalReady(terminalId);
     const ref = getTerminalRef(terminalId);
@@ -313,8 +321,11 @@ async function maybeInjectAiResume(terminalId: number) {
     }
     await ref.write(command.endsWith("\r") ? command : `${command}\r`);
     logDebug(`[Terminal] AI resume injected terminalId=${terminalId} agent=${info.agentType}`);
+    clearResumePending(terminalId);
   } catch (e) {
     logDebug(`[Terminal] AI resume injection failed terminalId=${terminalId}: ${e}`);
+    // 失敗確定（リトライしない）なので表示上の待ちも解く
+    clearResumePending(terminalId);
   }
 }
 
@@ -334,6 +345,7 @@ function registerRestoredAiSession(terminalId: number, info: import("./types/ter
   if (!info) return;
   terminalAiSessions.set(terminalId, info);
   pendingAiRestore.set(terminalId, info);
+  markResumePending(terminalId, info.agentType);
 }
 // 新規追加ターミナル: autoStart を抑制して reparenting 後に手動 startPty するための ID セット
 const pendingManualStart = new Set<number>();
@@ -956,6 +968,7 @@ async function onRemoveRepository(repositoryId: string) {
     thumbnailUrls.delete(terminal.id);
     pendingByTerminal.delete(terminal.id);
     pendingAiRestore.delete(terminal.id);
+    clearResumePending(terminal.id);
     readyTerminals.delete(terminal.id);
   }
   worktree?.terminals.splice(0);
@@ -1249,6 +1262,7 @@ async function onMoveToMainWindow(worktreeId: string) {
       terminalAiSessions.set(t.id, t.aiSession);
       if (t.resumePending) {
         pendingAiRestore.set(t.id, t.aiSession);
+        markResumePending(t.id, t.aiSession.agentType);
       }
     }
   }

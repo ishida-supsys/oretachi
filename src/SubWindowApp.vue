@@ -222,7 +222,12 @@ async function maybeInjectAiResume(terminalId: number) {
   // 再投入を防ぐため、成否によらず先にマーカーを落とす
   pendingAiRestore.delete(terminalId);
   const command = buildResumeCommand(info.agentType, info.sessionId);
-  if (!command) return;
+  if (!command) {
+    // resume 非対応の種別: このタブでは投入自体が発生しないので、メイン側の
+    // 表示上の待ち（#328）もここで解いてもらう
+    void emitTo("main", "sub-ai-resume-consumed", { terminalId });
+    return;
+  }
   const term = terminalRefs.get(terminalId);
   if (!term) return;
   try {
@@ -237,8 +242,11 @@ async function maybeInjectAiResume(terminalId: number) {
     }
     await term.write(command.endsWith("\r") ? command : `${command}\r`);
     logDebug(`[Terminal] AI resume injected terminalId=${terminalId} agent=${info.agentType}`);
+    void emitTo("main", "sub-ai-resume-consumed", { terminalId });
   } catch (e) {
     logDebug(`[Terminal] AI resume injection failed terminalId=${terminalId}: ${e}`);
+    // 失敗確定（リトライしない）なので、メイン側の表示上の待ちも解いてもらう
+    void emitTo("main", "sub-ai-resume-consumed", { terminalId });
   }
 }
 

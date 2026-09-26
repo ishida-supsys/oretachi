@@ -13,6 +13,7 @@ import Badge from "primevue/badge";
 import type { UrlArtifactEntry } from "../types/artifact";
 import { subscriptionCounts } from "../composables/useEventSubscriptions";
 import { EMPTY_SUBSCRIPTION_COUNTS } from "../utils/subscriptionCounts";
+import { resumePendingTerminals } from "../composables/useAiResumePending";
 
 const props = defineProps<{
   worktree: Worktree;
@@ -152,6 +153,7 @@ const terminalList = computed(() =>
     id: t.id,
     title: t.title,
     imageUrl: props.thumbnailUrls.get(t.id) ?? null,
+    resumePendingAgent: resumePendingTerminals.get(t.id) ?? null,
   }))
 );
 </script>
@@ -257,6 +259,7 @@ const terminalList = computed(() =>
         :title="item.title"
         :image-url="item.imageUrl"
         :is-active="false"
+        :resume-pending-agent="item.resumePendingAgent"
         @click="onThumbnailClick(item.id)"
       />
     </div>
