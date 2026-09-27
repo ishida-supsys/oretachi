@@ -344,6 +344,14 @@ describe('detectOretachiToolPrompt', () => {
       .toBeNull()
   })
 
+  // #345: send_keys は allow_confirm: true を付ければ answer_prompt と同様に
+  // 他ワークツリーのダイアログを確定・キャンセルしうる。無条件承認は引数を見ないため
+  // allow_confirm の有無で区別できず、常に AI 判定 / 手動承認へ落とす
+  it('returns null for oretachi_send_keys', () => {
+    expect(detectOretachiToolPrompt(ccPrompt('plugin:oretachi:oretachi - oretachi_send_keys')))
+      .toBeNull()
+  })
+
   // 解析するだけの read-only ツールは read_terminal と同じ扱いで自動承認する
   it('detects read-only inspect_prompt', () => {
     expect(detectOretachiToolPrompt(ccPrompt('plugin:oretachi:oretachi - oretachi_inspect_prompt')))

@@ -890,6 +890,119 @@ pub fn keys_preview(keys: &[Keystroke]) -> Vec<String> {
     keys.iter().map(|k| k.label.clone()).collect()
 }
 
+// ─── oretachi_send_keys 用の名前付きキー (#345) ───────────────────────────────
+
+/// `oretachi_send_keys` が確定を意味すると扱うキー名。
+///
+/// 「確認のための操作」と「確定」を呼び出し側の宣言で分けるための境界（issue #345）。
+/// `Enter` / `Esc` はダイアログを確定・キャンセルしうるので、`allow_confirm: true` が
+/// 無ければ **1 つでも含まれた時点で何も送らない**。確定は `oretachi_answer_prompt`
+/// （fingerprint 照合付き）へ寄せる。
+pub fn is_confirm_key(name: &str) -> bool {
+    matches!(name, "Enter" | "Esc")
+}
+
+/// 名前付きキーをバイト列へ変換する（#345）。
+///
+/// `app_cursor` は宛先がアプリケーションカーソルモード（DECCKM）かどうか
+/// （[`is_application_cursor_mode`] 参照）。矢印 / Home / End はこのモードに応じて
+/// CSI（`ESC[A`）と SS3（`ESC O A`）を切り替える。Windows の ConPTY 越しでは
+/// どちらでも吸収されるが、macOS / Linux の PTY はバイトがそのままアプリへ届くため
+/// DECCKM 中のアプリ（vim / less 等）は SS3 でないと認識しないことがある。
+///
+/// 未定義の名前には `None` を返す。呼び出し側（`oretachi_send_keys`）は
+/// **1 つでも `None` があれば何も送らない**。
+pub fn named_keystroke(name: &str, app_cursor: bool) -> Option<Keystroke> {
+    let arrow = |label: &str, csi: &[u8], ss3: &[u8]| Keystroke {
+        label: label.to_string(),
+        bytes: if app_cursor {
+            let mut b = vec![0x1b, b'O'];
+            b.extend_from_slice(ss3);
+            b
+        } else {
+            let mut b = vec![0x1b, b'['];
+            b.extend_from_slice(csi);
+            b
+        },
+        require: None,
+    };
+    match name {
+        "Up" => Some(arrow("Up", b"A", b"A")),
+        "Down" => Some(arrow("Down", b"B", b"B")),
+        "Right" => Some(arrow("Right", b"C", b"C")),
+        "Left" => Some(arrow("Left", b"D", b"D")),
+        "Home" => Some(arrow("Home", b"H", b"H")),
+        "End" => Some(arrow("End", b"F", b"F")),
+        "Tab" => Some(Keystroke { label: "Tab".into(), bytes: b"\t".to_vec(), require: None }),
+        "ShiftTab" => {
+            Some(Keystroke { label: "ShiftTab".into(), bytes: b"\x1b[Z".to_vec(), require: None })
+        }
+        "PageUp" => {
+            Some(Keystroke { label: "PageUp".into(), bytes: b"\x1b[5~".to_vec(), require: None })
+        }
+        "PageDown" => {
+            Some(Keystroke { label: "PageDown".into(), bytes: b"\x1b[6~".to_vec(), require: None })
+        }
+        "Backspace" => {
+            Some(Keystroke { label: "Backspace".into(), bytes: vec![0x7f], require: None })
+        }
+        "Enter" => Some(Keystroke::cr()),
+        "Esc" => Some(Keystroke::esc()),
+        _ => None,
+    }
+}
+
+/// `oretachi_send_keys` の入力検証（純粋関数・PTY 非依存）。
+///
+/// 未定義のキー名が 1 つでもあれば、または `allow_confirm` が無いのに確定キーが
+/// 含まれていれば、**何も送らずに** `Err` を返す。呼び出し側はこの結果を見てから
+/// はじめて PTY へ書き込む。
+/// `oretachi_send_keys` の1回の呼び出しで送れるキー数の上限。
+///
+/// **この定数は `plan_named_keys` 自身が守る。** 呼び出し元（`mcp_server::oretachi_send_keys`）
+/// にも同じ上限の早期チェックがあるが、それは「上限超過のエラーメッセージを他の検証より先に
+/// 出したい」ための重複であって、ここでの検査を代替しない。将来 `plan_named_keys` を呼ぶ
+/// 経路が増えても、上限チェックの実装漏れが起きないようにする。
+pub const MAX_SEND_KEYS: usize = 32;
+
+pub fn plan_named_keys(
+    keys: &[String],
+    allow_confirm: bool,
+    app_cursor: bool,
+) -> Result<Vec<Keystroke>, String> {
+    if keys.is_empty() {
+        return Err("keys が空です".to_string());
+    }
+    if keys.len() > MAX_SEND_KEYS {
+        return Err(format!(
+            "keys が多すぎます（{} 件、上限 {} 件）。何も送っていません。長い操作は複数回に分けてください",
+            keys.len(),
+            MAX_SEND_KEYS
+        ));
+    }
+    if let Some(bad) = keys.iter().find(|k| named_keystroke(k, app_cursor).is_none()) {
+        return Err(format!(
+            "未定義のキー名 '{}' が含まれています。何も送っていません。使えるのは \
+             Up / Down / Left / Right / Tab / ShiftTab / Home / End / PageUp / PageDown / \
+             Backspace / Enter / Esc です",
+            bad
+        ));
+    }
+    if !allow_confirm {
+        if let Some(bad) = keys.iter().find(|k| is_confirm_key(k)) {
+            return Err(format!(
+                "'{}' は確定を意味するキーで、allow_confirm: true を渡さない限り送れません。\
+                 何も送っていません。確定操作は oretachi_answer_prompt（fingerprint 照合付き）を使ってください",
+                bad
+            ));
+        }
+    }
+    Ok(keys
+        .iter()
+        .map(|k| named_keystroke(k, app_cursor).expect("上で全キーの存在を確認済み"))
+        .collect())
+}
+
 // ─── 画面再生 ────────────────────────────────────────────────────────────────
 
 /// 出力履歴のバイト列を VT エミュレータへ流し直して画面テキストを作る。
@@ -940,6 +1053,24 @@ pub fn render_logical_screen(bytes: &[u8], rows: u16, cols: u16) -> String {
     // 画面下部の空行は落とす（`contents()` と同じ振る舞い）。残すと `tail` が
     // 空行だらけになって、人へ見せる画面末尾が読みにくい
     out.trim_end_matches('\n').to_string()
+}
+
+/// 出力履歴を再生して、宛先がアプリケーションカーソルモード（DECCKM, `ESC[?1h`）に
+/// 入っているかを調べる（#345）。
+///
+/// **Windows の ConPTY は入力側の CSI / SS3 を吸収するのでここを気にしなくてよいが、
+/// macOS / Linux の PTY はバイトをそのままアプリへ渡す。** DECCKM が立っているアプリ
+/// （vim / less など）は矢印を SS3 形式（`ESC O A` 等）で送らないと認識しないことがある。
+/// `named_keystroke` はこの結果を見て矢印 / Home / End の形式を切り替える。
+///
+/// `render_logical_screen` と別関数にしているのは、あちらは画面テキストだけを返して
+/// `vt100::Screen` を捨ててしまうため。
+pub fn is_application_cursor_mode(bytes: &[u8], rows: u16, cols: u16) -> bool {
+    let rows = rows.max(MIN_REPLAY_ROWS);
+    let cols = cols.max(MIN_REPLAY_COLS);
+    let mut parser = vt100::Parser::new(rows, cols, 0);
+    parser.process(bytes);
+    parser.screen().application_cursor()
 }
 
 const MIN_REPLAY_ROWS: u16 = 4;
@@ -5419,5 +5550,110 @@ mod tests {
             let screen = render_logical_screen(b"hello", rows, cols);
             assert!(screen.contains("hello"), "rows={} cols={} screen={:?}", rows, cols, screen);
         }
+    }
+
+    // ─── oretachi_send_keys (#345) ─────────────────────────────────────────
+
+    #[test]
+    fn named_keystroke_covers_all_documented_names() {
+        let cases: &[(&str, &[u8])] = &[
+            ("Up", b"\x1b[A"),
+            ("Down", b"\x1b[B"),
+            ("Left", b"\x1b[D"),
+            ("Right", b"\x1b[C"),
+            ("Tab", b"\t"),
+            ("ShiftTab", b"\x1b[Z"),
+            ("Home", b"\x1b[H"),
+            ("End", b"\x1b[F"),
+            ("PageUp", b"\x1b[5~"),
+            ("PageDown", b"\x1b[6~"),
+            ("Backspace", &[0x7f]),
+            ("Enter", b"\r"),
+            ("Esc", &[0x1b]),
+        ];
+        for (name, bytes) in cases {
+            let key = named_keystroke(name, false)
+                .unwrap_or_else(|| panic!("'{}' が未定義になっている", name));
+            assert_eq!(key.bytes, bytes.to_vec(), "name={}", name);
+        }
+    }
+
+    #[test]
+    fn named_keystroke_unknown_name_is_none() {
+        assert_eq!(named_keystroke("Foo", false), None);
+        assert_eq!(named_keystroke("down", false), None); // 大文字小文字は区別する
+        assert_eq!(named_keystroke("", false), None);
+    }
+
+    #[test]
+    fn named_keystroke_uses_ss3_in_application_cursor_mode() {
+        // DECCKM (ESC[?1h) を立てた後は矢印 / Home / End が SS3 形式になる。
+        // Windows の ConPTY は入力側でこの違いを吸収するが、macOS / Linux の PTY は
+        // バイトをそのまま渡すため、DECCKM 中のアプリ（vim / less 等）向けに必要
+        for (name, ss3) in [
+            ("Up", b"\x1bOA".to_vec()),
+            ("Down", b"\x1bOB".to_vec()),
+            ("Left", b"\x1bOD".to_vec()),
+            ("Right", b"\x1bOC".to_vec()),
+            ("Home", b"\x1bOH".to_vec()),
+            ("End", b"\x1bOF".to_vec()),
+        ] {
+            let key = named_keystroke(name, true).unwrap();
+            assert_eq!(key.bytes, ss3, "name={}", name);
+        }
+        // 矢印以外はモードの影響を受けない
+        assert_eq!(named_keystroke("Enter", true).unwrap().bytes, b"\r".to_vec());
+        assert_eq!(named_keystroke("Tab", true).unwrap().bytes, b"\t".to_vec());
+    }
+
+    #[test]
+    fn is_application_cursor_mode_reflects_decckm() {
+        assert!(!is_application_cursor_mode(b"hello", 24, 80));
+        assert!(is_application_cursor_mode(b"\x1b[?1hhello", 24, 80));
+        // 解除されれば戻る
+        assert!(!is_application_cursor_mode(b"\x1b[?1h\x1b[?1l", 24, 80));
+    }
+
+    #[test]
+    fn plan_named_keys_rejects_unknown_name_without_sending_anything() {
+        let keys = vec!["Down".to_string(), "Bogus".to_string()];
+        let err = plan_named_keys(&keys, false, false).unwrap_err();
+        assert!(err.contains("Bogus"), "err={}", err);
+    }
+
+    #[test]
+    fn plan_named_keys_rejects_confirm_keys_without_allow_confirm() {
+        let keys = vec!["Down".to_string(), "Enter".to_string()];
+        let err = plan_named_keys(&keys, false, false).unwrap_err();
+        assert!(err.contains("Enter"), "err={}", err);
+
+        let keys = vec!["Esc".to_string()];
+        let err = plan_named_keys(&keys, false, false).unwrap_err();
+        assert!(err.contains("Esc"), "err={}", err);
+    }
+
+    #[test]
+    fn plan_named_keys_allows_confirm_keys_when_opted_in() {
+        let keys = vec!["Down".to_string(), "Enter".to_string()];
+        let planned = plan_named_keys(&keys, true, false).unwrap();
+        assert_eq!(planned.len(), 2);
+        assert_eq!(planned[1].bytes, b"\r".to_vec());
+    }
+
+    #[test]
+    fn plan_named_keys_rejects_empty() {
+        assert!(plan_named_keys(&[], false, false).is_err());
+    }
+
+    #[test]
+    fn plan_named_keys_enforces_its_own_limit() {
+        // 呼び出し元 (`oretachi_send_keys`) だけでなく plan_named_keys 自身が上限を守る。
+        // 将来別の呼び出し経路が増えても上限チェックの実装漏れが起きないようにするため
+        let keys = vec!["Down".to_string(); MAX_SEND_KEYS + 1];
+        let err = plan_named_keys(&keys, false, false).unwrap_err();
+        assert!(err.contains(&(MAX_SEND_KEYS + 1).to_string()), "err={}", err);
+
+        let keys = vec!["Down".to_string(); MAX_SEND_KEYS];
+        assert!(plan_named_keys(&keys, false, false).is_ok());
     }
 }
