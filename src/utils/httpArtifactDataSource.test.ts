@@ -130,13 +130,90 @@ describe("httpArtifactDataSource", () => {
       expect(fetchMock).toHaveBeenCalledWith("/api/worktrees/a%2Fb/artifacts", { credentials: "same-origin" });
     });
 
-    it("rejects setMemory / callMcpTool as unsupported", async () => {
+    it("setMemory POSTs to .../memory and updates the cached state", async () => {
+      const onUnauthorized = vi.fn();
+      const ctx = await createHttpArtifactViewerContext("worktree", "issue-326", {
+        onUnauthorized,
+        navigateTo: vi.fn(),
+      });
+
+      // read() で lastMemory を仕込む
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          artifact: { id: "a", title: "A", type: "text/markdown", content: "# hi", created_at: 1, updated_at: 2 },
+          memory: { foo: "old" },
+          memoryUpdatedAt: 1,
+        }),
+      );
+      await ctx!.dataSource.read("a");
+
+      fetchMock.mockResolvedValueOnce(jsonResponse({ memoryUpdatedAt: 99 }));
+      await ctx!.dataSource.setMemory("a", { foo: "bar" });
+      expect(fetchMock).toHaveBeenLastCalledWith("/api/worktrees/issue-326/artifacts/a/memory", {
+        credentials: "same-origin",
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ memory: { foo: "bar" } }),
+      });
+
+      const states = await ctx!.dataSource.listStates();
+      expect(states).toEqual({ a: { memory: { foo: "bar" }, memoryUpdatedAt: 99 } });
+    });
+
+    it("setMemory(null) sends null and clears the cached memory", async () => {
       const ctx = await createHttpArtifactViewerContext("worktree", "issue-326", {
         onUnauthorized: vi.fn(),
         navigateTo: vi.fn(),
       });
-      await expect(ctx!.dataSource.setMemory("a", null)).rejects.toThrow();
-      await expect(ctx!.dataSource.callMcpTool("a", "tool", {})).rejects.toThrow();
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          artifact: { id: "a", title: "A", type: "text/markdown", content: "# hi", created_at: 1, updated_at: 2 },
+          memory: { foo: "old" },
+          memoryUpdatedAt: 1,
+        }),
+      );
+      await ctx!.dataSource.read("a");
+
+      fetchMock.mockResolvedValueOnce(jsonResponse({ memoryUpdatedAt: 0 }));
+      await ctx!.dataSource.setMemory("a", null);
+      expect(fetchMock).toHaveBeenLastCalledWith(
+        "/api/worktrees/issue-326/artifacts/a/memory",
+        expect.objectContaining({ body: JSON.stringify({ memory: null }) }),
+      );
+      const states = await ctx!.dataSource.listStates();
+      expect(states).toEqual({ a: { memory: undefined, memoryUpdatedAt: 0 } });
+    });
+
+    it("callMcpTool POSTs to .../call-tool and returns the result", async () => {
+      const ctx = await createHttpArtifactViewerContext("worktree", "issue-326", {
+        onUnauthorized: vi.fn(),
+        navigateTo: vi.fn(),
+      });
+      fetchMock.mockResolvedValueOnce(jsonResponse({ result: "tool-result" }));
+      const result = await ctx!.dataSource.callMcpTool("a", "oretachi_get_worktree_status", { query: "x" });
+      expect(result).toBe("tool-result");
+      expect(fetchMock).toHaveBeenCalledWith("/api/worktrees/issue-326/artifacts/a/call-tool", {
+        credentials: "same-origin",
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tool: "oretachi_get_worktree_status", params: { query: "x" } }),
+      });
+    });
+
+    it("callMcpTool surfaces the {error} message and calls onUnauthorized on 401", async () => {
+      const onUnauthorized = vi.fn();
+      const ctx = await createHttpArtifactViewerContext("worktree", "issue-326", {
+        onUnauthorized,
+        navigateTo: vi.fn(),
+      });
+      fetchMock.mockResolvedValueOnce(jsonResponse({ error: "ホワイトリストにないツールです" }, 400));
+      await expect(ctx!.dataSource.callMcpTool("a", "not_whitelisted", {})).rejects.toThrow(
+        "ホワイトリストにないツールです",
+      );
+
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 401 }));
+      await expect(ctx!.dataSource.callMcpTool("a", "tool", {})).rejects.toBeInstanceOf(UnauthorizedError);
+      expect(onUnauthorized).toHaveBeenCalledOnce();
     });
 
     it("navigates to the worktree page directly for openScopeViewer(worktree)", async () => {

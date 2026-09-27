@@ -53,8 +53,12 @@ const WEB_CAPABILITIES: ArtifactCapabilities = {
   transfer: false,
 };
 
-async function apiFetch<T>(path: string, onUnauthorized: () => void): Promise<T> {
-  const res = await fetch(path, { credentials: "same-origin" });
+async function apiFetch<T>(
+  path: string,
+  onUnauthorized: () => void,
+  init?: RequestInit,
+): Promise<T> {
+  const res = await fetch(path, { credentials: "same-origin", ...init });
   if (res.status === 401) {
     onUnauthorized();
     throw new UnauthorizedError();
@@ -70,6 +74,19 @@ async function apiFetch<T>(path: string, onUnauthorized: () => void): Promise<T>
     throw new Error(msg);
   }
   return (await res.json()) as T;
+}
+
+/** `apiFetch` の POST 版。書き込み系エンドポイント(`/memory`・`/call-tool`)専用 */
+function apiPost<T>(
+  path: string,
+  body: unknown,
+  onUnauthorized: () => void,
+): Promise<T> {
+  return apiFetch<T>(path, onUnauthorized, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
 }
 
 /** `GET /api/worktrees`。ワークツリー一覧ページと、スコープ名・リポジトリ key 解決の両方で使う */
@@ -136,7 +153,7 @@ export interface HttpArtifactViewerContext {
 
 /**
  * ArtifactViewerApp.vue 向けの HTTP 実装を組み立てる。
- * 書き込み系（setMemory / callMcpTool）と自動更新（SSE）は未対応（#340 / #341 の範囲）。
+ * 自動更新（SSE）は未対応（#341 の範囲）。
  * スコープ（repository の key）が解決できない場合は null を返す。
  */
 export async function createHttpArtifactViewerContext(
@@ -189,12 +206,30 @@ export async function createHttpArtifactViewerContext(
       return { displayName: r?.name ?? scopeKey, repositoryName: r?.name ?? null };
     },
 
-    setMemory() {
-      return Promise.reject(new Error("Web 版ではメモリーの書き込みに未対応です"));
+    async setMemory(artifactId, memory) {
+      const raw = await apiPost<{ memoryUpdatedAt: number }>(
+        `${readPathFor(artifactId)}/memory`,
+        { memory },
+        opts.onUnauthorized,
+      );
+      // 直近に read() した artifactId と同じなら、次の listStates() が
+      // 古いキャッシュを返さないよう更新しておく（Tauri 実装は onStateChanged で
+      // 押し込むが、Web は自分自身の書き込みに対するイベントを受け取らないため）。
+      if (lastMemory?.artifactId === artifactId) {
+        lastMemory = {
+          artifactId,
+          state: { memory: memory ?? undefined, memoryUpdatedAt: raw.memoryUpdatedAt },
+        };
+      }
     },
 
-    callMcpTool() {
-      return Promise.reject(new Error("Web 版では MCP ツールの呼び出しに未対応です"));
+    async callMcpTool(artifactId, tool, params) {
+      const raw = await apiPost<{ result: string }>(
+        `${readPathFor(artifactId)}/call-tool`,
+        { tool, params },
+        opts.onUnauthorized,
+      );
+      return raw.result;
     },
 
     async onArtifactChanged() {

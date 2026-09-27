@@ -8,46 +8,54 @@
 // 保存しない) を発行し、token を除いた URL へリダイレクトする。以降は Cookie のみで
 // 認証する。`regenerate_mcp_api_key` で key が変われば旧 Cookie は自動的に無効になる。
 //
-// #337 (JSON API) 以降はこのルータへ追加する形で実装する。
-//
-// セルフレビューで挙がった申し送り事項(#336 の範囲では対応不要、後続 sub-issue で要考慮):
-// - このルータは今のところ GET のみ・副作用なしなので CSRF は問題にならないが、
-//   Cookie は `SameSite=Strict` のみで守られている。RFC 6265 の Cookie 分離も
-//   schemeful-same-site 判定もポート単位ではないため、同一ホストの別ポートで動く
-//   別インスタンス/別ローカルサーバーから見ると同一サイト scoped になりうる。
-//   #337 以降で書き込み系(store・callTool ブリッジ)を足すときは、
-//   SameSite=Strict だけに頼らず Origin/Sec-Fetch-Site 検証か CSRF トークンを併用すること。
-// - `remote_access`(0.0.0.0 bind)時は TLS 終端が無いため `?token=` の URL も
-//   発行後の Cookie も LAN 上を平文で流れる(Bearer 経路と同じ既知のリスクだが、
-//   ブラウザへ直接貼る導線が増える分、履歴・オートコンプリートに残る経路が広がる)。
-//   #341 の「ブラウザで開く」導線で remote_access 時の注意喚起を検討すること。
-//   `Secure` 属性はこのアプリが HTTPS 非対応なため付けられない(付けると
-//   localhost の通常利用まで Cookie が送られなくなる)。
+// #340 で書き込み系(memory 保存・callTool ブリッジ)を追加した。POST は `csrf_guard`
+// middleware(`viewer_auth` の内側)で Origin/Host/Sec-Fetch-Site を検証しており、
+// SameSite=Strict の Cookie だけに頼っていない(csrf_guard のドキュメントコメント参照)。
 
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 
 use axum::{
     body::Body,
     extract::{Path as AxumPath, Request, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri},
     middleware::{self, Next},
     response::{Html, IntoResponse, Json, Redirect, Response},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use hmac::{Hmac, Mac};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 use crate::settings::{Repository, SettingsManager, WorktreeEntry};
 use crate::{
     artifacts_dir_in, list_artifacts_in_dir, list_repo_artifacts_in_dir, read_artifact_store,
-    repo_artifacts_dir_in, repo_artifacts_key, validate_path_component,
+    repo_artifacts_dir_in, repo_artifacts_key, set_artifact_memory_in, validate_path_component,
 };
+
+/// アーティファクトの置き場所ワークツリーへスコープ固定して MCP ツールを呼ぶ。
+/// リポジトリスコープからは呼べない(呼び出し側で弾く)。
+pub type ToolCaller = Arc<
+    dyn Fn(
+            String, /* worktree_id */
+            String, /* artifact_id */
+            String, /* tool */
+            serde_json::Value,
+        ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// memory 書き込み後、開いている Tauri ビューアへ知らせる(mcp_server.rs の
+/// `artifact-state-changed` 発行と同じ目的: 知らせないと Tauri 側 iframe が古い
+/// スナップショットで書き戻し、Web 側の保存を消してしまう)。
+pub type StateChangedNotifier = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
 
 /// 現在の MCP API key を返す。設定は再起動なしで変わりうるため、毎リクエスト読む。
 pub type KeyProvider = Arc<dyn Fn() -> String + Send + Sync>;
@@ -74,6 +82,9 @@ struct ViewerState {
     cookie_name: String,
     data_dir: PathBuf,
     settings: SettingsProvider,
+    port: u16,
+    tool_caller: ToolCaller,
+    notify_state_changed: StateChangedNotifier,
 }
 
 fn session_cookie_value(key: &str) -> String {
@@ -188,6 +199,61 @@ async fn viewer_auth(
         log::warn!("[web_viewer] unauthorized request: no valid session cookie");
         unauthorized_response(&uri)
     }
+}
+
+/// 書き込み系(GET/HEAD/OPTIONS 以外)の CSRF 対策 middleware。`viewer_auth` の内側
+/// (Cookie 認証が通った後)に layer する。
+///
+/// Cookie は `SameSite=Strict` のみで守られているが、RFC 6265 の Cookie 分離も
+/// schemeful-same-site 判定もポート単位ではないため、同一ホストの別ポートで動く
+/// 別インスタンス/別ローカルサーバー(vite dev server 等)から見ると同一サイト
+/// scoped になりうる。そのため Origin と Host(port 込み)の完全一致を要求する。
+///
+/// DNS rebinding(`evil.example:<port>` が 127.0.0.1 を指す)については、Origin も
+/// Host も `evil.example:<port>` で一致してしまいここは通過するが、Cookie は
+/// host-only 属性で `evil.example` へは送られないため `viewer_auth` の Cookie 検証
+/// (このガードより外側)で 401 になる。この防御が csrf_guard 単体では閉じないことに注意。
+async fn csrf_guard(
+    State(state): State<ViewerState>,
+    headers: HeaderMap,
+    method: Method,
+    request: Request,
+    next: Next,
+) -> Response {
+    if matches!(method, Method::GET | Method::HEAD | Method::OPTIONS) {
+        return next.run(request).await;
+    }
+
+    let host = headers.get(header::HOST).and_then(|v| v.to_str().ok());
+    let origin = headers.get(header::ORIGIN).and_then(|v| v.to_str().ok());
+
+    let Some(host) = host else {
+        return api_error(StatusCode::FORBIDDEN, "Host ヘッダーがありません");
+    };
+    let Some(origin) = origin else {
+        return api_error(StatusCode::FORBIDDEN, "Origin ヘッダーがありません");
+    };
+
+    let host_port = host
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse::<u16>().ok())
+        .unwrap_or(80);
+    if host_port != state.port {
+        return api_error(StatusCode::FORBIDDEN, "Host のポートが一致しません");
+    }
+
+    let expected_origin = format!("http://{}", host);
+    if origin != expected_origin {
+        return api_error(StatusCode::FORBIDDEN, "Origin が一致しません");
+    }
+
+    if let Some(site) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        if site != "same-origin" {
+            return api_error(StatusCode::FORBIDDEN, "Sec-Fetch-Site が same-origin ではありません");
+        }
+    }
+
+    next.run(request).await
 }
 
 /// `application/x-www-form-urlencoded` 相当の最小限のパーセントデコード。
@@ -554,6 +620,119 @@ async fn api_read_repo_artifact(
     respond_with_artifact(dir, artifact_id).await
 }
 
+// ─── /api/* (書き込み JSON API、#340) ───────────────────────────────────────
+//
+// `csrf_guard`(Origin/Host 検証)と `viewer_auth`(Cookie 認証)の両方を通った
+// リクエストのみここへ届く。
+
+#[derive(Deserialize)]
+struct SetMemoryBody {
+    memory: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct CallToolBody {
+    tool: String,
+    #[serde(default)]
+    params: serde_json::Value,
+}
+
+fn resolve_worktree_dir(state: &ViewerState, id: &str) -> Result<PathBuf, Response> {
+    validate_path_component(id).map_err(|e| api_error(StatusCode::BAD_REQUEST, e))?;
+    let (worktrees, _repositories) = (state.settings)();
+    if !worktrees.iter().any(|w| w.id == id) {
+        return Err(api_error(StatusCode::NOT_FOUND, "ワークツリーが見つかりません"));
+    }
+    artifacts_dir_in(&state.data_dir, id).map_err(|e| api_error(StatusCode::BAD_REQUEST, e))
+}
+
+/// リポジトリ key からディレクトリと実 ID(通知の scopeId に使う)を解決する。
+fn resolve_repo_dir(state: &ViewerState, repo_key: &str) -> Result<(PathBuf, String), Response> {
+    validate_path_component(repo_key).map_err(|e| api_error(StatusCode::BAD_REQUEST, e))?;
+    let (_worktrees, repositories) = (state.settings)();
+    let Some(repository) = repositories
+        .iter()
+        .find(|r| repo_artifacts_key(&r.id) == repo_key)
+    else {
+        return Err(api_error(StatusCode::NOT_FOUND, "リポジトリが見つかりません"));
+    };
+    let dir = repo_artifacts_dir_in(&state.data_dir, &repository.id)
+        .map_err(|e| api_error(StatusCode::BAD_REQUEST, e))?;
+    Ok((dir, repository.id.clone()))
+}
+
+fn memory_response(updated_at: Option<u64>) -> Response {
+    json_response(StatusCode::OK, json!({ "memoryUpdatedAt": updated_at.unwrap_or(0) }))
+}
+
+/// `POST /api/worktrees/{id}/artifacts/{artifact_id}/memory`
+async fn api_set_worktree_memory(
+    State(state): State<ViewerState>,
+    AxumPath((id, artifact_id)): AxumPath<(String, String)>,
+    Json(body): Json<SetMemoryBody>,
+) -> Response {
+    let dir = match resolve_worktree_dir(&state, &id) {
+        Ok(dir) => dir,
+        Err(resp) => return resp,
+    };
+    match set_artifact_memory_in(dir, &artifact_id, body.memory).await {
+        Ok(updated_at) => {
+            if updated_at.is_some() {
+                (state.notify_state_changed)("worktree", &id, &artifact_id);
+            }
+            memory_response(updated_at)
+        }
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// `POST /api/repositories/{repo_key}/artifacts/{artifact_id}/memory`
+async fn api_set_repo_memory(
+    State(state): State<ViewerState>,
+    AxumPath((repo_key, artifact_id)): AxumPath<(String, String)>,
+    Json(body): Json<SetMemoryBody>,
+) -> Response {
+    let (dir, repository_id) = match resolve_repo_dir(&state, &repo_key) {
+        Ok(v) => v,
+        Err(resp) => return resp,
+    };
+    match set_artifact_memory_in(dir, &artifact_id, body.memory).await {
+        Ok(updated_at) => {
+            if updated_at.is_some() {
+                (state.notify_state_changed)("repository", &repository_id, &artifact_id);
+            }
+            memory_response(updated_at)
+        }
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// `POST /api/worktrees/{id}/artifacts/{artifact_id}/call-tool`
+async fn api_call_tool_worktree(
+    State(state): State<ViewerState>,
+    AxumPath((id, artifact_id)): AxumPath<(String, String)>,
+    Json(body): Json<CallToolBody>,
+) -> Response {
+    if let Err(resp) = resolve_worktree_dir(&state, &id) {
+        return resp;
+    }
+    match (state.tool_caller)(id, artifact_id, body.tool, body.params).await {
+        Ok(result) => json_response(StatusCode::OK, json!({ "result": result })),
+        Err(e) => api_error(StatusCode::BAD_REQUEST, e),
+    }
+}
+
+/// `POST /api/repositories/{repo_key}/artifacts/{artifact_id}/call-tool`
+///
+/// リポジトリ保管庫のアーティファクトには紐づくワークツリーが無く、スコープを強制できない
+/// ため常に拒否する(`lib.rs` の `artifact_call_mcp_tool` と同じ方針)。
+async fn api_call_tool_repo() -> Response {
+    api_error(
+        StatusCode::BAD_REQUEST,
+        "MCP ツール呼び出しはワークツリーのアーティファクトからのみ使えます（現在のスコープ: repository）",
+    )
+}
+
 /// テスト・実装から共通で使うルータ組み立て。
 fn build_router(
     key: KeyProvider,
@@ -562,6 +741,9 @@ fn build_router(
     dev_proxy: DevProxyTarget,
     data_dir: PathBuf,
     settings: SettingsProvider,
+    port: u16,
+    tool_caller: ToolCaller,
+    notify_state_changed: StateChangedNotifier,
 ) -> Router {
     let state = ViewerState {
         key: key.clone(),
@@ -570,6 +752,9 @@ fn build_router(
         cookie_name,
         data_dir,
         settings,
+        port,
+        tool_caller,
+        notify_state_changed,
     };
 
     // `/assets/*`・`/vendor/*`・ルート直下の静的ファイル(`/vite.svg` 等)は
@@ -594,8 +779,25 @@ fn build_router(
             "/api/repositories/{repo_key}/artifacts/{artifact_id}",
             get(api_read_repo_artifact),
         )
+        .route(
+            "/api/worktrees/{id}/artifacts/{artifact_id}/memory",
+            post(api_set_worktree_memory),
+        )
+        .route(
+            "/api/repositories/{repo_key}/artifacts/{artifact_id}/memory",
+            post(api_set_repo_memory),
+        )
+        .route(
+            "/api/worktrees/{id}/artifacts/{artifact_id}/call-tool",
+            post(api_call_tool_worktree),
+        )
+        .route(
+            "/api/repositories/{repo_key}/artifacts/{artifact_id}/call-tool",
+            post(api_call_tool_repo),
+        )
         .fallback(get(static_fallback))
         .with_state(state.clone())
+        .layer(middleware::from_fn_with_state(state.clone(), csrf_guard))
         .layer(middleware::from_fn_with_state(state, viewer_auth))
 }
 
@@ -645,7 +847,36 @@ pub fn router(app_handle: AppHandle, port: u16) -> Router {
         .app_data_dir()
         .expect("app_data_dir は起動時に必ず解決できる");
 
-    build_router(key, cookie_name, assets, dev_proxy, data_dir, settings)
+    let tool_caller_handle = app_handle.clone();
+    let tool_caller: ToolCaller = Arc::new(move |worktree_id, artifact_id, tool, params| {
+        let handle = tool_caller_handle.clone();
+        Box::pin(async move {
+            crate::mcp_server::call_tool_for_artifact(&handle, &worktree_id, &artifact_id, &tool, params)
+                .await
+        })
+    });
+
+    let notify_handle = app_handle.clone();
+    let notify_state_changed: StateChangedNotifier = Arc::new(move |scope, scope_id, artifact_id| {
+        if let Err(e) = notify_handle.emit(
+            "artifact-state-changed",
+            json!({ "scope": scope, "scopeId": scope_id, "artifactId": artifact_id }),
+        ) {
+            log::warn!("[web_viewer] Failed to emit artifact-state-changed: {}", e);
+        }
+    });
+
+    build_router(
+        key,
+        cookie_name,
+        assets,
+        dev_proxy,
+        data_dir,
+        settings,
+        port,
+        tool_caller,
+        notify_state_changed,
+    )
 }
 
 #[cfg(test)]
@@ -744,6 +975,47 @@ mod tests {
         format!("oretachi_viewer_test={}", session_cookie_value(key))
     }
 
+    const TEST_PORT: u16 = 34567;
+
+    fn test_host() -> String {
+        format!("localhost:{}", TEST_PORT)
+    }
+
+    fn test_origin() -> String {
+        format!("http://{}", test_host())
+    }
+
+    /// テスト用 tool_caller。渡された引数を記録し、固定の結果 (または注入されたエラー) を返す。
+    fn stub_tool_caller(
+        calls: Arc<std::sync::Mutex<Vec<(String, String, String, serde_json::Value)>>>,
+        result: Result<String, String>,
+    ) -> ToolCaller {
+        Arc::new(move |worktree_id, artifact_id, tool, params| {
+            calls
+                .lock()
+                .unwrap()
+                .push((worktree_id, artifact_id, tool, params));
+            let result = result.clone();
+            Box::pin(async move { result })
+        })
+    }
+
+    fn noop_state_notifier() -> StateChangedNotifier {
+        Arc::new(|_, _, _| {})
+    }
+
+    /// 呼ばれた引数 `(scope, scopeId, artifactId)` を記録するテスト用 notifier。
+    fn recording_state_notifier(
+        calls: Arc<std::sync::Mutex<Vec<(String, String, String)>>>,
+    ) -> StateChangedNotifier {
+        Arc::new(move |scope, scope_id, artifact_id| {
+            calls
+                .lock()
+                .unwrap()
+                .push((scope.to_string(), scope_id.to_string(), artifact_id.to_string()));
+        })
+    }
+
     fn router_for_test() -> Router {
         build_router(
             key_provider(TEST_KEY),
@@ -752,6 +1024,9 @@ mod tests {
             None,
             temp_data_dir("basic"),
             empty_settings(),
+            TEST_PORT,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            noop_state_notifier(),
         )
     }
 
@@ -761,6 +1036,32 @@ mod tests {
             builder = builder.header(header::COOKIE, c);
         }
         let req = builder.body(Body::empty()).unwrap();
+        router.clone().oneshot(req).await.unwrap()
+    }
+
+    /// POST リクエストを送る。`origin`/`host` を渡すと CSRF ガード用ヘッダーとして付ける。
+    async fn post_json(
+        router: &Router,
+        uri: &str,
+        cookie: Option<&str>,
+        origin: Option<&str>,
+        host: Option<&str>,
+        body: serde_json::Value,
+    ) -> Response {
+        let mut builder = HttpRequest::builder().uri(uri).method("POST");
+        if let Some(c) = cookie {
+            builder = builder.header(header::COOKIE, c);
+        }
+        if let Some(o) = origin {
+            builder = builder.header(header::ORIGIN, o);
+        }
+        if let Some(h) = host {
+            builder = builder.header(header::HOST, h);
+        }
+        builder = builder.header(header::CONTENT_TYPE, "application/json");
+        let req = builder
+            .body(Body::from(serde_json::to_vec(&body).unwrap()))
+            .unwrap();
         router.clone().oneshot(req).await.unwrap()
     }
 
@@ -856,6 +1157,9 @@ mod tests {
             None,
             temp_data_dir("empty-key"),
             empty_settings(),
+            TEST_PORT,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            noop_state_notifier(),
         );
         let resp = get(&router, "/worktrees?token=", None).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -877,6 +1181,9 @@ mod tests {
             None,
             temp_data_dir("key-rotation"),
             empty_settings(),
+            TEST_PORT,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            noop_state_notifier(),
         );
 
         let resp = get(&router, "/worktrees", Some(&cookie)).await;
@@ -989,6 +1296,9 @@ mod tests {
             None,
             data_dir,
             settings,
+            TEST_PORT,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            noop_state_notifier(),
         );
         let cookie = cookie_for(TEST_KEY);
         let resp = get(&router, "/api/worktrees", Some(&cookie)).await;
@@ -1027,6 +1337,9 @@ mod tests {
             None,
             data_dir,
             settings,
+            TEST_PORT,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            noop_state_notifier(),
         );
         let cookie = cookie_for(TEST_KEY);
 
@@ -1086,6 +1399,9 @@ mod tests {
             None,
             data_dir,
             settings,
+            TEST_PORT,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            noop_state_notifier(),
         );
         let cookie = cookie_for(TEST_KEY);
 
@@ -1136,6 +1452,9 @@ mod tests {
             None,
             data_dir,
             settings,
+            TEST_PORT,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            noop_state_notifier(),
         );
         let cookie = cookie_for(TEST_KEY);
 
@@ -1164,5 +1483,429 @@ mod tests {
         // settings に無いリポジトリ key
         let resp = get(&router, "/api/repositories/unknown/artifacts", Some(&cookie)).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    // ─── #340: memory 書き込み ──────────────────────────────────────────────
+
+    fn worktree_router_with(
+        data_dir: PathBuf,
+        wt: WorktreeEntry,
+        tool_caller: ToolCaller,
+        notify: StateChangedNotifier,
+    ) -> Router {
+        let settings: SettingsProvider = Arc::new(move || (vec![wt.clone()], vec![]));
+        build_router(
+            key_provider(TEST_KEY),
+            "oretachi_viewer_test".to_string(),
+            stub_assets(),
+            None,
+            data_dir,
+            settings,
+            TEST_PORT,
+            tool_caller,
+            notify,
+        )
+    }
+
+    #[tokio::test]
+    async fn set_worktree_memory_roundtrips_and_notifies() {
+        let data_dir = temp_data_dir("set-memory-worktree");
+        let wt = test_worktree("wt-mem");
+        write_test_artifact(&data_dir.join("artifacts").join(&wt.id), "art-1", 100);
+
+        let notify_calls = Arc::new(std::sync::Mutex::new(vec![]));
+        let router = worktree_router_with(
+            data_dir,
+            wt,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            recording_state_notifier(notify_calls.clone()),
+        );
+        let cookie = cookie_for(TEST_KEY);
+
+        let resp = post_json(
+            &router,
+            "/api/worktrees/wt-mem/artifacts/art-1/memory",
+            Some(&cookie),
+            Some(&test_origin()),
+            Some(&test_host()),
+            json!({ "memory": { "foo": "bar" } }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        let updated_at = body["memoryUpdatedAt"].as_u64().unwrap();
+        assert!(updated_at > 0);
+        assert_eq!(
+            notify_calls.lock().unwrap().as_slice(),
+            [("worktree".to_string(), "wt-mem".to_string(), "art-1".to_string())]
+        );
+
+        // read で読み直せる
+        let resp = get(&router, "/api/worktrees/wt-mem/artifacts/art-1", Some(&cookie)).await;
+        let body = json_body(resp).await;
+        assert_eq!(body["memory"]["foo"], "bar");
+        assert_eq!(body["memoryUpdatedAt"], updated_at);
+
+        // null で削除
+        let resp = post_json(
+            &router,
+            "/api/worktrees/wt-mem/artifacts/art-1/memory",
+            Some(&cookie),
+            Some(&test_origin()),
+            Some(&test_host()),
+            json!({ "memory": null }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resp = get(&router, "/api/worktrees/wt-mem/artifacts/art-1", Some(&cookie)).await;
+        let body = json_body(resp).await;
+        assert!(body["memory"].is_null());
+    }
+
+    #[tokio::test]
+    async fn set_worktree_memory_rejects_non_object() {
+        let data_dir = temp_data_dir("set-memory-invalid");
+        let wt = test_worktree("wt-mem2");
+        write_test_artifact(&data_dir.join("artifacts").join(&wt.id), "art-1", 100);
+        let router = worktree_router_with(
+            data_dir,
+            wt,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            noop_state_notifier(),
+        );
+        let cookie = cookie_for(TEST_KEY);
+
+        let resp = post_json(
+            &router,
+            "/api/worktrees/wt-mem2/artifacts/art-1/memory",
+            Some(&cookie),
+            Some(&test_origin()),
+            Some(&test_host()),
+            json!({ "memory": "not-an-object" }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn set_memory_on_orphan_artifact_does_not_create_sidecar() {
+        let data_dir = temp_data_dir("set-memory-orphan");
+        let wt = test_worktree("wt-mem3");
+        // 本体 JSON を作らない(存在しないアーティファクトIDへ書き込む)
+        let notify_calls = Arc::new(std::sync::Mutex::new(vec![]));
+        let router = worktree_router_with(
+            data_dir.clone(),
+            wt,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            recording_state_notifier(notify_calls.clone()),
+        );
+        let cookie = cookie_for(TEST_KEY);
+
+        let resp = post_json(
+            &router,
+            "/api/worktrees/wt-mem3/artifacts/does-not-exist/memory",
+            Some(&cookie),
+            Some(&test_origin()),
+            Some(&test_host()),
+            json!({ "memory": { "foo": "bar" } }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["memoryUpdatedAt"], 0);
+        assert!(notify_calls.lock().unwrap().is_empty(), "孤児書き込みでは通知しない");
+        assert!(!data_dir
+            .join("artifacts")
+            .join("wt-mem3")
+            .join("does-not-exist.state")
+            .exists());
+    }
+
+    #[tokio::test]
+    async fn set_repo_memory_roundtrips() {
+        let data_dir = temp_data_dir("set-memory-repo");
+        let repo = test_repository("D:/git/set-memory-repo");
+        let repo_key = repo_artifacts_key(&repo.id);
+        write_test_artifact(&data_dir.join("repo-artifacts").join(&repo_key), "art-1", 100);
+
+        let repo_for_settings = repo.clone();
+        let settings: SettingsProvider = Arc::new(move || (vec![], vec![repo_for_settings.clone()]));
+        let notify_calls = Arc::new(std::sync::Mutex::new(vec![]));
+        let router = build_router(
+            key_provider(TEST_KEY),
+            "oretachi_viewer_test".to_string(),
+            stub_assets(),
+            None,
+            data_dir,
+            settings,
+            TEST_PORT,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            recording_state_notifier(notify_calls.clone()),
+        );
+        let cookie = cookie_for(TEST_KEY);
+
+        let resp = post_json(
+            &router,
+            &format!("/api/repositories/{}/artifacts/art-1/memory", repo_key),
+            Some(&cookie),
+            Some(&test_origin()),
+            Some(&test_host()),
+            json!({ "memory": { "foo": "bar" } }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            notify_calls.lock().unwrap().as_slice(),
+            [("repository".to_string(), repo.id.clone(), "art-1".to_string())]
+        );
+    }
+
+    // ─── #340: callTool ブリッジ ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn call_tool_worktree_forwards_to_tool_caller() {
+        let data_dir = temp_data_dir("call-tool-worktree");
+        let wt = test_worktree("wt-tool");
+        write_test_artifact(&data_dir.join("artifacts").join(&wt.id), "art-1", 100);
+
+        let calls = Arc::new(std::sync::Mutex::new(vec![]));
+        let router = worktree_router_with(
+            data_dir,
+            wt,
+            stub_tool_caller(calls.clone(), Ok("tool-result".to_string())),
+            noop_state_notifier(),
+        );
+        let cookie = cookie_for(TEST_KEY);
+
+        let resp = post_json(
+            &router,
+            "/api/worktrees/wt-tool/artifacts/art-1/call-tool",
+            Some(&cookie),
+            Some(&test_origin()),
+            Some(&test_host()),
+            json!({ "tool": "oretachi_get_worktree_status", "params": { "query": "x" } }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["result"], "tool-result");
+
+        let recorded = calls.lock().unwrap();
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, "wt-tool");
+        assert_eq!(recorded[0].1, "art-1");
+        assert_eq!(recorded[0].2, "oretachi_get_worktree_status");
+        assert_eq!(recorded[0].3, json!({ "query": "x" }));
+    }
+
+    #[tokio::test]
+    async fn call_tool_worktree_propagates_error() {
+        let data_dir = temp_data_dir("call-tool-error");
+        let wt = test_worktree("wt-tool2");
+        write_test_artifact(&data_dir.join("artifacts").join(&wt.id), "art-1", 100);
+        let router = worktree_router_with(
+            data_dir,
+            wt,
+            stub_tool_caller(
+                Arc::new(std::sync::Mutex::new(vec![])),
+                Err("ホワイトリストにないツールです".to_string()),
+            ),
+            noop_state_notifier(),
+        );
+        let cookie = cookie_for(TEST_KEY);
+
+        let resp = post_json(
+            &router,
+            "/api/worktrees/wt-tool2/artifacts/art-1/call-tool",
+            Some(&cookie),
+            Some(&test_origin()),
+            Some(&test_host()),
+            json!({ "tool": "not_whitelisted", "params": {} }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        let body = json_body(resp).await;
+        assert_eq!(body["error"], "ホワイトリストにないツールです");
+    }
+
+    #[tokio::test]
+    async fn call_tool_repository_is_always_rejected() {
+        let data_dir = temp_data_dir("call-tool-repo");
+        let repo = test_repository("D:/git/call-tool-repo");
+        let repo_key = repo_artifacts_key(&repo.id);
+        write_test_artifact(&data_dir.join("repo-artifacts").join(&repo_key), "art-1", 100);
+
+        let repo_for_settings = repo.clone();
+        let settings: SettingsProvider = Arc::new(move || (vec![], vec![repo_for_settings.clone()]));
+        let router = build_router(
+            key_provider(TEST_KEY),
+            "oretachi_viewer_test".to_string(),
+            stub_assets(),
+            None,
+            data_dir,
+            settings,
+            TEST_PORT,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            noop_state_notifier(),
+        );
+        let cookie = cookie_for(TEST_KEY);
+
+        let resp = post_json(
+            &router,
+            &format!("/api/repositories/{}/artifacts/art-1/call-tool", repo_key),
+            Some(&cookie),
+            Some(&test_origin()),
+            Some(&test_host()),
+            json!({ "tool": "anything", "params": {} }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    }
+
+    // ─── #340: CSRF ガード ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn csrf_guard_rejects_missing_origin() {
+        let data_dir = temp_data_dir("csrf-no-origin");
+        let wt = test_worktree("wt-csrf1");
+        write_test_artifact(&data_dir.join("artifacts").join(&wt.id), "art-1", 100);
+        let router = worktree_router_with(
+            data_dir,
+            wt,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            noop_state_notifier(),
+        );
+        let cookie = cookie_for(TEST_KEY);
+
+        let resp = post_json(
+            &router,
+            "/api/worktrees/wt-csrf1/artifacts/art-1/memory",
+            Some(&cookie),
+            None,
+            Some(&test_host()),
+            json!({ "memory": { "a": 1 } }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn csrf_guard_rejects_mismatched_origin_port() {
+        let data_dir = temp_data_dir("csrf-wrong-port");
+        let wt = test_worktree("wt-csrf2");
+        write_test_artifact(&data_dir.join("artifacts").join(&wt.id), "art-1", 100);
+        let router = worktree_router_with(
+            data_dir,
+            wt,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            noop_state_notifier(),
+        );
+        let cookie = cookie_for(TEST_KEY);
+
+        // vite dev サーバ等、別ポートの localhost からの Origin
+        let resp = post_json(
+            &router,
+            "/api/worktrees/wt-csrf2/artifacts/art-1/memory",
+            Some(&cookie),
+            Some("http://localhost:1420"),
+            Some(&test_host()),
+            json!({ "memory": { "a": 1 } }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn csrf_guard_rejects_mismatched_host() {
+        let data_dir = temp_data_dir("csrf-wrong-host");
+        let wt = test_worktree("wt-csrf3");
+        write_test_artifact(&data_dir.join("artifacts").join(&wt.id), "art-1", 100);
+        let router = worktree_router_with(
+            data_dir,
+            wt,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            noop_state_notifier(),
+        );
+        let cookie = cookie_for(TEST_KEY);
+
+        let resp = post_json(
+            &router,
+            "/api/worktrees/wt-csrf3/artifacts/art-1/memory",
+            Some(&cookie),
+            Some(&test_origin()),
+            Some(&format!("evil.example:{}", TEST_PORT)),
+            json!({ "memory": { "a": 1 } }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn csrf_guard_rejects_cross_site_sec_fetch_site() {
+        let data_dir = temp_data_dir("csrf-cross-site");
+        let wt = test_worktree("wt-csrf4");
+        write_test_artifact(&data_dir.join("artifacts").join(&wt.id), "art-1", 100);
+        let router = worktree_router_with(
+            data_dir,
+            wt,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            noop_state_notifier(),
+        );
+        let cookie = cookie_for(TEST_KEY);
+
+        let req = HttpRequest::builder()
+            .uri("/api/worktrees/wt-csrf4/artifacts/art-1/memory")
+            .method("POST")
+            .header(header::COOKIE, &cookie)
+            .header(header::ORIGIN, test_origin())
+            .header(header::HOST, test_host())
+            .header("sec-fetch-site", "cross-site")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(serde_json::to_vec(&json!({ "memory": { "a": 1 } })).unwrap()))
+            .unwrap();
+        let resp = router.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn csrf_guard_allows_matching_origin_and_host() {
+        let data_dir = temp_data_dir("csrf-ok");
+        let wt = test_worktree("wt-csrf5");
+        write_test_artifact(&data_dir.join("artifacts").join(&wt.id), "art-1", 100);
+        let router = worktree_router_with(
+            data_dir,
+            wt,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            noop_state_notifier(),
+        );
+        let cookie = cookie_for(TEST_KEY);
+
+        let resp = post_json(
+            &router,
+            "/api/worktrees/wt-csrf5/artifacts/art-1/memory",
+            Some(&cookie),
+            Some(&test_origin()),
+            Some(&test_host()),
+            json!({ "memory": { "a": 1 } }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn csrf_guard_is_bypassed_for_get_but_not_post_without_cookie() {
+        let router = router_for_test();
+        // Cookie が無ければ csrf_guard より外側の viewer_auth で 401 になる
+        // (POST でも Origin 検証の前に弾かれる)。
+        let resp = post_json(
+            &router,
+            "/api/worktrees/unknown/artifacts/art-1/memory",
+            None,
+            Some(&test_origin()),
+            Some(&test_host()),
+            json!({ "memory": {} }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
     }
 }

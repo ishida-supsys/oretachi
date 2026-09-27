@@ -1145,25 +1145,25 @@ pub(crate) async fn write_artifact_memory(
     Ok(assigned.load(std::sync::atomic::Ordering::Relaxed))
 }
 
-/// メモリーを書き換える。`memory` が null / 未指定ならキーごと削除する（＝リセット）。
+/// メモリーを書き換える唯一の実装。`memory` が null / 未指定ならキーごと削除する（＝リセット）。
 /// ピン止めと違い、メモリーはアーティファクトの中身に属する状態なので転送では引き継ぐ。
-#[tauri::command]
-async fn set_artifact_memory(
-    app_handle: tauri::AppHandle,
-    scope: String,
-    scope_id: String,
-    artifact_id: String,
+///
+/// Tauri コマンド（`set_artifact_memory`）と web_viewer（`POST .../memory`）の両方から呼ばれる。
+/// 戻り値は書き込み後の `memoryUpdatedAt`。孤児サイドカーを削除しただけ（本体が既に無い）の
+/// 場合は `None` を返す（この場合は状態変化を通知しない＝呼び出し元の判断に委ねる）。
+pub(crate) async fn set_artifact_memory_in(
+    dir: std::path::PathBuf,
+    artifact_id: &str,
     memory: Option<serde_json::Value>,
-) -> Result<(), String> {
-    validate_path_component(&artifact_id)?;
-    let dir = artifact_scope_dir(&app_handle, &scope, &scope_id)?;
+) -> Result<Option<u64>, String> {
+    validate_path_component(artifact_id)?;
     let memory = validate_artifact_memory(memory)?;
 
     // 本体が削除された後に debounce 済みの保存が着弾しても、孤児サイドカーを作らない。
     // 一覧走査（list_artifact_states）に本体の無い ID が現れると、以後どこからも
     // 消せないゴミになる。削除との間に TOCTOU は残るが、後始末が 1 回遅れるだけ。
     let orphan_dir = dir.clone();
-    let orphan_id = artifact_id.clone();
+    let orphan_id = artifact_id.to_string();
     let orphaned = tokio::task::spawn_blocking(move || {
         if orphan_dir.join(format!("{}.json", orphan_id)).exists() {
             return false;
@@ -1174,13 +1174,28 @@ async fn set_artifact_memory(
     .await
     .map_err(|e| format!("task join error: {}", e))?;
     if orphaned {
-        return Ok(());
+        return Ok(None);
     }
 
     // ビューア自身の書き込みは表示中ロックの対象外（ロックが止めるのは MCP 由来だけ）。
     // 楽観ロックも掛けない: フォーム入力は debounce 済みの最新スナップショットを
     // まるごと送る後勝ちで良く、直列化は iframe 側の flush が担っている。
-    write_artifact_memory(dir, &artifact_id, memory, None)
+    write_artifact_memory(dir, artifact_id, memory, None)
+        .await
+        .map(Some)
+}
+
+/// メモリーを書き換える。`memory` が null / 未指定ならキーごと削除する（＝リセット）。
+#[tauri::command]
+async fn set_artifact_memory(
+    app_handle: tauri::AppHandle,
+    scope: String,
+    scope_id: String,
+    artifact_id: String,
+    memory: Option<serde_json::Value>,
+) -> Result<(), String> {
+    let dir = artifact_scope_dir(&app_handle, &scope, &scope_id)?;
+    set_artifact_memory_in(dir, &artifact_id, memory)
         .await
         .map(|_| ())
 }
