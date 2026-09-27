@@ -254,6 +254,25 @@ describe("httpArtifactDataSource", () => {
       expect(handler).toHaveBeenCalledWith({ artifactId: "a", command: "create", autoOpen: true });
     });
 
+    it("onArtifactChanged passes autoOpen: false through (hook-driven URL auto-registration)", async () => {
+      const ctx = await createHttpArtifactViewerContext("worktree", "issue-326", {
+        onUnauthorized: vi.fn(),
+        navigateTo: vi.fn(),
+      });
+      const handler = vi.fn();
+      await ctx!.dataSource.onArtifactChanged(handler);
+
+      emitSseEvent({
+        type: "artifact-changed",
+        scope: "worktree",
+        scopeId: "issue-326",
+        artifactId: "a",
+        command: "create",
+        autoOpen: false,
+      });
+      expect(handler).toHaveBeenCalledWith({ artifactId: "a", command: "create", autoOpen: false });
+    });
+
     it("onArtifactChanged resync reloads the last read() artifact, or is a no-op if nothing was read", async () => {
       const ctx = await createHttpArtifactViewerContext("worktree", "issue-326", {
         onUnauthorized: vi.fn(),

@@ -7995,6 +7995,8 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
                 let worktree_id = payload["worktreeId"].as_str().unwrap_or("").to_string();
                 let artifact_id = payload["artifactId"].as_str().unwrap_or("").to_string();
                 let command = payload["command"].as_str().unwrap_or("").to_string();
+                // 欠落時は true 扱い(デスクトップ版 tauriArtifactDataSource.ts の `!== false` と同じ既定)。
+                let auto_open = payload["autoOpen"].as_bool().unwrap_or(true);
                 if worktree_id.is_empty() || artifact_id.is_empty() {
                     return;
                 }
@@ -8003,6 +8005,7 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
                         worktree_id,
                         artifact_id,
                         command,
+                        auto_open,
                     ),
                 );
             }

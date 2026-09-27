@@ -229,7 +229,13 @@ export async function createHttpArtifactViewerContext(
         }
         if (event.type !== "artifact-changed" || !event.artifactId) return;
         if (!matchesScope(event)) return;
-        handler({ artifactId: event.artifactId, command: event.command ?? "update", autoOpen: true });
+        // フックによる URL 自動登録等の副産物 (autoOpen: false) は、デスクトップ版
+        // (tauriArtifactDataSource.ts) と同じくトーストを出させない。欠落時は true 扱い。
+        handler({
+          artifactId: event.artifactId,
+          command: event.command ?? "update",
+          autoOpen: event.autoOpen ?? true,
+        });
       });
     },
 

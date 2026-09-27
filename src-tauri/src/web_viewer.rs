@@ -73,10 +73,21 @@ pub struct ViewerEvent {
     pub artifact_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub command: Option<String>,
+    /// `artifact-changed` のみ意味を持つ。フックによる URL 自動登録等の副産物としての
+    /// 追加は `false` になり、ビューア側は「開く」導線を出さずに黙って一覧へ取り込む
+    /// (`ArtifactViewerApp.vue` の `refreshSelected` 参照)。欠落時は `true` 相当として扱う
+    /// (デスクトップ版 `tauriArtifactDataSource.ts` の `!== false` と同じ既定)。
+    #[serde(rename = "autoOpen", skip_serializing_if = "Option::is_none")]
+    pub auto_open: Option<bool>,
 }
 
 impl ViewerEvent {
-    pub fn artifact_changed_worktree(worktree_id: String, artifact_id: String, command: String) -> Self {
+    pub fn artifact_changed_worktree(
+        worktree_id: String,
+        artifact_id: String,
+        command: String,
+        auto_open: bool,
+    ) -> Self {
         Self {
             kind: "artifact-changed",
             scope: "worktree",
@@ -84,6 +95,7 @@ impl ViewerEvent {
             repo_key: None,
             artifact_id,
             command: Some(command),
+            auto_open: Some(auto_open),
         }
     }
 
@@ -100,6 +112,9 @@ impl ViewerEvent {
             repo_key: Some(repo_key),
             artifact_id,
             command: Some(command),
+            // repo-artifact-changed は Rust 側でそもそも autoOpen を積んでいない
+            // (常に "開く" 前提の transfer/import/delete のみが emit 元)。
+            auto_open: None,
         }
     }
 
@@ -116,6 +131,7 @@ impl ViewerEvent {
             repo_key,
             artifact_id,
             command: None,
+            auto_open: None,
         }
     }
 }
@@ -1371,6 +1387,7 @@ mod tests {
                 "wt-1".to_string(),
                 "art-1".to_string(),
                 "create".to_string(),
+                true,
             ))
             .unwrap();
 

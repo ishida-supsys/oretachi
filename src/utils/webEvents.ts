@@ -14,6 +14,8 @@ export interface ViewerSseEvent {
   repoKey?: string;
   artifactId?: string;
   command?: string;
+  /** `artifact-changed` (worktree scope) のみ意味を持つ。欠落時は `true` 相当として扱う */
+  autoOpen?: boolean;
 }
 
 type Handler = (event: ViewerSseEvent) => void;
@@ -44,8 +46,14 @@ function ensureSource(): EventSource {
     }
   };
   es.onerror = () => {
-    // EventSource は自動再接続するので何もしない。再接続後は onopen → 次の
-    // onmessage の手前で resync が飛ぶ。
+    // 接続確立時点で 401 等の非 200 を返された場合、EventSource 仕様上は
+    // "fail the connection" して readyState=CLOSED のまま自動再接続しない
+    // (自動再接続が働くのは、一度確立した接続が後から切れた場合だけ)。
+    // Cookie 失効後にそのまま固まらないよう、次回の subscribeViewerEvents 呼び出しで
+    // 新しい EventSource を張り直せるようにしておく。
+    if (es.readyState === EventSource.CLOSED && source === es) {
+      source = null;
+    }
   };
   source = es;
   return es;
