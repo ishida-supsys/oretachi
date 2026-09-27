@@ -1,10 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, nextTick, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, inject, nextTick, onMounted, onBeforeUnmount } from "vue";
 import { useI18n } from "vue-i18n";
-import { openUrl } from "@tauri-apps/plugin-opener";
-import { ask } from "@tauri-apps/plugin-dialog";
 import ArtifactLinkUrlText from "./ArtifactLinkUrlText.vue";
 import { resolveExternalLink } from "../../utils/externalLink";
+import { ARTIFACT_VIEWER_HOST_KEY } from "../../utils/artifactDataSource";
 import type { ArtifactLinkRect } from "../../utils/artifactFrameLink";
 
 /**
@@ -39,6 +38,7 @@ const { t } = useI18n();
 // ローカルスコープなので、そのまま引くと（フォールバックは効くが）dev で毎回
 // "[intlify] Not found key" が出る。グローバルスコープの t を別に取っておく
 const { t: gt } = useI18n({ useScope: "global" });
+const host = inject(ARTIFACT_VIEWER_HOST_KEY);
 
 /** リンク → ポップアップへマウスを移す間に閉じないための猶予。ArtifactUrlHoverMenu と同値 */
 const GRACE_MS = 180;
@@ -220,7 +220,7 @@ const openTarget = computed(() => resolveExternalLink(href.value));
 
 async function open() {
   const url = openTarget.value;
-  if (!url) return;
+  if (!url || !host) return;
   // 全文が見えていない / 自己申告の URL は、実 URL を見せて同意を取ってから外に出す
   const needsConfirm = selfDeclared.value || truncated.value;
   // 開いたらポップアップの役目は終わり。残すと他ウィンドウへフォーカスが移った先で
@@ -228,13 +228,13 @@ async function open() {
   hideNow();
   try {
     if (needsConfirm) {
-      const ok = await ask(gt("externalLink.confirm", { url }), {
+      const ok = await host.confirm(gt("externalLink.confirm", { url }), {
         title: gt("externalLink.title"),
         kind: "warning",
       });
       if (!ok) return;
     }
-    await openUrl(url);
+    await host.openExternalUrl(url);
   } catch (e) {
     console.error("openUrl failed", e);
   }

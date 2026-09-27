@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import { computed, ref } from "vue";
+import { computed, inject, ref } from "vue";
 import { useI18n } from "vue-i18n";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { ARTIFACT_VIEWER_HOST_KEY } from "../../utils/artifactDataSource";
 
 const props = defineProps<{
   content: string;
 }>();
 
 const { t } = useI18n();
+const host = inject(ARTIFACT_VIEWER_HOST_KEY);
 
 /** content は URL 1行。前後の空白と余分な行は落とす */
 const url = computed(() => props.content.trim().split(/\r?\n/)[0]?.trim() ?? "");
@@ -17,9 +18,9 @@ const copied = ref(false);
 let copyTimer: ReturnType<typeof setTimeout> | null = null;
 
 async function open() {
-  if (!isOpenable.value) return;
+  if (!isOpenable.value || !host) return;
   try {
-    await openUrl(url.value);
+    await host.openExternalUrl(url.value);
   } catch (e) {
     console.error("openUrl failed", e);
   }
