@@ -6,8 +6,25 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.32.0] - 2026-09-27
+
 ### Added
+- アーティファクトWeb閲覧に書き込みAPI(memory/callTool)とCSRF対策を追加した (#340)
+- アーティファクトWeb閲覧の自動更新(SSE)とブラウザで開く導線を追加した (#341)
 - MCP に `oretachi_send_keys` ツールを追加。名前付きキー (Up/Down/Left/Right/Tab/ShiftTab/Home/End/PageUp/PageDown/Backspace/Enter/Esc) を送れる。Enter/Esc は `allow_confirm: true` を渡さない限り送れない (#345)
+- アーティファクトWeb閲覧のWeb閲覧ページを追加した (#339)
+- アーティファクトWeb閲覧の読み取りJSON APIを追加した (#337)
+- Web閲覧用ルータの土台(Cookie認証・静的アセット配信)を追加した (#336)
+- 再起動後のターミナル復元待ちバッジをサムネイルに追加した (#328)
+
+### Fixed
+- `add_task` の prompt をデータとして扱わせ、プランナーAIが埋め込まれた指示を実行してしまう問題に対応した (#330)
+- アップデート適用前にセッション状態を保存するようにした (#327)
+- 自動承認で notify到着直後にプロンプト未検出のまま通知される問題を出現待ちで救済した (#326)
+- リポジトリ通知バッジをリポジトリチップへ出すようにした (#325)
+
+### Changed
+- ArtifactViewerApp の Tauri 依存をデータアクセス層に分離した (#338)
 
 ## [0.31.7] - 2026-09-25
 
@@ -828,7 +845,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.31.7...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.32.0...HEAD
+[0.32.0]: https://github.com/ishida-supsys/oretachi/compare/0.31.7...0.32.0
 [0.31.7]: https://github.com/ishida-supsys/oretachi/compare/0.31.6...0.31.7
 [0.31.6]: https://github.com/ishida-supsys/oretachi/compare/0.31.5...0.31.6
 [0.31.5]: https://github.com/ishida-supsys/oretachi/compare/0.31.4...0.31.5
