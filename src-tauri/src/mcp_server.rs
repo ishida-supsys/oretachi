@@ -7862,7 +7862,7 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
         );
 
         let api_key_state = ApiKeyState(api_key.clone());
-        let router = axum::Router::new()
+        let bearer_router = axum::Router::new()
             .nest_service("/mcp", service)
             .route("/notify", post(notify_handler))
             .route("/set-description", post(set_description_handler))
@@ -7926,6 +7926,10 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
 
         write_server_info_file(&app_handle, port, &api_key);
         log::info!("MCP server listening on http://{}:{}/mcp", bind_addr, port);
+
+        // 閲覧用ルータ(Cookie 認証)は Bearer layer の**外**で merge する。
+        // remote_access で 0.0.0.0 bind の場合も同じ Cookie 認証で守られる。
+        let router = bearer_router.merge(crate::web_viewer::router(app_handle.clone(), port));
 
         // ステータス: 起動中（世代が一致する場合のみ更新）
         if generation.load(Ordering::SeqCst) == my_generation {
