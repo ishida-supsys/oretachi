@@ -9,6 +9,20 @@
 // 認証する。`regenerate_mcp_api_key` で key が変われば旧 Cookie は自動的に無効になる。
 //
 // #337 (JSON API) 以降はこのルータへ追加する形で実装する。
+//
+// セルフレビューで挙がった申し送り事項(#336 の範囲では対応不要、後続 sub-issue で要考慮):
+// - このルータは今のところ GET のみ・副作用なしなので CSRF は問題にならないが、
+//   Cookie は `SameSite=Strict` のみで守られている。RFC 6265 の Cookie 分離も
+//   schemeful-same-site 判定もポート単位ではないため、同一ホストの別ポートで動く
+//   別インスタンス/別ローカルサーバーから見ると同一サイト scoped になりうる。
+//   #337 以降で書き込み系(store・callTool ブリッジ)を足すときは、
+//   SameSite=Strict だけに頼らず Origin/Sec-Fetch-Site 検証か CSRF トークンを併用すること。
+// - `remote_access`(0.0.0.0 bind)時は TLS 終端が無いため `?token=` の URL も
+//   発行後の Cookie も LAN 上を平文で流れる(Bearer 経路と同じ既知のリスクだが、
+//   ブラウザへ直接貼る導線が増える分、履歴・オートコンプリートに残る経路が広がる)。
+//   #341 の「ブラウザで開く」導線で remote_access 時の注意喚起を検討すること。
+//   `Secure` 属性はこのアプリが HTTPS 非対応なため付けられない(付けると
+//   localhost の通常利用まで Cookie が送られなくなる)。
 
 use std::sync::Arc;
 
