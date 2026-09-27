@@ -870,7 +870,7 @@ pub struct ArtifactParams {
     pub content_type: Option<String>,
     #[schemars(description = "アーティファクトのタイトル (create時必須)")]
     pub title: Option<String>,
-    #[schemars(description = "アーティファクトの中身 (create/rewrite時は content か file_path のどちらかが必須)。markdown / html / react では `artifact:` リンクで他のアーティファクトへ遷移できる: 同一ワークツリー内は `artifact:<アーティファクトID>`、他ワークツリー宛は `artifact://worktree/<worktreeId>/<アーティファクトID>`、リポジトリ保管庫宛は `artifact://repository/<encodeURIComponent(リポジトリの絶対パス)>/<アーティファクトID>`。react ではメモリー（アーティファクトごとに永続化される JSON ストア）が使える: `import { useMemory } from 'oretachi'` して `const [value, setValue] = useMemory('key', 初期値)`。書き込みはデバウンスされ、ウィンドウを閉じて開き直しても・リポジトリへ転送しても復元される（合計 1MB まで。他に getMemory / setMemory / clearMemory / subscribeMemory がある）。さらに `import { callTool } from 'oretachi'` で oretachi の MCP ツールを呼べる: `await callTool('oretachi_write_terminal', { session_id: 12, text: 'echo hi' })`。呼べるのは oretachi_write_terminal / oretachi_add_task / notify_worktree / oretachi_poll_inbox / oretachi_ack_message / oretachi_read_terminal / oretachi_list_worktree_notifications / oretachi_inspect_prompt / oretachi_answer_prompt / oretachi_clear_worktree_notification / oretachi_show_worktree / oretachi_show_artifacts だけで、terminal_id / project_dir / notify_worktree の宛先 / add_task の追加先ワークグループはアーティファクトの置き場所のワークツリーへ強制される(session_id は同じワークツリーの稼働中端末、または**アーティファクトの置き場所ワークツリーが oretachi_subscribe_worktree で購読しているワークツリー**の稼働中端末に限る)。戻り値はツールの結果を JSON.parse したもの(パースできなければ文字列)。**制約**: アーティファクトからは oretachi_list_terminals が呼べないため、read/write_terminal に渡す session_id は生成時にコードへ埋め込むこと(アプリ再起動やタブ再作成で無効になる)。oretachi_poll_inbox / oretachi_ack_message / notify_worktree(kind: \"worktree.message\") はそのワークツリーで AI エージェント端末がちょうど1つ走行中でないとエラーになるので、AI セッション終了後も動かしたいボタンには使わないこと。他ワークツリーの端末へ read/write_terminal したい場合は、アーティファクトの置き場所ワークツリー側から宛先を購読しておくこと(逆向き＝宛先側が置き場所を購読しているだけでは通らない)。**宛先がダイアログ(ツール許可 / プラン承認 / AskUserQuestion)で止まっている場合に write_terminal で自由テキストを送ってはいけない**: テキストはダイアログに吸われ、末尾の CR が意図しない選択肢(既定は `1. Yes`)の確定として解釈される。先に oretachi_inspect_prompt(session_id) で画面の形状と実在する選択肢を取り、oretachi_answer_prompt(session_id, expect_fingerprint, kind, ...) で答えること。**oretachi_show_worktree** は宛先のタブを oretachi の前面に出すだけのツールで(端末の内容は読み書きしない)、宛先は worktree_id でのみ指定する(worktree_name / project_dir は落とされる)。session_id を添えるとそのタブまで当たる。許可範囲は read/write_terminal と同じで、自ワークツリーか購読先に限る。**oretachi_show_artifacts** は宛先のアーティファクトウィンドウを開くツールで、宛先の指定方法(worktree_id のみ)も許可範囲も oretachi_show_worktree と同じ。artifact_id を添えるとそのアーティファクトを選択した状態で開く")]
+    #[schemars(description = "アーティファクトの中身 (create/rewrite時は content か file_path のどちらかが必須)。markdown / html / react では `artifact:` リンクで他のアーティファクトへ遷移できる: 同一ワークツリー内は `artifact:<アーティファクトID>`、他ワークツリー宛は `artifact://worktree/<worktreeId>/<アーティファクトID>`、リポジトリ保管庫宛は `artifact://repository/<encodeURIComponent(リポジトリの絶対パス)>/<アーティファクトID>`。react ではメモリー（アーティファクトごとに永続化される JSON ストア）が使える: `import { useMemory } from 'oretachi'` して `const [value, setValue] = useMemory('key', 初期値)`。書き込みはデバウンスされ、ウィンドウを閉じて開き直しても・リポジトリへ転送しても復元される（合計 1MB まで。他に getMemory / setMemory / clearMemory / subscribeMemory がある）。さらに `import { callTool } from 'oretachi'` で oretachi の MCP ツールを呼べる: `await callTool('oretachi_write_terminal', { session_id: 12, text: 'echo hi' })`。呼べるのは oretachi_write_terminal / oretachi_send_keys / oretachi_add_task / notify_worktree / oretachi_poll_inbox / oretachi_ack_message / oretachi_read_terminal / oretachi_list_worktree_notifications / oretachi_inspect_prompt / oretachi_answer_prompt / oretachi_clear_worktree_notification / oretachi_show_worktree / oretachi_show_artifacts だけで、terminal_id / project_dir / notify_worktree の宛先 / add_task の追加先ワークグループはアーティファクトの置き場所のワークツリーへ強制される(session_id は同じワークツリーの稼働中端末、または**アーティファクトの置き場所ワークツリーが oretachi_subscribe_worktree で購読しているワークツリー**の稼働中端末に限る)。戻り値はツールの結果を JSON.parse したもの(パースできなければ文字列)。**制約**: アーティファクトからは oretachi_list_terminals が呼べないため、read/write_terminal に渡す session_id は生成時にコードへ埋め込むこと(アプリ再起動やタブ再作成で無効になる)。oretachi_poll_inbox / oretachi_ack_message / notify_worktree(kind: \"worktree.message\") はそのワークツリーで AI エージェント端末がちょうど1つ走行中でないとエラーになるので、AI セッション終了後も動かしたいボタンには使わないこと。他ワークツリーの端末へ read/write_terminal したい場合は、アーティファクトの置き場所ワークツリー側から宛先を購読しておくこと(逆向き＝宛先側が置き場所を購読しているだけでは通らない)。**宛先がダイアログ(ツール許可 / プラン承認 / AskUserQuestion)で止まっている場合に write_terminal で自由テキストを送ってはいけない**: テキストはダイアログに吸われ、末尾の CR が意図しない選択肢(既定は `1. Yes`)の確定として解釈される。先に oretachi_inspect_prompt(session_id) で画面の形状と実在する選択肢を取り、oretachi_answer_prompt(session_id, expect_fingerprint, kind, ...) で答えること。**oretachi_show_worktree** は宛先のタブを oretachi の前面に出すだけのツールで(端末の内容は読み書きしない)、宛先は worktree_id でのみ指定する(worktree_name / project_dir は落とされる)。session_id を添えるとそのタブまで当たる。許可範囲は read/write_terminal と同じで、自ワークツリーか購読先に限る。**oretachi_show_artifacts** は宛先のアーティファクトウィンドウを開くツールで、宛先の指定方法(worktree_id のみ)も許可範囲も oretachi_show_worktree と同じ。artifact_id を添えるとそのアーティファクトを選択した状態で開く")]
     pub content: Option<String>,
     #[schemars(description = "create/rewrite時: content の代わりに、このパスのファイルを読んでそのまま中身として登録する。**テンプレートをそのまま登録する場合はこちらを使う** (スキル同梱の templates/*.jsx など)。ファイルを Read してから同じテキストを content に書き戻す往復が消えるので、生成が大幅に速く・安くなる。content とは排他。相対パスはワークツリー追加先ディレクトリ基準。読めるのは**ワークツリー追加先ディレクトリ配下**と **oretachi プラグインディレクトリ (claude-plugins) 配下**のファイルだけで、それ以外の絶対パスはエラーになる (この範囲は設定由来の固定値で、対象ワークツリーの指定では変わらない)。UTF-8 テキスト限定 (BOM は自動で除去)、1MB まで")]
     pub file_path: Option<String>,
@@ -1499,6 +1499,16 @@ pub struct WriteTerminalParams {
     pub text: String,
     #[schemars(description = "true なら改行を \\r 正規化＋末尾 \\r 保証してから送信（デフォルト true）。末尾 CR は本文と別 write で送るので Claude Code 宛でも確実にターンが始まる。vitest の単一キー入力など改行不要時は false")]
     pub submit: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SendKeysParams {
+    #[schemars(description = "PTY セッションID（oretachi_list_terminals で取得）")]
+    pub session_id: u32,
+    #[schemars(description = "送る名前付きキーの配列（先頭から順に 1 キー 1 write で送る）。使えるのは Up / Down / Left / Right / Tab / ShiftTab / Home / End / PageUp / PageDown / Backspace / Enter / Esc。表に無い名前が 1 つでもあれば invalid_params になり何も送らない")]
+    pub keys: Vec<String>,
+    #[schemars(description = "true のときだけ keys に Enter / Esc を含められる（既定 false）。確定・キャンセルは事故で押しやすいので既定では拒否し、確認のための移動操作（矢印・Tab 等）とはっきり区別する。ダイアログの確定は fingerprint 照合付きの oretachi_answer_prompt を使うこと")]
+    pub allow_confirm: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -4332,6 +4342,117 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text("written")]))
     }
 
+    #[tool(description = "指定 PTY セッションへ名前付きキーを送る（issue #345）。矢印キーなどの制御文字は MCP のツール引数へ ESC（0x1b）を直接載せられないため、oretachi_write_terminal では届かない。使える名前: Up / Down / Left / Right（矢印） / Tab / ShiftTab / Home / End / PageUp / PageDown / Backspace / Enter / Esc。**表に無い名前が 1 つでもあれば invalid_params になり何も送らない。** Enter / Esc はダイアログを確定・キャンセルしうるため既定では拒否され、allow_confirm: true を渡したときだけ送れる（確認のための移動操作と確定を呼び出し側の宣言で分けるため）。ダイアログの確定は fingerprint 照合付きの oretachi_answer_prompt を使うこと。主な用途は、購読元セッションが購読先の AskUserQuestion 等のダイアログを**確定せずに**タブ切替・カーソル移動で中身を確かめること。**1 キー 1 write** で、キー間に猶予を挟む（Claude Code は同じ読み取りチャンクに来た CR を送信として扱わない）。他ワークツリー宛の許可条件は oretachi_write_terminal と同じ（購読が必要）。アーティファクトの callTool からも呼べる", annotations(destructive_hint = true))]
+    async fn oretachi_send_keys(
+        &self,
+        Parameters(SendKeysParams { session_id, keys, allow_confirm }): Parameters<SendKeysParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // 上限チェック自体は plan_named_keys にもある（そちらが唯一の防波堤で、これは
+        // 早期リターンのための重複）。名前の妥当性より先にここで弾いておくことで、
+        // 「上限超過」と「未定義のキー名」が同時に起きたときに前者を優先して案内する
+        if keys.len() > crate::prompt_parser::MAX_SEND_KEYS {
+            return Err(McpError::invalid_params(
+                format!(
+                    "keys が多すぎます（{} 件、上限 {} 件）。何も送っていません。長い操作は複数回に分けてください",
+                    keys.len(),
+                    crate::prompt_parser::MAX_SEND_KEYS
+                ),
+                None,
+            ));
+        }
+
+        {
+            let pty = self.app_handle.state::<PtyManager>();
+            if !pty
+                .list_sessions()
+                .iter()
+                .any(|s| s.session_id == session_id && s.exit_code.is_none())
+            {
+                return Err(McpError::invalid_params(
+                    format!("session_id {} は稼働中のターミナルとして見つかりません", session_id),
+                    None,
+                ));
+            }
+        }
+
+        // 未定義のキー名 / allow_confirm なしの確定キーは、ここで弾いて **何も write しない**。
+        // named_keystroke の有無（存在するかどうか）は app_cursor に関わらず同じなので、
+        // 先に固定値で検査だけ済ませる（app_cursor が要る「バイト列の組み立て」自体は
+        // ロックを取ったあとにやり直す）
+        crate::prompt_parser::plan_named_keys(&keys, allow_confirm.unwrap_or(false), false)
+            .map_err(|e| McpError::invalid_params(e, None))?;
+
+        // **照合とキー送信の間に別の write を挟ませない。** oretachi_answer_prompt /
+        // oretachi_write_terminal と同じロックを取る（#215）
+        let lock = session_write_lock(session_id);
+        let _guard = lock.lock().await;
+
+        // ロックを取ったあとの最新の画面から application cursor mode を読み直して
+        // バイト列を組み立て直す。ロック前に読むと、その後の別 write でモードが
+        // 変わりうる。名前の妥当性は上で確認済みなので、ここは失敗しない
+        let app_cursor = self.application_cursor_mode(session_id);
+        let keys_final = crate::prompt_parser::plan_named_keys(&keys, allow_confirm.unwrap_or(false), app_cursor)
+            .expect("上で妥当性を確認済み");
+
+        let preview = crate::prompt_parser::keys_preview(&keys_final);
+        log::info!(
+            "[mcp] oretachi_send_keys: session_id={} keys={} allow_confirm={} app_cursor={}",
+            session_id,
+            preview.join(" → "),
+            allow_confirm.unwrap_or(false),
+            app_cursor
+        );
+
+        let (status, sent, reason) = match self.send_keystrokes(session_id, &keys_final).await {
+            KeySendResult::Sent { keys: labels, .. } => ("sent", labels, None),
+            KeySendResult::WriteFailed { sent, label, error } => {
+                let status = if sent.is_empty() { "failed" } else { "pastedOnly" };
+                log::warn!(
+                    "[mcp] oretachi_send_keys: session_id={} status={} sent={:?} error={}",
+                    session_id, status, sent, error
+                );
+                (
+                    status,
+                    sent,
+                    Some(format!(
+                        "キー '{}' の送信に失敗しました: {}{}",
+                        label,
+                        error,
+                        if status == "pastedOnly" {
+                            "。**同じキー列を再送しないでください**（既に届いたキーで画面が動いています）"
+                        } else {
+                            ""
+                        }
+                    )),
+                )
+            }
+            // 名前付きキーは `require` を持たないため RequirementUnmet は起きない
+            KeySendResult::RequirementUnmet { sent, .. } => ("failed", sent, None),
+        };
+
+        let json = serde_json::json!({
+            "status": status,
+            "keysSent": sent,
+            "reason": reason,
+        });
+        Ok(CallToolResult::success(vec![Content::text(json.to_string())]))
+    }
+
+    /// `oretachi_send_keys` 用に、宛先が現在アプリケーションカーソルモード（DECCKM）かを
+    /// 調べる。読み取りに失敗した場合は安全側（false = CSI 形式）に倒す。
+    fn application_cursor_mode(&self, session_id: u32) -> bool {
+        let pty = self.app_handle.state::<PtyManager>();
+        let Ok((rows, cols)) = pty.screen_size(session_id) else {
+            return false;
+        };
+        let Ok(result) =
+            pty.read_output_history(session_id, Some(crate::prompt_parser::REPLAY_BYTES), None)
+        else {
+            return false;
+        };
+        crate::prompt_parser::is_application_cursor_mode(&result.data, rows, cols)
+    }
+
     /// 指定セッションの画面を再生して解析する。`oretachi_inspect_prompt` / `oretachi_answer_prompt`
     /// が共有する読み取り経路。
     ///
@@ -5885,8 +6006,17 @@ struct SubscriberIdentity {
 ///   いない（`ArtifactViewerApp` の `onNavigate` は購読を見ずにビューアを開く）ので、
 ///   「任意ワークツリーのビューアを開かせない」という保証はここだけでは成立しない。
 ///   どちらの経路でも中身の読み出しはアーティファクト側の JS ではなく人が見る画面に留まる。
+/// - **`oretachi_send_keys` は「矢印などの制御キーを送る」ツール（#345）。** `oretachi_write_terminal`
+///   で生の ESC を送れば同じ矢印移動ができるので新しい権限ではなく、JS から生キー列を組み立てて
+///   流すより安全（キー名しか渡せず、勝手なエスケープシーケンスは注入できない）。**ただし
+///   `allow_confirm: true` を付ければ `oretachi_answer_prompt` と同様に他ワークツリーの
+///   ダイアログを確定・キャンセルしうる**（＝任意コード実行と等価になりうる）ので、
+///   フロントの `ORETACHI_AUTO_APPROVE_TOOLS` には入れていない。許可範囲・session_id の
+///   スコープ検査は `oretachi_write_terminal` と同じ（`oretachi_read_terminal` 等と一緒に
+///   session_id 系の cross-worktree 検査へ加えてある）。
 pub(crate) const ARTIFACT_CALLABLE_TOOLS: &[&str] = &[
     "oretachi_write_terminal",
+    "oretachi_send_keys",
     "oretachi_add_task",
     "notify_worktree",
     "oretachi_poll_inbox",
@@ -6228,6 +6358,7 @@ pub(crate) async fn call_tool_for_artifact(
         tool,
         "oretachi_read_terminal"
             | "oretachi_write_terminal"
+            | "oretachi_send_keys"
             | "oretachi_inspect_prompt"
             | "oretachi_answer_prompt"
     ) {
@@ -6335,6 +6466,7 @@ pub(crate) async fn call_tool_for_artifact(
         "oretachi_write_terminal" => {
             service.oretachi_write_terminal(Parameters(parse(tool, args)?)).await
         }
+        "oretachi_send_keys" => service.oretachi_send_keys(Parameters(parse(tool, args)?)).await,
         "oretachi_read_terminal" => service.oretachi_read_terminal(Parameters(parse(tool, args)?)),
         "oretachi_inspect_prompt" => service.oretachi_inspect_prompt(Parameters(parse(tool, args)?)),
         "oretachi_answer_prompt" => {
@@ -8818,6 +8950,7 @@ mod tests {
             "oretachi_spawn_terminal",
             "oretachi_kill_terminal",
             "oretachi_write_terminal",
+            "oretachi_send_keys",
             "oretachi_answer_prompt",
             "oretachi_import_worktree",
         ];

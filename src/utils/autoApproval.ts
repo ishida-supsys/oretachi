@@ -181,6 +181,10 @@ export function isSameApprovalScreen(before: string, after: string): boolean {
  *   (= 任意コード実行)。無条件承認すると安全ゲートが無効化される
  * - oretachi_answer_prompt … 他ワークツリーの**許可ダイアログを承認しうる** (#215)。
  *   矢印 + CR で `1. Yes` を確定できるので write_terminal と同等に任意コード実行と等価
+ * - oretachi_send_keys … `allow_confirm: true` を付ければ Enter / Esc を送れ、
+ *   answer_prompt と同様に他ワークツリーのダイアログを確定・キャンセルしうる (#345)。
+ *   既定 (allow_confirm 省略) では確定系キーを送らないが、無条件承認だと呼び出し時の
+ *   引数までは見ないため区別できない
  * - oretachi_add_task … 任意 prompt からワークツリー作成とエージェント実行を発火する
  * - oretachi_import_worktree … settings を書き換えてワークツリーを登録する
  *

@@ -6,6 +6,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- MCP に `oretachi_send_keys` ツールを追加。名前付きキー (Up/Down/Left/Right/Tab/ShiftTab/Home/End/PageUp/PageDown/Backspace/Enter/Esc) を送れる。Enter/Esc は `allow_confirm: true` を渡さない限り送れない (#345)
+
 ## [0.31.7] - 2026-09-25
 
 ### Fixed
