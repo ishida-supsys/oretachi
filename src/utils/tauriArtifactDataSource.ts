@@ -6,8 +6,6 @@ import { writeImage as clipboardWriteImage } from "@tauri-apps/plugin-clipboard-
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { useArtifactWindow, ARTIFACT_NAVIGATE_EVENT, type ArtifactNavigateEvent } from "../composables/useArtifactWindow";
 import type {
-  ArtifactMeta,
-  ArtifactData,
   ArtifactState,
   ArtifactChangedEvent,
   ArtifactStateChangedEvent,
@@ -21,15 +19,7 @@ import type {
   ArtifactScopeRef,
   ArtifactViewerHost,
 } from "./artifactDataSource";
-
-// JSONの "type" フィールドを content_type にマッピングする
-// (Rust側は serde(rename="type") でJSONに保存するため)
-function mapMeta(raw: any): ArtifactMeta {
-  return { ...raw, content_type: raw.type ?? raw.content_type };
-}
-function mapArtifact(raw: any): ArtifactData {
-  return { ...raw, content_type: raw.type ?? raw.content_type };
-}
+import { mapArtifactData as mapArtifact, mapArtifactMeta as mapMeta } from "./artifactPayload";
 
 const TAURI_CAPABILITIES: ArtifactCapabilities = {
   pin: true,
