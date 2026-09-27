@@ -32,6 +32,17 @@ export default defineConfig(async ({ mode }) => {
       VueI18nPlugin({ defaultSFCLang: 'json' }),
     ],
 
+    // アーティファクト Web 閲覧 (#339) は index.html とは別エントリの SPA。
+    // Rust 側 (web_viewer.rs) は SPA シェルとして `web.html` を返す。
+    build: {
+      rollupOptions: {
+        input: {
+          main: "index.html",
+          web: "web.html",
+        },
+      },
+    },
+
     // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`
     //
     // 1. prevent Vite from obscuring rust errors

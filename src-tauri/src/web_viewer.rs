@@ -32,7 +32,7 @@ use axum::{
     extract::{Path as AxumPath, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     middleware::{self, Next},
-    response::{IntoResponse, Json, Redirect, Response},
+    response::{Html, IntoResponse, Json, Redirect, Response},
     routing::get,
     Router,
 };
@@ -100,6 +100,21 @@ fn find_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     None
 }
 
+/// 未認証時の 401。`/api/*` は既存どおり空ボディのまま(フロントは status だけを見る)、
+/// それ以外(SPA シェル・アセット)は認証下にあるアセットを使わずに描ける
+/// インライン HTML の 401 画面を返す(ワイヤーフレームの「未認証」画面に相当)。
+fn unauthorized_response(uri: &Uri) -> Response {
+    if uri.path().starts_with("/api/") {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    const BODY: &str = include_str!("web_viewer_unauthorized.html");
+    let mut response = (StatusCode::UNAUTHORIZED, Html(BODY)).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
 /// 閲覧ルータ全体にかける認証 middleware。
 async fn viewer_auth(
     State(state): State<ViewerState>,
@@ -107,11 +122,11 @@ async fn viewer_auth(
     uri: Uri,
     request: Request,
     next: Next,
-) -> Result<Response, StatusCode> {
+) -> Response {
     let key = (state.key)();
     if key.is_empty() {
         log::warn!("[web_viewer] API key not configured, rejecting all requests");
-        return Err(StatusCode::UNAUTHORIZED);
+        return unauthorized_response(&uri);
     }
 
     // `?token=` が付いていれば、Cookie へ移し替えて token 抜きの URL へリダイレクトする。
@@ -131,7 +146,7 @@ async fn viewer_auth(
     if let Some(provided) = token {
         if !constant_time_eq_str(&provided, &key) {
             log::warn!("[web_viewer] token mismatch");
-            return Err(StatusCode::UNAUTHORIZED);
+            return unauthorized_response(&uri);
         }
 
         let mut location = uri.path().to_string();
@@ -156,7 +171,7 @@ async fn viewer_auth(
             header::REFERRER_POLICY,
             HeaderValue::from_static("no-referrer"),
         );
-        return Ok(response);
+        return response;
     }
 
     // token が無ければ Cookie を見る。
@@ -168,10 +183,10 @@ async fn viewer_auth(
     };
 
     if authorized {
-        Ok(next.run(request).await)
+        next.run(request).await
     } else {
         log::warn!("[web_viewer] unauthorized request: no valid session cookie");
-        Err(StatusCode::UNAUTHORIZED)
+        unauthorized_response(&uri)
     }
 }
 
@@ -233,8 +248,11 @@ fn asset_response(bytes: Vec<u8>, mime_type: String) -> Response {
         .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
+/// SPA シェルのアセット名。`index.html` (Tauri 版) とは別エントリ (#339)。
+const WEB_SPA_SHELL: &str = "web.html";
+
 async fn serve_index(State(state): State<ViewerState>) -> Response {
-    match (state.assets)("index.html") {
+    match (state.assets)(WEB_SPA_SHELL) {
         Some((bytes, mime_type)) => {
             let mut response = asset_response(bytes, mime_type);
             response
@@ -244,7 +262,7 @@ async fn serve_index(State(state): State<ViewerState>) -> Response {
         }
         None => {
             if let Some(target) = &state.dev_proxy {
-                return proxy_to_dev(target, "/").await;
+                return proxy_to_dev(target, &format!("/{}", WEB_SPA_SHELL)).await;
             }
             StatusCode::NOT_FOUND.into_response()
         }
@@ -646,7 +664,7 @@ mod tests {
 
     fn stub_assets() -> AssetSource {
         Arc::new(|path: &str| match path {
-            "index.html" => Some((b"<html>index</html>".to_vec(), "text/html".to_string())),
+            "web.html" => Some((b"<html>index</html>".to_vec(), "text/html".to_string())),
             "assets/app.js" => Some((b"console.log(1)".to_vec(), "text/javascript".to_string())),
             _ => None,
         })
@@ -785,6 +803,34 @@ mod tests {
         let router = router_for_test();
         let resp = get(&router, "/worktrees", None).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn unauthorized_non_api_path_returns_html_page() {
+        let router = router_for_test();
+        let resp = get(&router, "/worktrees", None).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            resp.headers().get(header::CONTENT_TYPE).unwrap().to_str().unwrap(),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(
+            resp.headers().get(header::CACHE_CONTROL).unwrap().to_str().unwrap(),
+            "no-store"
+        );
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(body.contains("<html"));
+        assert!(body.contains("Authentication required"));
+    }
+
+    #[tokio::test]
+    async fn unauthorized_api_path_returns_empty_body_as_before() {
+        let router = router_for_test();
+        let resp = get(&router, "/api/worktrees", None).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        assert!(bytes.is_empty());
     }
 
     #[tokio::test]

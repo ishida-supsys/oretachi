@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>oretachi Artifacts</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        background: #fafafa;
+        font-family: system-ui, sans-serif;
+        color: #222;
+      }
+      .card {
+        max-width: 480px;
+        width: 100%;
+        margin: 0 24px;
+        padding: 32px 28px;
+        display: flex;
+        flex-direction: column;
+        gap: 16px;
+        align-items: center;
+        text-align: center;
+      }
+      .lock {
+        font-size: 40px;
+      }
+      h1 {
+        font-size: 18px;
+        margin: 0;
+      }
+      p {
+        font-size: 13px;
+        color: #666;
+        line-height: 1.8;
+        margin: 0;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <div class="lock">🔒</div>
+      <h1>Authentication required / 認証が必要です</h1>
+      <p>
+        Open this page again from the oretachi app's "Open in browser". If you regenerated the MCP API key,
+        you also need to reopen it from there.<br /><br />
+        oretachi アプリの「ブラウザで開く」から開き直してください。MCP の API キーを再生成した場合も、
+        ここから開き直す必要があります。
+      </p>
+    </div>
+  </body>
+</html>

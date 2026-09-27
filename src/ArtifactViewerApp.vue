@@ -30,6 +30,17 @@ const toast = useToast();
 const props = defineProps<{
   dataSource: ArtifactDataSource;
   host: ArtifactViewerHost;
+  /**
+   * 起動時に選択しておくアーティファクト。Tauri 版は指定せず `?artifactId=` から読む
+   * （新規ウィンドウで開かれたとき）。Web 版はルートパスの一部として持つため、
+   * こちらで明示的に渡す。
+   */
+  initialArtifactId?: string;
+}>();
+
+const emit = defineEmits<{
+  /** 選択中のアーティファクトが変わった（Web 版が URL に反映するためのフック） */
+  selected: [id: string, mode: "push" | "replace"];
 }>();
 
 provide(ARTIFACT_VIEWER_HOST_KEY, props.host);
@@ -39,7 +50,7 @@ const isRepositoryScope = props.dataSource.scope.kind === "repository";
 
 const params = new URLSearchParams(window.location.search);
 /** 起動時に選択しておくアーティファクト（リンクから新規ウィンドウで開かれたとき） */
-const initialArtifactId = params.get("artifactId") ?? "";
+const initialArtifactId = props.initialArtifactId ?? params.get("artifactId") ?? "";
 
 // URL には ID しか載らない（リンクを書く側は遷移先の名前を知らないため）。
 // 名前は resolveScopeName で settings から解決する。解決前・失敗時は ID を出す。
@@ -313,6 +324,10 @@ async function loadArtifact(id: string) {
   loading.value = true;
   try {
     selectedArtifact.value = await props.dataSource.read(id);
+    // Tauri 版は listStates() が常に全件を返すので mount 時の1回で足りるが、
+    // Web 版は read() のたびにその1件分の memory しか持たない実装のため、
+    // ここで取り直して states に反映する（Tauri 版では冗長な呼び直しになるだけで実害はない）。
+    await loadStates();
   } catch (e) {
     console.error("read artifact failed", e);
     selectedArtifact.value = null;
@@ -326,6 +341,7 @@ async function selectArtifact(id: string, mode: "push" | "replace" = "push") {
   if (mode === "push") history.push(id);
   else history.replace(id);
   await loadArtifact(id);
+  emit("selected", id, mode);
 }
 
 /**
@@ -341,6 +357,7 @@ async function stepHistory(delta: -1 | 1) {
     if (artifacts.value.some((a) => a.id === id)) {
       history.moveTo(nextIndex);
       await loadArtifact(id);
+      emit("selected", id, "replace");
       return;
     }
     history.prune(id);

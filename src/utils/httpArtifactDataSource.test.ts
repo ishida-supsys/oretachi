@@ -1,0 +1,222 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHttpArtifactViewerContext, fetchWorktreesIndex, UnauthorizedError } from "./httpArtifactDataSource";
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
+
+const WORKTREES_INDEX = {
+  worktrees: [
+    {
+      id: "issue-326",
+      name: "issue-326",
+      repositoryId: "/repo/oretachi",
+      repositoryName: "oretachi",
+      branchName: "worktree/issue-326",
+      description: "desc",
+      isHome: false,
+      isRepository: false,
+      artifactCount: 2,
+      lastUpdatedAt: 100,
+    },
+  ],
+  repositories: [
+    {
+      key: "abcd1234",
+      id: "/repo/oretachi",
+      name: "oretachi",
+      artifactCount: 1,
+      lastUpdatedAt: 50,
+    },
+  ],
+};
+
+describe("httpArtifactDataSource", () => {
+  let fetchMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(() => {
+    fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  describe("fetchWorktreesIndex", () => {
+    it("returns the parsed index", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(WORKTREES_INDEX));
+      const onUnauthorized = vi.fn();
+      const result = await fetchWorktreesIndex(onUnauthorized);
+      expect(result).toEqual(WORKTREES_INDEX);
+      expect(onUnauthorized).not.toHaveBeenCalled();
+    });
+
+    it("calls onUnauthorized and throws UnauthorizedError on 401", async () => {
+      fetchMock.mockResolvedValueOnce(new Response(null, { status: 401 }));
+      const onUnauthorized = vi.fn();
+      await expect(fetchWorktreesIndex(onUnauthorized)).rejects.toBeInstanceOf(UnauthorizedError);
+      expect(onUnauthorized).toHaveBeenCalledOnce();
+    });
+
+    it("surfaces the {error} message on other failures", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse({ error: "boom" }, 500));
+      await expect(fetchWorktreesIndex(vi.fn())).rejects.toThrow("boom");
+    });
+  });
+
+  describe("createHttpArtifactViewerContext (worktree scope)", () => {
+    it("does not need /api/worktrees to resolve the scope", async () => {
+      const ctx = await createHttpArtifactViewerContext("worktree", "issue-326", {
+        onUnauthorized: vi.fn(),
+        navigateTo: vi.fn(),
+      });
+      expect(ctx).not.toBeNull();
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(ctx!.dataSource.scope).toEqual({ kind: "worktree", worktreeId: "issue-326", repositoryId: "" });
+      expect(ctx!.dataSource.capabilities).toEqual({
+        pin: false,
+        lock: false,
+        delete: false,
+        export: false,
+        import: false,
+        copyPng: false,
+        transfer: false,
+      });
+    });
+
+    it("maps `type` to `content_type` for list() and read()", async () => {
+      const ctx = await createHttpArtifactViewerContext("worktree", "issue-326", {
+        onUnauthorized: vi.fn(),
+        navigateTo: vi.fn(),
+      });
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse([{ id: "a", title: "A", type: "text/markdown", created_at: 1, updated_at: 2 }]),
+      );
+      const list = await ctx!.dataSource.list();
+      expect(fetchMock).toHaveBeenCalledWith("/api/worktrees/issue-326/artifacts", { credentials: "same-origin" });
+      expect(list).toEqual([
+        { id: "a", title: "A", type: "text/markdown", content_type: "text/markdown", created_at: 1, updated_at: 2 },
+      ]);
+
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          artifact: { id: "a", title: "A", type: "text/markdown", content: "# hi", created_at: 1, updated_at: 2 },
+          memory: { foo: "bar" },
+          memoryUpdatedAt: 42,
+        }),
+      );
+      const data = await ctx!.dataSource.read("a");
+      expect(fetchMock).toHaveBeenLastCalledWith("/api/worktrees/issue-326/artifacts/a", {
+        credentials: "same-origin",
+      });
+      expect(data.content_type).toBe("text/markdown");
+      expect(data.content).toBe("# hi");
+
+      const states = await ctx!.dataSource.listStates();
+      expect(states).toEqual({ a: { memory: { foo: "bar" }, memoryUpdatedAt: 42 } });
+    });
+
+    it("percent-encodes ids in request paths", async () => {
+      const ctx = await createHttpArtifactViewerContext("worktree", "a/b", {
+        onUnauthorized: vi.fn(),
+        navigateTo: vi.fn(),
+      });
+      fetchMock.mockResolvedValueOnce(jsonResponse([]));
+      await ctx!.dataSource.list();
+      expect(fetchMock).toHaveBeenCalledWith("/api/worktrees/a%2Fb/artifacts", { credentials: "same-origin" });
+    });
+
+    it("rejects setMemory / callMcpTool as unsupported", async () => {
+      const ctx = await createHttpArtifactViewerContext("worktree", "issue-326", {
+        onUnauthorized: vi.fn(),
+        navigateTo: vi.fn(),
+      });
+      await expect(ctx!.dataSource.setMemory("a", null)).rejects.toThrow();
+      await expect(ctx!.dataSource.callMcpTool("a", "tool", {})).rejects.toThrow();
+    });
+
+    it("navigates to the worktree page directly for openScopeViewer(worktree)", async () => {
+      const navigateTo = vi.fn();
+      const ctx = await createHttpArtifactViewerContext("worktree", "issue-326", {
+        onUnauthorized: vi.fn(),
+        navigateTo,
+      });
+      await ctx!.host.openScopeViewer("worktree", "other-wt", "art-1");
+      expect(navigateTo).toHaveBeenCalledWith("/worktrees/other-wt/artifacts/art-1");
+      expect(fetchMock).not.toHaveBeenCalled();
+    });
+
+    it("resolves the repository key via /api/worktrees for openScopeViewer(repository)", async () => {
+      const navigateTo = vi.fn();
+      const ctx = await createHttpArtifactViewerContext("worktree", "issue-326", {
+        onUnauthorized: vi.fn(),
+        navigateTo,
+      });
+      fetchMock.mockResolvedValueOnce(jsonResponse(WORKTREES_INDEX));
+      await ctx!.host.openScopeViewer("repository", "/repo/oretachi", "art-1");
+      expect(navigateTo).toHaveBeenCalledWith("/repositories/abcd1234/artifacts/art-1");
+    });
+
+    it("throws if the repository id from a link can't be resolved", async () => {
+      const ctx = await createHttpArtifactViewerContext("worktree", "issue-326", {
+        onUnauthorized: vi.fn(),
+        navigateTo: vi.fn(),
+      });
+      fetchMock.mockResolvedValueOnce(jsonResponse(WORKTREES_INDEX));
+      await expect(ctx!.host.openScopeViewer("repository", "/unknown", "art-1")).rejects.toThrow();
+    });
+
+    it("relays notifyExternalNavigate to the handler registered via host.onNavigate", async () => {
+      const ctx = await createHttpArtifactViewerContext("worktree", "issue-326", {
+        onUnauthorized: vi.fn(),
+        navigateTo: vi.fn(),
+      });
+      const handler = vi.fn();
+      const unlisten = await ctx!.host.onNavigate(handler);
+      ctx!.notifyExternalNavigate("art-2");
+      expect(handler).toHaveBeenCalledWith("art-2");
+      unlisten();
+      ctx!.notifyExternalNavigate("art-3");
+      expect(handler).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe("createHttpArtifactViewerContext (repository scope)", () => {
+    it("resolves the real repository id via /api/worktrees", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(WORKTREES_INDEX));
+      const ctx = await createHttpArtifactViewerContext("repository", "abcd1234", {
+        onUnauthorized: vi.fn(),
+        navigateTo: vi.fn(),
+      });
+      expect(ctx!.dataSource.scope).toEqual({
+        kind: "repository",
+        worktreeId: "",
+        repositoryId: "/repo/oretachi",
+      });
+    });
+
+    it("returns null for an unknown repository key", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(WORKTREES_INDEX));
+      const ctx = await createHttpArtifactViewerContext("repository", "does-not-exist", {
+        onUnauthorized: vi.fn(),
+        navigateTo: vi.fn(),
+      });
+      expect(ctx).toBeNull();
+    });
+
+    it("resolveScopeName reads name from the index", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(WORKTREES_INDEX));
+      const ctx = await createHttpArtifactViewerContext("repository", "abcd1234", {
+        onUnauthorized: vi.fn(),
+        navigateTo: vi.fn(),
+      });
+      fetchMock.mockResolvedValueOnce(jsonResponse(WORKTREES_INDEX));
+      const name = await ctx!.dataSource.resolveScopeName();
+      expect(name).toEqual({ displayName: "oretachi", repositoryName: "oretachi" });
+    });
+  });
+});
