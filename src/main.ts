@@ -51,6 +51,7 @@ async function mountApp() {
   });
 
   let rootComponent;
+  let rootProps: Record<string, unknown> = {};
   if (mode === "subwindow") {
     rootComponent = (await import("./SubWindowApp.vue")).default;
   } else if (mode === "tray") {
@@ -59,11 +60,14 @@ async function mountApp() {
     rootComponent = (await import("./CodeReviewApp.vue")).default;
   } else if (mode === "artifact") {
     rootComponent = (await import("./ArtifactViewerApp.vue")).default;
+    const { createTauriArtifactViewerContext } = await import("./utils/tauriArtifactDataSource");
+    const { dataSource, host } = createTauriArtifactViewerContext(window.location.search);
+    rootProps = { dataSource, host };
   } else {
     rootComponent = (await import("./App.vue")).default;
   }
 
-  createApp(rootComponent)
+  createApp(rootComponent, rootProps)
     .use(PrimeVue, {
       theme: {
         preset: Aura,

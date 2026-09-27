@@ -1,12 +1,7 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from "vue";
+import { ref, computed, onMounted, onUnmounted, provide, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { useToast } from "primevue/usetoast";
-import { invoke } from "@tauri-apps/api/core";
-import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { getCurrentWindow } from "@tauri-apps/api/window";
-import { ask, message, open as openFileDialog, save as saveFileDialog } from "@tauri-apps/plugin-dialog";
-import { writeImage } from "@tauri-apps/plugin-clipboard-manager";
 import Toast from "primevue/toast";
 import type { ToastMessageOptions } from "primevue/toast";
 import Popover from "primevue/popover";
@@ -23,43 +18,35 @@ import { buildExportViewHtml, exportFileName, hasStandaloneView } from "./utils/
 import { svgToPngBytes } from "./utils/svgToPng";
 import { sortArtifacts, filterArtifacts } from "./utils/artifactList";
 import { parseArtifactLink } from "./utils/artifactLink";
-import {
-  useArtifactWindow,
-  ARTIFACT_NAVIGATE_EVENT,
-  type ArtifactNavigateEvent,
-} from "./composables/useArtifactWindow";
 import { useArtifactHistory } from "./composables/useArtifactHistory";
 import { URL_ARTIFACT_CONTENT_TYPE } from "./types/artifact";
-import type {
-  ArtifactMeta,
-  ArtifactData,
-  ArtifactState,
-  ArtifactChangedEvent,
-  ArtifactStateChangedEvent,
-  RepoArtifactChangedEvent,
-  CopyArtifactResult,
-} from "./types/artifact";
+import type { ArtifactMeta, ArtifactData, ArtifactState } from "./types/artifact";
+import { ARTIFACT_VIEWER_HOST_KEY } from "./utils/artifactDataSource";
+import type { ArtifactDataSource, ArtifactViewerHost } from "./utils/artifactDataSource";
 
 const { t } = useI18n();
 const toast = useToast();
 
+const props = defineProps<{
+  dataSource: ArtifactDataSource;
+  host: ArtifactViewerHost;
+}>();
+
+provide(ARTIFACT_VIEWER_HOST_KEY, props.host);
+
+const capabilities = props.dataSource.capabilities;
+const isRepositoryScope = props.dataSource.scope.kind === "repository";
+
 const params = new URLSearchParams(window.location.search);
-// scope 未指定は従来どおり worktree スコープとして扱う（古い URL 互換）
-const scope = params.get("scope") === "repository" ? "repository" : "worktree";
-const worktreeId = params.get("worktreeId") ?? "";
-const repositoryId = params.get("repositoryId") ?? "";
 /** 起動時に選択しておくアーティファクト（リンクから新規ウィンドウで開かれたとき） */
 const initialArtifactId = params.get("artifactId") ?? "";
 
-const isRepositoryScope = scope === "repository";
-const scopeId = isRepositoryScope ? repositoryId : worktreeId;
-
 // URL には ID しか載らない（リンクを書く側は遷移先の名前を知らないため）。
-// 名前は resolve_artifact_scope で settings から解決する。解決前・失敗時は ID を出す。
-const headerTitle = ref(scopeId);
+// 名前は resolveScopeName で settings から解決する。解決前・失敗時は ID を出す。
+const headerTitle = ref(
+  isRepositoryScope ? props.dataSource.scope.repositoryId : props.dataSource.scope.worktreeId,
+);
 const repositoryName = ref("");
-
-const { openArtifactViewer, openRepositoryArtifactViewer } = useArtifactWindow();
 
 const artifacts = ref<ArtifactMeta[]>([]);
 const states = ref<Record<string, ArtifactState>>({});
@@ -79,9 +66,9 @@ const pinningIds = ref<Set<string>>(new Set());
 /** マークダウンをレンダリング結果ではなく生ソースで表示するか（選択を移すと既定のプレビューへ戻す） */
 const markdownSourceMode = ref(false);
 
-let unlisten: UnlistenFn | null = null;
-let unlistenNavigate: UnlistenFn | null = null;
-let unlistenState: UnlistenFn | null = null;
+let unlisten: (() => void) | null = null;
+let unlistenNavigate: (() => void) | null = null;
+let unlistenState: (() => void) | null = null;
 
 const typeIcons: Record<string, string> = {
   "application/vnd.ant.code": "pi-code",
@@ -103,32 +90,9 @@ function formatDate(ts: number): string {
   return new Date(ts * 1000).toLocaleString();
 }
 
-// JSONの "type" フィールドを content_type にマッピングする
-// (Rust側は serde(rename="type") でJSONに保存するため)
-function mapMeta(raw: any): ArtifactMeta {
-  return { ...raw, content_type: raw.type ?? raw.content_type };
-}
-function mapArtifact(raw: any): ArtifactData {
-  return { ...raw, content_type: raw.type ?? raw.content_type };
-}
-
-// スコープごとの Tauri コマンド差分を吸収する薄いラッパ
-function invokeList(): Promise<any[]> {
-  return isRepositoryScope
-    ? invoke<any[]>("list_repo_artifacts", { repositoryId })
-    : invoke<any[]>("list_artifacts", { worktreeId });
-}
-
-function invokeRead(artifactId: string): Promise<string> {
-  return isRepositoryScope
-    ? invoke<string>("read_repo_artifact", { repositoryId, artifactId })
-    : invoke<string>("read_artifact", { worktreeId, artifactId });
-}
-
 async function loadList() {
   try {
-    const list = await invokeList();
-    artifacts.value = list.map(mapMeta);
+    artifacts.value = await props.dataSource.list();
   } catch (e) {
     console.error("list artifacts failed", e);
   }
@@ -136,10 +100,7 @@ async function loadList() {
 
 async function loadStates() {
   try {
-    states.value = await invoke<Record<string, ArtifactState>>("list_artifact_states", {
-      scope,
-      scopeId,
-    });
+    states.value = await props.dataSource.listStates();
   } catch (e) {
     // サイドカーは補助情報なので、読めなくても一覧の表示は続ける
     console.error("list_artifact_states failed", e);
@@ -154,6 +115,7 @@ const sortedArtifacts = computed(() => sortArtifacts(artifacts.value, isPinned))
 const visibleArtifacts = computed(() => filterArtifacts(sortedArtifacts.value, searchQuery.value));
 
 async function togglePin(artifactId: string) {
+  if (!props.dataSource.setPinned) return;
   // 連打で pinned=true / false が同時に飛ぶと、楽観更新した UI とディスクが食い違う。
   // Rust 側でも直列化しているが、ここで弾いておかないと最後の応答が勝つとは限らない
   if (pinningIds.value.has(artifactId)) return;
@@ -164,12 +126,7 @@ async function togglePin(artifactId: string) {
   states.value = { ...states.value, [artifactId]: { ...previous, pinned } };
   pinningIds.value = new Set(pinningIds.value).add(artifactId);
   try {
-    await invoke("set_artifact_pinned", {
-      scope,
-      scopeId,
-      artifactId,
-      pinned,
-    });
+    await props.dataSource.setPinned(artifactId, pinned);
   } catch (e) {
     console.error("set_artifact_pinned failed", e);
     // 他の ID の未確定な楽観更新を巻き添えにしないよう、失敗した 1 キーだけ差し戻す
@@ -196,7 +153,7 @@ async function saveArtifactMemory(
   artifactId: string,
   memory: Record<string, unknown> | null,
 ): Promise<void> {
-  await invoke("set_artifact_memory", { scope, scopeId, artifactId, memory });
+  await props.dataSource.setMemory(artifactId, memory);
   const next = { ...(states.value[artifactId] ?? {}) };
   if (memory) next.memory = memory;
   else delete next.memory;
@@ -282,7 +239,7 @@ async function resetMemory() {
   const artifactId = selectedId.value;
   if (!artifactId) return;
 
-  const confirmed = await ask(t("memory.resetConfirm"), {
+  const confirmed = await props.host.confirm(t("memory.resetConfirm"), {
     title: t("memory.resetTitle"),
     kind: "warning",
   });
@@ -294,7 +251,7 @@ async function resetMemory() {
     toast.add({ severity: "success", summary: t("memory.resetDone"), life: 3000 });
   } catch (e) {
     console.error("set_artifact_memory failed", e);
-    await message(String(e), { title: t("memory.resetFailed"), kind: "error" });
+    await props.host.showError(String(e), t("memory.resetFailed"));
   }
 }
 
@@ -320,9 +277,9 @@ let stateGeneration = 0;
 
 async function touchLock() {
   const artifactId = selectedId.value;
-  if (!artifactId) return;
+  if (!artifactId || !props.dataSource.touchLock) return;
   try {
-    await invoke("artifact_lock_touch", { scope, scopeId, artifactId });
+    await props.dataSource.touchLock(artifactId);
   } catch (e) {
     // ロックは付加機能なので、失敗しても閲覧は続行させる
     console.warn("artifact_lock_touch failed", e);
@@ -330,8 +287,9 @@ async function touchLock() {
 }
 
 async function releaseLock() {
+  if (!props.dataSource.releaseLock) return;
   try {
-    await invoke("artifact_lock_release");
+    await props.dataSource.releaseLock();
   } catch (e) {
     console.warn("artifact_lock_release failed", e);
   }
@@ -343,13 +301,7 @@ async function releaseLock() {
  * （判定に使うのはこのビューアのスコープ = アーティファクトの置き場所）。
  */
 function callMcpTool(artifactId: string, tool: string, params: Record<string, unknown>) {
-  return invoke<string>("artifact_call_mcp_tool", {
-    scope,
-    scopeId,
-    artifactId,
-    tool,
-    params,
-  });
+  return props.dataSource.callMcpTool(artifactId, tool, params);
 }
 
 const history = useArtifactHistory();
@@ -360,8 +312,7 @@ async function loadArtifact(id: string) {
   selectedId.value = id;
   loading.value = true;
   try {
-    const raw = await invokeRead(id);
-    selectedArtifact.value = mapArtifact(JSON.parse(raw));
+    selectedArtifact.value = await props.dataSource.read(id);
   } catch (e) {
     console.error("read artifact failed", e);
     selectedArtifact.value = null;
@@ -438,10 +389,11 @@ async function onNavigate(href: string) {
     return;
   }
 
+  const scopeRef = props.dataSource.scope;
   const isSameScope =
     target.scope === null ||
-    (target.scope === "worktree" && !isRepositoryScope && target.id === worktreeId) ||
-    (target.scope === "repository" && isRepositoryScope && target.id === repositoryId);
+    (target.scope === "worktree" && !isRepositoryScope && target.id === scopeRef.worktreeId) ||
+    (target.scope === "repository" && isRepositoryScope && target.id === scopeRef.repositoryId);
 
   if (isSameScope) {
     await navigateWithin(target.artifactId, "push");
@@ -449,11 +401,7 @@ async function onNavigate(href: string) {
   }
 
   try {
-    if (target.scope === "worktree") {
-      await openArtifactViewer(target.id ?? "", target.artifactId);
-    } else {
-      await openRepositoryArtifactViewer(target.id ?? "", target.artifactId);
-    }
+    await props.host.openScopeViewer(target.scope ?? "worktree", target.id ?? "", target.artifactId);
   } catch (e) {
     console.error("open artifact viewer failed", e);
     toast.add({ severity: "error", summary: t("navigate.openFailed"), detail: href, life: 4000 });
@@ -520,8 +468,7 @@ async function refreshSelected(artifactId: string, command: string, autoOpen = t
     }
   } else if (selectedId.value === artifactId) {
     try {
-      const raw = await invokeRead(artifactId);
-      selectedArtifact.value = mapArtifact(JSON.parse(raw));
+      selectedArtifact.value = await props.dataSource.read(artifactId);
     } catch { /* ignore */ }
   }
 }
@@ -532,27 +479,19 @@ async function refreshSelected(artifactId: string, command: string, autoOpen = t
  */
 async function transferToRepository() {
   const artifactId = selectedId.value;
-  if (!artifactId || transferring.value) return;
+  if (!artifactId || transferring.value || !props.dataSource.copyToRepository) return;
 
   transferring.value = true;
   try {
-    let result = await invoke<CopyArtifactResult>("copy_artifact_to_repository", {
-      worktreeId,
-      artifactId,
-      overwrite: false,
-    });
+    let result = await props.dataSource.copyToRepository(artifactId, false);
 
     if (result.status === "exists") {
-      const confirmed = await ask(
+      const confirmed = await props.host.confirm(
         t("transfer.overwriteConfirm", { repository: result.repositoryName }),
         { title: t("transfer.overwriteTitle"), kind: "warning" },
       );
       if (!confirmed) return;
-      result = await invoke<CopyArtifactResult>("copy_artifact_to_repository", {
-        worktreeId,
-        artifactId,
-        overwrite: true,
-      });
+      result = await props.dataSource.copyToRepository(artifactId, true);
     }
 
     toast.add({
@@ -562,7 +501,7 @@ async function transferToRepository() {
     });
   } catch (e) {
     console.error("copy_artifact_to_repository failed", e);
-    await message(String(e), { title: t("transfer.failed"), kind: "error" });
+    await props.host.showError(String(e), t("transfer.failed"));
   } finally {
     transferring.value = false;
   }
@@ -589,16 +528,13 @@ async function renderMermaidSvg(source: string): Promise<string> {
 /** 表示中のアーティファクトを zip として書き出す */
 async function exportArtifact() {
   const artifact = selectedArtifact.value;
-  if (!artifact || exporting.value) return;
+  if (!artifact || exporting.value || !props.dataSource.exportArtifact) return;
 
   exporting.value = true;
   try {
     // 保存先を先に聞く。React の view.html は数 MB になるので、
     // キャンセルされる可能性のある操作の前に組み立てない
-    const destPath = await saveFileDialog({
-      defaultPath: exportFileName(artifact.title, artifact.id),
-      filters: [{ name: "zip", extensions: ["zip"] }],
-    });
+    const destPath = await props.host.pickSavePath(exportFileName(artifact.title, artifact.id));
     if (!destPath) return;
 
     // レンダリングに失敗しても再現材料だけは渡せるようにする（view.html 無しで続行）
@@ -610,13 +546,7 @@ async function exportArtifact() {
       toast.add({ severity: "warn", summary: t("export.viewFailed"), life: 5000 });
     }
 
-    const result = await invoke<{ path: string; bytes: number }>("export_artifact", {
-      scope,
-      scopeId,
-      artifactId: artifact.id,
-      destPath,
-      viewHtml,
-    });
+    const result = await props.dataSource.exportArtifact(artifact.id, destPath, viewHtml);
     toast.add({
       severity: "success",
       summary: t("export.done"),
@@ -625,7 +555,7 @@ async function exportArtifact() {
     });
   } catch (e) {
     console.error("export_artifact failed", e);
-    await message(String(e), { title: t("export.failed"), kind: "error" });
+    await props.host.showError(String(e), t("export.failed"));
   } finally {
     exporting.value = false;
   }
@@ -633,20 +563,14 @@ async function exportArtifact() {
 
 /** エクスポートした zip をこのスコープへ取り込む */
 async function importArtifact() {
-  if (importing.value) return;
+  if (importing.value || !props.dataSource.importArtifact) return;
 
   importing.value = true;
   try {
-    const zipPath = await openFileDialog({
-      multiple: false,
-      filters: [{ name: "zip", extensions: ["zip"] }],
-    });
-    if (typeof zipPath !== "string") return;
+    const zipPath = await props.host.pickZipToOpen();
+    if (!zipPath) return;
 
-    const result = await invoke<{ artifactId: string; title: string; renamedFrom: string | null }>(
-      "import_artifact",
-      { scope, scopeId, zipPath },
-    );
+    const result = await props.dataSource.importArtifact(zipPath);
     // 一覧の更新と「開く」導線は artifact-changed(command=create) の既存ハンドラに任せる
     toast.add({
       severity: "success",
@@ -658,7 +582,7 @@ async function importArtifact() {
     });
   } catch (e) {
     console.error("import_artifact failed", e);
-    await message(String(e), { title: t("import.failed"), kind: "error" });
+    await props.host.showError(String(e), t("import.failed"));
   } finally {
     importing.value = false;
   }
@@ -681,11 +605,11 @@ async function copyPngToClipboard() {
       artifact.content_type === "application/vnd.ant.mermaid"
         ? await renderMermaidSvg(artifact.content)
         : artifact.content;
-    await writeImage(await svgToPngBytes(svg));
+    await props.host.writeImage(await svgToPngBytes(svg));
     toast.add({ severity: "success", summary: t("copyPng.done"), life: 3000 });
   } catch (e) {
     console.error("copy png failed", e);
-    await message(String(e), { title: t("copyPng.failed"), kind: "error" });
+    await props.host.showError(String(e), t("copyPng.failed"));
   } finally {
     copyingPng.value = false;
   }
@@ -694,19 +618,19 @@ async function copyPngToClipboard() {
 /** リポジトリスコープでのみ使う、恒久保存アーティファクトの個別削除 */
 async function deleteRepoArtifact() {
   const artifactId = selectedId.value;
-  if (!artifactId) return;
+  if (!artifactId || !props.dataSource.deleteArtifact) return;
 
-  const confirmed = await ask(
+  const confirmed = await props.host.confirm(
     t("delete.confirm", { title: selectedArtifact.value?.title ?? artifactId }),
     { title: t("delete.title"), kind: "warning" },
   );
   if (!confirmed) return;
 
   try {
-    await invoke("delete_repo_artifact", { repositoryId, artifactId });
+    await props.dataSource.deleteArtifact(artifactId);
   } catch (e) {
     console.error("delete_repo_artifact failed", e);
-    await message(String(e), { title: t("delete.failed"), kind: "error" });
+    await props.host.showError(String(e), t("delete.failed"));
   }
 }
 
@@ -716,19 +640,19 @@ async function deleteRepoArtifact() {
  */
 async function deleteWorktreeArtifact() {
   const artifactId = selectedId.value;
-  if (!artifactId) return;
+  if (!artifactId || !props.dataSource.deleteArtifact) return;
 
-  const confirmed = await ask(
+  const confirmed = await props.host.confirm(
     t("delete.confirmWorktree", { title: selectedArtifact.value?.title ?? artifactId }),
     { title: t("delete.title"), kind: "warning" },
   );
   if (!confirmed) return;
 
   try {
-    await invoke("delete_artifact", { worktreeId, artifactId });
+    await props.dataSource.deleteArtifact(artifactId);
   } catch (e) {
     console.error("delete_artifact failed", e);
-    await message(String(e), { title: t("delete.failed"), kind: "error" });
+    await props.host.showError(String(e), t("delete.failed"));
   }
 }
 
@@ -740,10 +664,7 @@ function withMenuHidden<T>(fn: () => T): T {
 /** ヘッダー・ウィンドウタイトルに出す名前を settings から解決する */
 async function resolveScopeName() {
   try {
-    const info = await invoke<{ displayName: string; repositoryName: string | null }>(
-      "resolve_artifact_scope",
-      { scope, id: scopeId },
-    );
+    const info = await props.dataSource.resolveScopeName();
     headerTitle.value = info.displayName;
     repositoryName.value = info.repositoryName ?? "";
   } catch (e) {
@@ -751,7 +672,7 @@ async function resolveScopeName() {
     console.warn("resolve_artifact_scope failed", e);
   }
   try {
-    await getCurrentWindow().setTitle(`Artifacts - ${headerTitle.value}`);
+    await props.host.setWindowTitle(`Artifacts - ${headerTitle.value}`);
   } catch (e) {
     console.warn("setTitle failed", e);
   }
@@ -770,17 +691,19 @@ onMounted(async () => {
   // 送信側の focusExisting は起動途中のウィンドウでも true を返すため、
   // loadList() などを待つ前に最優先で登録する（待つと取りこぼす）。
   // ウィンドウを跨ぐ遷移なので履歴は積まない。
-  unlistenNavigate = await listen<ArtifactNavigateEvent>(ARTIFACT_NAVIGATE_EVENT, async (event) => {
-    await navigateWithin(event.payload.artifactId, "replace");
+  unlistenNavigate = await props.host.onNavigate(async (artifactId) => {
+    await navigateWithin(artifactId, "replace");
   });
 
   // ロックのハートビート。後続の await（listen / loadList）が失敗しても
   // 「ウィンドウは開いたままロックだけ TTL で失効する」を避けるため、ここで先に張る。
   // ロック対象の登録自体は watch(selectedId) が行う
-  const intervalMs = await invoke<number>("artifact_lock_heartbeat_interval").catch(
-    () => ARTIFACT_LOCK_HEARTBEAT_FALLBACK_MS,
-  );
-  lockTimer = setInterval(() => void touchLock(), intervalMs);
+  if (props.dataSource.lockHeartbeatIntervalMs) {
+    const intervalMs = await props.dataSource
+      .lockHeartbeatIntervalMs()
+      .catch(() => ARTIFACT_LOCK_HEARTBEAT_FALLBACK_MS);
+    lockTimer = setInterval(() => void touchLock(), intervalMs);
+  }
 
   void resolveScopeName();
   await loadList();
@@ -803,34 +726,21 @@ onMounted(async () => {
     await selectArtifact(sortedArtifacts.value[0].id);
   }
 
-  if (isRepositoryScope) {
-    unlisten = await listen<RepoArtifactChangedEvent>("repo-artifact-changed", async (event) => {
-      if (event.payload.repositoryId !== repositoryId) return;
-      await refreshSelected(event.payload.artifactId, event.payload.command);
-    });
-  } else {
-    unlisten = await listen<ArtifactChangedEvent>("artifact-changed", async (event) => {
-      if (event.payload.worktreeId !== worktreeId) return;
-      await refreshSelected(
-        event.payload.artifactId,
-        event.payload.command,
-        event.payload.autoOpen !== false,
-      );
-    });
-  }
+  unlisten = await props.dataSource.onArtifactChanged(async ({ artifactId, command, autoOpen }) => {
+    await refreshSelected(artifactId, command, autoOpen);
+  });
 
   // MCP の artifact_store がストアを書き換えたら、サイドカーのキャッシュを取り直し、
   // 表示中の iframe にも押し込む。押し込まないと iframe は古いスナップショットを持ち続け、
   // 次の 1 入力で自分の状態を丸ごと書き戻して MCP 側の書き込みを消してしまう
   // （MCP 側は成功を返しているので、消えたことに誰も気づけない）
-  unlistenState = await listen<ArtifactStateChangedEvent>("artifact-state-changed", async (event) => {
-    if (event.payload.scope !== scope || event.payload.scopeId !== scopeId) return;
+  unlistenState = await props.dataSource.onStateChanged(async ({ artifactId }) => {
     // loadStates() の await を挟むので、短時間に複数回届くとハンドラの完了順が
     // 入れ替わり、古いスナップショットを iframe へ押し込みうる。世代で捨てる
     const generation = ++stateGeneration;
     await loadStates();
     if (generation !== stateGeneration) return;
-    if (event.payload.artifactId !== selectedId.value) return;
+    if (artifactId !== selectedId.value) return;
     reactViewRef.value?.pushMemory(selectedMemory.value ?? {});
   });
 
@@ -873,6 +783,7 @@ onUnmounted(() => {
         <span :class="isRepositoryScope ? 'pi pi-folder sidebar-icon' : 'pi pi-box sidebar-icon'" />
         <span class="sidebar-title">{{ headerTitle }}</span>
         <button
+          v-if="capabilities.import"
           class="sidebar-import"
           :disabled="importing"
           :title="t('import.tooltip')"
@@ -918,6 +829,7 @@ onUnmounted(() => {
             <span class="artifact-meta">{{ formatDate(artifact.updated_at) }}</span>
           </div>
           <button
+            v-if="capabilities.pin"
             class="pin-button"
             :class="{ active: isPinned(artifact.id) }"
             :title="isPinned(artifact.id) ? t('pin.unpin') : t('pin.pin')"
@@ -967,7 +879,7 @@ onUnmounted(() => {
             <span class="content-type">
               <!-- リポジトリ保管庫には MCP からの書き込み経路が無く、フラグが効かないので出さない -->
               <span
-                v-if="!isRepositoryScope && selectedArtifact.locked_while_open"
+                v-if="capabilities.lock && !isRepositoryScope && selectedArtifact.locked_while_open"
                 class="locked-badge"
                 :title="t('locked.tooltip')"
               >
@@ -1010,7 +922,7 @@ onUnmounted(() => {
             <!-- リポジトリスコープにはメニューが無いので、エクスポートもヘッダーへ直接出す
                  （保管庫のアーティファクトこそ社外への共有・報告の対象になる） -->
             <button
-              v-if="isRepositoryScope"
+              v-if="isRepositoryScope && capabilities.export"
               class="btn-header"
               :disabled="exporting"
               :title="
@@ -1024,7 +936,7 @@ onUnmounted(() => {
               <span>{{ t("export.label") }}</span>
             </button>
             <button
-              v-if="isRepositoryScope && canCopyPng"
+              v-if="isRepositoryScope && capabilities.copyPng && canCopyPng"
               class="btn-header"
               :disabled="copyingPng"
               :title="t('copyPng.tooltip')"
@@ -1043,7 +955,7 @@ onUnmounted(() => {
               <span>{{ t("menu.label") }}</span>
             </button>
             <button
-              v-else
+              v-else-if="capabilities.delete"
               class="btn-header btn-delete"
               :title="t('delete.title')"
               @click="deleteRepoArtifact"
@@ -1057,6 +969,7 @@ onUnmounted(() => {
         <Popover v-if="!isRepositoryScope" ref="menuRef">
           <div class="popup-menu">
             <button
+              v-if="capabilities.export"
               class="popup-item"
               :disabled="exporting"
               :title="
@@ -1070,7 +983,7 @@ onUnmounted(() => {
               {{ t("export.label") }}
             </button>
             <button
-              v-if="canCopyPng"
+              v-if="capabilities.copyPng && canCopyPng"
               class="popup-item"
               :disabled="copyingPng"
               :title="t('copyPng.tooltip')"
@@ -1081,6 +994,7 @@ onUnmounted(() => {
             </button>
             <div class="popup-divider" />
             <button
+              v-if="capabilities.transfer"
               class="popup-item"
               :disabled="transferring"
               :title="t('transfer.tooltip')"
@@ -1101,6 +1015,7 @@ onUnmounted(() => {
             </button>
             <div class="popup-divider" />
             <button
+              v-if="capabilities.delete"
               class="popup-item popup-item-danger"
               @click="withMenuHidden(deleteWorktreeArtifact)"
             >
