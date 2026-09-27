@@ -66,17 +66,22 @@ pub(crate) fn escape_like(s: &str) -> String {
     out
 }
 
+/// `artifacts_dir` の AppHandle 非依存版。`data_dir` は `app_data_dir()` 相当。
+/// web_viewer からも同じロジックで呼べるようにここへ切り出している。
+pub(crate) fn artifacts_dir_in(
+    data_dir: &std::path::Path,
+    worktree_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    validate_path_component(worktree_id)?;
+    Ok(data_dir.join("artifacts").join(worktree_id))
+}
+
 fn artifacts_dir(
     app_handle: &tauri::AppHandle,
     worktree_id: &str,
 ) -> Result<std::path::PathBuf, String> {
-    validate_path_component(worktree_id)?;
-    Ok(app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("artifacts")
-        .join(worktree_id))
+    let data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    artifacts_dir_in(&data_dir, worktree_id)
 }
 
 /// リポジトリ ID（＝リポジトリの絶対パス）を SHA-256 の先頭 128bit（32桁の hex）に
@@ -84,25 +89,36 @@ fn artifacts_dir(
 /// base64 だと元パス長の 4/3 倍になり、深いパスで Windows の 255 文字上限を超えて
 /// `create_dir_all` が失敗するため、長さが元パスに依存しないハッシュを使う。
 /// hex なのでパス区切りやドライブレターの `:` を含まない。
+///
+/// web_viewer の URL セグメントとしても使う（リポジトリ ID そのものは絶対パスで
+/// URL に載せられないため）。
+pub(crate) fn repo_artifacts_key(repository_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(repository_id.as_bytes());
+    digest.iter().take(16).fold(String::new(), |mut acc, b| {
+        use std::fmt::Write;
+        let _ = write!(acc, "{:02x}", b);
+        acc
+    })
+}
+
+/// `repo_artifacts_dir` の AppHandle 非依存版。
+pub(crate) fn repo_artifacts_dir_in(
+    data_dir: &std::path::Path,
+    repository_id: &str,
+) -> Result<std::path::PathBuf, String> {
+    let encoded = repo_artifacts_key(repository_id);
+    // hex は理論上安全だが、ディレクトリ名として使う以上ここでも検証する
+    validate_path_component(&encoded)?;
+    Ok(data_dir.join("repo-artifacts").join(encoded))
+}
+
 fn repo_artifacts_dir(
     app_handle: &tauri::AppHandle,
     repository_id: &str,
 ) -> Result<std::path::PathBuf, String> {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(repository_id.as_bytes());
-    let encoded = digest.iter().take(16).fold(String::new(), |mut acc, b| {
-        use std::fmt::Write;
-        let _ = write!(acc, "{:02x}", b);
-        acc
-    });
-    // hex は理論上安全だが、ディレクトリ名として使う以上ここでも検証する
-    validate_path_component(&encoded)?;
-    Ok(app_handle
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("repo-artifacts")
-        .join(encoded))
+    let data_dir = app_handle.path().app_data_dir().map_err(|e| e.to_string())?;
+    repo_artifacts_dir_in(&data_dir, repository_id)
 }
 
 // ─── PTY コマンド ────────────────────────────────────────────────────────────
@@ -706,37 +722,54 @@ async fn install_downloaded_update(app: tauri::AppHandle) -> Result<(), String> 
 
 // ─── アーティファクトコマンド ─────────────────────────────────────────────────
 
+/// ワークツリーのアーティファクト一覧を読む本体。`list_artifacts`（Tauri コマンド）と
+/// web_viewer の `GET /api/worktrees/{id}/artifacts` の両方から呼ぶ。
+/// 1 件でも壊れていれば全体を Err にする（`list_repo_artifacts_in_dir` とは非対称。
+/// こちらは恒久保存領域ではなくその場の作業成果物なので、既存の挙動を変えない）。
+pub(crate) fn list_artifacts_in_dir(dir: &std::path::Path) -> Result<Vec<serde_json::Value>, String> {
+    if !dir.exists() {
+        return Ok(vec![]);
+    }
+    let mut artifacts = Vec::new();
+    let entries = std::fs::read_dir(dir).map_err(|e| e.to_string())?;
+    for entry in entries {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("json") {
+            let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+            let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+            artifacts.push(val);
+        }
+    }
+    // updated_at 降順でソート
+    artifacts.sort_by(|a, b| {
+        let a_time = a.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        let b_time = b.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        b_time.cmp(&a_time)
+    });
+    Ok(artifacts)
+}
+
 #[tauri::command]
 async fn list_artifacts(
     app_handle: tauri::AppHandle,
     worktree_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let artifacts_dir = artifacts_dir(&app_handle, &worktree_id)?;
-    tokio::task::spawn_blocking(move || {
-        if !artifacts_dir.exists() {
-            return Ok(vec![]);
-        }
-        let mut artifacts = Vec::new();
-        let entries = std::fs::read_dir(&artifacts_dir).map_err(|e| e.to_string())?;
-        for entry in entries {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) == Some("json") {
-                let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-                let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
-                artifacts.push(val);
-            }
-        }
-        // updated_at 降順でソート
-        artifacts.sort_by(|a, b| {
-            let a_time = a.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
-            let b_time = b.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
-            b_time.cmp(&a_time)
-        });
-        Ok(artifacts)
-    })
-    .await
-    .map_err(|e| format!("task join error: {}", e))?
+    let dir = artifacts_dir(&app_handle, &worktree_id)?;
+    tokio::task::spawn_blocking(move || list_artifacts_in_dir(&dir))
+        .await
+        .map_err(|e| format!("task join error: {}", e))?
+}
+
+/// 単体アーティファクトの本体 JSON を文字列のまま読む本体。`read_artifact` /
+/// `read_repo_artifact`（Tauri コマンド）と web_viewer の read エンドポイントから呼ぶ。
+pub(crate) fn read_artifact_in_dir(
+    dir: &std::path::Path,
+    artifact_id: &str,
+) -> Result<String, String> {
+    validate_path_component(artifact_id)?;
+    let artifact_path = dir.join(format!("{}.json", artifact_id));
+    std::fs::read_to_string(&artifact_path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -745,14 +778,10 @@ async fn read_artifact(
     worktree_id: String,
     artifact_id: String,
 ) -> Result<String, String> {
-    validate_path_component(&artifact_id)?;
-    let artifact_path = artifacts_dir(&app_handle, &worktree_id)?
-        .join(format!("{}.json", artifact_id));
-    tokio::task::spawn_blocking(move || {
-        std::fs::read_to_string(&artifact_path).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("task join error: {}", e))?
+    let dir = artifacts_dir(&app_handle, &worktree_id)?;
+    tokio::task::spawn_blocking(move || read_artifact_in_dir(&dir, &artifact_id))
+        .await
+        .map_err(|e| format!("task join error: {}", e))?
 }
 
 #[tauri::command]
@@ -1277,58 +1306,72 @@ fn resolve_worktree_repository(
 /// 一覧・件数バッジ用途のため content / modules は落としてメタのみ返す。
 /// 例外は URL アーティファクト（`text/uri-list`）で、content が URL 1 行しかなく
 /// アイコン隣のドロップダウンがこの値を必要とするため落とさない。
+/// リポジトリのアーティファクト一覧を読む本体。一覧・件数バッジ用途のため
+/// content / modules は落としてメタのみ返す（例外は URL アーティファクトで、
+/// content が URL 1 行しかなくアイコン隣のドロップダウンがこの値を必要とするため落とさない）。
+/// 恒久保存領域なので、1 件壊れていても残りは必ず返す（全体を Err にしない）。
+pub(crate) fn list_repo_artifacts_in_dir(dir: &std::path::Path) -> Vec<serde_json::Value> {
+    if !dir.exists() {
+        return vec![];
+    }
+    let mut artifacts = Vec::new();
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) => {
+            log::warn!("[RepoArtifact] ディレクトリ読み込み失敗: {:?}: {}", dir, e);
+            return vec![];
+        }
+    };
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let raw = match std::fs::read_to_string(&path) {
+            Ok(raw) => raw,
+            Err(e) => {
+                log::warn!("[RepoArtifact] 読み込み失敗のためスキップ: {:?}: {}", path, e);
+                continue;
+            }
+        };
+        let mut val: serde_json::Value = match serde_json::from_str(&raw) {
+            Ok(val) => val,
+            Err(e) => {
+                log::warn!("[RepoArtifact] JSON 解析失敗のためスキップ: {:?}: {}", path, e);
+                continue;
+            }
+        };
+        if let Some(obj) = val.as_object_mut() {
+            let is_url_artifact = obj.get("type").and_then(|v| v.as_str())
+                == Some(artifact_url::URL_ARTIFACT_CONTENT_TYPE);
+            if !is_url_artifact {
+                obj.remove("content");
+            }
+            obj.remove("modules");
+        }
+        artifacts.push(val);
+    }
+    artifacts.sort_by(|a, b| {
+        let a_time = a.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        let b_time = b.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
+        b_time.cmp(&a_time)
+    });
+    artifacts
+}
+
 #[tauri::command]
 async fn list_repo_artifacts(
     app_handle: tauri::AppHandle,
     repository_id: String,
 ) -> Result<Vec<serde_json::Value>, String> {
     let dir = repo_artifacts_dir(&app_handle, &repository_id)?;
-    tokio::task::spawn_blocking(move || {
-        if !dir.exists() {
-            return Ok(vec![]);
-        }
-        let mut artifacts = Vec::new();
-        let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
-        for entry in entries {
-            let entry = entry.map_err(|e| e.to_string())?;
-            let path = entry.path();
-            if path.extension().and_then(|e| e.to_str()) != Some("json") {
-                continue;
-            }
-            // 恒久保存領域なので、1件壊れていても残りは必ず返す（全体を Err にしない）
-            let raw = match std::fs::read_to_string(&path) {
-                Ok(raw) => raw,
-                Err(e) => {
-                    log::warn!("[RepoArtifact] 読み込み失敗のためスキップ: {:?}: {}", path, e);
-                    continue;
-                }
-            };
-            let mut val: serde_json::Value = match serde_json::from_str(&raw) {
-                Ok(val) => val,
-                Err(e) => {
-                    log::warn!("[RepoArtifact] JSON 解析失敗のためスキップ: {:?}: {}", path, e);
-                    continue;
-                }
-            };
-            if let Some(obj) = val.as_object_mut() {
-                let is_url_artifact = obj.get("type").and_then(|v| v.as_str())
-                    == Some(artifact_url::URL_ARTIFACT_CONTENT_TYPE);
-                if !is_url_artifact {
-                    obj.remove("content");
-                }
-                obj.remove("modules");
-            }
-            artifacts.push(val);
-        }
-        artifacts.sort_by(|a, b| {
-            let a_time = a.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
-            let b_time = b.get("updated_at").and_then(|v| v.as_u64()).unwrap_or(0);
-            b_time.cmp(&a_time)
-        });
-        Ok(artifacts)
-    })
-    .await
-    .map_err(|e| format!("task join error: {}", e))?
+    tokio::task::spawn_blocking(move || list_repo_artifacts_in_dir(&dir))
+        .await
+        .map_err(|e| format!("task join error: {}", e))
 }
 
 #[tauri::command]
@@ -1337,14 +1380,10 @@ async fn read_repo_artifact(
     repository_id: String,
     artifact_id: String,
 ) -> Result<String, String> {
-    validate_path_component(&artifact_id)?;
-    let artifact_path =
-        repo_artifacts_dir(&app_handle, &repository_id)?.join(format!("{}.json", artifact_id));
-    tokio::task::spawn_blocking(move || {
-        std::fs::read_to_string(&artifact_path).map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|e| format!("task join error: {}", e))?
+    let dir = repo_artifacts_dir(&app_handle, &repository_id)?;
+    tokio::task::spawn_blocking(move || read_artifact_in_dir(&dir, &artifact_id))
+        .await
+        .map_err(|e| format!("task join error: {}", e))?
 }
 
 /// ワークツリーのアーティファクトを、そのワークツリーの元リポジトリへコピーする。
