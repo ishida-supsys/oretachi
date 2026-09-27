@@ -24,23 +24,30 @@
 //   `Secure` 属性はこのアプリが HTTPS 非対応なため付けられない(付けると
 //   localhost の通常利用まで Cookie が送られなくなる)。
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{Request, State},
+    extract::{Path as AxumPath, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     middleware::{self, Next},
-    response::{IntoResponse, Redirect, Response},
+    response::{IntoResponse, Json, Redirect, Response},
     routing::get,
     Router,
 };
 use hmac::{Hmac, Mac};
+use serde::Serialize;
+use serde_json::json;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tauri::{AppHandle, Manager};
 
-use crate::settings::SettingsManager;
+use crate::settings::{Repository, SettingsManager, WorktreeEntry};
+use crate::{
+    artifacts_dir_in, list_artifacts_in_dir, list_repo_artifacts_in_dir, read_artifact_store,
+    repo_artifacts_dir_in, repo_artifacts_key, validate_path_component,
+};
 
 /// 現在の MCP API key を返す。設定は再起動なしで変わりうるため、毎リクエスト読む。
 pub type KeyProvider = Arc<dyn Fn() -> String + Send + Sync>;
@@ -53,6 +60,10 @@ pub type AssetSource = Arc<dyn Fn(&str) -> Option<(Vec<u8>, String)> + Send + Sy
 /// (release ビルド、または dist が既に存在する dev)。
 pub type DevProxyTarget = Option<String>;
 
+/// `/api/*` が読む設定のスナップショットを返す。設定は再起動なしで変わりうるため、
+/// 毎リクエスト読む(`KeyProvider` と同じ方針)。
+pub type SettingsProvider = Arc<dyn Fn() -> (Vec<WorktreeEntry>, Vec<Repository>) + Send + Sync>;
+
 const COOKIE_HMAC_CONTEXT: &[u8] = b"oretachi-web-viewer-session-v1";
 
 #[derive(Clone)]
@@ -61,6 +72,8 @@ struct ViewerState {
     assets: AssetSource,
     dev_proxy: Option<String>,
     cookie_name: String,
+    data_dir: PathBuf,
+    settings: SettingsProvider,
 }
 
 fn session_cookie_value(key: &str) -> String {
@@ -302,18 +315,243 @@ async fn root_redirect() -> impl IntoResponse {
     Redirect::to("/worktrees")
 }
 
+// ─── /api/* (読み取り JSON API) ────────────────────────────────────────────
+//
+// このセクションはすべて `viewer_auth` の配下 (Cookie 認証必須) にある。
+// GET のみで副作用がないため CSRF は問題にならない (web_viewer.rs 冒頭のコメント参照)。
+
+fn json_response(status: StatusCode, value: impl Serialize) -> Response {
+    let mut response = (status, Json(value)).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
+fn api_error(status: StatusCode, message: impl Into<String>) -> Response {
+    json_response(status, json!({ "error": message.into() }))
+}
+
+fn last_updated_at(items: &[serde_json::Value]) -> u64 {
+    items
+        .iter()
+        .filter_map(|v| v.get("updated_at").and_then(|x| x.as_u64()))
+        .max()
+        .unwrap_or(0)
+}
+
+/// `GET /api/worktrees`: ワークツリー一覧(件数・最終更新込み)と、
+/// アーティファクトを 1 件以上持つリポジトリの一覧を返す。
+async fn api_list_worktrees(State(state): State<ViewerState>) -> Response {
+    let data_dir = state.data_dir.clone();
+    let (worktrees, repositories) = (state.settings)();
+    let result = tokio::task::spawn_blocking(move || {
+        let worktree_entries: Vec<serde_json::Value> = worktrees
+            .iter()
+            .map(|w| {
+                let artifacts = artifacts_dir_in(&data_dir, &w.id)
+                    .ok()
+                    .map(|dir| {
+                        list_artifacts_in_dir(&dir).unwrap_or_else(|e| {
+                            // 1件でも壊れていると全体 Err になる（list_artifacts_in_dir の仕様）。
+                            // 件数が原因不明のまま 0 に見えないよう、握りつぶさずログに残す。
+                            log::warn!(
+                                "[web_viewer] worktree {} のアーティファクト一覧取得に失敗: {}",
+                                w.id,
+                                e
+                            );
+                            vec![]
+                        })
+                    })
+                    .unwrap_or_default();
+                json!({
+                    "id": w.id,
+                    "name": w.name,
+                    "repositoryId": w.repository_id,
+                    "repositoryName": w.repository_name,
+                    "branchName": w.branch_name,
+                    "description": w.description,
+                    "isHome": w.is_home,
+                    "isRepository": w.is_repository,
+                    "artifactCount": artifacts.len(),
+                    "lastUpdatedAt": last_updated_at(&artifacts),
+                })
+            })
+            .collect();
+
+        let repository_entries: Vec<serde_json::Value> = repositories
+            .iter()
+            .filter_map(|r| {
+                let dir = repo_artifacts_dir_in(&data_dir, &r.id).ok()?;
+                let artifacts = list_repo_artifacts_in_dir(&dir);
+                if artifacts.is_empty() {
+                    return None;
+                }
+                Some(json!({
+                    "key": repo_artifacts_key(&r.id),
+                    "id": r.id,
+                    "name": r.name,
+                    "artifactCount": artifacts.len(),
+                    "lastUpdatedAt": last_updated_at(&artifacts),
+                }))
+            })
+            .collect();
+
+        json!({ "worktrees": worktree_entries, "repositories": repository_entries })
+    })
+    .await;
+
+    match result {
+        Ok(body) => json_response(StatusCode::OK, body),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("task join error: {}", e)),
+    }
+}
+
+/// `GET /api/worktrees/{id}/artifacts`
+async fn api_list_worktree_artifacts(
+    State(state): State<ViewerState>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    if let Err(e) = validate_path_component(&id) {
+        return api_error(StatusCode::BAD_REQUEST, e);
+    }
+    let (worktrees, _repositories) = (state.settings)();
+    if !worktrees.iter().any(|w| w.id == id) {
+        return api_error(StatusCode::NOT_FOUND, "ワークツリーが見つかりません");
+    }
+    let dir = match artifacts_dir_in(&state.data_dir, &id) {
+        Ok(dir) => dir,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    match tokio::task::spawn_blocking(move || list_artifacts_in_dir(&dir)).await {
+        Ok(Ok(list)) => json_response(StatusCode::OK, list),
+        Ok(Err(e)) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("task join error: {}", e)),
+    }
+}
+
+/// `GET /api/repositories/{repo_key}/artifacts`
+async fn api_list_repo_artifacts(
+    State(state): State<ViewerState>,
+    AxumPath(repo_key): AxumPath<String>,
+) -> Response {
+    if let Err(e) = validate_path_component(&repo_key) {
+        return api_error(StatusCode::BAD_REQUEST, e);
+    }
+    let (_worktrees, repositories) = (state.settings)();
+    let Some(repository) = repositories
+        .iter()
+        .find(|r| repo_artifacts_key(&r.id) == repo_key)
+    else {
+        return api_error(StatusCode::NOT_FOUND, "リポジトリが見つかりません");
+    };
+    let dir = match repo_artifacts_dir_in(&state.data_dir, &repository.id) {
+        Ok(dir) => dir,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    let list = tokio::task::spawn_blocking(move || list_repo_artifacts_in_dir(&dir)).await;
+    match list {
+        Ok(list) => json_response(StatusCode::OK, list),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("task join error: {}", e)),
+    }
+}
+
+/// 本体 JSON・memory・memoryUpdatedAt をまとめて読む。ファイルが無ければ `Ok(None)`。
+///
+/// 存在確認と読み込みを分けると、その間に削除された場合に 404 ではなく 500 になる
+/// (TOCTOU)。ここでは 1 回の読み込みの結果だけで判定する。
+fn read_artifact_payload(
+    dir: &std::path::Path,
+    artifact_id: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    validate_path_component(artifact_id)?;
+    let path = dir.join(format!("{}.json", artifact_id));
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(raw) => raw,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    let artifact: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let (memory, memory_updated_at) = read_artifact_store(dir, artifact_id);
+    Ok(Some(json!({
+        "artifact": artifact,
+        "memory": memory,
+        "memoryUpdatedAt": memory_updated_at,
+    })))
+}
+
+async fn respond_with_artifact(dir: std::path::PathBuf, artifact_id: String) -> Response {
+    match tokio::task::spawn_blocking(move || read_artifact_payload(&dir, &artifact_id)).await {
+        Ok(Ok(Some(body))) => json_response(StatusCode::OK, body),
+        Ok(Ok(None)) => api_error(StatusCode::NOT_FOUND, "アーティファクトが見つかりません"),
+        Ok(Err(e)) => api_error(StatusCode::INTERNAL_SERVER_ERROR, e),
+        Err(e) => api_error(StatusCode::INTERNAL_SERVER_ERROR, format!("task join error: {}", e)),
+    }
+}
+
+/// `GET /api/worktrees/{id}/artifacts/{artifact_id}`
+async fn api_read_worktree_artifact(
+    State(state): State<ViewerState>,
+    AxumPath((id, artifact_id)): AxumPath<(String, String)>,
+) -> Response {
+    if let Err(e) = validate_path_component(&id) {
+        return api_error(StatusCode::BAD_REQUEST, e);
+    }
+    if let Err(e) = validate_path_component(&artifact_id) {
+        return api_error(StatusCode::BAD_REQUEST, e);
+    }
+    let (worktrees, _repositories) = (state.settings)();
+    if !worktrees.iter().any(|w| w.id == id) {
+        return api_error(StatusCode::NOT_FOUND, "ワークツリーが見つかりません");
+    }
+    let dir = match artifacts_dir_in(&state.data_dir, &id) {
+        Ok(dir) => dir,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    respond_with_artifact(dir, artifact_id).await
+}
+
+/// `GET /api/repositories/{repo_key}/artifacts/{artifact_id}`
+async fn api_read_repo_artifact(
+    State(state): State<ViewerState>,
+    AxumPath((repo_key, artifact_id)): AxumPath<(String, String)>,
+) -> Response {
+    if let Err(e) = validate_path_component(&repo_key) {
+        return api_error(StatusCode::BAD_REQUEST, e);
+    }
+    if let Err(e) = validate_path_component(&artifact_id) {
+        return api_error(StatusCode::BAD_REQUEST, e);
+    }
+    let (_worktrees, repositories) = (state.settings)();
+    let Some(repository) = repositories
+        .iter()
+        .find(|r| repo_artifacts_key(&r.id) == repo_key)
+    else {
+        return api_error(StatusCode::NOT_FOUND, "リポジトリが見つかりません");
+    };
+    let dir = match repo_artifacts_dir_in(&state.data_dir, &repository.id) {
+        Ok(dir) => dir,
+        Err(e) => return api_error(StatusCode::BAD_REQUEST, e),
+    };
+    respond_with_artifact(dir, artifact_id).await
+}
+
 /// テスト・実装から共通で使うルータ組み立て。
 fn build_router(
     key: KeyProvider,
     cookie_name: String,
     assets: AssetSource,
     dev_proxy: DevProxyTarget,
+    data_dir: PathBuf,
+    settings: SettingsProvider,
 ) -> Router {
     let state = ViewerState {
         key: key.clone(),
         assets,
         dev_proxy: dev_proxy.clone(),
         cookie_name,
+        data_dir,
+        settings,
     };
 
     // `/assets/*`・`/vendor/*`・ルート直下の静的ファイル(`/vite.svg` 等)は
@@ -324,6 +562,20 @@ fn build_router(
         .route("/worktrees", get(spa_shell))
         .route("/worktrees/{*rest}", get(spa_shell))
         .route("/repositories/{*rest}", get(spa_shell))
+        .route("/api/worktrees", get(api_list_worktrees))
+        .route("/api/worktrees/{id}/artifacts", get(api_list_worktree_artifacts))
+        .route(
+            "/api/worktrees/{id}/artifacts/{artifact_id}",
+            get(api_read_worktree_artifact),
+        )
+        .route(
+            "/api/repositories/{repo_key}/artifacts",
+            get(api_list_repo_artifacts),
+        )
+        .route(
+            "/api/repositories/{repo_key}/artifacts/{artifact_id}",
+            get(api_read_repo_artifact),
+        )
         .fallback(get(static_fallback))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state, viewer_auth))
@@ -364,7 +616,18 @@ pub fn router(app_handle: AppHandle, port: u16) -> Router {
 
     let cookie_name = format!("oretachi_viewer_{}", port);
 
-    build_router(key, cookie_name, assets, dev_proxy)
+    let settings_handle = app_handle.clone();
+    let settings: SettingsProvider = Arc::new(move || {
+        let s = settings_handle.state::<SettingsManager>().get();
+        (s.worktrees, s.repositories)
+    });
+
+    let data_dir = app_handle
+        .path()
+        .app_data_dir()
+        .expect("app_data_dir は起動時に必ず解決できる");
+
+    build_router(key, cookie_name, assets, dev_proxy, data_dir, settings)
 }
 
 #[cfg(test)]
@@ -389,12 +652,88 @@ mod tests {
         })
     }
 
+    fn empty_settings() -> SettingsProvider {
+        Arc::new(|| (vec![], vec![]))
+    }
+
+    /// テストごとに衝突しない一時ディレクトリを用意する(既存があれば作り直す)。
+    fn temp_data_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "oretachi-web-viewer-test-{}-{}-{}",
+            tag,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn test_worktree(id: &str) -> WorktreeEntry {
+        WorktreeEntry {
+            id: id.to_string(),
+            name: format!("name-{}", id),
+            repository_id: "repo-1".to_string(),
+            repository_name: "repo-name".to_string(),
+            path: format!("/tmp/{}", id),
+            branch_name: "main".to_string(),
+            hotkey_char: None,
+            auto_approval: None,
+            auto_approval_prompt: None,
+            description: None,
+            description_open: None,
+            workgroup_id: None,
+            tray_notification: None,
+            is_home: false,
+            is_repository: false,
+        }
+    }
+
+    fn test_repository(id: &str) -> Repository {
+        Repository {
+            id: id.to_string(),
+            name: format!("repo-name-{}", id),
+            path: id.to_string(),
+            exec_script: None,
+            copy_targets: None,
+            package_manager: None,
+            package_manager_args: None,
+            notification_hooks: None,
+            pull_before_add: None,
+            branch_name_pattern: None,
+        }
+    }
+
+    fn write_test_artifact(dir: &std::path::Path, artifact_id: &str, updated_at: u64) {
+        std::fs::create_dir_all(dir).unwrap();
+        let content = json!({
+            "id": artifact_id,
+            "updated_at": updated_at,
+            "content": "hello",
+            "modules": {},
+        });
+        std::fs::write(
+            dir.join(format!("{}.json", artifact_id)),
+            serde_json::to_string(&content).unwrap(),
+        )
+        .unwrap();
+    }
+
+    fn cookie_for(key: &str) -> String {
+        format!("oretachi_viewer_test={}", session_cookie_value(key))
+    }
+
     fn router_for_test() -> Router {
         build_router(
             key_provider(TEST_KEY),
             "oretachi_viewer_test".to_string(),
             stub_assets(),
             None,
+            temp_data_dir("basic"),
+            empty_settings(),
         )
     }
 
@@ -469,6 +808,8 @@ mod tests {
             "oretachi_viewer_test".to_string(),
             stub_assets(),
             None,
+            temp_data_dir("empty-key"),
+            empty_settings(),
         );
         let resp = get(&router, "/worktrees?token=", None).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -488,6 +829,8 @@ mod tests {
             "oretachi_viewer_test".to_string(),
             stub_assets(),
             None,
+            temp_data_dir("key-rotation"),
+            empty_settings(),
         );
 
         let resp = get(&router, "/worktrees", Some(&cookie)).await;
@@ -562,5 +905,218 @@ mod tests {
             .unwrap();
         let resp = combined.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    async fn json_body(resp: Response) -> serde_json::Value {
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn api_worktrees_requires_cookie() {
+        let router = router_for_test();
+        let resp = get(&router, "/api/worktrees", None).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn api_worktrees_returns_counts_and_repositories_with_artifacts() {
+        let data_dir = temp_data_dir("worktrees-api");
+        let wt = test_worktree("wt-a");
+        let repo_with = test_repository("D:/git/has-artifacts");
+        let repo_without = test_repository("D:/git/empty");
+
+        write_test_artifact(&data_dir.join("artifacts").join(&wt.id), "art-1", 100);
+        write_test_artifact(&data_dir.join("artifacts").join(&wt.id), "art-2", 200);
+        let repo_key = repo_artifacts_key(&repo_with.id);
+        write_test_artifact(&data_dir.join("repo-artifacts").join(&repo_key), "repo-art-1", 50);
+
+        let wt_for_settings = wt.clone();
+        let repos_for_settings = vec![repo_with.clone(), repo_without.clone()];
+        let settings: SettingsProvider =
+            Arc::new(move || (vec![wt_for_settings.clone()], repos_for_settings.clone()));
+
+        let router = build_router(
+            key_provider(TEST_KEY),
+            "oretachi_viewer_test".to_string(),
+            stub_assets(),
+            None,
+            data_dir,
+            settings,
+        );
+        let cookie = cookie_for(TEST_KEY);
+        let resp = get(&router, "/api/worktrees", Some(&cookie)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+
+        assert_eq!(body["worktrees"][0]["id"], "wt-a");
+        assert_eq!(body["worktrees"][0]["artifactCount"], 2);
+        assert_eq!(body["worktrees"][0]["lastUpdatedAt"], 200);
+
+        let repositories = body["repositories"].as_array().unwrap();
+        assert_eq!(repositories.len(), 1, "アーティファクトの無いリポジトリは出ない");
+        assert_eq!(repositories[0]["key"], repo_key);
+        assert_eq!(repositories[0]["artifactCount"], 1);
+    }
+
+    #[tokio::test]
+    async fn api_worktree_list_and_read_roundtrip_with_memory() {
+        let data_dir = temp_data_dir("worktree-list-read");
+        let wt = test_worktree("wt-b");
+        let artifacts_dir = data_dir.join("artifacts").join(&wt.id);
+        write_test_artifact(&artifacts_dir, "art-1", 100);
+        std::fs::write(
+            artifacts_dir.join("art-1.state"),
+            serde_json::to_string(&json!({ "memory": { "foo": "bar" }, "memoryUpdatedAt": 42 }))
+                .unwrap(),
+        )
+        .unwrap();
+
+        let wt_for_settings = wt.clone();
+        let settings: SettingsProvider = Arc::new(move || (vec![wt_for_settings.clone()], vec![]));
+        let router = build_router(
+            key_provider(TEST_KEY),
+            "oretachi_viewer_test".to_string(),
+            stub_assets(),
+            None,
+            data_dir,
+            settings,
+        );
+        let cookie = cookie_for(TEST_KEY);
+
+        let resp = get(&router, "/api/worktrees/wt-b/artifacts", Some(&cookie)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let list = json_body(resp).await;
+        assert_eq!(list.as_array().unwrap().len(), 1);
+        assert_eq!(list[0]["content"], "hello");
+
+        let resp = get(
+            &router,
+            "/api/worktrees/wt-b/artifacts/art-1",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        assert_eq!(body["artifact"]["id"], "art-1");
+        assert_eq!(body["memory"]["foo"], "bar");
+        assert_eq!(body["memoryUpdatedAt"], 42);
+
+        let resp = get(
+            &router,
+            "/api/worktrees/wt-b/artifacts/does-not-exist",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn api_repository_list_drops_content_and_modules_except_url_artifacts() {
+        let data_dir = temp_data_dir("repo-list");
+        let repo = test_repository("D:/git/repo-list");
+        let repo_key = repo_artifacts_key(&repo.id);
+        let dir = data_dir.join("repo-artifacts").join(&repo_key);
+        write_test_artifact(&dir, "art-1", 100);
+        std::fs::write(
+            dir.join("art-2.json"),
+            serde_json::to_string(&json!({
+                "id": "art-2",
+                "updated_at": 200,
+                "type": "text/uri-list",
+                "content": "https://example.com",
+                "modules": {},
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let repo_for_settings = repo.clone();
+        let settings: SettingsProvider = Arc::new(move || (vec![], vec![repo_for_settings.clone()]));
+        let router = build_router(
+            key_provider(TEST_KEY),
+            "oretachi_viewer_test".to_string(),
+            stub_assets(),
+            None,
+            data_dir,
+            settings,
+        );
+        let cookie = cookie_for(TEST_KEY);
+
+        let resp = get(
+            &router,
+            &format!("/api/repositories/{}/artifacts", repo_key),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let list = json_body(resp).await;
+        let by_id = |id: &str| {
+            list.as_array()
+                .unwrap()
+                .iter()
+                .find(|v| v["id"] == id)
+                .unwrap()
+                .clone()
+        };
+        assert!(by_id("art-1").get("content").is_none());
+        assert!(by_id("art-1").get("modules").is_none());
+        assert_eq!(by_id("art-2")["content"], "https://example.com");
+
+        let resp = get(
+            &router,
+            &format!("/api/repositories/{}/artifacts/art-1", repo_key),
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = json_body(resp).await;
+        // read エンドポイントは list と違い本体をそのまま返すので content が残る
+        assert_eq!(body["artifact"]["content"], "hello");
+    }
+
+    #[tokio::test]
+    async fn api_rejects_path_traversal_and_unknown_ids() {
+        let data_dir = temp_data_dir("api-traversal");
+        let wt = test_worktree("wt-c");
+        write_test_artifact(&data_dir.join("artifacts").join(&wt.id), "art-1", 1);
+
+        let wt_for_settings = wt.clone();
+        let settings: SettingsProvider = Arc::new(move || (vec![wt_for_settings.clone()], vec![]));
+        let router = build_router(
+            key_provider(TEST_KEY),
+            "oretachi_viewer_test".to_string(),
+            stub_assets(),
+            None,
+            data_dir,
+            settings,
+        );
+        let cookie = cookie_for(TEST_KEY);
+
+        // `..` を含む id
+        let resp = get(
+            &router,
+            "/api/worktrees/..%2Fetc/artifacts",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // `\` を含む artifact_id
+        let resp = get(
+            &router,
+            "/api/worktrees/wt-c/artifacts/foo%5Cbar",
+            Some(&cookie),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // settings に無いワークツリー id
+        let resp = get(&router, "/api/worktrees/unknown/artifacts", Some(&cookie)).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+
+        // settings に無いリポジトリ key
+        let resp = get(&router, "/api/repositories/unknown/artifacts", Some(&cookie)).await;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
     }
 }
