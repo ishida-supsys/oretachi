@@ -626,6 +626,45 @@ fn get_mcp_status(state: State<mcp_server::McpServerManager>) -> mcp_server::Mcp
     state.get_status()
 }
 
+/// アーティファクト Web 閲覧のトップページ(`/worktrees`)を開くための URL を作る(#341)。
+///
+/// `remote_access` が有効でも既定ブラウザは同一マシン上で開くので、常に `127.0.0.1` を使う
+/// (LAN 経由の平文送信を避ける。停止条件でユーザー確認済み)。ポートは bind 後の実ポートを
+/// 使う必要があるため、設定値ではなく `McpServerManager` の実行時ステータスから取る。
+#[tauri::command]
+fn get_artifact_web_viewer_url(
+    mcp_state: State<mcp_server::McpServerManager>,
+    settings_manager: State<SettingsManager>,
+) -> Result<String, String> {
+    let status = mcp_state.get_status();
+    let port = status
+        .port
+        .filter(|_| status.running)
+        .ok_or_else(|| "MCP サーバーが起動していません".to_string())?;
+    let api_key = settings_manager.get().mcp_api_key;
+    if api_key.is_empty() {
+        return Err("MCP API key が未設定です".to_string());
+    }
+    let token = percent_encode_query_component(&api_key);
+    Ok(format!("http://127.0.0.1:{}/worktrees?token={}", port, token))
+}
+
+/// `application/x-www-form-urlencoded` のクエリ値として安全な最小限のパーセントエンコード。
+/// `mcp_api_key` は英数字のみ(`settings::generate_api_key`)なので通常は素通りするが、
+/// 将来の生成方式変更や手動設定を考慮して防御的にエンコードする。
+fn percent_encode_query_component(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{:02X}", b)),
+        }
+    }
+    out
+}
+
 #[tauri::command]
 async fn restart_mcp_server(app_handle: tauri::AppHandle) -> Result<mcp_server::McpStatus, String> {
     let manager = app_handle.state::<mcp_server::McpServerManager>();
@@ -1197,7 +1236,17 @@ async fn set_artifact_memory(
     let dir = artifact_scope_dir(&app_handle, &scope, &scope_id)?;
     set_artifact_memory_in(dir, &artifact_id, memory)
         .await
-        .map(|_| ())
+        .map(|_| ())?;
+
+    // Tauri イベント(artifact-state-changed)は emit しない: このアプリ内の他ビューア
+    // ウィンドウへ自分の書き込みをエコーする経路が無く、追加すると自己エコーになる。
+    // Web 閲覧(SSE)だけはこの書き込みを知る手段が無いので、broadcast channel へ直接送る(#341)。
+    if let Some(mcp_manager) = app_handle.try_state::<mcp_server::McpServerManager>() {
+        let _ = mcp_manager
+            .viewer_events_tx
+            .send(web_viewer::ViewerEvent::state_changed(&scope, scope_id, artifact_id));
+    }
+    Ok(())
 }
 
 // ─── アーティファクト表示中ロック ─────────────────────────────────────────────
@@ -2325,6 +2374,7 @@ pub fn run() {
             open_in_file_explorer,
             open_log_dir,
             get_mcp_status,
+            get_artifact_web_viewer_url,
             restart_mcp_server,
             regenerate_mcp_api_key,
             mcp_server::register_detached_worktree,

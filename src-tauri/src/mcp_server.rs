@@ -529,9 +529,20 @@ pub struct McpServerManager {
     added_listener_id: Mutex<Option<tauri::EventId>>,
     /// notify-worktree リスナーID（再起動時にアンリジスターするために保持）
     notify_listener_id: Mutex<Option<tauri::EventId>>,
+    /// artifact-changed リスナーID（再起動時にアンリジスターするために保持。#341）
+    artifact_changed_listener_id: Mutex<Option<tauri::EventId>>,
+    /// repo-artifact-changed リスナーID（再起動時にアンリジスターするために保持。#341）
+    repo_artifact_changed_listener_id: Mutex<Option<tauri::EventId>>,
+    /// artifact-state-changed リスナーID（再起動時にアンリジスターするために保持。#341）
+    artifact_state_changed_listener_id: Mutex<Option<tauri::EventId>>,
     /// hook 通知をWebView IPCを経由せずMCPピアへ直接配信するチャネル
     /// (WebView IPC を使うと UIスレッドに負荷がかかるため broadcast channel を使用)
     pub hook_tx: broadcast::Sender<NotifyWorktreeEvent>,
+    /// アーティファクト変更を Web 閲覧の SSE(`/api/events`)へ中継するチャネル(#341)。
+    /// `artifact-changed` / `repo-artifact-changed` / `artifact-state-changed` の
+    /// Tauri イベントリスナーがここへ転送する。`set_artifact_memory`(アプリ内ビューア)
+    /// のように Tauri イベントを発行しない書き込みも、ここへは直接送ってよい。
+    pub viewer_events_tx: broadcast::Sender<crate::web_viewer::ViewerEvent>,
     /// 通知の rate limiting: (worktree_name, kind, tray) → 最終送信時刻 (None=未送信)
     /// hook: 3秒、approval: 1秒 debounce。general/completed や任意の kind は
     /// debounce しない（MCP クライアントの意図的な通知を握り潰さないため）
@@ -632,7 +643,11 @@ impl McpServerManager {
             archive_listener_id: Mutex::new(None),
             added_listener_id: Mutex::new(None),
             notify_listener_id: Mutex::new(None),
+            artifact_changed_listener_id: Mutex::new(None),
+            repo_artifact_changed_listener_id: Mutex::new(None),
+            artifact_state_changed_listener_id: Mutex::new(None),
             hook_tx: broadcast::channel::<NotifyWorktreeEvent>(256).0,
+            viewer_events_tx: broadcast::channel::<crate::web_viewer::ViewerEvent>(256).0,
             notify_last_sent: Mutex::new(HashMap::new()),
             event_last_sent: Mutex::new(HashMap::new()),
             prompt_context_last_sent: Mutex::new(HashMap::new()),
@@ -7876,6 +7891,21 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
             app_handle.unlisten(old_id);
         }
     }
+    if let Ok(mut guard) = manager.artifact_changed_listener_id.lock() {
+        if let Some(old_id) = guard.take() {
+            app_handle.unlisten(old_id);
+        }
+    }
+    if let Ok(mut guard) = manager.repo_artifact_changed_listener_id.lock() {
+        if let Some(old_id) = guard.take() {
+            app_handle.unlisten(old_id);
+        }
+    }
+    if let Ok(mut guard) = manager.artifact_state_changed_listener_id.lock() {
+        if let Some(old_id) = guard.take() {
+            app_handle.unlisten(old_id);
+        }
+    }
 
     drop(manager);
 
@@ -7951,6 +7981,86 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
     let manager = app_handle.state::<McpServerManager>();
     if let Ok(mut guard) = manager.notify_listener_id.lock() {
         *guard = Some(notify_listener_id);
+    }
+    let viewer_events_tx = manager.viewer_events_tx.clone();
+    drop(manager);
+
+    // アーティファクト変更 (`artifact-changed` / `repo-artifact-changed` /
+    // `artifact-state-changed`) を Web 閲覧の SSE (`/api/events`) へ中継する(#341)。
+    // 既存の worktree-archived 等と同じ作法で、リスナーIDを保存して再起動時にアンリジスターする。
+    let viewer_events_tx_for_artifact = viewer_events_tx.clone();
+    let artifact_changed_listener_id =
+        app_handle.listen("artifact-changed", move |event: tauri::Event| {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+                let worktree_id = payload["worktreeId"].as_str().unwrap_or("").to_string();
+                let artifact_id = payload["artifactId"].as_str().unwrap_or("").to_string();
+                let command = payload["command"].as_str().unwrap_or("").to_string();
+                // 欠落時は true 扱い(デスクトップ版 tauriArtifactDataSource.ts の `!== false` と同じ既定)。
+                let auto_open = payload["autoOpen"].as_bool().unwrap_or(true);
+                if worktree_id.is_empty() || artifact_id.is_empty() {
+                    return;
+                }
+                let _ = viewer_events_tx_for_artifact.send(
+                    crate::web_viewer::ViewerEvent::artifact_changed_worktree(
+                        worktree_id,
+                        artifact_id,
+                        command,
+                        auto_open,
+                    ),
+                );
+            }
+        });
+    let manager = app_handle.state::<McpServerManager>();
+    if let Ok(mut guard) = manager.artifact_changed_listener_id.lock() {
+        *guard = Some(artifact_changed_listener_id);
+    }
+    drop(manager);
+
+    let viewer_events_tx_for_repo = viewer_events_tx.clone();
+    let repo_artifact_changed_listener_id =
+        app_handle.listen("repo-artifact-changed", move |event: tauri::Event| {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+                let repository_id = payload["repositoryId"].as_str().unwrap_or("").to_string();
+                let artifact_id = payload["artifactId"].as_str().unwrap_or("").to_string();
+                let command = payload["command"].as_str().unwrap_or("").to_string();
+                if repository_id.is_empty() || artifact_id.is_empty() {
+                    return;
+                }
+                let _ = viewer_events_tx_for_repo.send(
+                    crate::web_viewer::ViewerEvent::artifact_changed_repository(
+                        repository_id,
+                        artifact_id,
+                        command,
+                    ),
+                );
+            }
+        });
+    let manager = app_handle.state::<McpServerManager>();
+    if let Ok(mut guard) = manager.repo_artifact_changed_listener_id.lock() {
+        *guard = Some(repo_artifact_changed_listener_id);
+    }
+    drop(manager);
+
+    let viewer_events_tx_for_state = viewer_events_tx.clone();
+    let artifact_state_changed_listener_id =
+        app_handle.listen("artifact-state-changed", move |event: tauri::Event| {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) {
+                let scope = payload["scope"].as_str().unwrap_or("worktree").to_string();
+                let scope_id = payload["scopeId"].as_str().unwrap_or("").to_string();
+                let artifact_id = payload["artifactId"].as_str().unwrap_or("").to_string();
+                if scope_id.is_empty() || artifact_id.is_empty() {
+                    return;
+                }
+                let _ = viewer_events_tx_for_state.send(crate::web_viewer::ViewerEvent::state_changed(
+                    &scope,
+                    scope_id,
+                    artifact_id,
+                ));
+            }
+        });
+    let manager = app_handle.state::<McpServerManager>();
+    if let Ok(mut guard) = manager.artifact_state_changed_listener_id.lock() {
+        *guard = Some(artifact_state_changed_listener_id);
     }
     drop(manager);
 
@@ -8061,7 +8171,12 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
 
         // 閲覧用ルータ(Cookie 認証)は Bearer layer の**外**で merge する。
         // remote_access で 0.0.0.0 bind の場合も同じ Cookie 認証で守られる。
-        let router = bearer_router.merge(crate::web_viewer::router(app_handle.clone(), port));
+        let router = bearer_router.merge(crate::web_viewer::router(
+            app_handle.clone(),
+            port,
+            viewer_events_tx.clone(),
+            shutdown_rx.clone(),
+        ));
 
         // ステータス: 起動中（世代が一致する場合のみ更新）
         if generation.load(Ordering::SeqCst) == my_generation {

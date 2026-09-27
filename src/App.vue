@@ -23,6 +23,7 @@ import TrayButton from "./components/TrayButton.vue";
 import FirstRunWizard from "./components/wizard/FirstRunWizard.vue";
 import { message } from "@tauri-apps/plugin-dialog";
 import { invoke } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useIdeSelect } from "./composables/useIdeSelect";
 import { useSettings, syncRepositoryWorktrees, applyPluginConfig } from "./composables/useSettings";
 import { useWorktrees } from "./composables/useWorktrees";
@@ -1507,6 +1508,21 @@ async function onFocusAllSubWindows() {
   }
 }
 
+/** アーティファクト Web 閲覧のトップページ(`/worktrees`)を既定ブラウザで開く(#341) */
+async function onOpenWebViewer() {
+  try {
+    const url = await invoke<string>("get_artifact_web_viewer_url");
+    await openUrl(url);
+  } catch (e) {
+    toast.add({
+      severity: "error",
+      summary: t("webViewerOpenFailed"),
+      detail: String(e),
+      life: 6000,
+    });
+  }
+}
+
 // ワークツリー設定ダイアログ（カードメニューの「設定」から開く。
 // 自動承認 / トレイ通知 / ホットキー / プラグイン再適用をここに集約している）
 const worktreeSettingsTargetId = ref("");
@@ -2619,6 +2635,7 @@ onMounted(async () => {
         @move-to-main-window="onMoveToMainWindow"
         @focus-sub-window="onFocusSubWindow"
         @focus-all-sub-windows="onFocusAllSubWindows"
+        @open-web-viewer="onOpenWebViewer"
         @open-worktree-settings="worktreeSettingsTargetId = $event"
         @cancel-ai-judging="onCancelAiJudging"
         @cancel-remove="cancelWorktreeRemove"
@@ -2855,6 +2872,7 @@ onMounted(async () => {
   "en": {
     "eventSpawnedSummary": "Agent started for a subscription",
     "eventSpawnedDetail": "Opened a tab in {name} to deliver {count} unread message(s).",
+    "webViewerOpenFailed": "Failed to open the browser viewer",
     "taskAddSummary": "Add Task",
     "taskAddDetail": "Generating code...",
     "taskExecutingSummary": "Executing Task",
@@ -2893,6 +2911,7 @@ onMounted(async () => {
   "ja": {
     "eventSpawnedSummary": "購読のためエージェントを起動しました",
     "eventSpawnedDetail": "{name} に未読 {count} 件を届けるためタブを開きました",
+    "webViewerOpenFailed": "ブラウザビューアを開けませんでした",
     "taskAddSummary": "タスク追加",
     "taskAddDetail": "コード生成中...",
     "taskExecutingSummary": "タスク実行中",

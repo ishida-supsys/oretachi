@@ -12,6 +12,7 @@
 // middleware(`viewer_auth` の内側)で Origin/Host/Sec-Fetch-Site を検証しており、
 // SameSite=Strict の Cookie だけに頼っていない(csrf_guard のドキュメントコメント参照)。
 
+use std::convert::Infallible;
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -22,7 +23,10 @@ use axum::{
     extract::{Path as AxumPath, Request, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Json, Redirect, Response},
+    response::{
+        sse::{Event as SseEvent, KeepAlive},
+        Html, IntoResponse, Json, Redirect, Response, Sse,
+    },
     routing::{get, post},
     Router,
 };
@@ -32,6 +36,7 @@ use serde_json::json;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tauri::{AppHandle, Emitter, Manager};
+use tokio::sync::{broadcast, watch};
 
 use crate::settings::{Repository, SettingsManager, WorktreeEntry};
 use crate::{
@@ -55,7 +60,91 @@ pub type ToolCaller = Arc<
 /// memory 書き込み後、開いている Tauri ビューアへ知らせる(mcp_server.rs の
 /// `artifact-state-changed` 発行と同じ目的: 知らせないと Tauri 側 iframe が古い
 /// スナップショットで書き戻し、Web 側の保存を消してしまう)。
+/// このイベントは mcp_server.rs の `artifact-state-changed` リスナー経由で
+/// `/api/events` (SSE, #341) へも中継される(web_viewer 自身は broadcast へ直接送らない)。
 pub type StateChangedNotifier = Arc<dyn Fn(&str, &str, &str) + Send + Sync>;
+
+/// `/api/events` (SSE) が中継するイベント。`artifact-changed` / `repo-artifact-changed` /
+/// `artifact-state-changed` の3つの Tauri イベントをこの形に正規化して配信する。
+///
+/// `scope` は worktree の実 ID を積む。repository のときはそれに加えて `repo_key`
+/// (URL に使う `repo_artifacts_key` のハッシュ) も積む。フロントは URL に使う
+/// key と一覧 API が返す実 ID の両方を持つ必要があるため(`resolveScope` 参照)。
+#[derive(Clone, Debug, Serialize)]
+pub struct ViewerEvent {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub scope: &'static str,
+    #[serde(rename = "scopeId")]
+    pub scope_id: String,
+    #[serde(rename = "repoKey", skip_serializing_if = "Option::is_none")]
+    pub repo_key: Option<String>,
+    #[serde(rename = "artifactId")]
+    pub artifact_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// `artifact-changed` のみ意味を持つ。フックによる URL 自動登録等の副産物としての
+    /// 追加は `false` になり、ビューア側は「開く」導線を出さずに黙って一覧へ取り込む
+    /// (`ArtifactViewerApp.vue` の `refreshSelected` 参照)。欠落時は `true` 相当として扱う
+    /// (デスクトップ版 `tauriArtifactDataSource.ts` の `!== false` と同じ既定)。
+    #[serde(rename = "autoOpen", skip_serializing_if = "Option::is_none")]
+    pub auto_open: Option<bool>,
+}
+
+impl ViewerEvent {
+    pub fn artifact_changed_worktree(
+        worktree_id: String,
+        artifact_id: String,
+        command: String,
+        auto_open: bool,
+    ) -> Self {
+        Self {
+            kind: "artifact-changed",
+            scope: "worktree",
+            scope_id: worktree_id,
+            repo_key: None,
+            artifact_id,
+            command: Some(command),
+            auto_open: Some(auto_open),
+        }
+    }
+
+    pub fn artifact_changed_repository(
+        repository_id: String,
+        artifact_id: String,
+        command: String,
+    ) -> Self {
+        let repo_key = repo_artifacts_key(&repository_id);
+        Self {
+            kind: "artifact-changed",
+            scope: "repository",
+            scope_id: repository_id,
+            repo_key: Some(repo_key),
+            artifact_id,
+            command: Some(command),
+            // repo-artifact-changed は Rust 側でそもそも autoOpen を積んでいない
+            // (常に "開く" 前提の transfer/import/delete のみが emit 元)。
+            auto_open: None,
+        }
+    }
+
+    pub fn state_changed(scope: &str, scope_id: String, artifact_id: String) -> Self {
+        let repo_key = if scope == "repository" {
+            Some(repo_artifacts_key(&scope_id))
+        } else {
+            None
+        };
+        Self {
+            kind: "state-changed",
+            scope: if scope == "repository" { "repository" } else { "worktree" },
+            scope_id,
+            repo_key,
+            artifact_id,
+            command: None,
+            auto_open: None,
+        }
+    }
+}
 
 /// 現在の MCP API key を返す。設定は再起動なしで変わりうるため、毎リクエスト読む。
 pub type KeyProvider = Arc<dyn Fn() -> String + Send + Sync>;
@@ -85,6 +174,8 @@ struct ViewerState {
     port: u16,
     tool_caller: ToolCaller,
     notify_state_changed: StateChangedNotifier,
+    events: broadcast::Sender<ViewerEvent>,
+    shutdown: watch::Receiver<bool>,
 }
 
 fn session_cookie_value(key: &str) -> String {
@@ -733,6 +824,50 @@ async fn api_call_tool_repo() -> Response {
     )
 }
 
+/// `GET /api/events`: アーティファクトの変更を SSE で中継する。
+///
+/// `viewer_auth` の配下にあるため Cookie 認証が必須。接続が `broadcast::Receiver` の
+/// バッファ(256件)を溢れさせて `Lagged` になった場合は、個々の差分を追わせる代わりに
+/// `{"type":"resync"}` を1件送って呼び出し元に一覧・本体の再取得を促す。
+/// サーバー再起動(`shutdown` が true になる)を検知したら接続を閉じる
+/// (開いたままの SSE 接続があると graceful shutdown が完了しない)。
+async fn api_events(State(state): State<ViewerState>) -> Response {
+    let rx = state.events.subscribe();
+    let shutdown = state.shutdown.clone();
+    let stream = futures_util::stream::unfold((rx, shutdown), |(mut rx, mut shutdown)| async move {
+        loop {
+            tokio::select! {
+                result = rx.recv() => {
+                    return match result {
+                        Ok(payload) => {
+                            let data = serde_json::to_string(&payload).unwrap_or_default();
+                            Some((Ok::<_, Infallible>(SseEvent::default().data(data)), (rx, shutdown)))
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            log::warn!("[web_viewer] SSE lagged, {} events dropped; sending resync", n);
+                            let data = json!({ "type": "resync" }).to_string();
+                            Some((Ok(SseEvent::default().data(data)), (rx, shutdown)))
+                        }
+                        Err(broadcast::error::RecvError::Closed) => None,
+                    };
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return None;
+                    }
+                    // false → false の変化は基本無いはずだが、安全側でループを続ける。
+                }
+            }
+        }
+    });
+
+    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
 /// テスト・実装から共通で使うルータ組み立て。
 fn build_router(
     key: KeyProvider,
@@ -744,6 +879,8 @@ fn build_router(
     port: u16,
     tool_caller: ToolCaller,
     notify_state_changed: StateChangedNotifier,
+    events: broadcast::Sender<ViewerEvent>,
+    shutdown: watch::Receiver<bool>,
 ) -> Router {
     let state = ViewerState {
         key: key.clone(),
@@ -755,6 +892,8 @@ fn build_router(
         port,
         tool_caller,
         notify_state_changed,
+        events,
+        shutdown,
     };
 
     // `/assets/*`・`/vendor/*`・ルート直下の静的ファイル(`/vite.svg` 等)は
@@ -795,6 +934,7 @@ fn build_router(
             "/api/repositories/{repo_key}/artifacts/{artifact_id}/call-tool",
             post(api_call_tool_repo),
         )
+        .route("/api/events", get(api_events))
         .fallback(get(static_fallback))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state.clone(), csrf_guard))
@@ -805,7 +945,14 @@ fn build_router(
 ///
 /// `port` は bind 後の実ポート(0 指定時も実際の値)を渡すこと。Cookie 名に含めることで、
 /// 同一ホストで動く別インスタンス(本番/dev)の Cookie を混同しないようにする。
-pub fn router(app_handle: AppHandle, port: u16) -> Router {
+/// `events` は `/api/events` (SSE) が中継するイベントの送信側、`shutdown` はサーバー
+/// 再起動時に SSE 接続を閉じるための監視チャンネル(呼び出し元の `shutdown_rx` を渡す)。
+pub fn router(
+    app_handle: AppHandle,
+    port: u16,
+    events: broadcast::Sender<ViewerEvent>,
+    shutdown: watch::Receiver<bool>,
+) -> Router {
     let key_handle = app_handle.clone();
     let key: KeyProvider = Arc::new(move || {
         key_handle
@@ -856,6 +1003,8 @@ pub fn router(app_handle: AppHandle, port: u16) -> Router {
         })
     });
 
+    // `artifact-state-changed` の emit は mcp_server.rs のリスナー経由で `/api/events` (SSE) へも
+    // 中継される(#341)。ここでは Tauri イベントを発行するだけでよい。
     let notify_handle = app_handle.clone();
     let notify_state_changed: StateChangedNotifier = Arc::new(move |scope, scope_id, artifact_id| {
         if let Err(e) = notify_handle.emit(
@@ -876,6 +1025,8 @@ pub fn router(app_handle: AppHandle, port: u16) -> Router {
         port,
         tool_caller,
         notify_state_changed,
+        events,
+        shutdown,
     )
 }
 
@@ -884,6 +1035,8 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use axum::http::Request as HttpRequest;
+    use futures_util::StreamExt;
+    use std::time::Duration;
     use tower::ServiceExt;
 
     const TEST_KEY: &str = "test-api-key-1234567890";
@@ -903,6 +1056,21 @@ mod tests {
 
     fn empty_settings() -> SettingsProvider {
         Arc::new(|| (vec![], vec![]))
+    }
+
+    fn test_events() -> broadcast::Sender<ViewerEvent> {
+        broadcast::channel(16).0
+    }
+
+    /// send 側を保持せず戻すと、watch チャンネルが即クローズ扱いになり
+    /// `changed()` が(shutdown を送っていないのに)即座に `Err` で解決してしまう
+    /// (`tokio::select!` はどちらの分岐が先に ready でも取り得るため、これが
+    /// `/api/events` のストリームを起動直後に終了させるフレーキーな失敗の原因になっていた)。
+    /// send 側は使わないが、`forget` して drop させないことでチャンネルを開いたままにする。
+    fn test_shutdown() -> watch::Receiver<bool> {
+        let (tx, rx) = watch::channel(false);
+        std::mem::forget(tx);
+        rx
     }
 
     /// テストごとに衝突しない一時ディレクトリを用意する(既存があれば作り直す)。
@@ -1027,6 +1195,8 @@ mod tests {
             TEST_PORT,
             stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
             noop_state_notifier(),
+            test_events(),
+            test_shutdown(),
         )
     }
 
@@ -1160,6 +1330,8 @@ mod tests {
             TEST_PORT,
             stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
             noop_state_notifier(),
+            test_events(),
+            test_shutdown(),
         );
         let resp = get(&router, "/worktrees?token=", None).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -1184,6 +1356,8 @@ mod tests {
             TEST_PORT,
             stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
             noop_state_notifier(),
+            test_events(),
+            test_shutdown(),
         );
 
         let resp = get(&router, "/worktrees", Some(&cookie)).await;
@@ -1299,6 +1473,8 @@ mod tests {
             TEST_PORT,
             stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
             noop_state_notifier(),
+            test_events(),
+            test_shutdown(),
         );
         let cookie = cookie_for(TEST_KEY);
         let resp = get(&router, "/api/worktrees", Some(&cookie)).await;
@@ -1340,6 +1516,8 @@ mod tests {
             TEST_PORT,
             stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
             noop_state_notifier(),
+            test_events(),
+            test_shutdown(),
         );
         let cookie = cookie_for(TEST_KEY);
 
@@ -1402,6 +1580,8 @@ mod tests {
             TEST_PORT,
             stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
             noop_state_notifier(),
+            test_events(),
+            test_shutdown(),
         );
         let cookie = cookie_for(TEST_KEY);
 
@@ -1455,6 +1635,8 @@ mod tests {
             TEST_PORT,
             stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
             noop_state_notifier(),
+            test_events(),
+            test_shutdown(),
         );
         let cookie = cookie_for(TEST_KEY);
 
@@ -1504,6 +1686,8 @@ mod tests {
             TEST_PORT,
             tool_caller,
             notify,
+            test_events(),
+            test_shutdown(),
         )
     }
 
@@ -1641,6 +1825,8 @@ mod tests {
             TEST_PORT,
             stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
             recording_state_notifier(notify_calls.clone()),
+            test_events(),
+            test_shutdown(),
         );
         let cookie = cookie_for(TEST_KEY);
 
@@ -1747,6 +1933,8 @@ mod tests {
             TEST_PORT,
             stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
             noop_state_notifier(),
+            test_events(),
+            test_shutdown(),
         );
         let cookie = cookie_for(TEST_KEY);
 
@@ -1907,5 +2095,103 @@ mod tests {
         )
         .await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    // ─── #341: SSE (/api/events) ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn events_requires_cookie() {
+        let router = router_for_test();
+        let resp = get(&router, "/api/events", None).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn events_streams_broadcast_payload_as_sse_data() {
+        let events_tx = test_events();
+        let router = build_router(
+            key_provider(TEST_KEY),
+            "oretachi_viewer_test".to_string(),
+            stub_assets(),
+            None,
+            temp_data_dir("events-basic"),
+            empty_settings(),
+            TEST_PORT,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            noop_state_notifier(),
+            events_tx.clone(),
+            test_shutdown(),
+        );
+        let cookie = cookie_for(TEST_KEY);
+        let req = HttpRequest::builder()
+            .uri("/api/events")
+            .method("GET")
+            .header(header::COOKIE, cookie)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CACHE_CONTROL).unwrap().to_str().unwrap(),
+            "no-store"
+        );
+
+        let mut stream = resp.into_body().into_data_stream();
+
+        // ハンドラは `subscribe()` してから Response を返すので、この時点で
+        // 送信すれば取りこぼさない(ストリームをまだ poll していなくても届く)。
+        events_tx
+            .send(ViewerEvent::artifact_changed_worktree(
+                "wt-1".to_string(),
+                "art-1".to_string(),
+                "create".to_string(),
+                true,
+            ))
+            .unwrap();
+
+        let chunk = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("SSE chunk が届かない")
+            .expect("ストリームが予期せず終了した")
+            .unwrap();
+        let text = String::from_utf8(chunk.to_vec()).unwrap();
+        assert!(text.contains("data:"));
+        assert!(text.contains("\"type\":\"artifact-changed\""));
+        assert!(text.contains("\"scopeId\":\"wt-1\""));
+        assert!(text.contains("\"artifactId\":\"art-1\""));
+    }
+
+    #[tokio::test]
+    async fn events_stream_ends_on_shutdown() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let router = build_router(
+            key_provider(TEST_KEY),
+            "oretachi_viewer_test".to_string(),
+            stub_assets(),
+            None,
+            temp_data_dir("events-shutdown"),
+            empty_settings(),
+            TEST_PORT,
+            stub_tool_caller(Arc::new(std::sync::Mutex::new(vec![])), Ok("ok".to_string())),
+            noop_state_notifier(),
+            test_events(),
+            shutdown_rx,
+        );
+        let cookie = cookie_for(TEST_KEY);
+        let req = HttpRequest::builder()
+            .uri("/api/events")
+            .method("GET")
+            .header(header::COOKIE, cookie)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let mut stream = resp.into_body().into_data_stream();
+
+        shutdown_tx.send(true).unwrap();
+
+        let next = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("shutdown を送っても SSE ストリームが終わらない");
+        assert!(next.is_none(), "shutdown 後はストリームが終わるはず");
     }
 }

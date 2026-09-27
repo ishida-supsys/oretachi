@@ -8,6 +8,7 @@ import type {
   ArtifactViewerHost,
 } from "./artifactDataSource";
 import { buildWebPath } from "./webRoute";
+import { subscribeViewerEvents, type ViewerSseEvent } from "./webEvents";
 
 /** `/api/*` が Cookie 無し・失効で 401 を返したときに送出する */
 export class UnauthorizedError extends Error {
@@ -153,7 +154,7 @@ export interface HttpArtifactViewerContext {
 
 /**
  * ArtifactViewerApp.vue 向けの HTTP 実装を組み立てる。
- * 自動更新（SSE）は未対応（#341 の範囲）。
+ * 自動更新は `/api/events` (SSE) 経由で対応済み（#341）。
  * スコープ（repository の key）が解決できない場合は null を返す。
  */
 export async function createHttpArtifactViewerContext(
@@ -168,6 +169,25 @@ export async function createHttpArtifactViewerContext(
   /** 直近に read() したアーティファクトの memory だけを保持する（Web 版に一括取得 API は無い） */
   let lastMemory: { artifactId: string; state: ArtifactState } | null = null;
   let navigateHandler: ((artifactId: string) => void) | null = null;
+
+  /** イベントが自スコープ宛かどうか。repository は URL の key（ハッシュ）で照合する */
+  function matchesScope(event: ViewerSseEvent): boolean {
+    if (kind === "worktree") {
+      return event.scope === "worktree" && event.scopeId === scopeKey;
+    }
+    return event.scope === "repository" && event.repoKey === scopeKey;
+  }
+
+  /** memory だけを読み直して `lastMemory` を更新する（本体は再取得しない） */
+  async function refetchMemory(artifactId: string): Promise<ArtifactState> {
+    const raw = await apiFetch<{
+      memory: Record<string, unknown> | null;
+      memoryUpdatedAt: number;
+    }>(readPathFor(artifactId), opts.onUnauthorized);
+    const state: ArtifactState = { memory: raw.memory ?? undefined, memoryUpdatedAt: raw.memoryUpdatedAt };
+    lastMemory = { artifactId, state };
+    return state;
+  }
 
   const dataSource: ArtifactDataSource = {
     scope,
@@ -232,13 +252,36 @@ export async function createHttpArtifactViewerContext(
       return raw.result;
     },
 
-    async onArtifactChanged() {
-      // #341 (SSE) まで自動更新は無い。呼び出し元は購読解除関数だけを要求するので no-op を返す
-      return () => {};
+    async onArtifactChanged(handler) {
+      return subscribeViewerEvents((event) => {
+        if (event.type === "resync") {
+          // 個々の差分は追えないので、選択中のもの(直近 read() した ID)を
+          // 一覧・本体ごと読み直させる。何も読んでいなければ何もしない。
+          if (!lastMemory) return;
+          handler({ artifactId: lastMemory.artifactId, command: "update", autoOpen: true });
+          return;
+        }
+        if (event.type !== "artifact-changed" || !event.artifactId) return;
+        if (!matchesScope(event)) return;
+        // フックによる URL 自動登録等の副産物 (autoOpen: false) は、デスクトップ版
+        // (tauriArtifactDataSource.ts) と同じくトーストを出させない。欠落時は true 扱い。
+        handler({
+          artifactId: event.artifactId,
+          command: event.command ?? "update",
+          autoOpen: event.autoOpen ?? true,
+        });
+      });
     },
 
-    async onStateChanged() {
-      return () => {};
+    async onStateChanged(handler) {
+      return subscribeViewerEvents((event) => {
+        // `listStates()` は直近 read() した1件しか返さないので、それ以外の
+        // アーティファクト宛の通知は(表示に反映されないため)無視してよい。
+        const targetId = event.type === "resync" ? lastMemory?.artifactId : event.artifactId;
+        if (!targetId || targetId !== lastMemory?.artifactId) return;
+        if (event.type !== "resync" && (event.type !== "state-changed" || !matchesScope(event))) return;
+        void refetchMemory(targetId).then(() => handler({ artifactId: targetId }));
+      });
     },
   };
 
