@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from "vue";
+import { computed, onMounted, onUnmounted, ref } from "vue";
 import { useI18n } from "vue-i18n";
 import { fetchWorktreesIndex, type WorktreesIndex } from "../utils/httpArtifactDataSource";
+import { subscribeViewerEvents } from "../utils/webEvents";
 
 const { t } = useI18n({ useScope: "global" });
 
@@ -28,7 +29,29 @@ async function load() {
   }
 }
 
+let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleReload() {
+  if (reloadTimer) return;
+  // 短時間に連続する変更をまとめて1回の再読込にする
+  reloadTimer = setTimeout(() => {
+    reloadTimer = null;
+    void load();
+  }, 300);
+}
+
+let unsubscribeEvents: (() => void) | null = null;
+
 onMounted(load);
+onMounted(() => {
+  // このページはどのワークツリー・リポジトリの件数も表示するので、
+  // スコープを問わずどのイベントでも再読込する。
+  unsubscribeEvents = subscribeViewerEvents(() => scheduleReload());
+});
+
+onUnmounted(() => {
+  unsubscribeEvents?.();
+  if (reloadTimer) clearTimeout(reloadTimer);
+});
 
 const groupedByRepository = computed(() => {
   const q = filter.value.trim().toLowerCase();

@@ -24,6 +24,7 @@
 //   `Secure` 属性はこのアプリが HTTPS 非対応なため付けられない(付けると
 //   localhost の通常利用まで Cookie が送られなくなる)。
 
+use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -32,7 +33,10 @@ use axum::{
     extract::{Path as AxumPath, Request, State},
     http::{header, HeaderMap, HeaderValue, StatusCode, Uri},
     middleware::{self, Next},
-    response::{Html, IntoResponse, Json, Redirect, Response},
+    response::{
+        sse::{Event as SseEvent, KeepAlive},
+        Html, IntoResponse, Json, Redirect, Response, Sse,
+    },
     routing::get,
     Router,
 };
@@ -42,12 +46,79 @@ use serde_json::json;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tauri::{AppHandle, Manager};
+use tokio::sync::{broadcast, watch};
 
 use crate::settings::{Repository, SettingsManager, WorktreeEntry};
 use crate::{
     artifacts_dir_in, list_artifacts_in_dir, list_repo_artifacts_in_dir, read_artifact_store,
     repo_artifacts_dir_in, repo_artifacts_key, validate_path_component,
 };
+
+/// `/api/events` (SSE) が中継するイベント。`artifact-changed` / `repo-artifact-changed` /
+/// `artifact-state-changed` の3つの Tauri イベントをこの形に正規化して配信する。
+///
+/// `scope` は worktree の実 ID を積む。repository のときはそれに加えて `repo_key`
+/// (URL に使う `repo_artifacts_key` のハッシュ) も積む。フロントは URL に使う
+/// key と一覧 API が返す実 ID の両方を持つ必要があるため(`resolveScope` 参照)。
+#[derive(Clone, Debug, Serialize)]
+pub struct ViewerEvent {
+    #[serde(rename = "type")]
+    pub kind: &'static str,
+    pub scope: &'static str,
+    #[serde(rename = "scopeId")]
+    pub scope_id: String,
+    #[serde(rename = "repoKey", skip_serializing_if = "Option::is_none")]
+    pub repo_key: Option<String>,
+    #[serde(rename = "artifactId")]
+    pub artifact_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+}
+
+impl ViewerEvent {
+    pub fn artifact_changed_worktree(worktree_id: String, artifact_id: String, command: String) -> Self {
+        Self {
+            kind: "artifact-changed",
+            scope: "worktree",
+            scope_id: worktree_id,
+            repo_key: None,
+            artifact_id,
+            command: Some(command),
+        }
+    }
+
+    pub fn artifact_changed_repository(
+        repository_id: String,
+        artifact_id: String,
+        command: String,
+    ) -> Self {
+        let repo_key = repo_artifacts_key(&repository_id);
+        Self {
+            kind: "artifact-changed",
+            scope: "repository",
+            scope_id: repository_id,
+            repo_key: Some(repo_key),
+            artifact_id,
+            command: Some(command),
+        }
+    }
+
+    pub fn state_changed(scope: &str, scope_id: String, artifact_id: String) -> Self {
+        let repo_key = if scope == "repository" {
+            Some(repo_artifacts_key(&scope_id))
+        } else {
+            None
+        };
+        Self {
+            kind: "state-changed",
+            scope: if scope == "repository" { "repository" } else { "worktree" },
+            scope_id,
+            repo_key,
+            artifact_id,
+            command: None,
+        }
+    }
+}
 
 /// 現在の MCP API key を返す。設定は再起動なしで変わりうるため、毎リクエスト読む。
 pub type KeyProvider = Arc<dyn Fn() -> String + Send + Sync>;
@@ -74,6 +145,8 @@ struct ViewerState {
     cookie_name: String,
     data_dir: PathBuf,
     settings: SettingsProvider,
+    events: broadcast::Sender<ViewerEvent>,
+    shutdown: watch::Receiver<bool>,
 }
 
 fn session_cookie_value(key: &str) -> String {
@@ -554,6 +627,50 @@ async fn api_read_repo_artifact(
     respond_with_artifact(dir, artifact_id).await
 }
 
+/// `GET /api/events`: アーティファクトの変更を SSE で中継する。
+///
+/// `viewer_auth` の配下にあるため Cookie 認証が必須。接続が `broadcast::Receiver` の
+/// バッファ(256件)を溢れさせて `Lagged` になった場合は、個々の差分を追わせる代わりに
+/// `{"type":"resync"}` を1件送って呼び出し元に一覧・本体の再取得を促す。
+/// サーバー再起動(`shutdown` が true になる)を検知したら接続を閉じる
+/// (開いたままの SSE 接続があると graceful shutdown が完了しない)。
+async fn api_events(State(state): State<ViewerState>) -> Response {
+    let rx = state.events.subscribe();
+    let shutdown = state.shutdown.clone();
+    let stream = futures_util::stream::unfold((rx, shutdown), |(mut rx, mut shutdown)| async move {
+        loop {
+            tokio::select! {
+                result = rx.recv() => {
+                    return match result {
+                        Ok(payload) => {
+                            let data = serde_json::to_string(&payload).unwrap_or_default();
+                            Some((Ok::<_, Infallible>(SseEvent::default().data(data)), (rx, shutdown)))
+                        }
+                        Err(broadcast::error::RecvError::Lagged(n)) => {
+                            log::warn!("[web_viewer] SSE lagged, {} events dropped; sending resync", n);
+                            let data = json!({ "type": "resync" }).to_string();
+                            Some((Ok(SseEvent::default().data(data)), (rx, shutdown)))
+                        }
+                        Err(broadcast::error::RecvError::Closed) => None,
+                    };
+                }
+                changed = shutdown.changed() => {
+                    if changed.is_err() || *shutdown.borrow() {
+                        return None;
+                    }
+                    // false → false の変化は基本無いはずだが、安全側でループを続ける。
+                }
+            }
+        }
+    });
+
+    let mut response = Sse::new(stream).keep_alive(KeepAlive::default()).into_response();
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    response
+}
+
 /// テスト・実装から共通で使うルータ組み立て。
 fn build_router(
     key: KeyProvider,
@@ -562,6 +679,8 @@ fn build_router(
     dev_proxy: DevProxyTarget,
     data_dir: PathBuf,
     settings: SettingsProvider,
+    events: broadcast::Sender<ViewerEvent>,
+    shutdown: watch::Receiver<bool>,
 ) -> Router {
     let state = ViewerState {
         key: key.clone(),
@@ -570,6 +689,8 @@ fn build_router(
         cookie_name,
         data_dir,
         settings,
+        events,
+        shutdown,
     };
 
     // `/assets/*`・`/vendor/*`・ルート直下の静的ファイル(`/vite.svg` 等)は
@@ -594,6 +715,7 @@ fn build_router(
             "/api/repositories/{repo_key}/artifacts/{artifact_id}",
             get(api_read_repo_artifact),
         )
+        .route("/api/events", get(api_events))
         .fallback(get(static_fallback))
         .with_state(state.clone())
         .layer(middleware::from_fn_with_state(state, viewer_auth))
@@ -603,7 +725,14 @@ fn build_router(
 ///
 /// `port` は bind 後の実ポート(0 指定時も実際の値)を渡すこと。Cookie 名に含めることで、
 /// 同一ホストで動く別インスタンス(本番/dev)の Cookie を混同しないようにする。
-pub fn router(app_handle: AppHandle, port: u16) -> Router {
+/// `events` は `/api/events` (SSE) が中継するイベントの送信側、`shutdown` はサーバー
+/// 再起動時に SSE 接続を閉じるための監視チャンネル(呼び出し元の `shutdown_rx` を渡す)。
+pub fn router(
+    app_handle: AppHandle,
+    port: u16,
+    events: broadcast::Sender<ViewerEvent>,
+    shutdown: watch::Receiver<bool>,
+) -> Router {
     let key_handle = app_handle.clone();
     let key: KeyProvider = Arc::new(move || {
         key_handle
@@ -645,7 +774,9 @@ pub fn router(app_handle: AppHandle, port: u16) -> Router {
         .app_data_dir()
         .expect("app_data_dir は起動時に必ず解決できる");
 
-    build_router(key, cookie_name, assets, dev_proxy, data_dir, settings)
+    build_router(
+        key, cookie_name, assets, dev_proxy, data_dir, settings, events, shutdown,
+    )
 }
 
 #[cfg(test)]
@@ -653,6 +784,8 @@ mod tests {
     use super::*;
     use axum::body::to_bytes;
     use axum::http::Request as HttpRequest;
+    use futures_util::StreamExt;
+    use std::time::Duration;
     use tower::ServiceExt;
 
     const TEST_KEY: &str = "test-api-key-1234567890";
@@ -672,6 +805,21 @@ mod tests {
 
     fn empty_settings() -> SettingsProvider {
         Arc::new(|| (vec![], vec![]))
+    }
+
+    fn test_events() -> broadcast::Sender<ViewerEvent> {
+        broadcast::channel(16).0
+    }
+
+    /// send 側を保持せず戻すと、watch チャンネルが即クローズ扱いになり
+    /// `changed()` が(shutdown を送っていないのに)即座に `Err` で解決してしまう
+    /// (`tokio::select!` はどちらの分岐が先に ready でも取り得るため、これが
+    /// `/api/events` のストリームを起動直後に終了させるフレーキーな失敗の原因になっていた)。
+    /// send 側は使わないが、`forget` して drop させないことでチャンネルを開いたままにする。
+    fn test_shutdown() -> watch::Receiver<bool> {
+        let (tx, rx) = watch::channel(false);
+        std::mem::forget(tx);
+        rx
     }
 
     /// テストごとに衝突しない一時ディレクトリを用意する(既存があれば作り直す)。
@@ -752,6 +900,8 @@ mod tests {
             None,
             temp_data_dir("basic"),
             empty_settings(),
+            test_events(),
+            test_shutdown(),
         )
     }
 
@@ -856,6 +1006,8 @@ mod tests {
             None,
             temp_data_dir("empty-key"),
             empty_settings(),
+            test_events(),
+            test_shutdown(),
         );
         let resp = get(&router, "/worktrees?token=", None).await;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
@@ -877,6 +1029,8 @@ mod tests {
             None,
             temp_data_dir("key-rotation"),
             empty_settings(),
+            test_events(),
+            test_shutdown(),
         );
 
         let resp = get(&router, "/worktrees", Some(&cookie)).await;
@@ -989,6 +1143,8 @@ mod tests {
             None,
             data_dir,
             settings,
+            test_events(),
+            test_shutdown(),
         );
         let cookie = cookie_for(TEST_KEY);
         let resp = get(&router, "/api/worktrees", Some(&cookie)).await;
@@ -1027,6 +1183,8 @@ mod tests {
             None,
             data_dir,
             settings,
+            test_events(),
+            test_shutdown(),
         );
         let cookie = cookie_for(TEST_KEY);
 
@@ -1086,6 +1244,8 @@ mod tests {
             None,
             data_dir,
             settings,
+            test_events(),
+            test_shutdown(),
         );
         let cookie = cookie_for(TEST_KEY);
 
@@ -1136,6 +1296,8 @@ mod tests {
             None,
             data_dir,
             settings,
+            test_events(),
+            test_shutdown(),
         );
         let cookie = cookie_for(TEST_KEY);
 
@@ -1164,5 +1326,94 @@ mod tests {
         // settings に無いリポジトリ key
         let resp = get(&router, "/api/repositories/unknown/artifacts", Some(&cookie)).await;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn events_requires_cookie() {
+        let router = router_for_test();
+        let resp = get(&router, "/api/events", None).await;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn events_streams_broadcast_payload_as_sse_data() {
+        let events_tx = test_events();
+        let router = build_router(
+            key_provider(TEST_KEY),
+            "oretachi_viewer_test".to_string(),
+            stub_assets(),
+            None,
+            temp_data_dir("events-basic"),
+            empty_settings(),
+            events_tx.clone(),
+            test_shutdown(),
+        );
+        let cookie = cookie_for(TEST_KEY);
+        let req = HttpRequest::builder()
+            .uri("/api/events")
+            .method("GET")
+            .header(header::COOKIE, cookie)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            resp.headers().get(header::CACHE_CONTROL).unwrap().to_str().unwrap(),
+            "no-store"
+        );
+
+        let mut stream = resp.into_body().into_data_stream();
+
+        // ハンドラは `subscribe()` してから Response を返すので、この時点で
+        // 送信すれば取りこぼさない(ストリームをまだ poll していなくても届く)。
+        events_tx
+            .send(ViewerEvent::artifact_changed_worktree(
+                "wt-1".to_string(),
+                "art-1".to_string(),
+                "create".to_string(),
+            ))
+            .unwrap();
+
+        let chunk = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("SSE chunk が届かない")
+            .expect("ストリームが予期せず終了した")
+            .unwrap();
+        let text = String::from_utf8(chunk.to_vec()).unwrap();
+        assert!(text.contains("data:"));
+        assert!(text.contains("\"type\":\"artifact-changed\""));
+        assert!(text.contains("\"scopeId\":\"wt-1\""));
+        assert!(text.contains("\"artifactId\":\"art-1\""));
+    }
+
+    #[tokio::test]
+    async fn events_stream_ends_on_shutdown() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let router = build_router(
+            key_provider(TEST_KEY),
+            "oretachi_viewer_test".to_string(),
+            stub_assets(),
+            None,
+            temp_data_dir("events-shutdown"),
+            empty_settings(),
+            test_events(),
+            shutdown_rx,
+        );
+        let cookie = cookie_for(TEST_KEY);
+        let req = HttpRequest::builder()
+            .uri("/api/events")
+            .method("GET")
+            .header(header::COOKIE, cookie)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let mut stream = resp.into_body().into_data_stream();
+
+        shutdown_tx.send(true).unwrap();
+
+        let next = tokio::time::timeout(Duration::from_secs(2), stream.next())
+            .await
+            .expect("shutdown を送っても SSE ストリームが終わらない");
+        assert!(next.is_none(), "shutdown 後はストリームが終わるはず");
     }
 }

@@ -1,5 +1,22 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHttpArtifactViewerContext, fetchWorktreesIndex, UnauthorizedError } from "./httpArtifactDataSource";
+import type { ViewerSseEvent } from "./webEvents";
+
+/**
+ * `subscribeViewerEvents` を差し替えて、実際の `EventSource` 無しに
+ * `onArtifactChanged` / `onStateChanged` の配送ロジックだけを検証する(#341)。
+ */
+const sseHandlers = new Set<(event: ViewerSseEvent) => void>();
+vi.mock("./webEvents", () => ({
+  subscribeViewerEvents: vi.fn((handler: (event: ViewerSseEvent) => void) => {
+    sseHandlers.add(handler);
+    return () => sseHandlers.delete(handler);
+  }),
+}));
+
+function emitSseEvent(event: ViewerSseEvent) {
+  for (const h of [...sseHandlers]) h(event);
+}
 
 function jsonResponse(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -44,6 +61,7 @@ describe("httpArtifactDataSource", () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    sseHandlers.clear();
   });
 
   describe("fetchWorktreesIndex", () => {
@@ -217,6 +235,112 @@ describe("httpArtifactDataSource", () => {
       fetchMock.mockResolvedValueOnce(jsonResponse(WORKTREES_INDEX));
       const name = await ctx!.dataSource.resolveScopeName();
       expect(name).toEqual({ displayName: "oretachi", repositoryName: "oretachi" });
+    });
+  });
+
+  describe("SSE auto-update (#341)", () => {
+    it("onArtifactChanged forwards only events for this worktree scope", async () => {
+      const ctx = await createHttpArtifactViewerContext("worktree", "issue-326", {
+        onUnauthorized: vi.fn(),
+        navigateTo: vi.fn(),
+      });
+      const handler = vi.fn();
+      await ctx!.dataSource.onArtifactChanged(handler);
+
+      emitSseEvent({ type: "artifact-changed", scope: "worktree", scopeId: "other-wt", artifactId: "a" });
+      expect(handler).not.toHaveBeenCalled();
+
+      emitSseEvent({ type: "artifact-changed", scope: "worktree", scopeId: "issue-326", artifactId: "a", command: "create" });
+      expect(handler).toHaveBeenCalledWith({ artifactId: "a", command: "create", autoOpen: true });
+    });
+
+    it("onArtifactChanged resync reloads the last read() artifact, or is a no-op if nothing was read", async () => {
+      const ctx = await createHttpArtifactViewerContext("worktree", "issue-326", {
+        onUnauthorized: vi.fn(),
+        navigateTo: vi.fn(),
+      });
+      const handler = vi.fn();
+      await ctx!.dataSource.onArtifactChanged(handler);
+
+      emitSseEvent({ type: "resync" });
+      expect(handler).not.toHaveBeenCalled();
+
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          artifact: { id: "a", title: "A", type: "text/markdown", content: "hi", created_at: 1, updated_at: 2 },
+          memory: null,
+          memoryUpdatedAt: 0,
+        }),
+      );
+      await ctx!.dataSource.read("a");
+
+      emitSseEvent({ type: "resync" });
+      expect(handler).toHaveBeenCalledWith({ artifactId: "a", command: "update", autoOpen: true });
+    });
+
+    it("onArtifactChanged forwards repository-scope events matched by repoKey", async () => {
+      fetchMock.mockResolvedValueOnce(jsonResponse(WORKTREES_INDEX));
+      const ctx = await createHttpArtifactViewerContext("repository", "abcd1234", {
+        onUnauthorized: vi.fn(),
+        navigateTo: vi.fn(),
+      });
+      const handler = vi.fn();
+      await ctx!.dataSource.onArtifactChanged(handler);
+
+      emitSseEvent({ type: "artifact-changed", scope: "repository", scopeId: "/repo/oretachi", repoKey: "other-key", artifactId: "a" });
+      expect(handler).not.toHaveBeenCalled();
+
+      emitSseEvent({ type: "artifact-changed", scope: "repository", scopeId: "/repo/oretachi", repoKey: "abcd1234", artifactId: "a", command: "delete" });
+      expect(handler).toHaveBeenCalledWith({ artifactId: "a", command: "delete", autoOpen: true });
+    });
+
+    it("unsubscribing onArtifactChanged stops delivery", async () => {
+      const ctx = await createHttpArtifactViewerContext("worktree", "issue-326", {
+        onUnauthorized: vi.fn(),
+        navigateTo: vi.fn(),
+      });
+      const handler = vi.fn();
+      const unsubscribe = await ctx!.dataSource.onArtifactChanged(handler);
+      unsubscribe();
+
+      emitSseEvent({ type: "artifact-changed", scope: "worktree", scopeId: "issue-326", artifactId: "a" });
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it("onStateChanged re-fetches memory and only reacts to the currently read artifact", async () => {
+      const ctx = await createHttpArtifactViewerContext("worktree", "issue-326", {
+        onUnauthorized: vi.fn(),
+        navigateTo: vi.fn(),
+      });
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          artifact: { id: "a", title: "A", type: "text/markdown", content: "hi", created_at: 1, updated_at: 2 },
+          memory: { foo: "old" },
+          memoryUpdatedAt: 1,
+        }),
+      );
+      await ctx!.dataSource.read("a");
+
+      const handler = vi.fn();
+      await ctx!.dataSource.onStateChanged(handler);
+
+      // 別のアーティファクト宛の通知は listStates() に反映されないので無視する
+      emitSseEvent({ type: "state-changed", scope: "worktree", scopeId: "issue-326", artifactId: "b" });
+      expect(handler).not.toHaveBeenCalled();
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      fetchMock.mockResolvedValueOnce(
+        jsonResponse({
+          artifact: { id: "a" },
+          memory: { foo: "new" },
+          memoryUpdatedAt: 2,
+        }),
+      );
+      emitSseEvent({ type: "state-changed", scope: "worktree", scopeId: "issue-326", artifactId: "a" });
+      await vi.waitFor(() => expect(handler).toHaveBeenCalledWith({ artifactId: "a" }));
+
+      const states = await ctx!.dataSource.listStates();
+      expect(states).toEqual({ a: { memory: { foo: "new" }, memoryUpdatedAt: 2 } });
     });
   });
 });

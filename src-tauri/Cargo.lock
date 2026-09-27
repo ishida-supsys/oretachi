@@ -3644,6 +3644,7 @@ dependencies = [
  "base64 0.22.1",
  "content_inspector",
  "dotenvy",
+ "futures-util",
  "glob",
  "hmac",
  "libc",
