@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import type { ArtifactMeta } from "../types/artifact";
 import { filterArtifacts, sortArtifacts } from "../utils/artifactList";
 import { fetchArtifactList, fetchWorktreesIndex } from "../utils/httpArtifactDataSource";
 import type { WebScopeKind } from "../utils/webRoute";
+import { subscribeViewerEvents, type ViewerSseEvent } from "../utils/webEvents";
 
 const { t } = useI18n({ useScope: "global" });
 
@@ -87,8 +88,37 @@ async function load() {
   }
 }
 
+/** 自スコープ宛のイベントか(resync は常に対象)。件数・最終更新が変わるので再読込する */
+function matchesScope(event: ViewerSseEvent): boolean {
+  if (event.type === "resync") return true;
+  if (props.scope === "worktree") return event.scope === "worktree" && event.scopeId === props.scopeKey;
+  return event.scope === "repository" && event.repoKey === props.scopeKey;
+}
+
+let reloadTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleReload() {
+  if (reloadTimer) return;
+  // 短時間に連続する変更をまとめて1回の再読込にする
+  reloadTimer = setTimeout(() => {
+    reloadTimer = null;
+    void load();
+  }, 300);
+}
+
+let unsubscribeEvents: (() => void) | null = null;
+
 onMounted(load);
+onMounted(() => {
+  unsubscribeEvents = subscribeViewerEvents((event) => {
+    if (matchesScope(event)) scheduleReload();
+  });
+});
 watch(() => [props.scope, props.scopeKey], load);
+
+onUnmounted(() => {
+  unsubscribeEvents?.();
+  if (reloadTimer) clearTimeout(reloadTimer);
+});
 </script>
 
 <template>

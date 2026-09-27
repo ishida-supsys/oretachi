@@ -259,6 +259,7 @@ const emit = defineEmits<{
   moveToMainWindow: [worktreeId: string];
   focusSubWindow: [worktreeId: string];
   focusAllSubWindows: [];
+  openWebViewer: [];
   openWorktreeSettings: [worktreeId: string];
   cancelAiJudging: [worktreeId: string];
   cancelRemove: [worktreeId: string];
@@ -439,6 +440,9 @@ watch(
             @click="showAllDescriptions = !showAllDescriptions"
           >
             <i :class="showAllDescriptions ? 'pi pi-eye' : 'pi pi-eye-slash'"></i>
+          </button>
+          <button class="btn-icon-header" :title="t('openWebViewer')" @click="emit('openWebViewer')">
+            <i class="pi pi-globe"></i>
           </button>
           <button class="btn-icon-header" :title="t('focusAllSubWindows')" @click="emit('focusAllSubWindows')">
             <i class="pi pi-window-maximize"></i>
@@ -850,6 +854,7 @@ watch(
     "worktreeTitle": "Worktrees",
     "worktreeEmpty": "No worktrees. Click the + button to create one.",
     "toggleShowAllDescriptions": "Show all descriptions",
+    "openWebViewer": "Open in browser",
     "focusAllSubWindows": "Bring all sub windows",
     "addWorktreeButton": "Add worktree",
     "taskTitle": "Tasks",
@@ -869,6 +874,7 @@ watch(
     "worktreeTitle": "ワークツリー",
     "worktreeEmpty": "ワークツリーがありません。右上の + ボタンで作成してください。",
     "toggleShowAllDescriptions": "すべての説明を表示",
+    "openWebViewer": "ブラウザで表示",
     "focusAllSubWindows": "すべてのサブウィンドウを呼び出す",
     "addWorktreeButton": "ワークツリー追加",
     "taskTitle": "タスク",

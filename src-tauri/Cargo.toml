@@ -65,6 +65,9 @@ hmac = "0.12"
 # Web閲覧の dev モード用フォールバック(vite devUrl へのプロキシ)専用。
 # tauri-plugin-updater が既に依存しているため、追加の重複ビルドは無い。
 reqwest = { version = "0.13", default-features = false }
+# Web閲覧の自動更新(SSE)ストリーム組み立て用（既に他クレート経由の推移依存で
+# 取得済みなので、新規ダウンロードは発生しない）
+futures-util = "0.3"
 # アーティファクトの zip エクスポート / インポート用（暗号化・追加圧縮方式は使わない）
 zip = { version = "4", default-features = false, features = ["deflate"] }
 rand = "0.8"
