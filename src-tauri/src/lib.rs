@@ -27,6 +27,7 @@ mod system_metrics;
 mod task_db;
 mod task_executor;
 mod terminal_session;
+mod web_viewer;
 
 #[cfg(target_os = "windows")]
 mod acrylic;
