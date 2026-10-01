@@ -1609,7 +1609,7 @@ static SESSION_WRITE_LOCKS: std::sync::OnceLock<
 /// 指定セッションの書き込みロックを取得する（無ければ作る）。
 ///
 /// セッションが死んでもエントリは残るが、キーは `u32`、値は空の `Arc<Mutex<()>>` だけで、
-/// セッション数には `MAX_PTY_SESSIONS` の上限が付いているので放置してよい。
+/// セッション数には設定 `maxPtySessions`（最大でも `MAX_MAX_PTY_SESSIONS`）の上限が付いているので放置してよい。
 pub(crate) fn session_write_lock(session_id: u32) -> Arc<tokio::sync::Mutex<()>> {
     let map = SESSION_WRITE_LOCKS.get_or_init(|| Mutex::new(HashMap::new()));
     let mut guard = map.lock().unwrap_or_else(|e| e.into_inner());

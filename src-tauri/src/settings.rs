@@ -445,6 +445,16 @@ impl Default for AppearanceSettings {
 
 fn default_ai_timeout_secs() -> u64 { 120 }
 
+/// PTY セッション数の既定上限。設定が無い既存ユーザーの挙動はこの値で据え置く。
+pub const DEFAULT_MAX_PTY_SESSIONS: u32 = 32;
+/// 設定値の下限。0 や 1 だと自動 spawn も手動のタブ追加も成り立たない。
+pub const MIN_MAX_PTY_SESSIONS: u32 = 4;
+/// 設定値の上限。端末数 15+ で webview ハングと相関がある（#101）ため、
+/// 際限なく上げられないよう UI / Rust 双方でこの値に丸める。
+pub const MAX_MAX_PTY_SESSIONS: u32 = 128;
+
+fn default_max_pty_sessions() -> u32 { DEFAULT_MAX_PTY_SESSIONS }
+
 fn default_use_oretachi_terminal_for_background() -> bool { false }
 
 fn default_move_to_sub_window_on_mcp_spawn() -> bool { false }
@@ -597,6 +607,9 @@ pub struct AppSettings {
     pub ai_timeout_secs: u64,
     #[serde(default, rename = "debugMode")]
     pub debug_mode: bool,
+    /// PTY セッション数の上限。`get_max_pty_sessions` で範囲に丸めて使う。
+    #[serde(default = "default_max_pty_sessions", rename = "maxPtySessions")]
+    pub max_pty_sessions: u32,
     #[serde(default = "default_use_oretachi_terminal_for_background", rename = "useOretachiTerminalForBackground")]
     pub use_oretachi_terminal_for_background: bool,
     #[serde(default = "default_move_to_sub_window_on_mcp_spawn", rename = "moveToSubWindowOnMcpSpawn")]
@@ -622,6 +635,13 @@ impl AppSettings {
     /// AI タイムアウト秒数を返す。0 の場合はデフォルトの 120 秒にフォールバック。
     pub fn get_ai_timeout_secs(&self) -> u64 {
         if self.ai_timeout_secs == 0 { 120 } else { self.ai_timeout_secs }
+    }
+
+    /// PTY セッション上限を `MIN_MAX_PTY_SESSIONS..=MAX_MAX_PTY_SESSIONS` に丸めて返す。
+    /// 手で settings.json を書き換えた 0 や極端な値でも壊れないようにする。
+    pub fn get_max_pty_sessions(&self) -> usize {
+        self.max_pty_sessions
+            .clamp(MIN_MAX_PTY_SESSIONS, MAX_MAX_PTY_SESSIONS) as usize
     }
 }
 
@@ -652,6 +672,7 @@ impl Default for AppSettings {
             enable_home_cat: false,
             ai_timeout_secs: default_ai_timeout_secs(),
             debug_mode: false,
+            max_pty_sessions: default_max_pty_sessions(),
             use_oretachi_terminal_for_background: default_use_oretachi_terminal_for_background(),
             move_to_sub_window_on_mcp_spawn: default_move_to_sub_window_on_mcp_spawn(),
             home_agent_prompt: None,
@@ -1095,6 +1116,27 @@ mod tests {
         let json = r#"{"id": "1", "name": "repo", "path": "/path"}"#;
         let repo: Repository = serde_json::from_str(json).unwrap();
         assert!(repo.exec_script.is_none());
+    }
+
+    #[test]
+    fn test_max_pty_sessions_default_is_32() {
+        let json = r#"{"repositories": [], "worktreeBaseDir": "", "worktrees": []}"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.max_pty_sessions, 32);
+        assert_eq!(settings.get_max_pty_sessions(), 32);
+        assert_eq!(AppSettings::default().get_max_pty_sessions(), 32);
+    }
+
+    #[test]
+    fn test_max_pty_sessions_custom_and_clamp() {
+        let json = r#"{"repositories": [], "worktreeBaseDir": "", "worktrees": [], "maxPtySessions": 48}"#;
+        let settings: AppSettings = serde_json::from_str(json).unwrap();
+        assert_eq!(settings.get_max_pty_sessions(), 48);
+
+        let low = AppSettings { max_pty_sessions: 0, ..Default::default() };
+        assert_eq!(low.get_max_pty_sessions(), MIN_MAX_PTY_SESSIONS as usize);
+        let high = AppSettings { max_pty_sessions: u32::MAX, ..Default::default() };
+        assert_eq!(high.get_max_pty_sessions(), MAX_MAX_PTY_SESSIONS as usize);
     }
 
     #[test]
