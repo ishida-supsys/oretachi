@@ -214,6 +214,7 @@ export interface AppSettings {
   mcpRemoteAccess?: boolean;
   enableHomeCat?: boolean;
   aiTimeoutSecs?: number; // AIタイムアウト秒数 (デフォルト: 120)
+  maxPtySessions?: number; // PTY セッション数の上限 (デフォルト: 32、範囲 16〜256。Rust 側でも丸める)
   debugMode?: boolean;
   useOretachiTerminalForBackground?: boolean; // AI からの background コマンドを oretachi ターミナルで起動するか (デフォルト: false)
   moveToSubWindowOnMcpSpawn?: boolean; // MCP 経由のターミナル追加時にサブウィンドウへ自動移行するか (デフォルト: false)

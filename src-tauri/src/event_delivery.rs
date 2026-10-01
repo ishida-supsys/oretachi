@@ -91,8 +91,9 @@ const SPAWN_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(600);
 /// 「spawn すると言ったのに何も起きない」を作り、purpose である配送そのものが止まる。
 ///
 /// そこで**判断を人間に返す**: spawn は通し、危険域に入ったことだけ知らせる。
-/// 実際の歯止めは `pty_manager::MAX_PTY_SESSIONS`(32) と、ワークツリーごとの
-/// `SPAWN_COOLDOWN` / 単一フライトが担う。
+/// 実際の歯止めは設定 `maxPtySessions`（既定 32。`PtyManager::spawn` が判定）と、ワークツリーごとの
+/// `SPAWN_COOLDOWN` / 単一フライトが担う。設定の下限（`MIN_MAX_PTY_SESSIONS` = 16）はこの値より
+/// 大きいので、警告は常に拒否より先に出る。警告しきい値は上限設定とは連動させない。
 const SPAWN_WARN_LIVE_SESSIONS: usize = 12;
 
 /// 自動承認が有効なワークツリーへ押し込み / spawn してよいイベント種別（#120 §5.5）。

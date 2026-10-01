@@ -6,7 +6,7 @@ use std::sync::{
     Arc, Mutex,
 };
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 const AI_AGENT_NAMES: &[&str] = &["claude", "gemini", "codex", "cline"];
 /// AI エージェントを探すサブツリーの深さ。
@@ -15,11 +15,10 @@ const AI_AGENT_NAMES: &[&str] = &["claude", "gemini", "codex", "cline"];
 /// `pwsh → cmd.exe → node.exe → …` と伸びる。プロセス一覧は Win32 API の直読みなので
 /// 深く辿ってもコストは無視できる（旧実装は 10 秒ごとに `wmic` を spawn していた）。
 const AGENT_SEARCH_DEPTH: u32 = 8;
-const MAX_PTY_SESSIONS: usize = 32;
 const OUTPUT_HISTORY_BYTES: usize = 65_536;
 /// シェル本体が自然終了したセッションを map に残しておく寿命。
 /// この期間内なら MCP クライアントから exit code や最終ログを参照できる。
-/// MAX_PTY_SESSIONS の枠を一時的に圧迫し得るが、TTL 経過後は lazy sweep で除去される。
+/// セッション数の上限（設定 `maxPtySessions`）の枠を一時的に圧迫し得るが、TTL 経過後は lazy sweep で除去される。
 const EXITED_SESSION_TTL: Duration = Duration::from_secs(30);
 
 struct PtySession {
@@ -86,6 +85,18 @@ fn sweep_exited(map: &mut HashMap<u32, PtySession>) {
             Some(t) => t.elapsed() < EXITED_SESSION_TTL,
         }
     });
+}
+
+/// 生存（+ TTL 内の exited）セッション数 `live` が上限 `max` に達していれば、
+/// 設定値を含むエラーメッセージを返す。
+fn check_session_limit(live: usize, max: usize) -> Result<(), String> {
+    if live >= max {
+        return Err(format!(
+            "PTYセッション数の上限（{}）に達しています。不要なターミナルを閉じるか、設定で上限を引き上げてください",
+            max
+        ));
+    }
+    Ok(())
 }
 
 /// 1 回の flush で 1 セッションから drain する保留出力の上限。これを超えた分は次周期へ持ち越す（バックプレッシャ）。
@@ -672,15 +683,15 @@ impl PtyManagerCore {
         cwd: Option<String>,
     ) -> Result<u32, String> {
         log::debug!("[Terminal] pty_manager::spawn rows={} cols={} shell={:?} cwd={:?}", rows, cols, shell, cwd);
+        // 上限は spawn のたびに settings から読むので、変更は次回 spawn から再起動なしで効く。
+        let max_sessions = app_handle
+            .state::<crate::settings::SettingsManager>()
+            .get()
+            .get_max_pty_sessions();
         {
             let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
             sweep_exited(&mut sessions);
-            if sessions.len() >= MAX_PTY_SESSIONS {
-                return Err(format!(
-                    "PTYセッション数の上限（{}）に達しています。不要なターミナルを閉じてください",
-                    MAX_PTY_SESSIONS
-                ));
-            }
+            check_session_limit(sessions.len(), max_sessions)?;
         }
         let pty_system = native_pty_system();
 
@@ -1458,6 +1469,22 @@ pub fn strip_ansi(input: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_limit_allows_below_and_rejects_at_max() {
+        assert!(check_session_limit(0, 32).is_ok());
+        assert!(check_session_limit(31, 32).is_ok());
+        assert!(check_session_limit(32, 32).is_err());
+        assert!(check_session_limit(40, 32).is_err());
+    }
+
+    #[test]
+    fn session_limit_error_contains_configured_value() {
+        let err = check_session_limit(8, 8).unwrap_err();
+        assert!(err.contains("（8）"), "{}", err);
+        let err = check_session_limit(64, 64).unwrap_err();
+        assert!(err.contains("（64）"), "{}", err);
+    }
 
     /// `(pid, ppid, name)` の列から `find_ai_agent_in_subtree` 用の子マップを作る。
     fn children_of(procs: &[(u32, u32, &str)]) -> HashMap<u32, Vec<(u32, String)>> {
