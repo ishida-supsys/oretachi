@@ -531,12 +531,12 @@ function getSoundLabel(sound: string | null | undefined): string {
           class="text-input number-input"
           type="number"
           :value="settings.maxPtySessions ?? 32"
-          min="4"
-          max="128"
+          min="16"
+          max="256"
           @change="(e) => {
             const input = e.target as HTMLInputElement;
             const n = Math.round(Number(input.value));
-            const v = Number.isFinite(n) && input.value !== '' ? Math.min(128, Math.max(4, n)) : 32;
+            const v = Number.isFinite(n) && input.value !== '' ? Math.min(256, Math.max(16, n)) : 32;
             input.value = String(v);
             settings.maxPtySessions = v;
             scheduleSave();
@@ -1241,7 +1241,7 @@ function getSoundLabel(sound: string | null | undefined): string {
       "label": "Terminal",
       "fontSize": "Font size",
       "maxPtySessions": "Max terminal sessions",
-      "maxPtySessionsDesc": "Upper limit of terminals (PTY sessions) that can run at once (4–128, default 32). Applies from the next terminal spawn, no restart needed. Raising it increases the risk of webview hangs (observed with 15+ terminals).",
+      "maxPtySessionsDesc": "Upper limit of terminals (PTY sessions) that can run at once (16–256, default 32). Applies from the next terminal spawn, no restart needed. Raising it increases the risk of webview hangs (observed with 15+ terminals).",
       "defaultShell": "Default shell",
       "shellPlaceholder": "Empty = system default",
       "backgroundPaneSplitDirection": "Background pane split direction",
@@ -1355,7 +1355,7 @@ function getSoundLabel(sound: string | null | undefined): string {
       "label": "ターミナル",
       "fontSize": "文字サイズ",
       "maxPtySessions": "ターミナル最大数",
-      "maxPtySessionsDesc": "同時に起動できるターミナル（PTY セッション）の上限（4〜128、既定 32）。次回のターミナル起動から再起動なしで反映されます。引き上げると webview がハングするリスクが高まります（15 個以上で相関を確認済み）。",
+      "maxPtySessionsDesc": "同時に起動できるターミナル（PTY セッション）の上限（16〜256、既定 32）。次回のターミナル起動から再起動なしで反映されます。引き上げると webview がハングするリスクが高まります（15 個以上で相関を確認済み）。",
       "defaultShell": "デフォルトシェル",
       "shellPlaceholder": "空欄 = システムデフォルト",
       "backgroundPaneSplitDirection": "バックグラウンドペイン分割方向",

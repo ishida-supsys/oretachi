@@ -448,10 +448,10 @@ fn default_ai_timeout_secs() -> u64 { 120 }
 /// PTY セッション数の既定上限。設定が無い既存ユーザーの挙動はこの値で据え置く。
 pub const DEFAULT_MAX_PTY_SESSIONS: u32 = 32;
 /// 設定値の下限。0 や 1 だと自動 spawn も手動のタブ追加も成り立たない。
-pub const MIN_MAX_PTY_SESSIONS: u32 = 4;
+pub const MIN_MAX_PTY_SESSIONS: u32 = 16;
 /// 設定値の上限。端末数 15+ で webview ハングと相関がある（#101）ため、
 /// 際限なく上げられないよう UI / Rust 双方でこの値に丸める。
-pub const MAX_MAX_PTY_SESSIONS: u32 = 128;
+pub const MAX_MAX_PTY_SESSIONS: u32 = 256;
 
 fn default_max_pty_sessions() -> u32 { DEFAULT_MAX_PTY_SESSIONS }
 
