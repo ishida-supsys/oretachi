@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.33.0] - 2026-10-02
+
+### Added
+- PTYセッション数の上限を設定画面から変更可能にした。範囲は 16〜256 (#350)
+
 ## [0.32.0] - 2026-09-27
 
 ### Added
@@ -845,7 +850,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.32.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.33.0...HEAD
+[0.33.0]: https://github.com/ishida-supsys/oretachi/compare/0.32.0...0.33.0
 [0.32.0]: https://github.com/ishida-supsys/oretachi/compare/0.31.7...0.32.0
 [0.31.7]: https://github.com/ishida-supsys/oretachi/compare/0.31.6...0.31.7
 [0.31.6]: https://github.com/ishida-supsys/oretachi/compare/0.31.5...0.31.6

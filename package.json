@@ -1,7 +1,7 @@
 {
   "name": "oretachi",
   "private": true,
-  "version": "0.32.0",
+  "version": "0.33.0",
   "type": "module",
   "scripts": {
     "prepare": "node scripts/copy-vendor.mjs && node scripts/build-sidecar.mjs",
