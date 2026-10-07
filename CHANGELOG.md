@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.34.0] - 2026-10-07
+
+### Added
+- テーマから開発企画を立案する `dev-proposal` スキルを追加した (#352)
+
 ## [0.33.0] - 2026-10-02
 
 ### Added
@@ -850,7 +855,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.33.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.34.0...HEAD
+[0.34.0]: https://github.com/ishida-supsys/oretachi/compare/0.33.0...0.34.0
 [0.33.0]: https://github.com/ishida-supsys/oretachi/compare/0.32.0...0.33.0
 [0.32.0]: https://github.com/ishida-supsys/oretachi/compare/0.31.7...0.32.0
 [0.31.7]: https://github.com/ishida-supsys/oretachi/compare/0.31.6...0.31.7
