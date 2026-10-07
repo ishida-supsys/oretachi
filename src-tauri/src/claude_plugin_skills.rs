@@ -134,4 +134,25 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
         "notification-report/templates/data--report.example.jsx",
         include_str!("../skills/notification-report/templates/data--report.example.jsx"),
     ),
+    // --- dev-proposal ---
+    (
+        "dev-proposal/SKILL.md",
+        include_str!("../skills/dev-proposal/SKILL.md"),
+    ),
+    (
+        "dev-proposal/templates/entry-point.jsx",
+        include_str!("../skills/dev-proposal/templates/entry-point.jsx"),
+    ),
+    (
+        "dev-proposal/templates/components--ProposalCard.jsx",
+        include_str!("../skills/dev-proposal/templates/components--ProposalCard.jsx"),
+    ),
+    (
+        "dev-proposal/templates/lib--submit.jsx",
+        include_str!("../skills/dev-proposal/templates/lib--submit.jsx"),
+    ),
+    (
+        "dev-proposal/templates/data--proposals.example.jsx",
+        include_str!("../skills/dev-proposal/templates/data--proposals.example.jsx"),
+    ),
 ];
