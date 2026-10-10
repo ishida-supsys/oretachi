@@ -1743,8 +1743,9 @@ fn resolve_event_scope(
         .map(|g| g.trim().to_string())
         .filter(|g| !g.is_empty())
         .or_else(|| entry.and_then(|w| w.workgroup_id.clone()));
-    let group = mcp_server::resolve_workgroup_by_id(&settings, group_hint.as_deref())
-        .map(|g| g.id.clone());
+    // リポジトリ擬似ワークツリーはフロントのヒントより `is_repository` を優先して予約グループへ
+    // （配送側 / 返答許可側と同じ `event_scope_group_id` を通す）
+    let group = mcp_server::event_scope_group_id(&settings, entry, group_hint.as_deref());
     (repo, group)
 }
 
@@ -2435,6 +2436,7 @@ pub fn run() {
             event_delivery::event_list_orphaned_groups,
             event_delivery::event_rebind_group,
             event_delivery::event_unsubscribe,
+            event_delivery::event_forget_target,
             event_delivery::event_ack_all,
             event_delivery::event_terminal_unread,
             event_delivery::event_spawn_result,
