@@ -155,4 +155,33 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
         "dev-proposal/templates/data--proposals.example.jsx",
         include_str!("../skills/dev-proposal/templates/data--proposals.example.jsx"),
     ),
+    // --- notification-auto-dismiss ---
+    (
+        "notification-auto-dismiss/SKILL.md",
+        include_str!("../skills/notification-auto-dismiss/SKILL.md"),
+    ),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `skills/*/SKILL.md` を足したのに `SKILL_FILES` への登録を忘れても、
+    /// コンパイルでは検出されない。ディレクトリを走査して機械的に確認する。
+    #[test]
+    fn every_skill_dir_is_registered() {
+        let skills_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
+        let mut missing = Vec::new();
+        for entry in std::fs::read_dir(&skills_dir).expect("skills ディレクトリ") {
+            let entry = entry.unwrap();
+            if !entry.path().join("SKILL.md").is_file() {
+                continue;
+            }
+            let rel = format!("{}/SKILL.md", entry.file_name().to_string_lossy());
+            if !SKILL_FILES.iter().any(|(p, _)| *p == rel) {
+                missing.push(rel);
+            }
+        }
+        assert!(missing.is_empty(), "SKILL_FILES 未登録: {:?}", missing);
+    }
+}

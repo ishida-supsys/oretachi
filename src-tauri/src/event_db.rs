@@ -254,6 +254,188 @@ pub const MESSAGE_TEXT_MAX_CHARS: usize = 4000;
 /// エラーにすると通知そのものが落ちるので、切り詰めて通す。
 pub const HOOK_BODY_MAX_CHARS: usize = 1000;
 
+/// Stop 本文の縮小で、パス系フィールド削除（段 2）の対象から外すキー。
+const STOP_KEEP_KEYS: &[&str] = &[
+    "session_id",
+    "cwd",
+    "transcript_path",
+    "hook_event_name",
+    "stop_hook_active",
+    "last_assistant_message",
+    "background_tasks",
+    "session_crons",
+    "background_tasks_omitted",
+    "_truncated",
+];
+
+/// 中略の目印。
+const ELLIPSIS_MID: &str = "…（中略）…";
+
+/// 先頭 `head` 字 + 中略 + 末尾 `tail` 字に縮める。収まっていればそのまま。
+fn truncate_middle(s: &str, head: usize, tail: usize) -> String {
+    let n = s.chars().count();
+    if n <= head + tail + ELLIPSIS_MID.chars().count() {
+        return s.to_string();
+    }
+    let h: String = s.chars().take(head).collect();
+    let t: String = s.chars().skip(n - tail).collect();
+    format!("{}{}{}", h, ELLIPSIS_MID, t)
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+fn json_chars(map: &serde_json::Map<String, serde_json::Value>) -> usize {
+    serde_json::to_string(map)
+        .map(|s| s.chars().count())
+        .unwrap_or(usize::MAX)
+}
+
+/// 配列内オブジェクトの文字列フィールドを `max` 字に切る。
+fn clip_field_in_array(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    array_key: &str,
+    field: &str,
+    max: usize,
+) {
+    if let Some(serde_json::Value::Array(items)) = map.get_mut(array_key) {
+        for item in items.iter_mut() {
+            if let Some(serde_json::Value::String(s)) = item.get_mut(field) {
+                *s = truncate_chars(s, max);
+            }
+        }
+    }
+}
+
+fn clip_top_level_string(
+    map: &mut serde_json::Map<String, serde_json::Value>,
+    key: &str,
+    max: usize,
+) {
+    if let Some(serde_json::Value::String(s)) = map.get_mut(key) {
+        *s = truncate_chars(s, max);
+    }
+}
+
+/// 上限を超える Stop フック本文を、**常に妥当な JSON のまま**上限内へ縮める（#354）。
+/// Stop 以外・JSON でない本文は `None`。
+///
+/// `background_tasks` / `session_crons` は `last_assistant_message` の後ろに並ぶので、
+/// 文字数で切ると真っ先に失われる。判定に効く順に残すため、次の順で縮める。
+fn shrink_stop_body(text: &str) -> Option<String> {
+    let mut v: serde_json::Value = serde_json::from_str(text).ok()?;
+    let map = v.as_object_mut()?;
+    if map.get("hook_event_name").and_then(|x| x.as_str()) != Some("Stop") {
+        return None;
+    }
+    map.insert("_truncated".to_string(), serde_json::Value::Bool(true));
+    let fits = |m: &serde_json::Map<String, serde_json::Value>| json_chars(m) <= HOOK_BODY_MAX_CHARS;
+    let finish = |m: &serde_json::Map<String, serde_json::Value>| serde_json::to_string(m).ok();
+
+    // 1. last_assistant_message を先頭 150 + 末尾 300 に中略（人への質問は末尾に来やすい）
+    if let Some(serde_json::Value::String(s)) = map.get_mut("last_assistant_message") {
+        *s = truncate_middle(s, 150, 300);
+    }
+    if fits(map) {
+        return finish(map);
+    }
+    // 2. 判定に使わないパス系フィールドを落とす
+    let drop_keys: Vec<String> = map
+        .keys()
+        .filter(|k| {
+            !STOP_KEEP_KEYS.contains(&k.as_str()) && (k.ends_with("_dir") || k.ends_with("_path"))
+        })
+        .cloned()
+        .collect();
+    for k in drop_keys {
+        map.remove(&k);
+    }
+    if fits(map) {
+        return finish(map);
+    }
+    // 3. background_tasks / session_crons の長文フィールドを切る
+    clip_field_in_array(map, "background_tasks", "description", 80);
+    clip_field_in_array(map, "background_tasks", "command", 80);
+    clip_field_in_array(map, "session_crons", "prompt", 80);
+    if fits(map) {
+        return finish(map);
+    }
+    // 4. background_tasks の要素を減らす（空配列にすると「待ちなし」に見えるので 1 件は残す）
+    let mut omitted: u64 = 0;
+    loop {
+        let popped = match map.get_mut("background_tasks") {
+            Some(serde_json::Value::Array(a)) if a.len() > 1 => {
+                a.pop();
+                true
+            }
+            _ => false,
+        };
+        if !popped {
+            break;
+        }
+        omitted += 1;
+        map.insert("background_tasks_omitted".to_string(), omitted.into());
+        if fits(map) {
+            return finish(map);
+        }
+    }
+    // 5. last_assistant_message を段 1 の下限よりさらに縮める（末尾優先）
+    for (h, t) in [(50usize, 100usize), (0, 40)] {
+        if let Some(serde_json::Value::String(s)) = map.get_mut("last_assistant_message") {
+            *s = truncate_middle(s, h, t);
+        }
+        if fits(map) {
+            return finish(map);
+        }
+    }
+    // 6. 最終手段（JSON のまま）: session_crons を 1 件に、長い文字列値を切る
+    if let Some(serde_json::Value::Array(a)) = map.get_mut("session_crons") {
+        a.truncate(1);
+    }
+    for key in ["cwd", "transcript_path", "session_id"] {
+        clip_top_level_string(map, key, 60);
+    }
+    if let Some(serde_json::Value::String(s)) = map.get_mut("last_assistant_message") {
+        *s = truncate_chars(s, 40);
+    }
+    if fits(map) {
+        return finish(map);
+    }
+    // それでも収まらない異常入力: 判定に必要な最小限だけ残す
+    let mut min = serde_json::Map::new();
+    for key in ["hook_event_name", "_truncated", "background_tasks_omitted"] {
+        if let Some(x) = map.get(key) {
+            min.insert(key.to_string(), x.clone());
+        }
+    }
+    if let Some(serde_json::Value::Array(a)) = map.get("background_tasks") {
+        min.insert(
+            "background_tasks".to_string(),
+            serde_json::Value::Array(a.iter().take(1).cloned().collect()),
+        );
+    }
+    finish(&min)
+}
+
+/// トースト種別の本文を `HOOK_BODY_MAX_CHARS` に収める。
+/// Stop は構造を保って縮め（`shrink_stop_body`）、それ以外は従来どおり文字数で切る。
+pub fn truncate_hook_body(text: &str) -> String {
+    if text.chars().count() <= HOOK_BODY_MAX_CHARS {
+        return text.to_string();
+    }
+    if let Some(s) = shrink_stop_body(text) {
+        return s;
+    }
+    let cut: String = text.chars().take(HOOK_BODY_MAX_CHARS).collect();
+    format!("{}…（切り詰め）", cut)
+}
+
 /// `SessionStart` / `Stop` の `additionalContext` へ一度に注入する本文の上限文字数（#126）。
 ///
 /// 溜まった未読を全部並べると、自由文メッセージ数十件で相手のコンテキストを埋め尽くし、
@@ -4635,5 +4817,94 @@ mod tests {
         assert!(digest.contains("oretachi_ack_message"));
         assert!(digest.contains("wt-a"));
         assert!(digest.contains("wt-b"));
+    }
+
+    // --- truncate_hook_body (#354) ---
+
+    fn stop_body(msg: &str, tasks: usize, extra: serde_json::Value) -> String {
+        let bg: Vec<serde_json::Value> = (0..tasks)
+            .map(|i| {
+                serde_json::json!({
+                    "id": format!("t{i}"),
+                    "type": "subagent",
+                    "status": "running",
+                    "description": format!("self bug review {i} {}", "x".repeat(200)),
+                })
+            })
+            .collect();
+        let mut v = serde_json::json!({
+            "session_id": "sess-1",
+            "transcript_path": "C:\\Users\\a\\.claude\\t.jsonl",
+            "cwd": "X:\\devel\\wt",
+            "scratchpad_dir": "C:\\Users\\a\\AppData\\Local\\Temp\\claude\\scratch",
+            "hook_event_name": "Stop",
+            "stop_hook_active": false,
+            "last_assistant_message": msg,
+            "background_tasks": bg,
+            "session_crons": [{"id": "c1", "prompt": "p".repeat(300)}],
+        });
+        if let (Some(m), Some(e)) = (v.as_object_mut(), extra.as_object()) {
+            for (k, x) in e {
+                m.insert(k.clone(), x.clone());
+            }
+        }
+        v.to_string()
+    }
+
+    fn parse_ok(s: &str) -> serde_json::Value {
+        assert!(s.chars().count() <= HOOK_BODY_MAX_CHARS, "len={}", s.chars().count());
+        serde_json::from_str(s).expect("妥当な JSON")
+    }
+
+    #[test]
+    fn truncate_hook_body_keeps_background_tasks() {
+        let msg = format!("{}最後の質問です", "あ".repeat(3000));
+        let out = truncate_hook_body(&stop_body(&msg, 3, serde_json::json!({})));
+        let v = parse_ok(&out);
+        assert_eq!(v["_truncated"], true);
+        assert_eq!(v["session_id"], "sess-1");
+        assert_eq!(v["hook_event_name"], "Stop");
+        assert!(v["background_tasks"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(v["session_crons"].as_array().is_some_and(|a| !a.is_empty()));
+        assert!(v.get("scratchpad_dir").is_none());
+        assert!(v["last_assistant_message"].as_str().unwrap().ends_with("最後の質問です"));
+    }
+
+    #[test]
+    fn truncate_hook_body_omits_tasks_but_keeps_one() {
+        let out = truncate_hook_body(&stop_body("done", 40, serde_json::json!({})));
+        let v = parse_ok(&out);
+        let kept = v["background_tasks"].as_array().unwrap().len();
+        assert!(kept >= 1);
+        assert_eq!(v["background_tasks_omitted"].as_u64().unwrap() as usize, 40 - kept);
+    }
+
+    #[test]
+    fn truncate_hook_body_stays_valid_json_with_huge_paths() {
+        let long = "\\very\\long".repeat(200);
+        let extra = serde_json::json!({ "cwd": format!("X:{long}"), "transcript_path": format!("C:{long}") });
+        let out = truncate_hook_body(&stop_body(&"あ".repeat(3000), 5, extra));
+        let v = parse_ok(&out);
+        assert_eq!(v["hook_event_name"], "Stop");
+        assert!(v["background_tasks"].as_array().is_some_and(|a| !a.is_empty()));
+    }
+
+    #[test]
+    fn truncate_hook_body_leaves_short_and_non_stop_alone() {
+        let short = stop_body("ok", 0, serde_json::json!({}));
+        assert_eq!(truncate_hook_body(&short), short);
+
+        let legacy = |s: &str| {
+            let cut: String = s.chars().take(HOOK_BODY_MAX_CHARS).collect();
+            format!("{}…（切り詰め）", cut)
+        };
+        let perm = serde_json::json!({
+            "hook_event_name": "PermissionRequest",
+            "tool_input": {"command": "x".repeat(3000)},
+        })
+        .to_string();
+        assert_eq!(truncate_hook_body(&perm), legacy(&perm));
+        let plain = "あ".repeat(2000);
+        assert_eq!(truncate_hook_body(&plain), legacy(&plain));
     }
 }

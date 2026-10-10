@@ -16,6 +16,7 @@ import {
   shouldSendOsNotification,
   showsBadge,
 } from "../utils/notificationKinds";
+import { shouldClearNotification, type ClearExpectation } from "../utils/notificationClear";
 import type { NotifyKind, NotificationSoundSettings, TrayNotificationMode } from "../types/settings";
 
 export interface NotifyWorktreeEvent {
@@ -211,6 +212,20 @@ export function useNotifications() {
     if (notifications.delete(worktreeId)) syncNotificationsToBackend();
   }
 
+  /**
+   * 条件（件数・種別）が一致するときだけクリアする（#354）。一致してクリアしたら true。
+   * Rust は写しで一致判定した時点で写しを落としているので、不一致なら**再同期して**
+   * 写しをバッジの実態に戻す（戻さないと「バッジは残るのに写しから消えた」になる）。
+   */
+  function clearNotificationIfMatches(worktreeId: string, expected: ClearExpectation): boolean {
+    if (!shouldClearNotification(notifications.get(worktreeId), expected)) {
+      syncNotificationsToBackend();
+      return false;
+    }
+    clearNotification(worktreeId);
+    return true;
+  }
+
   /** 存在しないワークツリーの stale な通知エントリを削除する */
   function purgeStaleNotifications(activeWorktreeIds: Set<string>) {
     let purged = false;
@@ -244,6 +259,7 @@ export function useNotifications() {
     initNotificationListener,
     addNotification,
     clearNotification,
+    clearNotificationIfMatches,
     purgeStaleNotifications,
     getNotifiedWorktreeIds,
     getTotalNotificationCount,
