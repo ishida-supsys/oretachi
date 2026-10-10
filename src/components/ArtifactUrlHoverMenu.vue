@@ -110,6 +110,7 @@ async function open(entry: UrlArtifactEntry) {
   align-items: center;
   gap: 8px;
   height: 36px;
+  flex-shrink: 0;
   padding: 0 12px;
   box-sizing: border-box;
   background: none;
