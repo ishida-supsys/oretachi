@@ -6,6 +6,17 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.35.0] - 2026-10-10
+
+### Added
+- バックグラウンド処理の完了待ちで止まっているだけの Stop 通知を自動で外す `notification-auto-dismiss` スキルを同梱した (#354)
+- リポジトリチップ配下のワークツリーを購読対象にできるようにした (#356)
+- teamwork-parent スキルで sub-issue の入れ子（グループ枠・委任）を扱えるようにした (#358)
+
+### Fixed
+- URL一覧ポップアップの各行が縮んで縦幅がつぶれるのを修正した (#357)
+- bug-review 指摘（再確認の基準・停止条件突き合わせの位置・0件グループ・曽孫）を teamwork-parent スキルに反映した (#358)
+
 ## [0.34.0] - 2026-10-07
 
 ### Added
@@ -855,7 +866,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.34.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.35.0...HEAD
+[0.35.0]: https://github.com/ishida-supsys/oretachi/compare/0.34.0...0.35.0
 [0.34.0]: https://github.com/ishida-supsys/oretachi/compare/0.33.0...0.34.0
 [0.33.0]: https://github.com/ishida-supsys/oretachi/compare/0.32.0...0.33.0
 [0.32.0]: https://github.com/ishida-supsys/oretachi/compare/0.31.7...0.32.0
