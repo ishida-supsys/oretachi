@@ -2204,6 +2204,21 @@ pub async fn event_unsubscribe(app_handle: AppHandle, subscription_id: String) -
     Ok(deleted)
 }
 
+/// 指定ワークツリーを厳密一致 target とする購読行を削除する。
+///
+/// リポジトリ擬似ワークツリーの ID はリポジトリパスから決定論的に導出され、登録解除では
+/// `worktree.closed` が出ない（= 購読行の自動掃除が走らない）。放置すると同じパスの再登録で
+/// 古い購読が無言で復活するため、登録解除フローから明示的に呼ぶ。
+#[tauri::command]
+pub async fn event_forget_target(app_handle: AppHandle, worktree_id: String) -> Result<u64, String> {
+    let pool = pool_of(&app_handle)?;
+    let deleted = event_db::delete_subscriptions_for_target(&pool, &worktree_id).await?;
+    if deleted > 0 {
+        let _ = app_handle.emit("event-inbox-changed", ());
+    }
+    Ok(deleted)
+}
+
 /// UI からの既読化。エージェントが ack しないまま放置した分を人間が畳めるようにする。
 /// 対象は指定タブの未 ack 全件（人間は一覧で件数しか見ていないので ID を持っていない）。
 #[tauri::command]

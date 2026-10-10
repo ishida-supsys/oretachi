@@ -984,6 +984,11 @@ async function onRemoveRepository(repositoryId: string) {
   autoApprovalMap.delete(pseudoId);
   autoApprovalPromptMap.delete(pseudoId);
   lastJudgedCommandMap.delete(pseudoId);
+  // 購読行も同様: 登録解除では worktree.closed が出ないので自動掃除されず、
+  // 同じパスの再登録で無言で復活する
+  invoke("event_forget_target", { worktreeId: pseudoId }).catch((e) =>
+    console.warn("[subscription] event_forget_target failed:", e),
+  );
   if (activeWorktreeId.value === pseudoId) goHome();
 
   // settings から外し、擬似ワークツリーの prune とセッションファイル掃除を syncRepositoryWorktrees に任せる

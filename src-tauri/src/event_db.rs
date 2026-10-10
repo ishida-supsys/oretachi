@@ -173,11 +173,18 @@ impl std::fmt::Display for NotifyKind {
 /// - `*`: 全ワークツリー
 /// - `workgroup:<id>`: そのワークグループに属するワークツリー
 /// - `repo:<name>`: そのリポジトリのワークツリー（名前は `normalize_target` で正規化）
+/// - `workgroup:@repository`: UI の「リポジトリ」チップ配下（各リポジトリのルートセッション＝
+///   リポジトリ擬似ワークツリー）。`REPOSITORY_GROUP_ID` を所属グループとして扱うので、
+///   先頭ワークグループ（`workgroup:<先頭グループ>`）への購読には当たらない
 ///
 /// 上記以外はワークツリー ID の厳密一致として扱う。
 pub const TARGET_ALL: &str = "*";
 pub const TARGET_WORKGROUP_PREFIX: &str = "workgroup:";
 pub const TARGET_REPO_PREFIX: &str = "repo:";
+
+/// リポジトリ擬似ワークツリーの「所属グループ」を表す予約 ID（実在のワークグループ ID は
+/// UUID なので衝突しない）。`matching_targets` は無改修で `workgroup:@repository` を生成する。
+pub const REPOSITORY_GROUP_ID: &str = "@repository";
 
 /// 配送戦略。
 /// - `turn_end`: 既定。`Stop` フック / `SessionStart` 回収でターン境界に届ける
