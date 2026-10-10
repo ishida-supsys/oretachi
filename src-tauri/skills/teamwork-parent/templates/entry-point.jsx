@@ -4,7 +4,7 @@ const { useMemory } = require('oretachi');
 const TASKS = require('./data/flow').default;
 const { DEPENDENCIES, MESSAGES, REPO_URL } = require('./data/flow');
 const TaskNode = require('./components/TaskNode').default;
-const { STATUS_COLORS, STATUS_LABELS } = require('./components/TaskNode');
+const { STATUS_COLORS, STATUS_LABELS, issueUrl } = require('./components/TaskNode');
 const { STOP_PHASE_COLORS, getStopConditions, stopStats } = require('./lib/stopConditions');
 const DependencyEdge = require('./components/DependencyEdge').default;
 const { BOX_WIDTH, BOX_HEIGHT } = require('./components/DependencyEdge');
@@ -43,8 +43,28 @@ function sanitizeView(saved) {
   };
 }
 
+// グループ枠の余白。見出し分(GROUP_HEADER)は上辺にだけ足す
+const GROUP_PAD = 16;
+const GROUP_HEADER = 28;
+
+// グループ(kind:'group')はノードではなく枠。座標を持たないので、parentId が一致する
+// 子ノードの外接矩形から x/y/w/h を計算して TASK_MAP のエントリへ載せる
+// (DependencyEdge が task.w / task.h を見るので、グループ枠へも線を引ける)。
+// 子が1つも座標を持たないグループは枠を描けないので x/y を付けない(線も出ない)。
 const TASK_MAP = {};
 TASKS.forEach(t => { TASK_MAP[t.id] = t; });
+const LEAVES = TASKS.filter(t => t.kind !== 'group');
+const GROUPS = TASKS.filter(t => t.kind === 'group').map(g => {
+  const kids = LEAVES.filter(t => t.parentId === g.id && Number.isFinite(t.x) && Number.isFinite(t.y));
+  if (kids.length === 0) return g;
+  const x1 = Math.min(...kids.map(t => t.x)) - GROUP_PAD;
+  const y1 = Math.min(...kids.map(t => t.y)) - GROUP_PAD - GROUP_HEADER;
+  const x2 = Math.max(...kids.map(t => t.x + BOX_WIDTH)) + GROUP_PAD;
+  const y2 = Math.max(...kids.map(t => t.y + BOX_HEIGHT)) + GROUP_PAD;
+  const framed = { ...g, x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+  TASK_MAP[g.id] = framed;
+  return framed;
+});
 
 const FONT = 'system-ui,sans-serif';
 const CARD = {
@@ -292,7 +312,8 @@ function App() {
   // ポップアップが指している対象(ノード or エッジ)。ドラッグ中はポップアップを出さないので null
   const hoverKey = dragging || !hover ? null : hover.key;
 
-  const doneCount = TASKS.filter(t => t.status === 'done').length;
+  // 進捗はグループを除いたリーフで数える(グループの done は子の状態から導かれる派生値)
+  const doneCount = LEAVES.filter(t => t.status === 'done').length;
   // 未クリアの停止条件を持つタスク/エッジ(= hasOpenStop)。まだ到達していない pending も含む
   // 「これから人の判定が必要になる箇所」の一覧なので、フェーズでは絞らない。
   const confirmTasks = TASKS.filter(t => stopStats(t).hasOpenStop);
@@ -303,14 +324,19 @@ function App() {
   // 着手可能 = (1) blocks 依存元がすべて done、かつ (2) そのタスクへ入るエッジの停止条件が
   // すべてクリア済み。(2) は kind を問わない — 親の停止条件が未クリアのまま次タスクを
   // 起動してはいけないため、informs エッジに付いた停止条件も起動を止める。
-  const readyTasks = TASKS.filter(t => {
-    if (t.status !== 'not_started') return false;
-    const incoming = DEPENDENCIES.filter(d => d.to === t.id);
+  // グループは着手の対象ではない(ワークツリーを作らない)ので除外する。parentId を持つ子は、
+  // 自身への入力エッジに加えて所属グループへの入力エッジも満たしたときに着手可能になる。
+  const incomingSatisfied = id => {
+    const incoming = DEPENDENCIES.filter(d => d.to === id);
     const blocksDone = incoming
       .filter(d => d.kind === 'blocks')
       .every(d => TASK_MAP[d.from] && TASK_MAP[d.from].status === 'done');
     const stopsCleared = incoming.every(d => !stopStats(d).hasOpenStop);
     return blocksDone && stopsCleared;
+  };
+  const readyTasks = LEAVES.filter(t => {
+    if (t.status !== 'not_started') return false;
+    return incomingSatisfied(t.id) && (!t.parentId || incomingSatisfied(t.parentId));
   });
 
   return (
@@ -337,6 +363,41 @@ function App() {
         transformOrigin: '0 0',
         width: CANVAS_W, height: CANVAS_H,
       }}>
+        {/* Layer 0: グループ枠(子ノードの背面。DOM 順で依存線より下) */}
+        {GROUPS.filter(g => Number.isFinite(g.x)).map(g => {
+          const color = STATUS_COLORS[g.status] || { bg: '#cdd6f4', text: '#1e1e2e' };
+          const url = issueUrl(REPO_URL, g.issueNumber);
+          return (
+            <div key={g.id} style={{
+              position: 'absolute', left: g.x, top: g.y, width: g.w, height: g.h,
+              boxSizing: 'border-box',
+              border: '2px dashed ' + color.bg, borderRadius: 12,
+              background: 'rgba(49,50,68,0.28)',
+            }}>
+              <div style={{
+                height: GROUP_HEADER, padding: '0 12px',
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8,
+                fontSize: 12, fontWeight: 700, fontFamily: FONT, color: '#cdd6f4',
+              }}>
+                <span style={{ whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', minWidth: 0 }}>
+                  {url ? (
+                    <a data-ui="1" href={url} target="_blank" rel="noopener noreferrer"
+                      style={{ color: 'inherit', textDecoration: 'underline', textUnderlineOffset: 2 }}>
+                      #{g.issueNumber}
+                    </a>
+                  ) : ('#' + g.issueNumber)} {g.title}
+                </span>
+                <span style={{
+                  fontSize: 10, fontWeight: 700, borderRadius: 3, padding: '1px 6px',
+                  background: color.bg, color: color.text, flexShrink: 0,
+                }}>
+                  グループ · {STATUS_LABELS[g.status] || g.status}
+                </span>
+              </div>
+            </div>
+          );
+        })}
+
         {/* Layer 1: 依存線 */}
         <svg style={{ ...svgStyle, zIndex: 0 }} viewBox={svgViewBox}>
           {DEPENDENCIES.map((dep, i) => (
@@ -348,7 +409,7 @@ function App() {
         </svg>
 
         {/* Layer 2: タスクノード */}
-        {TASKS.map(task => (
+        {LEAVES.map(task => (
           <TaskNode key={task.id} task={task} x={task.x} y={task.y}
             hovered={hoverKey === task.id} repoUrl={REPO_URL}
             onEnter={handleStopEnter} onLeave={handleStopLeave} />
@@ -364,7 +425,7 @@ function App() {
         display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: 6,
       }}>
         <Chip
-          label={'ⓘ ' + doneCount + ' / ' + TASKS.length + ' 完了'}
+          label={'ⓘ ' + doneCount + ' / ' + LEAVES.length + ' 完了'}
           active={openPanel === 'title'}
           title="タイトルを表示"
           onClick={() => togglePanel('title')}
@@ -421,6 +482,9 @@ function App() {
             ))}
             <div style={{ fontSize: 10, color: '#6c7086', fontFamily: FONT, marginTop: 4, borderTop: '1px solid #313244', paddingTop: 4 }}>
               実線: blocks / 破線: informs
+            </div>
+            <div style={{ fontSize: 10, color: '#6c7086', fontFamily: FONT }}>
+              点線の枠: グループ(同時管理する中間 issue) ／ 「委任」: 子が自分で teamwork-parent を走らせる
             </div>
             <div style={{ fontSize: 10, color: '#6c7086', fontFamily: FONT }}>
               停止条件 — ⏸灰: 未実行 ／ ⏸橙: 実行中(要判定) ／ ☑緑: 実行済み

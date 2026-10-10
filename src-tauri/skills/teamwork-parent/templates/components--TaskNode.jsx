@@ -114,6 +114,15 @@ function TaskNode({ task, x, y, hovered, onEnter, onLeave, repoUrl }) {
           ) : ('#' + task.issueNumber)}
         </span>
         <span style={{ display: 'flex', alignItems: 'center', gap: 5, flexShrink: 0 }}>
+          {task.delegated && (
+            <span title="子ワークツリーが自分で teamwork-parent を走らせて孫を管理する" style={{
+              fontSize: 9, fontWeight: 700, lineHeight: 1.6,
+              background: '#1e1e2e', color: '#cba6f7',
+              borderRadius: 3, padding: '0 5px', whiteSpace: 'nowrap',
+            }}>
+              委任
+            </span>
+          )}
           {stats.total > 0 && (
             <span style={{
               fontSize: 9, fontWeight: 700, lineHeight: 1.6,
@@ -156,3 +165,4 @@ function TaskNode({ task, x, y, hovered, onEnter, onLeave, repoUrl }) {
 exports.default = TaskNode;
 exports.STATUS_COLORS = STATUS_COLORS;
 exports.STATUS_LABELS = STATUS_LABELS;
+exports.issueUrl = issueUrl;
