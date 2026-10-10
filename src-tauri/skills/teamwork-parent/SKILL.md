@@ -10,7 +10,12 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_ore
 
 ## Step 1: 計画とユーザー承認
 
-1. 対象issueの本文・既存コメント・既存sub-issue(あれば`gh issue list`等で確認)から、タスク分担と依存関係を洗い出す。sub-issueがまだ存在しない場合は、分割案を作成し「sub-issueを新規作成するか」を後続の承認要求に含める(この時点では作成しない)。
+1. 対象issueの本文・既存コメント・既存sub-issueから、タスク分担と依存関係を洗い出す。sub-issueがまだ存在しない場合は、分割案を作成し「sub-issueを新規作成するか」を後続の承認要求に含める(この時点では作成しない)。
+   - **sub-issueごとに孫の有無を確認する。** `gh api repos/<owner>/<repo>/issues/<n>/sub_issues`で各sub-issueのsub-issueを取得する。
+   - **孫を持つsub-issueごとに`AskUserQuestion`で扱いを選ばせる**:
+     - 「このセッションで同時管理」— 孫もこのセッションのタスクとして洗い出す。この中間issueはワークツリーを作らない**グループ**として`data/flow`に入れ(`kind: 'group'`、孫に`parentId`)、孫は停止条件ヒアリング(項番3)の対象に含める。
+     - 「子ワークツリーで teamwork-parent を起動(委任)」— この sub-issue は`delegated: true`のリーフ1つとして扱う。子が自分で孫を管理する。
+   - 子が起動した後で入れ子が判明した場合に「同時管理へ切り替えて」と子から差し戻す経路は作らない(子がクローズすると親は`done`扱いして後続を自動起動してしまうため)。その場合は teamwork-child の「階層構造について」どおり、子が teamwork-parent を併用して管理する。
 2. 各sub-issueに決定的なブランチ名を採番する(例: `issue-<番号>`)。
 3. **停止条件をヒアリングする。** 分割案と同時に、次の2種類の停止条件の候補を挙げてユーザーに提示し、回答を得る:
    - **タスクの停止条件**(子ワークツリーが自分の作業中に止まる項目) — 例: 「追加テーブルのスキーマが確定したら確認」「動作確認の結果を見て判断」
@@ -21,6 +26,7 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_ore
    - sub-issue新規作成の要否(対象がある場合)
    - 計画フロー(依存関係・ユーザーが介入するタイミング)
    - **各タスク/エッジに設定した停止条件の一覧**
+   - 入れ子がある場合は、各中間issueを同時管理/委任のどちらにしたか。**同時管理する中間issueは、孫が全`done`になった時点で親がコメントしてクローズする**こと
    **承認が得られるまでStep2(`oretachi_add_task`の呼び出し)を行わない。**
 6. **承認が得られたら、Step 2 に入る直前に自分自身のワークツリーのトレイ通知をオフにする**(この呼び出し自体に承認は要らない。自分のノイズを止めるだけで他ワークツリーの通知には影響しないため):
    ```
@@ -32,9 +38,15 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_ore
 
 タスクの追加・削除や依存関係の変更を行う場合は、**その差分について停止条件を改めてユーザーに聞く**。新しいタスクにはそのタスクの停止条件を、新しいエッジにはその遷移の停止条件を、Step1と同じ手順でヒアリングしてから`data/flow`を更新する。既存の停止条件をそのまま流用する・不要と判断する、といった推測はしない。
 
+起動直前の`sub_issues`再確認(Step 2)で、計画後に孫が増えていたsub-issueが見つかった場合も同じ手順に入る: 項番1の選択(同時管理/委任)と停止条件のヒアリングを行い、`notify_worktree`でユーザーを呼び戻してから`data/flow`を更新する。
+
 ## Step 2: 子ワークツリー作成(承認不要、開始・完了トリガーで自動)
 
 依存が無い、または既に解消済みの`not_started`のsub-issueについて、承認後は都度**ユーザーに確認せず**以下を実行する。
+
+**起動直前に、そのsub-issueの`gh api repos/<owner>/<repo>/issues/<n>/sub_issues`を再確認する。** 計画後に孫が増えていたら、起動せずに「フローを修正するとき」の手順に入る。
+
+**グループ(`kind: 'group'`)は`oretachi_add_task`しない**(ワークツリーを作らない)。グループの孫は通常のリーフとしてこの手順で起動する。ただし`parentId`を持つ孫は、自身への入力エッジに加えて**所属グループへの入力エッジ**も満たしたときに着手可能になる(`to`がグループのエッジは、グループ内で内部依存を持たない入口の子を解禁する)。
 
 **ただし、そのタスクへ入るエッジに未クリアの停止条件が1つでもあれば、この手順に入らない。** `blocks` / `informs` のどちらでも同じ(停止条件が付いている以上、その遷移では親が止まる)。その場合はStep3の「親自身の停止条件」の扱いに従い、`notify_worktree`でユーザーを呼び戻して回答を得てからにする。
 
@@ -52,13 +64,20 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_ore
    ```
    oretachi_add_task(prompt: "teamwork-child スキルを読み込んでから対応してください。\nSub-issue: <URL>")
    ```
+   **委任(`delegated: true`)を選んだsub-issueだけ**、子に自分の孫を管理させるため次の形にする:
+   ```
+   oretachi_add_task(prompt: "teamwork-parent と teamwork-child スキルを読み込んでから対応してください。\nSub-issue: <URL>")
+   ```
+   この形も、禁止事項の「teamwork-child 読み込み指示を省略しない」を満たす。
 3. `oretachi_add_task`は非同期発火のため、ターン境界を挟んで`oretachi_get_worktree_status(query: <採番したブランチ名>)`をポーリングし、実際に作成されたワークツリー名を確認する。
 4. `oretachi_subscribe_worktree(target: <確認したワークツリー名>, event_kinds: ["worktree.closed", "worktree.created", "worktree.message"])`で購読する。
 5. 5章の手順で計画フローartifactの`data/flow`モジュールを更新し、対象タスクの`status`を`in_progress`にし、`branch`が実際の値と一致していることを確認する。
 
 ## Step 3: 子ワークツリーイベントへの対応
 
-- **`worktree.closed`**: 対応するsub-issueの`status`を`data/flow`更新で`done`にする。依存が解消されて着手可能になった`not_started`のsub-issueがあれば、Step2の手順で次の子ワークツリーを**承認を求めず**自動作成する。 **このとき、そのタスクの停止条件がすべて`checked: true`になっているか確認する。** 子がクリア報告を送り損ねている場合があるので、sub-issue本文の`## 停止条件`のチェックボックスと`data/flow`を突き合わせ、ズレていれば`data/flow`を実態に合わせて更新してから`done`にする。
+- **`worktree.closed`**: 対応するsub-issueの`status`を`data/flow`更新で`done`にする。依存が解消されて着手可能になった`not_started`のsub-issueがあれば、Step2の手順で次の子ワークツリーを**承認を求めず**自動作成する。
+  - **孫の`worktree.closed`で、そのグループ内の全リーフが`done`になったら**、グループの`status`を`done`にして(子が1つでも動いていれば`in_progress`)、グループを`from`とするエッジの依存解消を判定する。続けて中間issueへ完了コメントを投稿し`gh issue close`する。クローズに失敗したら`notify_worktree`でユーザーに依頼する。**グループの`done`は子の状態だけで決まり、クローズの成否で取り消さない。**
+  - **このとき、そのタスクの停止条件がすべて`checked: true`になっているか確認する。** 子がクリア報告を送り損ねている場合があるので、sub-issue本文の`## 停止条件`のチェックボックスと`data/flow`を突き合わせ、ズレていれば`data/flow`を実態に合わせて更新してから`done`にする。
 - **`worktree.message`**: `oretachi_poll_inbox`で内容を確認し、`oretachi_ack_message`で既読化する。
   - issueコメントのURLのみの場合は必要に応じて参照し、ユーザーの判断が必要な内容かどうかを見極める。
   - ユーザー判断が必要な内容だけを提示し、それ以外は自動で流れを継続する。
@@ -82,7 +101,7 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_ore
 
 ## Step 4: 完了判定
 
-全sub-issueが`done`になったら:
+全sub-issue(リーフとグループの両方)が`done`になったら:
 - `oretachi_set_tray_notification(project_dir: <自分の作業ディレクトリ絶対パス>, enabled: true)`を呼び、トレイ通知をオンへ戻す(ワークツリーは完了後も残って再利用されうるため、オフのまま放置しない)。ワークツリー作成時にトレイ通知オフが焼き込まれていた場合は、`enabled: false`のままにするかをユーザーに確認してから戻すこと。
 - ユーザーに完了を報告し、作業を停止する。
 - **このワークツリー自身が誰かのsub-issueである場合**(teamwork-childの義務を負っている場合)は、続けて`teamwork-child`スキルの完了報告手順(親issueへの報告 → `oretachi_close_worktree`の承認)に従う。
@@ -108,7 +127,8 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_ore
 
 - Step1の承認前に`oretachi_add_task`を呼ばない。
 - sub-issueの本文をそのまま`oretachi_add_task`のpromptに転記しない(URLのみ)。
-- `oretachi_add_task`のprompt冒頭の`teamwork-child`読み込み指示を省略しない(子ワークツリーが正しいスキルを読み込む唯一の経路のため)。
+- `oretachi_add_task`のprompt冒頭の`teamwork-child`読み込み指示を省略しない(子ワークツリーが正しいスキルを読み込む唯一の経路のため)。委任時の`teamwork-parent と teamwork-child スキルを読み込んで…`の形は、この指示を満たす。
+- グループ(`kind: 'group'`)を`oretachi_add_task`しない(中間issueのワークツリーは作らない)。
 - ユーザー判断が不要なメッセージでユーザーの手を止めない。
 - トレイ通知をオフにしたまま、ユーザー判断が必要な場面で`notify_worktree`を省略しない(ユーザーが永久に気付けなくなる)。
 - 子ワークツリーのトレイ通知を`oretachi_set_tray_notification`でオフにしない(承認待ちが見えなくなる)。
@@ -178,6 +198,8 @@ Step1で洗い出したsub-issue一覧・依存関係から座標を割り当て
 - 同じ列内のタスクは行間124px(84 + 間隔40)で縦に並べる
 - `CANVAS_W` = 最大タスクx + 220(BOX_WIDTH) + 40(マージン)
 - `CANVAS_H` = 最大タスクy + 84(BOX_HEIGHT) + 40(マージン)
+- **グループの孫は連続した行に置く**(グループ枠は孫ノードの外接矩形＋余白16px＋上辺の見出し28px で描かれる)。枠の見出し分として、グループ最上段の孫の上に44px以上の空きを確保し、枠内に無関係なノードが入らないようにする。グループ自体は座標を持たない
+- 入れ子(同時管理)の追加フィールド(`kind: 'group'` / `parentId` / `delegated: true`)は`templates/data--flow.example.jsx`のスキーマコメントを参照
 
 ## アーティファクト作成
 

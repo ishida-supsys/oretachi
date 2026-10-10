@@ -6,25 +6,31 @@ const { STOP_PHASE_COLORS, getStopConditions, isEdgeActive, stopPhase } = requir
 const BOX_WIDTH = 220;
 const BOX_HEIGHT = 84;
 
+// グループ枠(kind:'group')は entry-point が外接矩形から w/h を載せるので、
+// それがあれば枠の大きさ、無ければ通常ノードの大きさで端点を求める。
 function getEdgePoints(fromTask, toTask) {
-  const fCx = fromTask.x + BOX_WIDTH / 2;
-  const tCx = toTask.x + BOX_WIDTH / 2;
-  const fCy = fromTask.y + BOX_HEIGHT / 2;
-  const tCy = toTask.y + BOX_HEIGHT / 2;
+  const fW = fromTask.w ?? BOX_WIDTH;
+  const fH = fromTask.h ?? BOX_HEIGHT;
+  const tW = toTask.w ?? BOX_WIDTH;
+  const tH = toTask.h ?? BOX_HEIGHT;
+  const fCx = fromTask.x + fW / 2;
+  const tCx = toTask.x + tW / 2;
+  const fCy = fromTask.y + fH / 2;
+  const tCy = toTask.y + tH / 2;
   const dx = tCx - fCx;
   const dy = tCy - fCy;
 
   let fx, fy, tx, ty;
   if (Math.abs(dx) >= Math.abs(dy)) {
-    fx = dx >= 0 ? fromTask.x + BOX_WIDTH + 2 : fromTask.x - 2;
+    fx = dx >= 0 ? fromTask.x + fW + 2 : fromTask.x - 2;
     fy = fCy;
-    tx = dx >= 0 ? toTask.x - 2 : toTask.x + BOX_WIDTH + 2;
+    tx = dx >= 0 ? toTask.x - 2 : toTask.x + tW + 2;
     ty = tCy;
   } else {
     fx = fCx;
-    fy = dy >= 0 ? fromTask.y + BOX_HEIGHT + 2 : fromTask.y - 2;
+    fy = dy >= 0 ? fromTask.y + fH + 2 : fromTask.y - 2;
     tx = tCx;
-    ty = dy >= 0 ? toTask.y - 2 : toTask.y + BOX_HEIGHT + 2;
+    ty = dy >= 0 ? toTask.y - 2 : toTask.y + tH + 2;
   }
   return { fx, fy, tx, ty };
 }
@@ -34,6 +40,8 @@ function getEdgePoints(fromTask, toTask) {
 // hovered = このエッジの停止条件ポップアップが今出ている(App が hover.key と照合して渡す)。
 function DependencyEdge({ idx, dep, fromTask, toTask, hovered, onEnter, onLeave }) {
   if (!fromTask || !toTask) return null;
+  // 子を持たないグループは枠が計算されず座標が無い。線を引けないので描かない
+  if (!Number.isFinite(fromTask.x) || !Number.isFinite(toTask.x)) return null;
   const { fx, fy, tx, ty } = getEdgePoints(fromTask, toTask);
   const markerId = 'dep-arr-' + idx;
   const isInforms = dep.kind === 'informs';

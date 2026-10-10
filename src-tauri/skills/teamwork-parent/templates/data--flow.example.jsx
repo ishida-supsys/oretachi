@@ -23,8 +23,19 @@
 //       子の作業中に発生し、子の上で止まってユーザーに確認する。
 //       親はこの停止による子の停止では止まらない(MESSAGESに記録して流れを継続)。
 //       sub-issue本文の `## 停止条件` セクションに同じ内容を書いて子へ伝達する。
+//     --- 入れ子(sub-issue がさらに sub-issue を持つ場合)の任意フィールド ---
+//     kind: 'group' — 「このセッションで同時管理」を選んだ中間 sub-issue。
+//       ワークツリーを作らない(oretachi_add_task しない)ので branch は持たず、座標(x/y)も持たない。
+//       枠の位置と大きさは entry-point が parentId が一致する子ノードの外接矩形から計算する。
+//       status は親が data/flow に書く: 全子 done で done、子が1つでも動けば in_progress。
+//       **done は子の状態だけで決まり、中間 issue のクローズ成否には依存しない。**
+//     parentId: '<グループの id>' — グループに属する孫タスクが持つ。
+//     delegated: true — 「子ワークツリーで teamwork-parent を起動(委任)」を選んだ sub-issue。
+//       子ワークツリーが自分で孫を管理する(親はこの sub-issue をリーフとして扱う)。
 //   DEPENDENCIES: [{ from, to, kind, stopConditions }]
 //     kind: "blocks"(実線) | "informs"(破線)
+//     グループも端点にできる。from がグループ = 全子 done で遷移成立。
+//     to がグループ = グループ内で内部依存を持たない入口の子を解禁する。
 //     stopConditions: StopCondition[] — 親ワークツリーの停止条件。
 //       from → to の遷移(= to の子ワークツリーを起動する時点)で親が止まる。
 //       未クリアの条件が残っている間、親は to の oretachi_add_task を実行しない。
@@ -68,6 +79,19 @@ const TASKS = [
       { id: 'sc-142-1', text: '追加テーブルのスキーマが確定したら確認', checked: false },
       { id: 'sc-142-2', text: '動作確認の結果をユーザーが見て判断', checked: false },
     ] },
+
+  // 入れ子のサンプル: #143 は孫(#144/#145)を持つ中間 issue で「同時管理」を選んだ → グループ。
+  // 孫は連続した同じ行に置く(枠の見出し分の余白は entry-point が上辺に足す)
+  { id: 'task-143', issueNumber: 143, title: 'イベント配送の再設計', kind: 'group',
+    status: 'not_started' },
+  { id: 'task-144', issueNumber: 144, title: '配送キュー実装', status: 'not_started',
+    parentId: 'task-143', branch: 'issue-144', x: 880, y: 80 },
+  { id: 'task-145', issueNumber: 145, title: '再送ポリシー', status: 'not_started',
+    parentId: 'task-143', branch: 'issue-145', x: 1160, y: 80 },
+
+  // 「委任」を選んだ sub-issue: 子ワークツリーが自分で teamwork-parent を走らせる(リーフとして1ノード)
+  { id: 'task-146', issueNumber: 146, title: '監視ダッシュボード', status: 'not_started',
+    delegated: true, branch: 'issue-146', x: 1500, y: 80 },
 ];
 
 const DEPENDENCIES = [
@@ -91,6 +115,12 @@ const DEPENDENCIES = [
     stopConditions: [
       { id: 'sc-e2-1', text: '#140 のイベント名が #142 の検証手順と噛み合うか確認', checked: false },
     ] },
+
+  // 入れ子のサンプル。to がグループ = 入口の子(#144)を解禁、グループ内の内部依存は #144 → #145、
+  // from がグループ = 全子 done で #146 へ遷移成立
+  { from: 'task-142', to: 'task-143', kind: 'blocks' },
+  { from: 'task-144', to: 'task-145', kind: 'blocks' },
+  { from: 'task-143', to: 'task-146', kind: 'blocks' },
 ];
 
 const MESSAGES = [
