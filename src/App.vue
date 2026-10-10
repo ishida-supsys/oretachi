@@ -102,7 +102,7 @@ const { appliedZoom } = useUiZoom();
 const { worktrees, loadWorktreesFromSettings, syncWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, reorderWorktree, saveWorktreeOrder, restoreWorktreeOrder, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, registerTerminalSession, closeAllSubWindows } = useSubWindows();
 const { autoApprovalPromptMap, lastJudgedCommandMap, showAutoApprovalPromptDialog, autoApprovalPromptTargetId, restoreFromSettings: restoreAutoApprovalPrompts, onClickAutoApproval, onSaveAutoApprovalPrompt } = useAutoApprovalPrompt(settings, scheduleSave, isDetached);
-const { notifications, initNotificationListener, addNotification, clearNotification, purgeStaleNotifications, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
+const { notifications, initNotificationListener, addNotification, clearNotification, clearNotificationIfMatches, purgeStaleNotifications, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
 // 自動 spawn 拒否のトースト（#120 §7 / #130 / #137）。Rust 側は全 webview へブロードキャスト
 // するので、**そのワークツリーを表示しているウィンドウだけ**が出す。分離済みならサブウィンドウの担当。
 // 配送トーストは #137 で廃止（購読状態はカードの購読バッジが常時見せる）。
@@ -117,6 +117,10 @@ const { openTrayPopup, closeTrayPopup, getPendingWorktrees, clearPendingWorktree
  */
 function clearNotificationAndTray(worktreeId: string) {
   clearNotification(worktreeId);
+  notifyTrayCleared(worktreeId);
+}
+
+function notifyTrayCleared(worktreeId: string) {
   if (isTrayPopupOpen()) {
     emitTo("tray-popup", "tray-notification-cleared", { worktreeId }).catch(() => {});
   }
@@ -2058,9 +2062,22 @@ onMounted(async () => {
   // 「写しは空・バッジは残る」に割れる（emit は受信者ゼロでも成功する）。
   // 通知が積まれ始めるのは initNotificationListener が notify-worktree を購読して
   // からなので、その前に登録しておけば取りこぼす窓が構造的に無くなる。
-  await listen<{ worktree: string; worktreeId: string }>("clear-worktree-notification", (event) => {
-    clearNotificationAndTray(event.payload.worktreeId);
-    logDebug(`[Notification] cleared by MCP: ${event.payload.worktree} (${event.payload.worktreeId})`);
+  //
+  // expectedCount / expectedKind があるときは条件付きクリア（#354）。Rust の写しは最大 100ms
+  // 遅れるので、ここでフロントの権威状態と再照合し、不一致ならクリアしない（バッジが残る側に倒す）。
+  await listen<{ worktree: string; worktreeId: string; expectedCount?: number; expectedKind?: string }>("clear-worktree-notification", (event) => {
+    const { worktree, worktreeId, expectedCount, expectedKind } = event.payload;
+    if (expectedCount === undefined && expectedKind === undefined) {
+      clearNotificationAndTray(worktreeId);
+      logDebug(`[Notification] cleared by MCP: ${worktree} (${worktreeId})`);
+      return;
+    }
+    if (clearNotificationIfMatches(worktreeId, { expectedCount, expectedKind })) {
+      notifyTrayCleared(worktreeId);
+      logDebug(`[Notification] conditionally cleared by MCP: ${worktree} (${worktreeId})`);
+    } else {
+      logDebug(`[Notification] conditional clear skipped (mismatch): ${worktree} (${worktreeId})`);
+    }
   });
 
   // 自動承認リスナーを初期化（notify-worktree, sub-auto-approve-result 等）。

@@ -384,6 +384,26 @@ pub fn sync_notification_state(
 pub struct ClearNotificationEvent {
     pub worktree: String,
     pub worktree_id: String,
+    /// 指定があるときだけフロントの権威状態と照合してからクリアする（#354）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_count: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_kind: Option<String>,
+}
+
+/// 条件付きクリアの照合。条件が無ければ常に一致。指定された項目だけ比較し、
+/// 条件があるのに通知エントリが無ければ不一致。
+fn notification_matches(
+    current: Option<&NotificationSnapshot>,
+    expected_count: Option<u32>,
+    expected_kind: Option<&str>,
+) -> bool {
+    if expected_count.is_none() && expected_kind.is_none() {
+        return true;
+    }
+    let Some(cur) = current else { return false };
+    expected_count.map_or(true, |c| c == cur.count)
+        && expected_kind.map_or(true, |k| k == cur.kind)
 }
 
 /// ワークツリークローズの最終結果。フロントエンドの status 文字列に対応する。
@@ -1342,6 +1362,10 @@ pub struct ClearNotificationParams {
     pub worktree_name: Option<String>,
     #[schemars(description = "対象ワークツリーID（同名ワークツリーが複数ある場合に指定）")]
     pub worktree_id: Option<String>,
+    #[schemars(description = "条件付きクリア: 現在の未確認通知件数がこの値と一致するときだけクリアする。不一致なら何もせず skipped を返す")]
+    pub expected_count: Option<u32>,
+    #[schemars(description = "条件付きクリア: 現在の通知種別（approval / completed / general）がこの値と一致するときだけクリアする")]
+    pub expected_kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -3028,10 +3052,10 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "指定ワークツリーに溜まっている未確認通知（トレイバッジ・ホームのカードに出る件数）をリセットする。ワークツリーを開いたときと同じクリア操作を MCP から行うもので、通知の設定（oretachi_set_tray_notification）には影響しない。捌き終わったワークツリーの通知だけ落として残りを巡回したいときに使う。捌く対象は oretachi_list_worktree_notifications で古い順に取れる")]
+    #[tool(description = "指定ワークツリーに溜まっている未確認通知（トレイバッジ・ホームのカードに出る件数）をリセットする。ワークツリーを開いたときと同じクリア操作を MCP から行うもので、通知の設定（oretachi_set_tray_notification）には影響しない。捌き終わったワークツリーの通知だけ落として残りを巡回したいときに使う。捌く対象は oretachi_list_worktree_notifications で古い順に取れる。判定に時間差がある自動処理からは、直前に oretachi_list_worktree_notifications で見た count / kind を expected_count / expected_kind に渡すと、判定中に積まれた別の通知（approval など）を巻き込まない（不一致なら何もせず { skipped: true } を返す）。省略時は無条件でクリアする")]
     fn oretachi_clear_worktree_notification(
         &self,
-        Parameters(ClearNotificationParams { project_dir, worktree_name, worktree_id }): Parameters<ClearNotificationParams>,
+        Parameters(ClearNotificationParams { project_dir, worktree_name, worktree_id, expected_count, expected_kind }): Parameters<ClearNotificationParams>,
     ) -> Result<CallToolResult, McpError> {
         let settings_manager = self.app_handle.state::<SettingsManager>();
         let settings = settings_manager.get();
@@ -3044,6 +3068,36 @@ impl NotifyService {
             "specify one of project_dir / worktree_name / worktree_id",
         )?;
 
+        // 条件付きクリア（#354）: 写しが一致しなければ emit も写しの除去もしない。
+        // 写しは最大 100ms 遅れるので、一致した場合もフロントの権威状態で再照合させる。
+        let current = self
+            .app_handle
+            .state::<NotificationRegistry>()
+            .snapshot()
+            .get(&wt.id)
+            .cloned();
+        if !notification_matches(current.as_ref(), expected_count, expected_kind.as_deref()) {
+            log::info!(
+                "[mcp] oretachi_clear_worktree_notification: skipped worktree={} expected=({:?},{:?})",
+                wt.name, expected_count, expected_kind
+            );
+            let json = serde_json::json!({
+                "ok": true,
+                "skipped": true,
+                "reason": "現在の通知が expected_count / expected_kind と一致しないためクリアしませんでした",
+                "worktree": wt.name,
+                "worktreeId": wt.id,
+                "current": {
+                    "count": current.as_ref().map(|n| n.count).unwrap_or(0),
+                    "kind": current.as_ref().map(|n| n.kind.as_str()),
+                },
+            });
+            return Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string(&json)
+                    .map_err(|e| McpError::internal_error(e.to_string(), None))?,
+            )]));
+        }
+
         // 通知バッジの実体はフロント（App.vue の useNotifications）にしかないので、
         // 実際のクリアはイベントで依頼する。**依頼を出せてから写しを落とす**
         // （emit が Err なら写しは触らない。先に落とすと、クリアされていないのに
@@ -3051,6 +3105,8 @@ impl NotifyService {
         let event = ClearNotificationEvent {
             worktree: wt.name.clone(),
             worktree_id: wt.id.clone(),
+            expected_count,
+            expected_kind: expected_kind.clone(),
         };
         self.app_handle
             .emit("clear-worktree-notification", &event)
@@ -5791,15 +5847,8 @@ pub(crate) async fn publish_notify_event(
         // エージェントでもない**（＝誰もリトライできない）。長すぎてもエラーにせず切る。
         // 本文は `is_free_text_kind` により PTY へは出ず、`oretachi_poll_inbox` でだけ読める。
         let text = raw.unwrap_or_default();
-        if text.chars().count() > crate::event_db::HOOK_BODY_MAX_CHARS {
-            let cut: String = text
-                .chars()
-                .take(crate::event_db::HOOK_BODY_MAX_CHARS)
-                .collect();
-            format!("{}…（切り詰め）", cut)
-        } else {
-            text.to_string()
-        }
+        // Stop は background_tasks 等の構造を残して縮める（#354）。
+        crate::event_db::truncate_hook_body(text)
     };
 
     let pool = event_pool(app_handle)?;
@@ -8220,6 +8269,28 @@ pub fn start_mcp_server(app_handle: AppHandle, port: u16, remote_access: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_matches_rules() {
+        let snap = |count: u32, kind: &str| NotificationSnapshot {
+            count,
+            kind: kind.to_string(),
+            first_notified_at: 0,
+        };
+        // 条件なしは常に一致（後方互換）
+        assert!(notification_matches(None, None, None));
+        assert!(notification_matches(Some(&snap(2, "completed")), None, None));
+        // 条件ありで通知が無ければ不一致
+        assert!(!notification_matches(None, Some(1), None));
+        assert!(!notification_matches(None, None, Some("completed")));
+        // 指定した項目だけ比較する
+        let s = snap(1, "completed");
+        assert!(notification_matches(Some(&s), Some(1), Some("completed")));
+        assert!(notification_matches(Some(&s), Some(1), None));
+        assert!(notification_matches(Some(&s), None, Some("completed")));
+        assert!(!notification_matches(Some(&s), Some(2), Some("completed")));
+        assert!(!notification_matches(Some(&s), Some(1), Some("approval")));
+    }
 
     #[test]
     fn parse_artifact_time_accepts_unix_seconds() {
