@@ -6,6 +6,15 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.35.1] - 2026-10-11
+
+### Added
+- 自動承認宛のワークツリーへも購読イベントを配送し、発信元の判定結果で保留/抑止するようにした (#363)
+
+### Fixed
+- 判定中に預かったイベントと期限切れの保留を、承認で巻き込まないようにした (#363)
+- bug-review 指摘の対応 (#363)
+
 ## [0.35.0] - 2026-10-10
 
 ### Added
@@ -866,7 +875,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.35.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.35.1...HEAD
+[0.35.1]: https://github.com/ishida-supsys/oretachi/compare/0.35.0...0.35.1
 [0.35.0]: https://github.com/ishida-supsys/oretachi/compare/0.34.0...0.35.0
 [0.34.0]: https://github.com/ishida-supsys/oretachi/compare/0.33.0...0.34.0
 [0.33.0]: https://github.com/ishida-supsys/oretachi/compare/0.32.0...0.33.0
