@@ -700,6 +700,12 @@ async fn run_migrations(pool: &SqlitePool) -> Result<(), sqlx::Error> {
     let _ = sqlx::query("ALTER TABLE inbox ADD COLUMN notified_at INTEGER")
         .execute(pool)
         .await;
+    // 発信元の自動承認 AI 判定の結果待ちで**配送を保留する期限**（#363）。
+    // `held_until > now` の行は配送・件数・取得のどこにも出さない。期限が切れれば条件から
+    // 自然に外れて通常の未配送行になるので、判定結果が届かなくても解放処理は要らない。
+    let _ = sqlx::query("ALTER TABLE inbox ADD COLUMN held_until INTEGER")
+        .execute(pool)
+        .await;
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_inbox_terminal ON inbox(subscriber_terminal_id, state)",
     )
@@ -987,6 +993,28 @@ pub async fn fanout(
     targets: &[String],
     now: i64,
 ) -> Result<usize, String> {
+    fanout_held(pool, event, targets, now, FanoutHold::None).await
+}
+
+/// `fanout` で積む行を、発信元の自動承認の判定結果が出るまで保留するか（#363）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FanoutHold {
+    /// 通常どおり即配送の対象にする。
+    None,
+    /// 指定時刻（ms）まで配送しない。判定結果が来なければ期限で通常行に戻る。
+    Until(i64),
+    /// 判定済みで承認されていた。配送せず ack 済みで積む（監査用に行は残す）。
+    Acked,
+}
+
+/// `fanout` の本体。`hold` で積む行の保留状態を指定する。
+pub async fn fanout_held(
+    pool: &SqlitePool,
+    event: &EventRow,
+    targets: &[String],
+    now: i64,
+    hold: FanoutHold,
+) -> Result<usize, String> {
     // 暴走防止（#120 §5.4）: 連鎖が深すぎるイベントは配送しない。
     if event.depth > MAX_EVENT_DEPTH {
         log::warn!(
@@ -1043,17 +1071,22 @@ pub async fn fanout(
             None
         };
         let result = sqlx::query(
-            "INSERT OR IGNORE INTO inbox (id, subscriber_terminal_id, subscriber_worktree_id, event_id, state, created_at, orphaned_at, delivery, spawn_if_closed) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO inbox (id, subscriber_terminal_id, subscriber_worktree_id, event_id, state, created_at, orphaned_at, delivery, spawn_if_closed, held_until, acked_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(uuid::Uuid::new_v4().to_string())
         .bind(&sub.subscriber_terminal_id)
         .bind(&sub.subscriber_worktree_id)
         .bind(&event.id)
-        .bind(STATE_PENDING)
+        .bind(if hold == FanoutHold::Acked { STATE_ACKED } else { STATE_PENDING })
         .bind(now)
         .bind(orphaned_at)
         .bind(&sub.delivery)
         .bind(sub.spawn_if_closed)
+        .bind(match hold {
+            FanoutHold::Until(t) => Some(t),
+            _ => None,
+        })
+        .bind(if hold == FanoutHold::Acked { Some(now) } else { None })
         .execute(pool)
         .await
         .map_err(|e| e.to_string())?;
@@ -1093,7 +1126,10 @@ impl InboxFilter {
     }
 }
 
-/// 指定タブの inbox を条件付きで返す。
+/// 判定待ちで保留中の行を除く条件（`?` に現在時刻を1つ bind する。#363）。
+const NOT_HELD: &str = "(i.held_until IS NULL OR i.held_until <= ?)";
+
+/// 指定タブの inbox を条件付きで返す。保留中（`held_until` 未満）の行は含めない。
 pub async fn list_inbox(
     pool: &SqlitePool,
     terminal_id: &str,
@@ -1102,11 +1138,13 @@ pub async fn list_inbox(
     let sql = format!(
         "SELECT i.id, i.subscriber_terminal_id, i.subscriber_worktree_id, i.event_id, i.state, i.created_at, i.delivered_at, i.notified_at, i.acked_at, i.orphaned_at, i.delivery, i.spawn_if_closed, e.kind, e.body, e.source_worktree_id, e.actor \
          FROM inbox i JOIN events e ON e.id = i.event_id \
-         WHERE i.subscriber_terminal_id = ?{} ORDER BY i.created_at ASC",
-        filter.where_clause()
+         WHERE i.subscriber_terminal_id = ?{} AND {} ORDER BY i.created_at ASC",
+        filter.where_clause(),
+        NOT_HELD
     );
     sqlx::query_as::<_, InboxItem>(&sql)
         .bind(terminal_id)
+        .bind(now_ms())
         .fetch_all(pool)
         .await
         .map_err(|e| e.to_string())
@@ -1115,13 +1153,60 @@ pub async fn list_inbox(
 /// 未 ack 件数（未配送 / 配送済み未 ack の内訳付き）を返す。
 pub async fn count_unacked(pool: &SqlitePool, terminal_id: &str) -> Result<(i64, i64), String> {
     let row: (i64, i64) = sqlx::query_as(
-        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN delivered_at IS NULL AND notified_at IS NULL THEN 1 ELSE 0 END), 0) FROM inbox WHERE subscriber_terminal_id = ? AND acked_at IS NULL",
+        "SELECT COUNT(*), COALESCE(SUM(CASE WHEN delivered_at IS NULL AND notified_at IS NULL THEN 1 ELSE 0 END), 0) FROM inbox WHERE subscriber_terminal_id = ? AND acked_at IS NULL AND (held_until IS NULL OR held_until <= ?)",
     )
     .bind(terminal_id)
+    .bind(now_ms())
     .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())?;
     Ok(row)
+}
+
+/// 発信元の自動承認の判定結果で、保留中の行を確定させる（#363）。
+///
+/// 対象は `source_worktree_id` 発で `created_at <= until_ms` のイベントに紐づく保留行。
+/// `until_ms` は判定の**開始時刻**（#363）。開始前に届いたイベントの承認待ちはその判定が画面で
+/// 見ている。判定中に届いたものは呼び出し側が「預かり」として未承認扱いで解放し、フロントへ
+/// 伝わらなかったもの（トーストのデバウンス等）は承認で ack せず期限で配送に戻る。
+/// - `approved` … 人に委ねる必要が無かった。配送せず ack 済みにする（行は監査用に残す）。
+/// - それ以外 … 拒否・不明・エラーで人に委ねた。保留だけ解いて通常配送の対象に戻す。
+///
+/// 戻り値は確定させた件数。
+pub async fn resolve_held_from_source(
+    pool: &SqlitePool,
+    source_worktree_id: &str,
+    approved: bool,
+    until_ms: i64,
+    now: i64,
+) -> Result<u64, String> {
+    // **まだ保留中（`held_until > now`）の行だけを対象にする。** 期限が切れた行は既に通常の
+    // 未配送行として見えているので、無関係な後の承認で ack してはいけない。
+    // `EXISTS` にしているのは、`events` に `source_worktree_id` の索引が無く、`IN (SELECT ..)` だと
+    // 承認のたびに events を走査して（非 WAL なので）書き込みロックを長く握るため。
+    // こちらは保留行（通常は 0 件）の数に比例する。
+    let sql = if approved {
+        "UPDATE inbox SET held_until = NULL, acked_at = ?, state = ? \
+         WHERE held_until > ? AND acked_at IS NULL \
+           AND EXISTS (SELECT 1 FROM events e WHERE e.id = inbox.event_id \
+                         AND e.source_worktree_id = ? AND e.created_at <= ?)"
+    } else {
+        "UPDATE inbox SET held_until = NULL \
+         WHERE held_until > ? \
+           AND EXISTS (SELECT 1 FROM events e WHERE e.id = inbox.event_id \
+                         AND e.source_worktree_id = ? AND e.created_at <= ?)"
+    };
+    let mut q = sqlx::query(sql);
+    if approved {
+        q = q.bind(now).bind(STATE_ACKED);
+    }
+    Ok(q.bind(now)
+        .bind(source_worktree_id)
+        .bind(until_ms)
+        .execute(pool)
+        .await
+        .map_err(|e| e.to_string())?
+        .rows_affected())
 }
 
 /// `?, ?, ?` 形式のプレースホルダを件数分作る（sqlx のランタイム版に配列バインドは無い）。
@@ -1572,10 +1657,11 @@ pub async fn list_stale_unpushed(
         "SELECT i.id, i.subscriber_terminal_id, i.subscriber_worktree_id, i.event_id, i.state, i.created_at, i.delivered_at, i.notified_at, i.acked_at, i.orphaned_at, i.delivery, i.spawn_if_closed, e.kind, e.body, e.source_worktree_id, e.actor \
          FROM inbox i JOIN events e ON e.id = i.event_id \
          WHERE i.delivered_at IS NULL AND i.acked_at IS NULL AND i.orphaned_at IS NULL \
-           AND i.created_at <= ? \
+           AND i.created_at <= ? AND (i.held_until IS NULL OR i.held_until <= ?) \
          ORDER BY i.created_at ASC",
     )
     .bind(now - ttl_ms)
+    .bind(now)
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())
@@ -1602,9 +1688,10 @@ pub async fn count_stale_unpushed(
     let row: (i64, Option<i64>) = sqlx::query_as(
         "SELECT COUNT(*), MIN(created_at) FROM inbox \
          WHERE delivered_at IS NULL AND acked_at IS NULL AND orphaned_at IS NULL \
-           AND created_at <= ?",
+           AND created_at <= ? AND (held_until IS NULL OR held_until <= ?)",
     )
     .bind(now - ttl_ms)
+    .bind(now)
     .fetch_one(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -1704,9 +1791,11 @@ pub async fn list_pushable(
         "SELECT i.id, i.subscriber_terminal_id, i.subscriber_worktree_id, i.event_id, i.state, i.created_at, i.delivered_at, i.notified_at, i.acked_at, i.orphaned_at, i.delivery, i.spawn_if_closed, e.kind, e.body, e.source_worktree_id, e.actor \
          FROM inbox i JOIN events e ON e.id = i.event_id \
          WHERE i.delivered_at IS NULL AND i.acked_at IS NULL AND i.orphaned_at IS NULL AND i.created_at > ? \
+           AND (i.held_until IS NULL OR i.held_until <= ?) \
          ORDER BY i.created_at ASC",
     )
     .bind(now - push_ttl_ms)
+    .bind(now)
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())
@@ -1718,10 +1807,8 @@ pub async fn list_pushable(
 /// 購読テーブルではなく inbox を見るのは、`worktree.closed` では購読行が fanout 直後に
 /// 消えているため。`spawn_if_closed` は積んだ時点の値が inbox に焼き付けてある。
 ///
-/// 戻り値は `(購読者ワークツリー, イベント種別, 件数)`。**種別を返すのが要点（#126）。**
-/// 呼び出し元は自動承認が有効な宛先に対して種別ごとに許可判定する必要があり、
-/// 種別を落として件数だけ返すと自由文の `worktree.message` が定型イベントのふりをして
-/// spawn を引き起こせてしまう。
+/// 戻り値は `(購読者ワークツリー, イベント種別, 件数)`。発信元の判定待ちで保留中の行
+/// （`held_until` 未満）は数えない（#363）。
 pub async fn list_spawn_candidates(
     pool: &SqlitePool,
     now: i64,
@@ -1731,9 +1818,11 @@ pub async fn list_spawn_candidates(
         "SELECT i.subscriber_worktree_id, e.kind, COUNT(*) FROM inbox i JOIN events e ON e.id = i.event_id \
          WHERE i.orphaned_at IS NOT NULL AND i.acked_at IS NULL AND i.delivered_at IS NULL \
            AND i.spawn_if_closed = 1 AND i.subscriber_worktree_id IS NOT NULL AND i.created_at > ? \
+           AND (i.held_until IS NULL OR i.held_until <= ?) \
          GROUP BY i.subscriber_worktree_id, e.kind",
     )
     .bind(now - push_ttl_ms)
+    .bind(now)
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())?;
@@ -1810,8 +1899,9 @@ pub async fn list_subscriptions_by_subscriber_worktree(
 pub async fn count_unacked_by_terminal(pool: &SqlitePool) -> Result<Vec<(String, i64, i64)>, String> {
     sqlx::query_as(
         "SELECT subscriber_terminal_id, COUNT(*), COALESCE(SUM(CASE WHEN delivered_at IS NULL AND notified_at IS NULL THEN 1 ELSE 0 END), 0) \
-         FROM inbox WHERE acked_at IS NULL GROUP BY subscriber_terminal_id",
+         FROM inbox WHERE acked_at IS NULL AND (held_until IS NULL OR held_until <= ?) GROUP BY subscriber_terminal_id",
     )
+    .bind(now_ms())
     .fetch_all(pool)
     .await
     .map_err(|e| e.to_string())
@@ -1846,11 +1936,14 @@ pub async fn list_all_orphaned_groups(pool: &SqlitePool) -> Result<Vec<OrphanedG
 /// ID を持っていない。
 pub async fn ack_all(pool: &SqlitePool, terminal_id: &str, now: i64) -> Result<u64, String> {
     Ok(sqlx::query(
-        "UPDATE inbox SET acked_at = ?, state = ? WHERE subscriber_terminal_id = ? AND acked_at IS NULL",
+        // 判定待ちで保留中の行は UI に出ていないので巻き込まない（#363）。ここで ack すると、
+        // 後で人に委ねる判定になっても配送されず黙って消える。
+        "UPDATE inbox SET acked_at = ?, state = ? WHERE subscriber_terminal_id = ? AND acked_at IS NULL AND (held_until IS NULL OR held_until <= ?)",
     )
     .bind(now)
     .bind(STATE_ACKED)
     .bind(terminal_id)
+    .bind(now)
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?
@@ -2172,9 +2265,12 @@ fn format_pointer_text(count: i64) -> String {
 
 /// 本文をインラインで運ばず告知だけにする種別か（#137）。
 ///
-/// 判定基準は `AUTO_APPROVAL_PUSHABLE_KINDS`（`event_delivery.rs`）と同じ「**本文を誰が
-/// 書いたか**」。`worktree.closed` / `worktree.created` は oretachi が定型文に組み直す
-/// （`format_inbox_line`）ので、そのまま運んでよい。
+/// 判定基準は「**本文を誰が書いたか**」。`worktree.closed` / `worktree.created` は oretachi が
+/// 定型文に組み直す（`format_inbox_line`）ので、そのまま運んでよい。
+///
+/// 宛先の自動承認設定にかかわらず、**他エージェントが書いた本文が PTY / `additionalContext` に
+/// 出ないことを保証するのはこの関数だけ**（#363 で宛先側の種別許可リストを撤廃した）。
+/// 種別を足すときは default-deny のまま、定型文に組み直せるものだけを `false` にすること。
 pub(crate) fn is_free_text_kind(kind: &str) -> bool {
     // **既知の定型種別だけを許可する** default-deny。#140 で足した `hook` /
     // `approval` / `completed` / `general` の本文は Claude Code のフック JSON で、
@@ -2689,6 +2785,152 @@ mod tests {
         pool
     }
 
+
+    // ─── #363: 発信元の自動承認の判定待ち（held_until） ───────────────────────
+
+    /// 保留行を1件積む。`hold` の違いだけを見たいので購読は固定。
+    async fn seed_held(pool: &SqlitePool, hold: FanoutHold, now: i64) -> EventRow {
+        let mut s = sub("term-a", Some("wt-sub"), r#"["approval"]"#);
+        s.target = "wt-src".to_string();
+        upsert_subscription(pool, &s).await.unwrap();
+        let mut e = event("wt-src", Some("term-src"));
+        e.kind = KIND_APPROVAL.to_string();
+        e.created_at = now;
+        insert_event(pool, &e).await.unwrap();
+        let targets = matching_targets("wt-src", None, None);
+        assert_eq!(fanout_held(pool, &e, &targets, now, hold).await.unwrap(), 1);
+        e
+    }
+
+    /// 保留中の行は、配送候補・取得・件数のどこにも出ない。期限が切れれば自然に現れる。
+    #[test]
+    fn test_held_rows_are_hidden_until_expiry() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = now_ms();
+            seed_held(&pool, FanoutHold::Until(now + 60_000), now).await;
+
+            assert!(list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap().is_empty());
+            assert!(list_inbox(&pool, "term-a", InboxFilter::All).await.unwrap().is_empty());
+            assert_eq!(count_unacked(&pool, "term-a").await.unwrap(), (0, 0));
+            assert!(count_unacked_by_terminal(&pool).await.unwrap().is_empty());
+            // 期限後（now を進める）は通常の未配送行として見える
+            let later = now + 61_000;
+            assert_eq!(list_pushable(&pool, later, PUSH_TTL_MS).await.unwrap().len(), 1);
+        });
+    }
+
+    /// 承認された判定: 保留行は ack 済みになり、配送候補にも未 ack 件数にも出ない。
+    #[test]
+    fn test_resolve_held_approved_acks_rows() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = now_ms();
+            let e = seed_held(&pool, FanoutHold::Until(now + 60_000), now).await;
+
+            let n = resolve_held_from_source(&pool, "wt-src", true, now, now).await.unwrap();
+            assert_eq!(n, 1);
+            assert!(list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap().is_empty());
+            assert_eq!(count_unacked(&pool, "term-a").await.unwrap(), (0, 0));
+            // 行は監査用に残る
+            let all = list_inbox(&pool, "term-a", InboxFilter::All).await.unwrap();
+            assert_eq!(all.len(), 1);
+            assert_eq!(all[0].event_id, e.id);
+            assert!(all[0].acked_at.is_some());
+        });
+    }
+
+    /// UI の「すべて既読」は保留中の行（UI に出ていない）を巻き込まない。巻き込むと、後で人に
+    /// 委ねる判定になっても配送されず黙って消える。承認で確定した行は `state` も acked になる。
+    #[test]
+    fn test_ack_all_skips_held_rows_and_approval_sets_state() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = now_ms();
+            seed_held(&pool, FanoutHold::Until(now + 60_000), now).await;
+
+            assert_eq!(ack_all(&pool, "term-a", now).await.unwrap(), 0);
+            // 保留はそのまま。拒否の判定で解ければ配送される
+            resolve_held_from_source(&pool, "wt-src", false, now, now).await.unwrap();
+            assert_eq!(list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap().len(), 1);
+
+            let pool2 = memory_pool().await;
+            seed_held(&pool2, FanoutHold::Until(now + 60_000), now).await;
+            resolve_held_from_source(&pool2, "wt-src", true, now, now).await.unwrap();
+            let all = list_inbox(&pool2, "term-a", InboxFilter::All).await.unwrap();
+            assert_eq!(all[0].state, STATE_ACKED);
+        });
+    }
+
+    /// 期限が切れた行は保留ではなく通常の未配送行。無関係な後の承認で ack してはいけない。
+    #[test]
+    fn test_resolve_held_ignores_expired_rows() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = now_ms();
+            // 保留期限が既に過ぎている行
+            seed_held(&pool, FanoutHold::Until(now - 1), now - 10_000).await;
+
+            let n = resolve_held_from_source(&pool, "wt-src", true, now, now).await.unwrap();
+            assert_eq!(n, 0);
+            assert_eq!(count_unacked(&pool, "term-a").await.unwrap(), (1, 1));
+        });
+    }
+
+    /// 人に委ねた判定: 保留だけが解け、即配送の対象になる。
+    #[test]
+    fn test_resolve_held_rejected_releases_rows() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = now_ms();
+            seed_held(&pool, FanoutHold::Until(now + 60_000), now).await;
+
+            let n = resolve_held_from_source(&pool, "wt-src", false, now, now).await.unwrap();
+            assert_eq!(n, 1);
+            let pushable = list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap();
+            assert_eq!(pushable.len(), 1);
+            assert!(pushable[0].acked_at.is_none());
+            assert_eq!(count_unacked(&pool, "term-a").await.unwrap(), (1, 1));
+        });
+    }
+
+    /// 判定の終了時刻より後に起きたイベントと、別の発信元の行には触れない。
+    #[test]
+    fn test_resolve_held_scope_is_source_and_time() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = now_ms();
+            seed_held(&pool, FanoutHold::Until(now + 60_000), now).await;
+
+            // 別の発信元の判定では確定しない
+            assert_eq!(
+                resolve_held_from_source(&pool, "wt-other", true, now, now).await.unwrap(),
+                0
+            );
+            // 判定がイベントより前に終わっていた（until < created_at）なら確定しない
+            assert_eq!(
+                resolve_held_from_source(&pool, "wt-src", true, now - 1, now).await.unwrap(),
+                0
+            );
+            assert_eq!(count_unacked(&pool, "term-a").await.unwrap(), (0, 0));
+            assert_eq!(list_inbox(&pool, "term-a", InboxFilter::All).await.unwrap().len(), 0);
+        });
+    }
+
+    /// race: 判定結果が先に届いていたとき、`Acked` で積むと最初から ack 済みになる。
+    #[test]
+    fn test_fanout_acked_inserts_acked_rows() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = now_ms();
+            seed_held(&pool, FanoutHold::Acked, now).await;
+            assert!(list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap().is_empty());
+            assert_eq!(count_unacked(&pool, "term-a").await.unwrap(), (0, 0));
+            let all = list_inbox(&pool, "term-a", InboxFilter::All).await.unwrap();
+            assert_eq!(all.len(), 1);
+            assert!(all[0].acked_at.is_some());
+        });
+    }
 
     // ─── #140: kind 統合 ──────────────────────────────────────────────────────
 
