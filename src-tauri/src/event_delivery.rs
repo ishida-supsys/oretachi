@@ -2237,7 +2237,7 @@ pub async fn event_terminal_unread(app_handle: AppHandle) -> Result<Vec<Terminal
 /// - `approved=true` … 人に委ねる必要が無かったので、保留していた行を配送せず ack 済みにする
 /// - `approved=false` … 拒否・不明・エラーで人に委ねた。保留を解いて通常配送の対象に戻す
 ///
-/// 対象は判定の終了時刻（この関数が呼ばれた時刻）以前に起きたイベントだけ。判定後に新しく
+/// 対象は判定の終了時刻（`judged_at`。無ければ呼ばれた時刻）以前に起きたイベントだけ。判定後に新しく
 /// 来た承認待ちは巻き込まない。**積む側が結果を後追いで拾えるよう、先に記録を残す**
 /// （`record_auto_approval_resolution` の doc 参照）。自動承認が OFF のまま届いた
 /// `approval` / `general`（設定保存の遅延など）に対しても、フロントは `approved=false` で呼ぶ。
@@ -2246,12 +2246,16 @@ pub async fn resolve_auto_approval_hold(
     app_handle: AppHandle,
     worktree_id: String,
     approved: bool,
+    judged_at: Option<i64>,
 ) -> Result<u64, String> {
-    let at = event_db::now_ms();
+    // 判定が終わった時刻はフロントが握っている（IPC の遅延ぶん、後から来たイベントを
+    // 巻き込まないため）。未来の値は信用せず現在時刻で頭打ちにする。
+    let now = event_db::now_ms();
+    let at = judged_at.map_or(now, |t| t.min(now));
     record_auto_approval_resolution(&worktree_id, approved, at);
     let pool = pool_of(&app_handle)?;
     let resolved =
-        event_db::resolve_held_from_source(&pool, &worktree_id, approved, at, at).await?;
+        event_db::resolve_held_from_source(&pool, &worktree_id, approved, at, now).await?;
     if resolved > 0 {
         log::info!(
             "[delivery] 発信元の自動承認判定で保留を確定した worktree={} approved={} 件数={}",

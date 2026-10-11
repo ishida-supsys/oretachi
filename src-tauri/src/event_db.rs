@@ -1178,17 +1178,27 @@ pub async fn resolve_held_from_source(
     until_ms: i64,
     now: i64,
 ) -> Result<u64, String> {
+    // **まだ保留中（`held_until > now`）の行だけを対象にする。** 期限が切れた行は既に通常の
+    // 未配送行として見えているので、無関係な後の承認で ack してはいけない。
+    // `EXISTS` にしているのは、`events` に `source_worktree_id` の索引が無く、`IN (SELECT ..)` だと
+    // 承認のたびに events を走査して（非 WAL なので）書き込みロックを長く握るため。
+    // こちらは保留行（通常は 0 件）の数に比例する。
     let sql = if approved {
         "UPDATE inbox SET held_until = NULL, acked_at = ? \
-         WHERE held_until IS NOT NULL AND acked_at IS NULL \
-           AND event_id IN (SELECT id FROM events WHERE source_worktree_id = ? AND created_at <= ?)"
+         WHERE held_until > ? AND acked_at IS NULL \
+           AND EXISTS (SELECT 1 FROM events e WHERE e.id = inbox.event_id \
+                         AND e.source_worktree_id = ? AND e.created_at <= ?)"
     } else {
         "UPDATE inbox SET held_until = NULL \
-         WHERE held_until IS NOT NULL AND ? IS NOT NULL \
-           AND event_id IN (SELECT id FROM events WHERE source_worktree_id = ? AND created_at <= ?)"
+         WHERE held_until > ? \
+           AND EXISTS (SELECT 1 FROM events e WHERE e.id = inbox.event_id \
+                         AND e.source_worktree_id = ? AND e.created_at <= ?)"
     };
-    Ok(sqlx::query(sql)
-        .bind(now)
+    let mut q = sqlx::query(sql);
+    if approved {
+        q = q.bind(now);
+    }
+    Ok(q.bind(now)
         .bind(source_worktree_id)
         .bind(until_ms)
         .execute(pool)
@@ -1795,10 +1805,8 @@ pub async fn list_pushable(
 /// 購読テーブルではなく inbox を見るのは、`worktree.closed` では購読行が fanout 直後に
 /// 消えているため。`spawn_if_closed` は積んだ時点の値が inbox に焼き付けてある。
 ///
-/// 戻り値は `(購読者ワークツリー, イベント種別, 件数)`。**種別を返すのが要点（#126）。**
-/// 呼び出し元は自動承認が有効な宛先に対して種別ごとに許可判定する必要があり、
-/// 種別を落として件数だけ返すと自由文の `worktree.message` が定型イベントのふりをして
-/// spawn を引き起こせてしまう。
+/// 戻り値は `(購読者ワークツリー, イベント種別, 件数)`。発信元の判定待ちで保留中の行
+/// （`held_until` 未満）は数えない（#363）。
 pub async fn list_spawn_candidates(
     pool: &SqlitePool,
     now: i64,
@@ -2824,6 +2832,21 @@ mod tests {
             assert_eq!(all.len(), 1);
             assert_eq!(all[0].event_id, e.id);
             assert!(all[0].acked_at.is_some());
+        });
+    }
+
+    /// 期限が切れた行は保留ではなく通常の未配送行。無関係な後の承認で ack してはいけない。
+    #[test]
+    fn test_resolve_held_ignores_expired_rows() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = now_ms();
+            // 保留期限が既に過ぎている行
+            seed_held(&pool, FanoutHold::Until(now - 1), now - 10_000).await;
+
+            let n = resolve_held_from_source(&pool, "wt-src", true, now, now).await.unwrap();
+            assert_eq!(n, 0);
+            assert_eq!(count_unacked(&pool, "term-a").await.unwrap(), (1, 1));
         });
     }
 

@@ -671,6 +671,8 @@ onMounted(async () => {
     logDebug(`[AutoApproval] terminalEntries.size=${terminalEntries.size}`);
     aiJudging.value = true;
     let loopResult: { approved: boolean; lastCommand: string | undefined };
+    // 判定が終わった時刻。メインが購読イベントの保留を確定させる上限に使う（#363）
+    let judgedAt = Date.now();
     try {
       const terminalForApproval: TerminalForApproval[] = Array.from(terminalEntries.keys()).flatMap((tid) => {
         const ref = terminalRefs.get(tid);
@@ -683,6 +685,7 @@ onMounted(async () => {
       });
       loopResult = await runApprovalLoop(terminalForApproval, worktreeId, worktreePath, additionalPrompt.value);
     } finally {
+      judgedAt = Date.now();
       aiJudging.value = false;
     }
     logDebug(`[AutoApproval] sub result: approved=${loopResult.approved} command=${loopResult.lastCommand ?? "none"}`);
@@ -695,6 +698,7 @@ onMounted(async () => {
       worktreeId,
       approved: loopResult.approved,
       command: loopResult.lastCommand,
+      judgedAt,
       tray,
       pendingTray: pending?.tray,
     });

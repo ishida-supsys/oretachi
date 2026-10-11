@@ -68,10 +68,14 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
    * バックエンドは `approval` / `general` の購読イベントを、発信元が自動承認 ON のとき
    * 判定の結果が出るまで配送保留にしている。承認された（人に委ねる必要が無い）なら配送せず、
    * 拒否・不明・エラーなら配送する。失敗しても保留は期限で解けるので握りつぶす。
+   *
+   * `judgedAt` は判定が終わった時刻。バックエンドはこれ以前に起きたイベントだけを確定させる
+   * （IPC の遅延ぶん、判定後に届いた承認待ちを巻き込まないため）。
+   * **通知の提示を待たせないよう、呼び出し側は await しない。**
    */
-  async function resolveSubscriptionHold(worktreeId: string, approved: boolean) {
+  async function resolveSubscriptionHold(worktreeId: string, approved: boolean, judgedAt: number = Date.now()) {
     try {
-      await invoke("resolve_auto_approval_hold", { worktreeId, approved });
+      await invoke("resolve_auto_approval_hold", { worktreeId, approved, judgedAt });
     } catch (e) {
       logDebug(`[AutoApproval] resolve_auto_approval_hold failed: ${e}`);
     }
@@ -146,6 +150,10 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
     logDebug(`[AutoApproval] local terminals check, count=${wt.terminals.length}`);
     aiJudgingWorktrees.add(wt.id);
     let loopResult: { approved: boolean; lastCommand: string | undefined };
+    // 預かり分と判定終了時刻は、判定中フラグを下ろすのと**同じ同期区間**で確定させる。
+    // 間に await を挟むと、その間に届いたイベントが「この判定の結果」に巻き込まれる。
+    let pending: ReturnType<typeof takePendingNotify>;
+    let judgedAt = Date.now();
     try {
       const terminalForApproval: TerminalForApproval[] = wt.terminals.flatMap((t) => {
         const ref = deps.getTerminalRef(t.id);
@@ -163,15 +171,18 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
         deps.autoApprovalPromptMap.get(wt.id),
       );
     } finally {
+      // 預かり分は通知より先に取り出す。後続が throw してもストアに残さない
+      // （残すと次回の判定完了時に古いイベント由来の通知が余分に出る）。
+      pending = takePendingNotify(pendingNotify, wt.id);
+      judgedAt = Date.now();
       aiJudgingWorktrees.delete(wt.id);
     }
     if (loopResult.lastCommand) {
       deps.lastJudgedCommandMap.set(wt.id, loopResult.lastCommand);
     }
-    await resolveSubscriptionHold(wt.id, loopResult.approved);
-    // 預かり分は通知より先に取り出す。後続が throw してもストアに残さない
-    // （残すと次回の判定完了時に古いイベント由来の通知が余分に出る）。
-    const pending = takePendingNotify(pendingNotify, wt.id);
+    // 判定中に預かったイベントは判定していない（下の通知でも未承認扱い）。承認で確定させると
+    // 「トーストは出たが購読者には届かない」になるので、預かりがあれば人に委ねた側へ倒す。
+    void resolveSubscriptionHold(wt.id, loopResult.approved && !pending, judgedAt);
     const focused = deps.isWorktreeFocused(wt.id);
     let count = 0;
     if (shouldNotifyAfterJudge({ approved: loopResult.approved, focused, tray })) {
@@ -224,7 +235,7 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
       if (!autoApprovalMap.get(wt.id)) {
         // バックエンドの設定では自動承認 ON のまま保留された購読イベントが、判定されずに
         // 期限（約 2 分）まで届かなくなるのを防ぐ。判定しないので「人に委ねる」扱い。
-        await resolveSubscriptionHold(wt.id, false);
+        void resolveSubscriptionHold(wt.id, false);
         return;
       }
 
@@ -239,13 +250,15 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
       worktreeId: string;
       approved: boolean;
       command?: string;
+      /** サブウィンドウで判定が終わった時刻（ms）。購読イベントの保留確定の上限に使う（#363） */
+      judgedAt?: number;
       tray?: boolean;
       /** サブウィンドウが AI 判定中に預かったイベントの tray（あれば判定結果とは別に 1 件提示する・#168） */
       pendingTray?: boolean;
     }>(
       "sub-auto-approve-result",
       async (event) => {
-        const { worktreeId: wid, approved, command, pendingTray } = event.payload;
+        const { worktreeId: wid, approved, command, pendingTray, judgedAt } = event.payload;
         // tray は sub-try-auto-approve で渡した値がそのまま返ってくる（イベント単位・#168）
         const tray = trayOf(event.payload);
         logDebug(
@@ -254,7 +267,8 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
         if (command) {
           deps.lastJudgedCommandMap.set(wid, command);
         }
-        await resolveSubscriptionHold(wid, approved);
+        // 預かり分があれば、判定していないイベントを含むので承認では確定させない（local 経路と同じ）
+        void resolveSubscriptionHold(wid, approved && pendingTray === undefined, judgedAt);
         const focused = deps.isWorktreeFocused(wid);
         let count = 0;
         if (shouldNotifyAfterJudge({ approved, focused, tray })) count++;
