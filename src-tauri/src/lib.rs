@@ -580,6 +580,25 @@ fn detect_ai_agents() -> Vec<ai_provider::AiAgentInfo> {
     ai_provider::detect_ai_agents()
 }
 
+/// メインウィンドウのタスクバーボタンにオーバーレイ（未確認通知の件数バッジ）を出す。
+/// `rgba` が None ならオーバーレイを消す。Windows 専用 API で、他 OS では何も起きない。
+#[tauri::command]
+fn set_taskbar_badge(app: tauri::AppHandle, rgba: Option<Vec<u8>>, size: u32) -> Result<(), String> {
+    let Some(window) = app.get_webview_window("main") else {
+        return Ok(());
+    };
+    let icon = match rgba {
+        Some(rgba) => {
+            if rgba.len() as u64 != (size as u64) * (size as u64) * 4 {
+                return Err(format!("invalid badge size: {} bytes for {}x{}", rgba.len(), size, size));
+            }
+            Some(tauri::image::Image::new_owned(rgba, size, size))
+        }
+        None => None,
+    };
+    window.set_overlay_icon(icon).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 fn open_in_ide(command: String, path: String) -> Result<(), String> {
     let _bc = main_thread_watch::enter(main_thread_watch::Activity::OpenInIde);
@@ -2329,6 +2348,7 @@ pub fn run() {
         .manage(PendingUpdate::default())
         // ReportPool は setup() 内で非同期初期化するため、ここでは登録しない
         .invoke_handler(tauri::generate_handler![
+            set_taskbar_badge,
             pty_spawn,
             pty_write,
             pty_write_locked,
