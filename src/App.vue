@@ -141,7 +141,15 @@ const taskbarBadgeLabel = computed(() => badgeLabel(getTotalNotificationCount())
 watch(
   taskbarBadgeLabel,
   (label) => {
-    const rgba = label === null ? null : Array.from(renderBadgeRgba(label, TASKBAR_BADGE_SIZE));
+    let rgba: number[] | null = null;
+    if (label !== null) {
+      try {
+        rgba = Array.from(renderBadgeRgba(label, TASKBAR_BADGE_SIZE));
+      } catch (e) {
+        logDebug(`taskbar badge render failed: ${e}`);
+        return;
+      }
+    }
     invoke("set_taskbar_badge", { rgba, size: TASKBAR_BADGE_SIZE }).catch(() => {});
   },
   { immediate: true },
