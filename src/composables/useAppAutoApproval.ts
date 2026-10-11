@@ -69,8 +69,9 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
    * 判定の結果が出るまで配送保留にしている。承認された（人に委ねる必要が無い）なら配送せず、
    * 拒否・不明・エラーなら配送する。失敗しても保留は期限で解けるので握りつぶす。
    *
-   * `judgedAt` は判定が終わった時刻。バックエンドはこれ以前に起きたイベントだけを確定させる
-   * （IPC の遅延ぶん、判定後に届いた承認待ちを巻き込まないため）。
+   * `judgedAt` は判定を**始めた**時刻。バックエンドはこれ以前に届いたイベントだけを確定させる。
+   * 開始前のイベントの承認待ちは判定が画面で見ているが、判定中以降に届いたイベントは
+   * 判定の対象外（預かりは未承認扱い、フロントへ伝わらなかったものは期限で配送に戻る）。
    * **通知の提示を待たせないよう、呼び出し側は await しない。**
    */
   async function resolveSubscriptionHold(worktreeId: string, approved: boolean, judgedAt: number = Date.now()) {
@@ -150,10 +151,10 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
     logDebug(`[AutoApproval] local terminals check, count=${wt.terminals.length}`);
     aiJudgingWorktrees.add(wt.id);
     let loopResult: { approved: boolean; lastCommand: string | undefined };
-    // 預かり分と判定終了時刻は、判定中フラグを下ろすのと**同じ同期区間**で確定させる。
-    // 間に await を挟むと、その間に届いたイベントが「この判定の結果」に巻き込まれる。
+    // 預かり分は、判定中フラグを下ろすのと**同じ同期区間**で取り出す。
+    // 間に await を挟むと、その間に届いたイベントが取りこぼされる。
     let pending: ReturnType<typeof takePendingNotify>;
-    let judgedAt = Date.now();
+    const judgedAt = Date.now(); // 判定の開始時刻（購読イベントの保留確定の上限）
     try {
       const terminalForApproval: TerminalForApproval[] = wt.terminals.flatMap((t) => {
         const ref = deps.getTerminalRef(t.id);
@@ -170,11 +171,14 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
         wt.path,
         deps.autoApprovalPromptMap.get(wt.id),
       );
+    } catch (e) {
+      // 判定が例外で終わったら人に委ねる扱い。保留を期限まで抱えさせない。
+      void resolveSubscriptionHold(wt.id, false, judgedAt);
+      throw e;
     } finally {
       // 預かり分は通知より先に取り出す。後続が throw してもストアに残さない
       // （残すと次回の判定完了時に古いイベント由来の通知が余分に出る）。
       pending = takePendingNotify(pendingNotify, wt.id);
-      judgedAt = Date.now();
       aiJudgingWorktrees.delete(wt.id);
     }
     if (loopResult.lastCommand) {
@@ -250,7 +254,7 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
       worktreeId: string;
       approved: boolean;
       command?: string;
-      /** サブウィンドウで判定が終わった時刻（ms）。購読イベントの保留確定の上限に使う（#363） */
+      /** サブウィンドウで判定を始めた時刻（ms）。購読イベントの保留確定の上限に使う（#363） */
       judgedAt?: number;
       tray?: boolean;
       /** サブウィンドウが AI 判定中に預かったイベントの tray（あれば判定結果とは別に 1 件提示する・#168） */

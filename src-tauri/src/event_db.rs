@@ -1077,7 +1077,7 @@ pub async fn fanout_held(
         .bind(&sub.subscriber_terminal_id)
         .bind(&sub.subscriber_worktree_id)
         .bind(&event.id)
-        .bind(STATE_PENDING)
+        .bind(if hold == FanoutHold::Acked { STATE_ACKED } else { STATE_PENDING })
         .bind(now)
         .bind(orphaned_at)
         .bind(&sub.delivery)
@@ -1166,7 +1166,9 @@ pub async fn count_unacked(pool: &SqlitePool, terminal_id: &str) -> Result<(i64,
 /// 発信元の自動承認の判定結果で、保留中の行を確定させる（#363）。
 ///
 /// 対象は `source_worktree_id` 発で `created_at <= until_ms` のイベントに紐づく保留行。
-/// 判定の**終了時刻以前**に起きたイベントだけを見るので、判定後に新しく来た承認待ちは巻き込まない。
+/// `until_ms` は判定の**開始時刻**（#363）。開始前に届いたイベントの承認待ちはその判定が画面で
+/// 見ている。判定中に届いたものは呼び出し側が「預かり」として未承認扱いで解放し、フロントへ
+/// 伝わらなかったもの（トーストのデバウンス等）は承認で ack せず期限で配送に戻る。
 /// - `approved` … 人に委ねる必要が無かった。配送せず ack 済みにする（行は監査用に残す）。
 /// - それ以外 … 拒否・不明・エラーで人に委ねた。保留だけ解いて通常配送の対象に戻す。
 ///
@@ -1184,7 +1186,7 @@ pub async fn resolve_held_from_source(
     // 承認のたびに events を走査して（非 WAL なので）書き込みロックを長く握るため。
     // こちらは保留行（通常は 0 件）の数に比例する。
     let sql = if approved {
-        "UPDATE inbox SET held_until = NULL, acked_at = ? \
+        "UPDATE inbox SET held_until = NULL, acked_at = ?, state = ? \
          WHERE held_until > ? AND acked_at IS NULL \
            AND EXISTS (SELECT 1 FROM events e WHERE e.id = inbox.event_id \
                          AND e.source_worktree_id = ? AND e.created_at <= ?)"
@@ -1196,7 +1198,7 @@ pub async fn resolve_held_from_source(
     };
     let mut q = sqlx::query(sql);
     if approved {
-        q = q.bind(now);
+        q = q.bind(now).bind(STATE_ACKED);
     }
     Ok(q.bind(now)
         .bind(source_worktree_id)
@@ -1934,11 +1936,14 @@ pub async fn list_all_orphaned_groups(pool: &SqlitePool) -> Result<Vec<OrphanedG
 /// ID を持っていない。
 pub async fn ack_all(pool: &SqlitePool, terminal_id: &str, now: i64) -> Result<u64, String> {
     Ok(sqlx::query(
-        "UPDATE inbox SET acked_at = ?, state = ? WHERE subscriber_terminal_id = ? AND acked_at IS NULL",
+        // 判定待ちで保留中の行は UI に出ていないので巻き込まない（#363）。ここで ack すると、
+        // 後で人に委ねる判定になっても配送されず黙って消える。
+        "UPDATE inbox SET acked_at = ?, state = ? WHERE subscriber_terminal_id = ? AND acked_at IS NULL AND (held_until IS NULL OR held_until <= ?)",
     )
     .bind(now)
     .bind(STATE_ACKED)
     .bind(terminal_id)
+    .bind(now)
     .execute(pool)
     .await
     .map_err(|e| e.to_string())?
@@ -2832,6 +2837,28 @@ mod tests {
             assert_eq!(all.len(), 1);
             assert_eq!(all[0].event_id, e.id);
             assert!(all[0].acked_at.is_some());
+        });
+    }
+
+    /// UI の「すべて既読」は保留中の行（UI に出ていない）を巻き込まない。巻き込むと、後で人に
+    /// 委ねる判定になっても配送されず黙って消える。承認で確定した行は `state` も acked になる。
+    #[test]
+    fn test_ack_all_skips_held_rows_and_approval_sets_state() {
+        with_pool(async {
+            let pool = memory_pool().await;
+            let now = now_ms();
+            seed_held(&pool, FanoutHold::Until(now + 60_000), now).await;
+
+            assert_eq!(ack_all(&pool, "term-a", now).await.unwrap(), 0);
+            // 保留はそのまま。拒否の判定で解ければ配送される
+            resolve_held_from_source(&pool, "wt-src", false, now, now).await.unwrap();
+            assert_eq!(list_pushable(&pool, now, PUSH_TTL_MS).await.unwrap().len(), 1);
+
+            let pool2 = memory_pool().await;
+            seed_held(&pool2, FanoutHold::Until(now + 60_000), now).await;
+            resolve_held_from_source(&pool2, "wt-src", true, now, now).await.unwrap();
+            let all = list_inbox(&pool2, "term-a", InboxFilter::All).await.unwrap();
+            assert_eq!(all[0].state, STATE_ACKED);
         });
     }
 
