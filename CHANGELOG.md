@@ -6,6 +6,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.35.2] - 2026-10-11
+
+### Added
+- 未確認通知の件数をタスクバーアイコンのオーバーレイバッジ(赤い件数)で表示するようにした (#365)
+
+### Fixed
+- タスクバーのバッジ描画で例外が出ても握りつぶさず、ログに落とすようにした (#365)
+
 ## [0.35.1] - 2026-10-11
 
 ### Added
@@ -875,7 +883,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.35.1...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.35.2...HEAD
+[0.35.2]: https://github.com/ishida-supsys/oretachi/compare/0.35.1...0.35.2
 [0.35.1]: https://github.com/ishida-supsys/oretachi/compare/0.35.0...0.35.1
 [0.35.0]: https://github.com/ishida-supsys/oretachi/compare/0.34.0...0.35.0
 [0.34.0]: https://github.com/ishida-supsys/oretachi/compare/0.33.0...0.34.0
