@@ -2451,7 +2451,14 @@ impl NotifyService {
                 };
                 if pass {
                     Some(
-                        publish_notify_event(&self.app_handle, kind, body.as_deref(), source).await,
+                        publish_notify_event(
+                            &self.app_handle,
+                            kind,
+                            body.as_deref(),
+                            source,
+                            crate::event_db::now_ms(),
+                        )
+                        .await,
                     )
                 } else {
                     None
@@ -5868,6 +5875,7 @@ pub(crate) async fn publish_notify_event(
     kind: NotifyKind,
     body: Option<&str>,
     source: NotifySource,
+    received_at: i64,
 ) -> Result<serde_json::Value, McpError> {
     let raw = body.map(str::trim).filter(|s| !s.is_empty());
     let text = if kind == NotifyKind::WorktreeMessage {
@@ -5905,6 +5913,10 @@ pub(crate) async fn publish_notify_event(
 
     let pool = event_pool(app_handle)?;
     let now = crate::event_db::now_ms();
+    // イベントの時刻は**受信時刻**にする（#363）。HTTP 経路は発行を `tokio::spawn` で後ろへ回すので、
+    // ここで `now` を取ると、先に届いた自動承認の判定結果（`record_auto_approval_resolution`）より
+    // 後の時刻になり、承認済みのイベントを保留してしまう。
+    let created_at = received_at.min(now);
 
     // 購読者がいない種別は DB を触らずに返す（#140）。events.db は非 WAL なので、
     // 高頻度の hook を無条件に書くと SessionStart フックの読み取りと競合する。
@@ -5975,7 +5987,7 @@ pub(crate) async fn publish_notify_event(
         kind: kind.as_str().to_string(),
         body: body_json,
         actor: Some(source.actor.to_string()),
-        created_at: now,
+        created_at,
         depth,
         origin: Some(source.origin.clone()),
     };
@@ -5989,7 +6001,18 @@ pub(crate) async fn publish_notify_event(
         source.workgroup_id.as_deref(),
         source.repository_name.as_deref(),
     );
-    let delivered = crate::event_db::fanout(&pool, &event, &targets, now)
+    // 発信元が自動承認 ON の承認待ちは、AI 判定の結果が出るまで配送を保留する（#363）。
+    // 承認されれば配送せず、人に委ねたなら配送する。判定の伴わない種別は保留しない。
+    let hold = {
+        let settings = app_handle.state::<crate::settings::SettingsManager>().get();
+        crate::event_delivery::fanout_hold_for(
+            &settings,
+            &source.worktree_id,
+            kind.as_str(),
+            created_at,
+        )
+    };
+    let delivered = crate::event_db::fanout_held(&pool, &event, &targets, now, hold)
         .await
         .map_err(|e| McpError::internal_error(e, None))?;
     if delivered > 0 {
@@ -7198,9 +7221,12 @@ async fn notify_handler(
         if pass {
             let handle = app_handle.clone();
             let body = payload.body.clone();
+            // spawn の**前**に受信時刻を取る。判定結果との前後関係はこの時刻で比べる（#363）。
+            let received_at = crate::event_db::now_ms();
             tokio::spawn(async move {
                 if let Err(e) =
-                    publish_notify_event(&handle, kind, body.as_deref(), source).await
+                    publish_notify_event(&handle, kind, body.as_deref(), source, received_at)
+                        .await
                 {
                     log::warn!("[notify] 購読イベントの発行に失敗: {}", e.message);
                 }

@@ -1,5 +1,6 @@
 import { reactive } from "vue";
 import { listen, emitTo } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import { logDebug } from "../utils/log";
 import { runApprovalLoop, cancelApproval } from "../utils/autoApproval";
 import type { TerminalForApproval } from "../utils/autoApproval";
@@ -58,6 +59,21 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
     if (worktreeName) {
       // `kind` を渡して OS 通知側のゲートも通す（渡さないと素通りする）
       await deps.sendOsNotification(worktreeName, deps.t("notification.titleApproval"), "approval");
+    }
+  }
+
+  /**
+   * 発信元ワークツリーの自動承認判定が終わったことをバックエンドへ伝える（#363）。
+   *
+   * バックエンドは `approval` / `general` の購読イベントを、発信元が自動承認 ON のとき
+   * 判定の結果が出るまで配送保留にしている。承認された（人に委ねる必要が無い）なら配送せず、
+   * 拒否・不明・エラーなら配送する。失敗しても保留は期限で解けるので握りつぶす。
+   */
+  async function resolveSubscriptionHold(worktreeId: string, approved: boolean) {
+    try {
+      await invoke("resolve_auto_approval_hold", { worktreeId, approved });
+    } catch (e) {
+      logDebug(`[AutoApproval] resolve_auto_approval_hold failed: ${e}`);
     }
   }
 
@@ -152,6 +168,7 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
     if (loopResult.lastCommand) {
       deps.lastJudgedCommandMap.set(wt.id, loopResult.lastCommand);
     }
+    await resolveSubscriptionHold(wt.id, loopResult.approved);
     // 預かり分は通知より先に取り出す。後続が throw してもストアに残さない
     // （残すと次回の判定完了時に古いイベント由来の通知が余分に出る）。
     const pending = takePendingNotify(pendingNotify, wt.id);
@@ -204,7 +221,12 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
 
       const wt = deps.worktrees.value.find((w) => w.name === worktreeName);
       if (!wt) return;
-      if (!autoApprovalMap.get(wt.id)) return;
+      if (!autoApprovalMap.get(wt.id)) {
+        // バックエンドの設定では自動承認 ON のまま保留された購読イベントが、判定されずに
+        // 期限（約 2 分）まで届かなくなるのを防ぐ。判定しないので「人に委ねる」扱い。
+        await resolveSubscriptionHold(wt.id, false);
+        return;
+      }
 
       // tray は**イベント単位**の属性なので、ここで値を取り出して以降の判定へ持ち回る。
       // ワークツリー単位のラッチに置くと、判定中に届いた `tray: false` のイベントが
@@ -232,6 +254,7 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
         if (command) {
           deps.lastJudgedCommandMap.set(wid, command);
         }
+        await resolveSubscriptionHold(wid, approved);
         const focused = deps.isWorktreeFocused(wid);
         let count = 0;
         if (shouldNotifyAfterJudge({ approved, focused, tray })) count++;

@@ -28,7 +28,7 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__
 
 次の前提を知っておくこと。
 
-- **自動承認との関係:** タブのワークツリーで自動承認が ON だと、`completed` は押し込み対象（`AUTO_APPROVAL_PUSHABLE_KINDS`）に含まれないため、どの経路でも自動では注入されない。その場合は自動では動かず、**手で呼んだときだけ**処理する。
+- **自動承認との関係:** 宛先ワークツリーの自動承認設定は配送に影響しない。`completed` は自動承認が ON のタブにも本文なしの告知として届く（本文は `oretachi_poll_inbox` のツール出力で読む）。
 - **events.db の書き込み増:** `*` で `completed` を購読すると、全ワークツリーの Stop が events.db に書かれる。
 - **対象外:** リポジトリ設定で Stop を `completed` 以外の kind に割り当てている場合は、このスキルには届かない。
 

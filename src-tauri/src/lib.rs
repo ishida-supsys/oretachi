@@ -2440,6 +2440,7 @@ pub fn run() {
             event_delivery::event_ack_all,
             event_delivery::event_terminal_unread,
             event_delivery::event_spawn_result,
+            event_delivery::resolve_auto_approval_hold,
             set_debug_mode,
             get_debug_mode,
             get_force_wizard,
