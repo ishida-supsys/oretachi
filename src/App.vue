@@ -59,6 +59,9 @@ import { useSubWindowEvents } from "./composables/useSubWindowEvents";
 import { useShutdownGuard } from "./composables/useShutdownGuard";
 import type { ArchiveRow } from "./types/archive";
 import { logDebug } from "./utils/log";
+import { badgeLabel, renderBadgeRgba } from "./utils/taskbarBadge";
+
+const TASKBAR_BADGE_SIZE = 32;
 import { cssPxToLogical } from "./utils/uiScale";
 import { isHomeWorktree } from "./utils/homeWorktree";
 import { buildResumeCommand } from "./utils/resumeCommand";
@@ -132,6 +135,17 @@ const { tryAutoAssignHotkey } = useAutoHotkey();
 const { removeTask } = useTasks();
 
 const homeViewRef = ref<InstanceType<typeof HomeView> | null>(null);
+
+// タスクバーボタンの未確認通知バッジ。ラベルが変わったときだけ描画・IPC する。
+const taskbarBadgeLabel = computed(() => badgeLabel(getTotalNotificationCount()));
+watch(
+  taskbarBadgeLabel,
+  (label) => {
+    const rgba = label === null ? null : Array.from(renderBadgeRgba(label, TASKBAR_BADGE_SIZE));
+    invoke("set_taskbar_badge", { rgba, size: TASKBAR_BADGE_SIZE }).catch(() => {});
+  },
+  { immediate: true },
+);
 
 // 自動承認コマンドを猫に送る
 watch(
