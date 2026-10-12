@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.35.3] - 2026-10-12
+
+### Fixed
+- set_taskbar_badge を Windows 以外ではスタブにして macOS ビルドを通すようにした (#367)
+
 ## [0.35.2] - 2026-10-11
 
 ### Added
@@ -883,7 +888,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.35.2...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.35.3...HEAD
+[0.35.3]: https://github.com/ishida-supsys/oretachi/compare/0.35.2...0.35.3
 [0.35.2]: https://github.com/ishida-supsys/oretachi/compare/0.35.1...0.35.2
 [0.35.1]: https://github.com/ishida-supsys/oretachi/compare/0.35.0...0.35.1
 [0.35.0]: https://github.com/ishida-supsys/oretachi/compare/0.34.0...0.35.0
