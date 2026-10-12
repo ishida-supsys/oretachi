@@ -581,7 +581,15 @@ fn detect_ai_agents() -> Vec<ai_provider::AiAgentInfo> {
 }
 
 /// メインウィンドウのタスクバーボタンにオーバーレイ（未確認通知の件数バッジ）を出す。
-/// `rgba` が None ならオーバーレイを消す。Windows 専用 API で、他 OS では何も起きない。
+/// `rgba` が None ならオーバーレイを消す。`set_overlay_icon` は Windows 専用 API のため、
+/// Windows 以外ではコンパイル対象から外し、何もせず `Ok(())` を返すスタブにしている。
+#[cfg(not(target_os = "windows"))]
+#[tauri::command]
+fn set_taskbar_badge(_app: tauri::AppHandle, _rgba: Option<Vec<u8>>, _size: u32) -> Result<(), String> {
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 #[tauri::command]
 fn set_taskbar_badge(app: tauri::AppHandle, rgba: Option<Vec<u8>>, size: u32) -> Result<(), String> {
     let Some(window) = app.get_webview_window("main") else {
