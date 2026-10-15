@@ -6598,23 +6598,24 @@ pub(crate) async fn call_tool_for_artifact(
 ) -> Result<String, String> {
     // ビューア（`artifact-*`）と Web ビューアの経路。アプリ（`app` マーカー付き）は、権限が
     // granted の起動中インスタンスからしか API を呼べないので、**ここでは既存の callTool も拒否する**。
-    // ファイルが読めないときは従来どおり先へ進む（マーカーを確認できないだけで、書き込み側の
-    // 経路（artifact の create）で `app` を引き継いでいるので、マーカーが消えることはない）
-    if let Ok(dir) = app_handle
+    // 本体が**無い**ときだけ従来どおり先へ進む。在るのに読めないとき（Windows でアトミックな
+    // 置き換えの最中に一瞬ロックされる等）は、マーカーを確認できないので塞ぐ側へ倒す
+    // （メモリー書き込み側 `set_artifact_memory_in` と同じ扱い）。
+    let dir = app_handle
         .path()
         .app_data_dir()
         .map_err(|e| e.to_string())
-        .and_then(|d| crate::artifacts_dir_in(&d, worktree_id))
-    {
-        if let Ok(raw) = crate::read_artifact_in_dir(&dir, artifact_id) {
-            // 壊れた JSON は、`app` の文字列を含むならマーカー付きとして塞ぐ側へ倒す
-            if crate::app_manifest::raw_has_app_marker(&raw) {
-                return Err(
-                    "このアーティファクトはアプリです。通常のビューア・Web ビューアからは MCP ツールを呼べません（起動画面から起動し、承認された実行ウィンドウの中でだけ使えます）"
-                        .to_string(),
-                );
-            }
-        }
+        .and_then(|d| crate::artifacts_dir_in(&d, worktree_id))?;
+    let marked = match crate::read_artifact_in_dir(&dir, artifact_id) {
+        // 壊れた JSON は、`app` の文字列を含むならマーカー付きとして塞ぐ側へ倒す
+        Ok(raw) => crate::app_manifest::raw_has_app_marker(&raw),
+        Err(_) => dir.join(format!("{}.json", artifact_id)).exists(),
+    };
+    if marked {
+        return Err(
+            "このアーティファクトはアプリ、または状態を確認できないアーティファクトです。通常のビューア・Web ビューアからは MCP ツールを呼べません（アプリは起動画面から起動し、承認された実行ウィンドウの中でだけ使えます）"
+                .to_string(),
+        );
     }
     call_tool_scoped(app_handle, worktree_id, artifact_id, tool, params, None).await
 }
