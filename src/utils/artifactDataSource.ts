@@ -1,5 +1,6 @@
 import type { InjectionKey } from "vue";
 import type { ArtifactMeta, ArtifactData, ArtifactState, CopyArtifactResult } from "../types/artifact";
+import type { AppLaunchApi } from "../types/appInstance";
 
 /**
  * ArtifactViewerApp.vue が使うデータアクセス / プラットフォーム操作の抽象層。
@@ -30,6 +31,11 @@ export interface ArtifactCapabilities {
   import: boolean;
   copyPng: boolean;
   transfer: boolean;
+  /**
+   * アプリ形式アーティファクト（manifest の `app`）を起動できるか。
+   * Web ビューアは false（新しい特権 API は HTTP に出さない。起動不可と表示する）。
+   */
+  appLaunch: boolean;
 }
 
 export interface ArtifactChangedHandlerArgs {
@@ -83,6 +89,9 @@ export interface ArtifactDataSource {
 
   /** capabilities.transfer が true のときのみ利用可能 */
   copyToRepository?(artifactId: string, overwrite: boolean): Promise<CopyArtifactResult>;
+
+  /** capabilities.appLaunch が true（かつワークツリースコープ）のときのみ利用可能 */
+  app?: AppLaunchApi;
 
   /** イベント購読。戻り値は購読解除関数（このスコープ宛でないイベントは実装側で捨てる） */
   onArtifactChanged(handler: (args: ArtifactChangedHandlerArgs) => void): Promise<() => void>;

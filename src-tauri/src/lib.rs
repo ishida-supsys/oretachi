@@ -2,6 +2,9 @@ mod ai_commit_message;
 mod ai_description;
 mod ai_judge;
 mod ai_provider;
+mod app_grant;
+mod app_instance;
+mod app_manifest;
 mod archive_db;
 mod artifact_export;
 mod artifact_lock;
@@ -863,6 +866,9 @@ async fn delete_artifacts(app_handle: tauri::AppHandle, worktree_id: String) -> 
     })
     .await
     .map_err(|e| format!("task join error: {}", e))??;
+    // ワークツリーごと消える経路（クローズ / アーカイブ）。起動中のアプリを止め、承認も消す。
+    // 残すと、同じ id で作り直す / インポートした別物が同じ権限セットで承認なしに起動してしまう
+    app_instance::on_worktree_artifacts_deleted(&app_handle, &worktree_id);
     if deleted {
         if let Some(pool) = app_handle.try_state::<report_db::ReportPool>() {
             let _ = report_db::insert(&pool.0, "artifact_change:delete", &worktree_id).await;
@@ -896,6 +902,8 @@ async fn delete_artifact(
     .map_err(|e| format!("task join error: {}", e))??;
 
     if deleted {
+        // アプリなら起動中のインスタンスを止め、承認（grant）も消す（MCP の delete と同じ）
+        app_instance::on_artifact_deleted(&app_handle, &worktree_id, &artifact_id);
         let _ = app_handle.emit(
             "artifact-changed",
             serde_json::json!({
@@ -1230,17 +1238,33 @@ pub(crate) async fn set_artifact_memory_in(
     // 消せないゴミになる。削除との間に TOCTOU は残るが、後始末が 1 回遅れるだけ。
     let orphan_dir = dir.clone();
     let orphan_id = artifact_id.to_string();
-    let orphaned = tokio::task::spawn_blocking(move || {
-        if orphan_dir.join(format!("{}.json", orphan_id)).exists() {
-            return false;
-        }
-        let _ = std::fs::remove_file(artifact_state_path(&orphan_dir, &orphan_id));
-        true
+    // 戻り値: (本体が無い, アプリのマーカー付き)
+    let (orphaned, is_app) = tokio::task::spawn_blocking(move || {
+        let body = std::fs::read_to_string(orphan_dir.join(format!("{}.json", orphan_id)));
+        let Ok(raw) = body else {
+            if !orphan_dir.join(format!("{}.json", orphan_id)).exists() {
+                let _ = std::fs::remove_file(artifact_state_path(&orphan_dir, &orphan_id));
+                return (true, false);
+            }
+            // 存在するのに読めない（ロック中など）。マーカーを確認できないので塞ぐ側へ倒す
+            return (false, true);
+        };
+        (false, app_manifest::raw_has_app_marker(&raw))
     })
     .await
     .map_err(|e| format!("task join error: {}", e))?;
     if orphaned {
         return Ok(None);
+    }
+    // アプリのメモリ書き込みは、ビューアの `saveMemory` / Web ビューアの `api_set_*_memory`
+    // のどちらの経路からも拒否する（ここが両者の唯一の合流点）。manifest の maxBytes を
+    // 必ず強制しないと、必須にした最大サイズが事実上の任意になるため。
+    // アプリ自身のメモリ API は #371。MCP の `artifact_store` は承認済みの maxBytes を強制して通す
+    if is_app {
+        return Err(
+            "このアーティファクトはアプリです。メモリはビューア / Web ビューアからは書き込めません（アプリのメモリ API か MCP の artifact_store を使います）"
+                .to_string(),
+        );
     }
 
     // ビューア自身の書き込みは表示中ロックの対象外（ロックが止めるのは MCP 由来だけ）。
@@ -2310,6 +2334,10 @@ pub fn run() {
                         .difference(tauri_plugin_window_state::StateFlags::DECORATIONS),
                 )
                 .with_denylist(&["tray-popup"])
+                // アプリの常駐ウィンドウ（appinst-N）は追跡しない。ラベルは起動のたびに採番し直すので、
+                // 保存された位置・可視状態が別のアプリへ引き継がれて勝手に表示されうる。
+                // 再起動をまたいで復活しないものなので、保存する意味も無い
+                .with_filter(|label| !label.starts_with(app_instance::LABEL_PREFIX))
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
@@ -2344,6 +2372,8 @@ pub fn run() {
         .manage(mcp_server::McpPeerRegistry(std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()))))
         .manage(mcp_server::DetachedWorktreeRegistry::default())
         .manage(artifact_lock::ArtifactOpenRegistry::new())
+        .manage(app_grant::AppGrantStore::new())
+        .manage(app_instance::AppInstanceRegistry::default())
         .manage(mcp_server::NotificationRegistry::default())
         .manage(mcp_server::CloseWorktreeAckRegistry::default())
         .manage(mcp_server::ImportWorktreeAckRegistry::default())
@@ -2443,6 +2473,18 @@ pub fn run() {
             artifact_lock_touch,
             artifact_lock_release,
             artifact_call_mcp_tool,
+            app_instance::app_instance_start,
+            app_instance::app_instance_stop,
+            app_instance::app_instance_toggle_visible,
+            app_instance::app_instance_status,
+            app_instance::app_instance_log,
+            app_instance::app_instance_grant,
+            app_instance::app_instance_bootstrap,
+            app_instance::app_instance_report,
+            app_instance::app_call_mcp_tool,
+            app_instance::app_grant_respond,
+            app_instance::list_app_grants,
+            app_instance::revoke_app_grant,
             start_fs_watch,
             stop_fs_watch,
             settings::list_system_sounds,
@@ -2667,6 +2709,11 @@ pub fn run() {
             }
             let settings_manager = app.state::<SettingsManager>();
             settings_manager.init(app.handle());
+            // アプリ形式アーティファクトの承認（host 側のファイル。壊れていれば承認なし = 再承認）
+            match app.path().app_data_dir() {
+                Ok(dir) => app.state::<app_grant::AppGrantStore>().init(&dir),
+                Err(e) => log::warn!("[app-grant] app_data_dir を取得できません: {}", e),
+            }
 
             // settings.debug_mode を反映: env=false かつ settings=true の場合は Debug に昇格
             {
@@ -3111,6 +3158,8 @@ pub fn run() {
                     app_handle
                         .state::<artifact_lock::ArtifactOpenRegistry>()
                         .release_window(label);
+                    // アプリの常駐ウィンドウ（appinst-*）が外から壊れたら、起動レジストリからも外す
+                    app_instance::on_window_destroyed(app_handle, label);
                     // メインウィンドウが破棄されたら、残っている付随ウィンドウ
                     // (artifact-* / codereview-* / sub-* / tray-popup) を道連れで破棄する。
                     // アーティファクトウィンドウはサブウィンドウ/トレイポップアップからも
@@ -3219,6 +3268,32 @@ mod artifact_state_tests {
             Ok(())
         }))
         .expect("update");
+    }
+
+    /// アプリ（`app` マーカー付き）のメモリは、ビューア / Web ビューアの共通の入口
+    /// （`set_artifact_memory_in`）で拒否する。通常のアーティファクトは従来どおり書ける
+    #[test]
+    fn viewer_memory_write_is_rejected_for_app_artifacts() {
+        let dir = test_dir("app-memory");
+        std::fs::write(
+            dir.join("plain.json"),
+            r#"{"id":"plain","type":"application/vnd.ant.react","title":"t","content":"const k = \"app\";","created_at":1,"updated_at":1}"#,
+        )
+        .expect("write plain");
+        std::fs::write(
+            dir.join("appy.json"),
+            r#"{"id":"appy","type":"application/vnd.ant.react","title":"t","content":"c","app":{"name":"x"},"created_at":1,"updated_at":1}"#,
+        )
+        .expect("write app");
+
+        let mem = Some(serde_json::json!({ "k": 1 }));
+        assert!(block_on(set_artifact_memory_in(dir.clone(), "plain", mem.clone())).expect("plain").is_some());
+
+        let err = block_on(set_artifact_memory_in(dir.clone(), "appy", mem.clone())).expect_err("app is rejected");
+        assert!(err.contains("アプリ"), "{}", err);
+        // リセット（null）も同じく拒否。サイドカーは作られない
+        assert!(block_on(set_artifact_memory_in(dir.clone(), "appy", None)).is_err());
+        assert!(read_state(&dir, "appy").is_none());
     }
 
     /// メモリーとピン止めは同じサイドカーの別キーなので、片方の更新で他方が消えてはいけない

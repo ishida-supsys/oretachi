@@ -139,7 +139,15 @@ describe("createTauriArtifactViewerContext", () => {
       import: true,
       copyPng: true,
       transfer: true,
+      appLaunch: true,
     });
+  });
+
+  it("アプリの起動 API はワークツリースコープだけが持つ（リポジトリ保管庫のアプリは起動できない）", () => {
+    const wt = createTauriArtifactViewerContext("?scope=worktree&worktreeId=wt1");
+    expect(wt.dataSource.app).toBeDefined();
+    const repo = createTauriArtifactViewerContext("?scope=repository&repositoryId=r1");
+    expect(repo.dataSource.app).toBeUndefined();
   });
 
   it("onArtifactChanged(worktree) は自スコープのイベントだけ通し、autoOpen の既定は true", async () => {

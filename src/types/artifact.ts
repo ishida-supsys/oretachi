@@ -1,3 +1,5 @@
+import type { AppManifestView } from "./appInstance";
+
 /** URL アーティファクトの content_type（Rust 側は artifact_url.rs の URL_ARTIFACT_CONTENT_TYPE） */
 export const URL_ARTIFACT_CONTENT_TYPE = "text/uri-list";
 
@@ -23,6 +25,12 @@ export interface ArtifactMeta {
    * 判定は Rust 側（`artifact_lock::ArtifactOpenRegistry` との AND）で行う。
    */
   locked_while_open?: boolean;
+  /**
+   * アプリ形式のアーティファクトが持つ manifest（`application/vnd.ant.react` のみ）。
+   * **AI が書いたものなので表示専用**。権限の根拠は host 側の grant だけで、ここは見ない。
+   * 持つものは通常のビューアでは動かさず、起動画面を出す。
+   */
+  app?: AppManifestView;
 }
 
 export interface ArtifactData extends ArtifactMeta {

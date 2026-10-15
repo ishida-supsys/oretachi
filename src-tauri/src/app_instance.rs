@@ -1,0 +1,1195 @@
+//! アプリ形式アーティファクトの起動レジストリと常駐ウィンドウ（`appinst-*`）。
+//!
+//! - インスタンスごとに常駐ウィンドウを 1 つ作る。アプリのコードはそのウィンドウの中の
+//!   `sandbox="allow-scripts"` iframe でだけ動く（シェルは oretachi 自身のコード）。
+//! - 呼び出し元インスタンスは、呼び出した webview の**ウィンドウラベルから**このレジストリを引いて
+//!   決める。リクエストのパラメータからは決めない。
+//! - 起動は 1 インスタンス 1 つ。別アーティファクトなら同時に起動できる（上限 [`MAX_INSTANCES`]）。
+//! - 再起動をまたいで復活しない（レジストリは in-memory のみ）。
+//! - `artifact_lock`（表示中ロック）は流用しない。あれは「ビューアで表示中の 1 件」を守る粒度で、
+//!   非表示で常駐するインスタンスとは別物。
+
+use crate::app_grant::AppGrantStore;
+use crate::app_manifest::{self, AppGrant, AppManifest, RequestedPermissions, ResolvedPermissions};
+use serde::Serialize;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Mutex;
+use std::time::Duration;
+use tauri::{AppHandle, Emitter, Manager};
+use tokio::sync::oneshot;
+
+pub const LABEL_PREFIX: &str = "appinst-";
+
+/// 同時に起動できるインスタンス数（承認待ちの Starting を含む）。
+/// webview の数は既知のハング（端末 15 個以上と強相関）を悪化させうるので小さく始める。
+pub const MAX_INSTANCES: usize = 4;
+
+/// インスタンスごとのデバッグログの保持件数（リングバッファ）。
+const LOG_CAPACITY: usize = 500;
+
+/// ログを保持するキーの上限。停止後もログは見られるようにするが、無制限には持たない。
+const MAX_LOG_KEYS: usize = 64;
+
+/// 起動時の承認ダイアログを待つ上限。超えたら起動を中止する（インスタンスは作っていない）。
+const START_APPROVAL_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
+const REACT_TYPE: &str = "application/vnd.ant.react";
+
+type Key = (String, String);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum InstanceState {
+    /// 承認ダイアログの待ち。ウィンドウはまだ無く、API は呼べない。
+    Starting,
+    Running,
+}
+
+/// 承認ダイアログの結果。`Superseded` / `Cancelled` は `Rejected` と**区別する**
+/// （拒否は再承認ではインスタンスの停止を意味するが、差し替え・取り消しは何も変えない）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApprovalOutcome {
+    Approved,
+    Rejected,
+    /// より新しい manifest の要求に置き換えられた
+    Superseded,
+    /// インスタンスの停止・アーティファクトの削除などで取り下げられた（oneshot の drop も含む）
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LogEntry {
+    /// UNIX ミリ秒
+    pub ts: u64,
+    /// "info" | "warn" | "error"
+    pub level: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone)]
+struct PendingApproval {
+    request_id: String,
+    requested: RequestedPermissions,
+}
+
+#[derive(Debug)]
+struct Instance {
+    worktree_id: String,
+    artifact_id: String,
+    state: InstanceState,
+    visible: bool,
+    pending: Option<PendingApproval>,
+}
+
+struct Waiter {
+    tx: oneshot::Sender<ApprovalOutcome>,
+    key: Key,
+}
+
+#[derive(Default)]
+struct Inner {
+    by_label: HashMap<String, Instance>,
+    by_key: HashMap<Key, String>,
+    waiters: HashMap<String, Waiter>,
+    logs: HashMap<Key, VecDeque<LogEntry>>,
+    label_seq: u64,
+    request_seq: u64,
+}
+
+/// 認可の入口で使う、呼び出し元インスタンスの身元。
+#[derive(Debug, Clone)]
+pub struct InstanceContext {
+    pub worktree_id: String,
+    pub artifact_id: String,
+    pub reapproval_pending: bool,
+}
+
+#[derive(Default)]
+pub struct AppInstanceRegistry(Mutex<Inner>);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+// ─── レジストリ本体（純粋な状態遷移。AppHandle を取らないのでテストできる） ───────────
+
+impl Inner {
+    /// 起動枠を確保する。同一インスタンスの多重起動と上限超過はここで拒否する。
+    fn reserve(&mut self, worktree_id: &str, artifact_id: &str) -> Result<String, String> {
+        let key: Key = (worktree_id.to_string(), artifact_id.to_string());
+        if self.by_key.contains_key(&key) {
+            return Err("このアプリは既に起動中です（同一インスタンスの多重起動はできません）".to_string());
+        }
+        if self.by_label.len() >= MAX_INSTANCES {
+            return Err(format!(
+                "同時に起動できるアプリは {} 個までです。どれかを停止してから起動してください",
+                MAX_INSTANCES
+            ));
+        }
+        self.label_seq += 1;
+        let label = format!("{}{}", LABEL_PREFIX, self.label_seq);
+        self.by_label.insert(
+            label.clone(),
+            Instance {
+                worktree_id: key.0.clone(),
+                artifact_id: key.1.clone(),
+                state: InstanceState::Starting,
+                visible: false,
+                pending: None,
+            },
+        );
+        self.by_key.insert(key, label.clone());
+        Ok(label)
+    }
+
+    /// インスタンスを取り除き、待っている承認はすべて `Cancelled` にする。
+    /// 取り下げたリクエスト ID を返す（ダイアログを閉じさせるため）。
+    fn remove(&mut self, label: &str) -> Option<(Instance, Vec<String>)> {
+        let inst = self.by_label.remove(label)?;
+        self.by_key.remove(&(inst.worktree_id.clone(), inst.artifact_id.clone()));
+        let key: Key = (inst.worktree_id.clone(), inst.artifact_id.clone());
+        let ids: Vec<String> = self
+            .waiters
+            .iter()
+            .filter(|(_, w)| w.key == key)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &ids {
+            if let Some(w) = self.waiters.remove(id) {
+                let _ = w.tx.send(ApprovalOutcome::Cancelled);
+            }
+        }
+        Some((inst, ids))
+    }
+
+    /// 承認要求を登録する。同じインスタンスに保留があれば `Superseded` で置き換える（最新が勝つ）。
+    /// 戻り値は (新しいリクエスト ID, 受信側, 置き換えられた旧リクエスト ID)。
+    fn new_request(
+        &mut self,
+        label: &str,
+        requested: RequestedPermissions,
+    ) -> Option<(String, oneshot::Receiver<ApprovalOutcome>, Option<String>)> {
+        let key = {
+            let inst = self.by_label.get(label)?;
+            (inst.worktree_id.clone(), inst.artifact_id.clone())
+        };
+        self.request_seq += 1;
+        let request_id = format!("appgrant-{}", self.request_seq);
+        let old = self.by_label.get(label).and_then(|i| i.pending.as_ref()).map(|p| p.request_id.clone());
+        if let Some(old_id) = &old {
+            if let Some(w) = self.waiters.remove(old_id) {
+                let _ = w.tx.send(ApprovalOutcome::Superseded);
+            }
+        }
+        let (tx, rx) = oneshot::channel();
+        self.waiters.insert(request_id.clone(), Waiter { tx, key });
+        if let Some(inst) = self.by_label.get_mut(label) {
+            inst.pending = Some(PendingApproval { request_id: request_id.clone(), requested });
+        }
+        Some((request_id, rx, old))
+    }
+
+    /// 保留中の要求を取り下げる（manifest が保存済みの権限に戻ったときなど）。
+    fn cancel_pending(&mut self, label: &str) -> Option<String> {
+        let pending = self.by_label.get_mut(label)?.pending.take()?;
+        if let Some(w) = self.waiters.remove(&pending.request_id) {
+            let _ = w.tx.send(ApprovalOutcome::Cancelled);
+        }
+        Some(pending.request_id)
+    }
+
+    /// ダイアログからの応答を受け取る。すでに差し替え・取り下げ済みなら `None`。
+    fn answer(&mut self, request_id: &str, outcome: ApprovalOutcome) -> Option<Key> {
+        let w = self.waiters.remove(request_id)?;
+        let key = w.key.clone();
+        let _ = w.tx.send(outcome);
+        Some(key)
+    }
+
+    fn push_log(&mut self, key: &Key, level: &str, message: String) -> LogEntry {
+        if !self.logs.contains_key(key) && self.logs.len() >= MAX_LOG_KEYS {
+            // 起動中でないキーを 1 つ捨てる
+            let victim = self
+                .logs
+                .keys()
+                .find(|k| !self.by_key.contains_key(*k))
+                .cloned();
+            if let Some(v) = victim {
+                self.logs.remove(&v);
+            }
+        }
+        let entry = LogEntry { ts: now_ms(), level: level.to_string(), message };
+        let buf = self.logs.entry(key.clone()).or_default();
+        if buf.len() >= LOG_CAPACITY {
+            buf.pop_front();
+        }
+        buf.push_back(entry.clone());
+        entry
+    }
+}
+
+// ─── イベント・状態の通知 ──────────────────────────────────────────────
+
+fn status_value(
+    inner: &Inner,
+    store: &AppGrantStore,
+    worktree_id: &str,
+    artifact_id: &str,
+) -> serde_json::Value {
+    let key: Key = (worktree_id.to_string(), artifact_id.to_string());
+    let inst = inner.by_key.get(&key).and_then(|l| inner.by_label.get(l));
+    let grant = store.get(worktree_id, artifact_id);
+    serde_json::json!({
+        "worktreeId": worktree_id,
+        "artifactId": artifact_id,
+        "running": inst.map(|i| i.state == InstanceState::Running).unwrap_or(false),
+        "state": inst.map(|i| i.state),
+        "visible": inst.map(|i| i.visible).unwrap_or(false),
+        "reapprovalPending": inst.map(|i| i.pending.is_some()).unwrap_or(false),
+        "granted": grant.is_some(),
+        "grantedAt": grant.as_ref().map(|g| g.granted_at),
+        "maxInstances": MAX_INSTANCES,
+    })
+}
+
+fn emit_changed(app: &AppHandle, worktree_id: &str, artifact_id: &str) {
+    let payload = {
+        let reg = app.state::<AppInstanceRegistry>();
+        let store = app.state::<AppGrantStore>();
+        let Ok(inner) = reg.0.lock() else { return };
+        status_value(&inner, &store, worktree_id, artifact_id)
+    };
+    let _ = app.emit("app-instance-changed", payload);
+}
+
+/// デバッグログへ 1 行足し、ビューアへ通知する。
+pub fn add_log(app: &AppHandle, worktree_id: &str, artifact_id: &str, level: &str, message: impl Into<String>) {
+    let message = message.into();
+    let key: Key = (worktree_id.to_string(), artifact_id.to_string());
+    let entry = {
+        let reg = app.state::<AppInstanceRegistry>();
+        let Ok(mut inner) = reg.0.lock() else { return };
+        inner.push_log(&key, level, message.clone())
+    };
+    match level {
+        "error" => log::warn!("[app-instance] {}/{}: {}", worktree_id, artifact_id, message),
+        _ => log::debug!("[app-instance] {}/{}: {}", worktree_id, artifact_id, message),
+    }
+    let _ = app.emit(
+        "app-instance-log",
+        serde_json::json!({ "worktreeId": worktree_id, "artifactId": artifact_id, "entry": entry }),
+    );
+}
+
+fn emit_grant_cancelled(app: &AppHandle, request_ids: &[String]) {
+    for id in request_ids {
+        let _ = app.emit("app-grant-cancelled", serde_json::json!({ "requestId": id }));
+    }
+}
+
+// ─── 呼び出し元の検査 ─────────────────────────────────────────────────
+
+/// 起動画面を持つビューア（`artifact-*`）からだけ受け付ける。`appinst-*` から呼べてしまうと
+/// アプリ自身が自分の起動・停止・承認取り消しをできてしまう。
+fn require_viewer(window: &tauri::Window) -> Result<(), String> {
+    if window.label().starts_with("artifact-") {
+        Ok(())
+    } else {
+        Err(format!("このコマンドはアーティファクトのビューアからだけ呼べます（呼び出し元: {}）", window.label()))
+    }
+}
+
+fn require_viewer_or_main(window: &tauri::Window) -> Result<(), String> {
+    if window.label() == "main" {
+        return Ok(());
+    }
+    require_viewer(window)
+}
+
+fn require_instance_window(window: &tauri::Window) -> Result<(), String> {
+    if window.label().starts_with(LABEL_PREFIX) {
+        Ok(())
+    } else {
+        Err(format!("このコマンドはアプリの実行ウィンドウからだけ呼べます（呼び出し元: {}）", window.label()))
+    }
+}
+
+fn validate_ids(worktree_id: &str, artifact_id: &str) -> Result<(), String> {
+    crate::validate_path_component(worktree_id)?;
+    crate::validate_path_component(artifact_id)?;
+    Ok(())
+}
+
+/// ラベルから呼び出し元インスタンスを引く。**Running のものだけ**を返す（Starting は拒否）。
+pub fn context_for_label(app: &AppHandle, label: &str) -> Result<InstanceContext, String> {
+    let reg = app.state::<AppInstanceRegistry>();
+    let inner = reg.0.lock().map_err(|_| "レジストリのロックが壊れています".to_string())?;
+    let inst = inner
+        .by_label
+        .get(label)
+        .ok_or_else(|| "このウィンドウは起動中のアプリとして登録されていません".to_string())?;
+    if inst.state != InstanceState::Running {
+        return Err("このアプリはまだ起動処理中です".to_string());
+    }
+    Ok(InstanceContext {
+        worktree_id: inst.worktree_id.clone(),
+        artifact_id: inst.artifact_id.clone(),
+        reapproval_pending: inst.pending.is_some(),
+    })
+}
+
+// ─── アーティファクトの読み出し ───────────────────────────────────────
+
+struct AppArtifact {
+    raw: serde_json::Value,
+    title: String,
+    manifest: AppManifest,
+}
+
+fn read_app_artifact(app: &AppHandle, worktree_id: &str, artifact_id: &str) -> Result<AppArtifact, String> {
+    let dir = crate::artifacts_dir_in(
+        &app.path().app_data_dir().map_err(|e| e.to_string())?,
+        worktree_id,
+    )?;
+    let raw_text = crate::read_artifact_in_dir(&dir, artifact_id)
+        .map_err(|_| format!("アーティファクト '{}' が存在しません", artifact_id))?;
+    let raw: serde_json::Value =
+        serde_json::from_str(&raw_text).map_err(|e| format!("アーティファクトの JSON を解析できません: {}", e))?;
+    if raw.get("type").and_then(|v| v.as_str()) != Some(REACT_TYPE) {
+        return Err("アプリにできるのは application/vnd.ant.react のアーティファクトだけです".to_string());
+    }
+    let app_value = raw
+        .get("app")
+        .filter(|v| !v.is_null())
+        .ok_or_else(|| "このアーティファクトはアプリ（manifest の app）を持っていません".to_string())?;
+    let manifest = app_manifest::parse_manifest(app_value)?;
+    let title = raw.get("title").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    Ok(AppArtifact { raw, title, manifest })
+}
+
+// ─── 承認ダイアログ ───────────────────────────────────────────────────
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GrantRequestPayload<'a> {
+    request_id: &'a str,
+    /// "start"（初回・manifest 変更後の起動）| "change"（起動中の権限変更）
+    kind: &'a str,
+    worktree_id: &'a str,
+    worktree_name: &'a str,
+    artifact_id: &'a str,
+    artifact_title: &'a str,
+    app_name: &'a str,
+    app_version: Option<&'a str>,
+    app_description: Option<&'a str>,
+    source: Option<&'a app_manifest::AppSource>,
+    requested: &'a RequestedPermissions,
+    resolved: &'a ResolvedPermissions,
+    /// 再承認のとき、現在有効な権限（差分表示用）
+    previous: Option<&'a ResolvedPermissions>,
+    dangerous_tools: &'a [&'a str],
+}
+
+fn show_main_window(app: &AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
+/// 承認ダイアログを main に出す。**解決はここへ来る前に済ませてある**（承認時に再解決しない。
+/// 表示したものと保存するものを一致させるため）。
+fn emit_grant_request(
+    app: &AppHandle,
+    request_id: &str,
+    kind: &str,
+    worktree_id: &str,
+    artifact_id: &str,
+    art: &AppArtifact,
+    resolved: &ResolvedPermissions,
+    previous: Option<&ResolvedPermissions>,
+) {
+    let worktree_name = app
+        .state::<crate::settings::SettingsManager>()
+        .get()
+        .worktrees
+        .iter()
+        .find(|w| w.id == worktree_id)
+        .map(|w| w.name.clone())
+        .unwrap_or_else(|| worktree_id.to_string());
+    let payload = GrantRequestPayload {
+        request_id,
+        kind,
+        worktree_id,
+        worktree_name: &worktree_name,
+        artifact_id,
+        artifact_title: &art.title,
+        app_name: &art.manifest.name,
+        app_version: art.manifest.version.as_deref(),
+        app_description: art.manifest.description.as_deref(),
+        source: art.manifest.source.as_ref(),
+        requested: &art.manifest.permissions,
+        resolved,
+        previous,
+        dangerous_tools: app_manifest::DANGEROUS_TOOLS,
+    };
+    show_main_window(app);
+    if let Err(e) = app.emit("app-grant-request", &payload) {
+        log::warn!("[app-instance] app-grant-request の送出に失敗: {}", e);
+    }
+}
+
+/// ダイアログの応答（main だけが呼べる）。
+#[tauri::command]
+pub async fn app_grant_respond(
+    window: tauri::Window,
+    app: AppHandle,
+    request_id: String,
+    approved: bool,
+) -> Result<(), String> {
+    if window.label() != "main" {
+        return Err("承認の応答は main ウィンドウからだけ受け付けます".to_string());
+    }
+    let outcome = if approved { ApprovalOutcome::Approved } else { ApprovalOutcome::Rejected };
+    let answered = {
+        let reg = app.state::<AppInstanceRegistry>();
+        let mut inner = reg.0.lock().map_err(|_| "レジストリのロックが壊れています".to_string())?;
+        inner.answer(&request_id, outcome)
+    };
+    if answered.is_none() {
+        // 差し替え・取り下げ済み。ダイアログはすでに閉じられているはずなので無害
+        log::debug!("[app-instance] 応答先のない承認要求: {}", request_id);
+    }
+    Ok(())
+}
+
+// ─── 起動 ───────────────────────────────────────────────────────────
+
+fn build_resolved(app: &AppHandle, requested: &RequestedPermissions) -> Result<ResolvedPermissions, String> {
+    let settings = app.state::<crate::settings::SettingsManager>().get();
+    crate::mcp_server::resolve_app_permissions(&settings, requested)
+}
+
+#[tauri::command]
+pub async fn app_instance_start(
+    window: tauri::Window,
+    app: AppHandle,
+    worktree_id: String,
+    artifact_id: String,
+) -> Result<(), String> {
+    require_viewer(&window)?;
+    validate_ids(&worktree_id, &artifact_id)?;
+
+    let label = {
+        let reg = app.state::<AppInstanceRegistry>();
+        let mut inner = reg.0.lock().map_err(|_| "レジストリのロックが壊れています".to_string())?;
+        inner.reserve(&worktree_id, &artifact_id)?
+    };
+    emit_changed(&app, &worktree_id, &artifact_id);
+
+    match start_inner(&app, &label, &worktree_id, &artifact_id).await {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            release(&app, &label);
+            add_log(&app, &worktree_id, &artifact_id, "error", format!("起動に失敗: {}", e));
+            emit_changed(&app, &worktree_id, &artifact_id);
+            Err(e)
+        }
+    }
+}
+
+async fn start_inner(
+    app: &AppHandle,
+    label: &str,
+    worktree_id: &str,
+    artifact_id: &str,
+) -> Result<(), String> {
+    let art = read_app_artifact(app, worktree_id, artifact_id)?;
+    let requested = art.manifest.permissions.clone();
+    let saved = app.state::<AppGrantStore>().get(worktree_id, artifact_id);
+
+    let needs_approval = match &saved {
+        Some(g) => app_manifest::requested_changed(&g.requested, &requested),
+        None => true,
+    };
+
+    if needs_approval {
+        // 解決は 1 回だけ。ダイアログに出した集合をそのまま保存する
+        let resolved = build_resolved(app, &requested)?;
+        let (request_id, rx) = {
+            let reg = app.state::<AppInstanceRegistry>();
+            let mut inner = reg.0.lock().map_err(|_| "レジストリのロックが壊れています".to_string())?;
+            let (id, rx, _) = inner
+                .new_request(label, requested.clone())
+                .ok_or_else(|| "起動枠が失われました".to_string())?;
+            (id, rx)
+        };
+        add_log(app, worktree_id, artifact_id, "info", "権限の承認を待っています");
+        emit_grant_request(
+            app,
+            &request_id,
+            "start",
+            worktree_id,
+            artifact_id,
+            &art,
+            &resolved,
+            saved.as_ref().map(|g| &g.resolved),
+        );
+        let outcome = match tokio::time::timeout(START_APPROVAL_TIMEOUT, rx).await {
+            Ok(Ok(o)) => o,
+            Ok(Err(_)) => ApprovalOutcome::Cancelled,
+            Err(_) => {
+                let reg = app.state::<AppInstanceRegistry>();
+                if let Ok(mut inner) = reg.0.lock() {
+                    inner.waiters.remove(&request_id);
+                }
+                emit_grant_cancelled(app, &[request_id.clone()]);
+                return Err("承認の待ち時間が上限（10 分）を超えたため、起動を中止しました".to_string());
+            }
+        };
+        match outcome {
+            ApprovalOutcome::Approved => {}
+            ApprovalOutcome::Rejected => {
+                return Err("権限が承認されなかったため、起動しませんでした".to_string());
+            }
+            ApprovalOutcome::Superseded | ApprovalOutcome::Cancelled => {
+                return Err("承認の要求が取り下げられたため、起動しませんでした".to_string());
+            }
+        }
+        // 保留はここで解除（承認済み）
+        if let Ok(mut inner) = app.state::<AppInstanceRegistry>().0.lock() {
+            if let Some(i) = inner.by_label.get_mut(label) {
+                i.pending = None;
+            }
+        }
+        let grant = AppGrant {
+            granted_at: now_ms() / 1000,
+            requested,
+            resolved,
+        };
+        app.state::<AppGrantStore>().put(worktree_id, artifact_id, grant)?;
+        add_log(app, worktree_id, artifact_id, "info", "権限を承認しました");
+    }
+
+    // 承認待ちの間にアーティファクトが消えていないか（レジストリの枠も取り下げられていないか）
+    {
+        let reg = app.state::<AppInstanceRegistry>();
+        let inner = reg.0.lock().map_err(|_| "レジストリのロックが壊れています".to_string())?;
+        if !inner.by_label.contains_key(label) {
+            return Err("起動が取り消されました".to_string());
+        }
+    }
+
+    create_window(app, label, &art.manifest.name)?;
+
+    {
+        let reg = app.state::<AppInstanceRegistry>();
+        let mut inner = reg.0.lock().map_err(|_| "レジストリのロックが壊れています".to_string())?;
+        match inner.by_label.get_mut(label) {
+            Some(i) => i.state = InstanceState::Running,
+            None => {
+                drop(inner);
+                destroy_window(app, label);
+                return Err("起動が取り消されました".to_string());
+            }
+        }
+    }
+    add_log(app, worktree_id, artifact_id, "info", format!("起動しました（{}）", label));
+    emit_changed(app, worktree_id, artifact_id);
+
+    // 承認待ちの間に manifest が書き換わっていた場合に備え、もう一度だけ差分を見る
+    check_permission_change(app, worktree_id, artifact_id).await;
+    Ok(())
+}
+
+fn create_window(app: &AppHandle, label: &str, app_name: &str) -> Result<(), String> {
+    let win = tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App("index.html".into()))
+        .title(format!("{} — oretachi app", app_name))
+        .inner_size(960.0, 720.0)
+        .visible(false)
+        .disable_drag_drop_handler()
+        .build()
+        .map_err(|e| format!("実行ウィンドウを作れませんでした: {}", e))?;
+
+    // 閉じる = 隠す。インスタンスは継続し、停止ボタンかアプリ終了で止まる
+    let handle = app.clone();
+    let label_owned = label.to_string();
+    let win_for_events = win.clone();
+    win.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let _ = win_for_events.hide();
+            set_visible(&handle, &label_owned, false);
+        }
+    });
+    Ok(())
+}
+
+fn destroy_window(app: &AppHandle, label: &str) {
+    if let Some(w) = app.get_webview_window(label) {
+        // destroy は CloseRequested を経ない（hide にすり替えられない）
+        if let Err(e) = w.destroy() {
+            log::warn!("[app-instance] {} の破棄に失敗: {}", label, e);
+        }
+    }
+}
+
+fn set_visible(app: &AppHandle, label: &str, visible: bool) {
+    let key = {
+        let reg = app.state::<AppInstanceRegistry>();
+        let Ok(mut inner) = reg.0.lock() else { return };
+        let Some(inst) = inner.by_label.get_mut(label) else { return };
+        inst.visible = visible;
+        (inst.worktree_id.clone(), inst.artifact_id.clone())
+    };
+    emit_changed(app, &key.0, &key.1);
+}
+
+/// レジストリから外し、待っている承認ダイアログを閉じさせる。ウィンドウは壊さない。
+fn release(app: &AppHandle, label: &str) -> Option<(String, String)> {
+    let removed = {
+        let reg = app.state::<AppInstanceRegistry>();
+        let Ok(mut inner) = reg.0.lock() else { return None };
+        inner.remove(label)
+    };
+    removed.map(|(inst, ids)| {
+        emit_grant_cancelled(app, &ids);
+        (inst.worktree_id, inst.artifact_id)
+    })
+}
+
+// ─── 停止 ───────────────────────────────────────────────────────────
+
+fn label_for_key(app: &AppHandle, worktree_id: &str, artifact_id: &str) -> Option<String> {
+    let reg = app.state::<AppInstanceRegistry>();
+    let inner = reg.0.lock().ok()?;
+    inner.by_key.get(&(worktree_id.to_string(), artifact_id.to_string())).cloned()
+}
+
+/// インスタンスを停止する。ウィンドウを破棄し、レジストリから外す。止めたものがあれば `true`。
+pub fn stop_instance(app: &AppHandle, worktree_id: &str, artifact_id: &str, reason: &str) -> bool {
+    let Some(label) = label_for_key(app, worktree_id, artifact_id) else { return false };
+    let released = release(app, &label);
+    destroy_window(app, &label);
+    if released.is_some() {
+        add_log(app, worktree_id, artifact_id, "info", format!("停止しました（{}）", reason));
+        emit_changed(app, worktree_id, artifact_id);
+    }
+    released.is_some()
+}
+
+#[tauri::command]
+pub async fn app_instance_stop(
+    window: tauri::Window,
+    app: AppHandle,
+    worktree_id: String,
+    artifact_id: String,
+) -> Result<bool, String> {
+    require_viewer(&window)?;
+    validate_ids(&worktree_id, &artifact_id)?;
+    Ok(stop_instance(&app, &worktree_id, &artifact_id, "停止ボタン"))
+}
+
+/// `WindowEvent::Destroyed`（`lib.rs` の RunEvent）から呼ぶ。ウィンドウが外から壊れても
+/// レジストリに幽霊を残さない。
+pub fn on_window_destroyed(app: &AppHandle, label: &str) {
+    if !label.starts_with(LABEL_PREFIX) {
+        return;
+    }
+    if let Some((wt, art)) = release(app, label) {
+        add_log(app, &wt, &art, "info", "実行ウィンドウが閉じられたため停止しました");
+        emit_changed(app, &wt, &art);
+    }
+}
+
+/// アーティファクトの削除時（MCP `artifact delete`・UI の削除）。起動中なら止め、承認も消す。
+/// **承認を残すと、同じ id で作り直した別物が同じ権限セットで承認なしに起動してしまう。**
+pub fn on_artifact_deleted(app: &AppHandle, worktree_id: &str, artifact_id: &str) {
+    stop_instance(app, worktree_id, artifact_id, "アーティファクトが削除されました");
+    if let Err(e) = app.state::<AppGrantStore>().remove(worktree_id, artifact_id) {
+        log::warn!("[app-instance] grant の削除に失敗: {}", e);
+    }
+}
+
+/// ワークツリーのアーティファクトを丸ごと消す経路（`delete_artifacts`）。
+pub fn on_worktree_artifacts_deleted(app: &AppHandle, worktree_id: &str) {
+    let victims: Vec<String> = {
+        let reg = app.state::<AppInstanceRegistry>();
+        let Ok(inner) = reg.0.lock() else { return };
+        inner
+            .by_label
+            .values()
+            .filter(|i| i.worktree_id == worktree_id)
+            .map(|i| i.artifact_id.clone())
+            .collect()
+    };
+    for art in victims {
+        stop_instance(app, worktree_id, &art, "ワークツリーのアーティファクトが削除されました");
+    }
+    if let Err(e) = app.state::<AppGrantStore>().remove_worktree(worktree_id) {
+        log::warn!("[app-instance] grant の一括削除に失敗: {}", e);
+    }
+}
+
+// ─── 権限の変更への対応（前提 1） ─────────────────────────────────────
+
+/// `artifact` の create / rewrite が書かれた後に呼ぶ。起動中のインスタンスの manifest の権限が
+/// 保存済みの承認と違えば、直ちに host 側で再承認ダイアログを出す。**コードの更新だけでは出ない**
+/// （比較するのは権限セットだけ）。
+///
+/// 保留中も旧セットのまま動き続ける（関門は保存済みの grant だけを見る）。
+/// 承認で入れ替えてリロード、拒否で停止。保留は 1 インスタンスにつき 1 件で最新が勝つ。
+pub async fn check_permission_change(app: &AppHandle, worktree_id: &str, artifact_id: &str) {
+    let Some(label) = label_for_key(app, worktree_id, artifact_id) else { return };
+    let running = {
+        let reg = app.state::<AppInstanceRegistry>();
+        let Ok(inner) = reg.0.lock() else { return };
+        inner.by_label.get(&label).map(|i| i.state == InstanceState::Running).unwrap_or(false)
+    };
+    if !running {
+        // Starting は start_inner の最後にもう一度見る
+        return;
+    }
+
+    let art = match read_app_artifact(app, worktree_id, artifact_id) {
+        Ok(a) => a,
+        Err(e) => {
+            add_log(app, worktree_id, artifact_id, "error", format!("manifest を読めないため権限の変更を検査できません: {}", e));
+            return;
+        }
+    };
+    let requested = art.manifest.permissions.clone();
+    let Some(saved) = app.state::<AppGrantStore>().get(worktree_id, artifact_id) else {
+        add_log(app, worktree_id, artifact_id, "error", "承認が見つからないため停止します");
+        stop_instance(app, worktree_id, artifact_id, "承認の欠落");
+        return;
+    };
+
+    if !app_manifest::requested_changed(&saved.requested, &requested) {
+        // 保存済みの権限に戻った。保留があれば取り下げる
+        let cancelled = {
+            let reg = app.state::<AppInstanceRegistry>();
+            let Ok(mut inner) = reg.0.lock() else { return };
+            inner.cancel_pending(&label)
+        };
+        if let Some(id) = cancelled {
+            emit_grant_cancelled(app, &[id]);
+            add_log(app, worktree_id, artifact_id, "info", "権限が承認済みの内容に戻ったため、再承認の要求を取り下げました");
+            emit_changed(app, worktree_id, artifact_id);
+        }
+        return;
+    }
+
+    // すでに同じ内容の要求が保留中なら、ダイアログを重ねない
+    {
+        let reg = app.state::<AppInstanceRegistry>();
+        let Ok(inner) = reg.0.lock() else { return };
+        let same = inner
+            .by_label
+            .get(&label)
+            .and_then(|i| i.pending.as_ref())
+            .map(|p| p.requested == requested)
+            .unwrap_or(false);
+        if same {
+            return;
+        }
+    }
+
+    let resolved = match build_resolved(app, &requested) {
+        Ok(r) => r,
+        Err(e) => {
+            add_log(app, worktree_id, artifact_id, "error", format!("新しい権限を解決できません（旧セットのまま継続）: {}", e));
+            return;
+        }
+    };
+    let (request_id, rx, superseded) = {
+        let reg = app.state::<AppInstanceRegistry>();
+        let Ok(mut inner) = reg.0.lock() else { return };
+        match inner.new_request(&label, requested.clone()) {
+            Some(t) => t,
+            None => return,
+        }
+    };
+    if let Some(old) = superseded {
+        emit_grant_cancelled(app, &[old]);
+    }
+    add_log(app, worktree_id, artifact_id, "warn", "manifest の権限が変わりました。再承認を待っています（承認までは旧セットで動作し、新しい権限が要る呼び出しは拒否されます）");
+    emit_grant_request(app, &request_id, "change", worktree_id, artifact_id, &art, &resolved, Some(&saved.resolved));
+    emit_changed(app, worktree_id, artifact_id);
+
+    let app2 = app.clone();
+    let wt = worktree_id.to_string();
+    let aid = artifact_id.to_string();
+    let rid = request_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let outcome = rx.await.unwrap_or(ApprovalOutcome::Cancelled);
+        match outcome {
+            ApprovalOutcome::Approved => {
+                // 保留が自分のものかを確かめる（差し替えは Superseded で届くのでここには来ないが念のため）
+                let still_mine = {
+                    let reg = app2.state::<AppInstanceRegistry>();
+                    let Ok(mut inner) = reg.0.lock() else { return };
+                    match inner.by_label.get_mut(&label) {
+                        Some(i) if i.pending.as_ref().map(|p| p.request_id == rid).unwrap_or(false) => {
+                            i.pending = None;
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                if !still_mine {
+                    return;
+                }
+                let grant = AppGrant { granted_at: now_ms() / 1000, requested, resolved };
+                if let Err(e) = app2.state::<AppGrantStore>().put(&wt, &aid, grant) {
+                    add_log(&app2, &wt, &aid, "error", format!("承認の保存に失敗したため停止します: {}", e));
+                    stop_instance(&app2, &wt, &aid, "承認の保存失敗");
+                    return;
+                }
+                add_log(&app2, &wt, &aid, "info", "再承認されました。実行ウィンドウをリロードします");
+                reload_window(&app2, &label);
+                emit_changed(&app2, &wt, &aid);
+            }
+            ApprovalOutcome::Rejected => {
+                add_log(&app2, &wt, &aid, "warn", "再承認が拒否されました");
+                stop_instance(&app2, &wt, &aid, "再承認の拒否");
+            }
+            // 差し替え・取り下げは何も変えない（新しい要求 / 停止処理が引き継ぐ）
+            ApprovalOutcome::Superseded | ApprovalOutcome::Cancelled => {}
+        }
+    });
+}
+
+fn reload_window(app: &AppHandle, label: &str) {
+    if let Some(w) = app.get_webview_window(label) {
+        if let Err(e) = w.eval("window.location.reload()") {
+            log::warn!("[app-instance] {} のリロードに失敗: {}", label, e);
+        }
+    }
+}
+
+// ─── ビューア（起動画面）向けコマンド ─────────────────────────────────
+
+#[tauri::command]
+pub async fn app_instance_toggle_visible(
+    window: tauri::Window,
+    app: AppHandle,
+    worktree_id: String,
+    artifact_id: String,
+) -> Result<bool, String> {
+    require_viewer(&window)?;
+    validate_ids(&worktree_id, &artifact_id)?;
+    let label = label_for_key(&app, &worktree_id, &artifact_id)
+        .ok_or_else(|| "このアプリは起動していません".to_string())?;
+    let w = app
+        .get_webview_window(&label)
+        .ok_or_else(|| "実行ウィンドウが見つかりません".to_string())?;
+    let visible = w.is_visible().unwrap_or(false);
+    if visible {
+        let _ = w.hide();
+    } else {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+    set_visible(&app, &label, !visible);
+    Ok(!visible)
+}
+
+#[tauri::command]
+pub async fn app_instance_status(
+    window: tauri::Window,
+    app: AppHandle,
+    worktree_id: String,
+    artifact_id: String,
+) -> Result<serde_json::Value, String> {
+    require_viewer(&window)?;
+    validate_ids(&worktree_id, &artifact_id)?;
+    let reg = app.state::<AppInstanceRegistry>();
+    let store = app.state::<AppGrantStore>();
+    let inner = reg.0.lock().map_err(|_| "レジストリのロックが壊れています".to_string())?;
+    Ok(status_value(&inner, &store, &worktree_id, &artifact_id))
+}
+
+#[tauri::command]
+pub async fn app_instance_log(
+    window: tauri::Window,
+    app: AppHandle,
+    worktree_id: String,
+    artifact_id: String,
+) -> Result<Vec<LogEntry>, String> {
+    require_viewer(&window)?;
+    validate_ids(&worktree_id, &artifact_id)?;
+    let reg = app.state::<AppInstanceRegistry>();
+    let inner = reg.0.lock().map_err(|_| "レジストリのロックが壊れています".to_string())?;
+    Ok(inner
+        .logs
+        .get(&(worktree_id, artifact_id))
+        .map(|b| b.iter().cloned().collect())
+        .unwrap_or_default())
+}
+
+/// 起動画面が出す「承認済みの権限」の要約（表示専用）。
+#[tauri::command]
+pub async fn app_instance_grant(
+    window: tauri::Window,
+    app: AppHandle,
+    worktree_id: String,
+    artifact_id: String,
+) -> Result<Option<AppGrant>, String> {
+    require_viewer(&window)?;
+    validate_ids(&worktree_id, &artifact_id)?;
+    Ok(app.state::<AppGrantStore>().get(&worktree_id, &artifact_id))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantListItem {
+    worktree_id: String,
+    worktree_name: String,
+    artifact_id: String,
+    artifact_title: String,
+    granted_at: u64,
+    resolved: ResolvedPermissions,
+    running: bool,
+}
+
+/// 承認の一覧（設定画面・起動画面）。
+#[tauri::command]
+pub async fn list_app_grants(window: tauri::Window, app: AppHandle) -> Result<Vec<GrantListItem>, String> {
+    require_viewer_or_main(&window)?;
+    let settings = app.state::<crate::settings::SettingsManager>().get();
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let running: Vec<Key> = {
+        let reg = app.state::<AppInstanceRegistry>();
+        let inner = reg.0.lock().map_err(|_| "レジストリのロックが壊れています".to_string())?;
+        inner.by_key.keys().cloned().collect()
+    };
+    Ok(app
+        .state::<AppGrantStore>()
+        .list()
+        .into_iter()
+        .map(|(wt, art, g)| {
+            let title = crate::artifacts_dir_in(&data_dir, &wt)
+                .ok()
+                .and_then(|d| crate::read_artifact_in_dir(&d, &art).ok())
+                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
+                .and_then(|v| v.get("title").and_then(|t| t.as_str()).map(str::to_string))
+                .unwrap_or_default();
+            GrantListItem {
+                worktree_name: settings
+                    .worktrees
+                    .iter()
+                    .find(|w| w.id == wt)
+                    .map(|w| w.name.clone())
+                    .unwrap_or_else(|| wt.clone()),
+                running: running.contains(&(wt.clone(), art.clone())),
+                worktree_id: wt,
+                artifact_id: art,
+                artifact_title: title,
+                granted_at: g.granted_at,
+                resolved: g.resolved,
+            }
+        })
+        .collect())
+}
+
+/// 承認を取り消す。起動中なら止める。
+#[tauri::command]
+pub async fn revoke_app_grant(
+    window: tauri::Window,
+    app: AppHandle,
+    worktree_id: String,
+    artifact_id: String,
+) -> Result<bool, String> {
+    require_viewer_or_main(&window)?;
+    validate_ids(&worktree_id, &artifact_id)?;
+    stop_instance(&app, &worktree_id, &artifact_id, "承認の取り消し");
+    let removed = app.state::<AppGrantStore>().remove(&worktree_id, &artifact_id)?;
+    add_log(&app, &worktree_id, &artifact_id, "info", "承認を取り消しました");
+    emit_changed(&app, &worktree_id, &artifact_id);
+    Ok(removed)
+}
+
+// ─── 常駐ウィンドウ（シェル）向けコマンド。引数でインスタンスを指定させない ──────
+
+/// シェルが描画に使う材料。**ラベルから**インスタンスを引くので、他のアプリの中身は読めない。
+#[tauri::command]
+pub async fn app_instance_bootstrap(window: tauri::Window, app: AppHandle) -> Result<serde_json::Value, String> {
+    require_instance_window(&window)?;
+    let ctx = context_for_label(&app, window.label())?;
+    let art = read_app_artifact(&app, &ctx.worktree_id, &ctx.artifact_id)?;
+    Ok(serde_json::json!({
+        "worktreeId": ctx.worktree_id,
+        "artifactId": ctx.artifact_id,
+        "title": art.title,
+        "appName": art.manifest.name,
+        "content": art.raw.get("content").cloned().unwrap_or(serde_json::Value::String(String::new())),
+        "modules": art.raw.get("modules").cloned().unwrap_or_else(|| serde_json::json!({})),
+    }))
+}
+
+/// アプリからの MCP ツール呼び出し。関門は `mcp_server::call_tool_for_app_instance`。
+/// 拒否も許可もデバッグログに残す。
+#[tauri::command]
+pub async fn app_call_mcp_tool(
+    window: tauri::Window,
+    app: AppHandle,
+    tool: String,
+    params: serde_json::Value,
+) -> Result<String, String> {
+    require_instance_window(&window)?;
+    let ctx = context_for_label(&app, window.label())?;
+    let Some(grant) = app.state::<AppGrantStore>().get(&ctx.worktree_id, &ctx.artifact_id) else {
+        add_log(&app, &ctx.worktree_id, &ctx.artifact_id, "error", format!("拒否: {}（承認が見つかりません）", tool));
+        return Err("このアプリには承認がありません".to_string());
+    };
+    let result = crate::mcp_server::call_tool_for_app_instance(
+        &app,
+        &ctx.worktree_id,
+        &ctx.artifact_id,
+        &grant.resolved,
+        &tool,
+        params,
+    )
+    .await;
+    match &result {
+        Ok(_) => add_log(&app, &ctx.worktree_id, &ctx.artifact_id, "info", format!("許可: {}", tool)),
+        Err(e) => {
+            // 再承認待ちの間に新しい権限が要る呼び出しをしたときは、理由が分かるよう付記する
+            let reapproval = if ctx.reapproval_pending {
+                "（再承認待ちのため、新しい権限はまだ使えません）"
+            } else {
+                ""
+            };
+            add_log(&app, &ctx.worktree_id, &ctx.artifact_id, "warn", format!("拒否: {} — {}{}", tool, e, reapproval));
+        }
+    }
+    result
+}
+
+/// iframe 内の未処理エラーなどをデバッグログへ。
+#[tauri::command]
+pub async fn app_instance_report(
+    window: tauri::Window,
+    app: AppHandle,
+    level: String,
+    message: String,
+) -> Result<(), String> {
+    require_instance_window(&window)?;
+    let ctx = context_for_label(&app, window.label())?;
+    let level = match level.as_str() {
+        "error" | "warn" => level.as_str(),
+        _ => "info",
+    };
+    let clipped: String = message.chars().take(2000).collect();
+    add_log(&app, &ctx.worktree_id, &ctx.artifact_id, level, clipped);
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app_manifest::{MemoryPermission, RequestedPermissions};
+
+    fn perms(max: u64) -> RequestedPermissions {
+        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }) }
+    }
+
+    #[test]
+    fn rejects_double_start_of_same_instance() {
+        let mut inner = Inner::default();
+        assert!(inner.reserve("wt", "a").is_ok());
+        assert!(inner.reserve("wt", "a").unwrap_err().contains("既に起動中"));
+    }
+
+    #[test]
+    fn different_artifacts_can_run_together() {
+        let mut inner = Inner::default();
+        let a = inner.reserve("wt", "a").unwrap();
+        let b = inner.reserve("wt", "b").unwrap();
+        assert_ne!(a, b);
+        assert!(a.starts_with(LABEL_PREFIX));
+    }
+
+    #[test]
+    fn enforces_instance_cap_and_frees_slot_on_remove() {
+        let mut inner = Inner::default();
+        let mut labels = Vec::new();
+        for i in 0..MAX_INSTANCES {
+            labels.push(inner.reserve("wt", &format!("a{}", i)).unwrap());
+        }
+        assert!(inner.reserve("wt", "extra").unwrap_err().contains("まで"));
+        inner.remove(&labels[0]);
+        assert!(inner.reserve("wt", "extra").is_ok());
+    }
+
+    #[test]
+    fn labels_are_never_reused() {
+        let mut inner = Inner::default();
+        let a = inner.reserve("wt", "a").unwrap();
+        inner.remove(&a);
+        let b = inner.reserve("wt", "a").unwrap();
+        assert_ne!(a, b, "古いウィンドウのラベルが新しいインスタンスに引き継がれてはいけない");
+    }
+
+    #[test]
+    fn newer_request_supersedes_older_one() {
+        let mut inner = Inner::default();
+        let label = inner.reserve("wt", "a").unwrap();
+        let (id1, mut rx1, old1) = inner.new_request(&label, perms(1)).unwrap();
+        assert!(old1.is_none());
+        let (id2, _rx2, old2) = inner.new_request(&label, perms(2)).unwrap();
+        assert_eq!(old2.as_deref(), Some(id1.as_str()));
+        assert_eq!(rx1.try_recv().unwrap(), ApprovalOutcome::Superseded);
+        // 古い要求への応答は無効
+        assert!(inner.answer(&id1, ApprovalOutcome::Approved).is_none());
+        assert!(inner.answer(&id2, ApprovalOutcome::Approved).is_some());
+    }
+
+    #[test]
+    fn remove_cancels_pending_request_instead_of_rejecting() {
+        let mut inner = Inner::default();
+        let label = inner.reserve("wt", "a").unwrap();
+        let (id, mut rx, _) = inner.new_request(&label, perms(1)).unwrap();
+        let (_, cancelled) = inner.remove(&label).unwrap();
+        assert_eq!(cancelled, vec![id]);
+        assert_eq!(rx.try_recv().unwrap(), ApprovalOutcome::Cancelled);
+    }
+
+    #[test]
+    fn dropped_sender_is_not_a_rejection() {
+        // start_inner / 再承認タスクは oneshot の Err を Cancelled として扱う
+        let mut inner = Inner::default();
+        let label = inner.reserve("wt", "a").unwrap();
+        let (id, rx, _) = inner.new_request(&label, perms(1)).unwrap();
+        inner.waiters.remove(&id);
+        assert!(rx.blocking_recv().is_err());
+    }
+
+    #[test]
+    fn cancel_pending_clears_state() {
+        let mut inner = Inner::default();
+        let label = inner.reserve("wt", "a").unwrap();
+        let (id, mut rx, _) = inner.new_request(&label, perms(1)).unwrap();
+        assert_eq!(inner.cancel_pending(&label), Some(id));
+        assert_eq!(rx.try_recv().unwrap(), ApprovalOutcome::Cancelled);
+        assert!(inner.cancel_pending(&label).is_none());
+    }
+
+    #[test]
+    fn log_buffer_is_a_ring() {
+        let mut inner = Inner::default();
+        let key: Key = ("wt".into(), "a".into());
+        for i in 0..(LOG_CAPACITY + 10) {
+            inner.push_log(&key, "info", format!("m{}", i));
+        }
+        let buf = inner.logs.get(&key).unwrap();
+        assert_eq!(buf.len(), LOG_CAPACITY);
+        assert_eq!(buf.front().unwrap().message, "m10");
+    }
+}
