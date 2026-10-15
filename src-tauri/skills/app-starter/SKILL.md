@@ -15,7 +15,7 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
 - **manifest だけでは何も動かない。** AI が書いた manifest は信頼されない。ユーザーがアーティファクトウィンドウの**起動画面**で起動し、承認ダイアログで許可して初めて権限が有効になる。承認の前に、あなたが API を呼べるようにする手段は無い。
 - **宣言したものだけが使える。** manifest に無い権限（ツール・越境先・メモリー）は、承認済みでも常に拒否される。
 - **通常のビューアでは動かない。** `app` 付きのアーティファクトは起動画面を出す。実行は承認後の常駐ウィンドウの中（`sandbox` iframe）。Web ビューアでは起動できない。
-- 今の版で書ける権限は `mcp`（`tools` と `targets`）、`memory`（`maxBytes` 必須）、`fs`（下記）だけ。`db` / `network` / `subWindow` / `wasm` / `aiTerminal` は未対応で、書くとエラーになる。
+- 今の版で書ける権限は `mcp`（`tools` と `targets`）、`memory`（`maxBytes` 必須）、`fs`（下記）、`aiTerminal`（`agents` と `maxConcurrent` 必須）だけ。`db` / `network` / `subWindow` / `wasm` は未対応で、書くとエラーになる。
 - コード（content / modules）を更新しても再承認は要らず、起動中なら**承認を保ったまま iframe がリロードされる**（フルリロード。メモリー以外の JS の状態は失われる）。**権限（manifest の `permissions`）を変えたときだけ**、起動中なら直ちに再承認のダイアログが出る。承認までは旧権限のまま動き（リロードもされない）、新しい権限が要る呼び出しは拒否される。承認でリロード、拒否で停止。
 
 ## manifest
@@ -50,6 +50,7 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
   - `artifact://` はこのアプリ専用の保存領域（`app_data/artifact-files/<ワークツリー>/<アプリ id>/`）。**アーティファクトを削除すると一緒に消える。転送・エクスポート・インポートでは持ち出されない**（移した先で `artifact_file put` し直す）。
   - **既定で書き込みを拒否するパス**（`worktree://` の任意の階層。大文字小文字は無視）: `.git` / `.github` / `.claude` / `.vscode` / `.idea` / `.husky` / `.devcontainer` / `.mcp.json` / `.envrc` / `.codex` / `.gemini` / `.cursor` / `.githooks` / `.gitmodules` / `.cargo` / `.npmrc` / `.yarnrc.yml` / `.pre-commit-config.yaml` / `CLAUDE.md` / `CLAUDE.local.md` / `AGENTS.md`。ここへ書けると、あなたの権限で後からコマンドが走る（git フック・Claude Code のフック・CI・エディタのタスク）。**読み取りは絞り込まれない**（範囲内の `.env` や `.git/config` も読める。`read` は必要な範囲だけにする）。これらを `write` に含む manifest は、**`"allowSensitivePaths": true` を足さない限りエラー**になる。足した manifest は承認ダイアログで**最も強い警告**が出る。本当に必要でない限り足さない。
   - リンク（junction・symlink）の先が範囲外なら拒否される。上限: 1 回の読み書き 8MiB、一覧 1000 件。
+- `aiTerminal`: アプリ専用の AI セッション端末（Claude Code）を開く権限。`{ "agents": ["claude"], "maxConcurrent": 2 }`。`agents` は v1 では `claude` だけ、`maxConcurrent` は 1〜4（同時に開ける数）。**ユーザーと同じ権限で動くエージェントを起動できる**ので、承認ダイアログで最も強い警告になる。**権限モード・権限スキップ・許可ツールの一覧はアプリから指定できない**（書くと manifest が拒否される）。
 
 ## ファイル API（`fs`）
 
@@ -81,6 +82,26 @@ artifact_file(command: "delete", id: "<アプリ id>", project_dir: <作業デ�
 
 - アプリのアーティファクトが先に存在している必要がある（`create` の後に `put`）。承認は要らない（あなたはもともとユーザーと同等の権限を持つ）。
 - アプリ側から読むには、manifest の `fs.read` に `artifact://` を宣言しておく。
+
+## AI ターミナル API
+
+`aiTerminal` を承認されたアプリだけが、`const { aiTerminal } = require('oretachi')` で使える。**自分が `open` した端末だけ**を操作できる。メインの端末や他のアプリの端末への操作は Rust が拒否する。
+
+| 呼び出し | 内容 |
+|---|---|
+| `aiTerminal.open({ title, systemPrompt, initialPrompt, model, cwd })` | 端末を開く。`{ terminalId, sessionId }` が返る。`cwd` は `worktree://サブディレクトリ`（ワークツリー内。省略 = ルート）。未知のキー（権限モード等）は拒否 |
+| `aiTerminal.write(terminalId, text, submit?)` | 入力を送る（`oretachi_write_terminal` と同じ。`submit` 既定 true） |
+| `aiTerminal.sendKeys(terminalId, keys)` | 矢印などの制御キーを送る。**Enter / Esc は送れない**（ダイアログの確定は `answerPrompt`） |
+| `aiTerminal.read(terminalId, { maxBytes, fromCursor })` | 出力を読む（`cursor` を `fromCursor` に渡すと差分） |
+| `aiTerminal.inspectPrompt(terminalId)` / `aiTerminal.answerPrompt(terminalId, { expectFingerprint, kind, ... })` | ツール許可・プラン承認・質問のダイアログを確認して回答する。`oretachi_inspect_prompt` / `oretachi_answer_prompt` と同じ指紋検査（画面が変わっていたら何も送らず `stale`） |
+| `aiTerminal.close(terminalId)` / `aiTerminal.list()` | 閉じる / 自分が開いた端末の一覧 |
+| `aiTerminal.onEvent(fn)` | 端末の Stop / Notification / PermissionRequest を受け取る（`{ terminalId, event, kind, body }`）。解除関数が返る |
+
+- **`systemPrompt` は厳密なシステムプロンプトではない。** SessionStart フックが注入する additionalContext で、`/clear`・compact・再起動のたびに再注入される。開いた後に差し替える手段は無い。Claude Code のみ対応。
+- 専用端末の Stop や通知は、ワークツリーのバッジ・トレイ・タスクバーに積まれず、`onEvent` とデバッグログへ回る。description の更新を促す注入や inbox の要約も出ない。自動承認の対象外で、アプリの再起動では復元されない。
+- 数の上限は `maxConcurrent`（アプリごと）と全体 8 個。インスタンスを停止すると、開いた端末はすべて閉じる（コードの更新によるリロードでは維持され、新しい iframe は `list()` で取り直す）。
+- **既知の制限:** 同じ作業ディレクトリの Claude Code のセッションは `~/.claude/projects/<cwd>` の履歴を共有するので、メインのセッションの `/resume` の一覧に専用端末のセッションが並ぶ。`cwd` をワークツリー内の専用サブディレクトリにすると履歴は分かれる（フックの除外は `terminal_id` で判定する。サブディレクトリで起動するときは、フックを効かせるため cwd 直下にもプラグイン設定を書くので、その `.claude/` がサブディレクトリにできる）。
+- `initialPrompt` は `claude -- "<prompt>"` の位置引数として渡る（先頭が `-` でもフラグとして解釈されない）。`model` は英数字と `. _ - [ ]` だけで、先頭に `-` は使えない。
 
 ## メモリー API
 

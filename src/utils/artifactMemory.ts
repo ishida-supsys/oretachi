@@ -72,6 +72,16 @@ export const ARTIFACT_BRIDGE_METHOD_MEMORY_SET = "memory.set";
  */
 export const ARTIFACT_BRIDGE_METHOD_MCP_CALL = "mcp.call";
 
+/** `ARTIFACT_BRIDGE_PUSH_MARKER` の通知種別: 専用 AI ターミナルのフックイベント（Stop など）。`payload` に中身 */
+export const ARTIFACT_BRIDGE_PUSH_AI_TERMINAL_EVENT = "aiTerminal.event";
+
+/**
+ * 専用 AI ターミナル API の method 接頭辞。`aiTerminal.open` / `.write` / `.sendKeys` / `.read` /
+ * `.inspectPrompt` / `.answerPrompt` / `.close` / `.list`。params は Rust コマンドの引数
+ * （`terminalId` など）をそのまま持つ。権限の関門は Rust 側（`ai_terminal`）で、ここは中継だけ。
+ */
+export const ARTIFACT_BRIDGE_METHOD_AI_TERMINAL_PREFIX = "aiTerminal.";
+
 /**
  * アプリ（`app` 付きアーティファクト）のファイルシステム API。パスは `worktree://<相対>` /
  * `artifact://<相対>` だけ。判定は Rust 側（`app_fs::resolve_scoped_path`）。通常のビューアはこれらを
@@ -89,6 +99,11 @@ export const ARTIFACT_BRIDGE_METHOD_FS_REMOVE = "fs.remove";
 
 /** 応答が返らないまま Promise が残り続けないようにするタイムアウト（iframe 側） */
 const BRIDGE_TIMEOUT_MS = 10000;
+/**
+ * 時間のかかる呼び出し（端末の起動待ち 8 秒、ダイアログ回答後の再描画待ち 3 秒〜）のタイムアウト。
+ * 既定の 10 秒だと、Rust 側がまだ処理中なのに iframe だけが先に失敗してしまう。
+ */
+const BRIDGE_LONG_TIMEOUT_MS = 30000;
 /**
  * 1 文字入力ごとに保存が飛ばないようにする debounce（iframe 側）。
  *
@@ -205,6 +220,29 @@ export function postArtifactBridgeMemoryChanged(
   }
 }
 
+/** 専用 AI ターミナルのフックイベント（Stop など）を iframe へ知らせる。応答の無い一方向通知 */
+export function postArtifactBridgeAiTerminalEvent(
+  frame: HTMLIFrameElement | null,
+  payload: Record<string, unknown>,
+  nonce?: string,
+): void {
+  const target = frame?.contentWindow;
+  if (!target) return;
+  try {
+    target.postMessage(
+      {
+        [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+        event: ARTIFACT_BRIDGE_PUSH_AI_TERMINAL_EVENT,
+        payload: JSON.parse(JSON.stringify(payload ?? {})),
+        ...(nonce !== undefined ? { nonce } : {}),
+      },
+      "*",
+    );
+  } catch (e) {
+    console.warn("AI ターミナルのイベントを iframe へ送れませんでした", e);
+  }
+}
+
 /** debounce 待ちの保存を送り切るよう iframe へ頼む（アプリのリロード前）。完了は `ARTIFACT_BRIDGE_METHOD_FLUSHED` */
 export function postArtifactBridgeFlush(frame: HTMLIFrameElement | null, nonce?: string): void {
   const target = frame?.contentWindow;
@@ -266,6 +304,8 @@ export const ARTIFACT_BRIDGE_JS =
   "        applyExternalMemory(d.memory);" +
   "      else if(d.event===" + JSON.stringify(ARTIFACT_BRIDGE_PUSH_MEMORY_FLUSH) + ")" +
   "        flushNow();" +
+  "      else if(d.event===" + JSON.stringify(ARTIFACT_BRIDGE_PUSH_AI_TERMINAL_EVENT) + ")" +
+  "        emitAiTerminalEvent(d.payload);" +
   "      return;" +
   "    }" +
   "    if(d[" + JSON.stringify(ARTIFACT_BRIDGE_RESULT_MARKER) + "]!==true)return;" +
@@ -276,7 +316,7 @@ export const ARTIFACT_BRIDGE_JS =
   "    if(d.ok)p.resolve(d.result);" +
   "    else p.reject(new Error(String(d.error||'oretachi bridge error')));" +
   "  });" +
-  "  function call(method,params){" +
+  "  function call(method,params,timeoutMs){" +
   "    if(standalone)return Promise.reject(new Error(" +
   "      'oretachi bridge is unavailable in an exported file: '+method));" +
   "    return new Promise(function(resolve,reject){" +
@@ -284,7 +324,7 @@ export const ARTIFACT_BRIDGE_JS =
   "      var timer=setTimeout(function(){" +
   "        delete pending[id];" +
   "        reject(new Error('oretachi bridge timeout: '+method));" +
-  "      }," + BRIDGE_TIMEOUT_MS + ");" +
+  "      },(typeof timeoutMs==='number'?timeoutMs:" + BRIDGE_TIMEOUT_MS + "));" +
   "      pending[id]={resolve:resolve,reject:reject,timer:timer};" +
   "      try{" +
   "        var msg={requestId:id,method:method,params:params||{}};" +
@@ -492,6 +532,39 @@ export const ARTIFACT_BRIDGE_JS =
   "      return fsPath(path)||call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_FS_REMOVE) + ",{path:path});" +
   "    }" +
   "  };" +
+  // ── 専用 AI ターミナル（manifest の `aiTerminal` 権限が承認されたアプリだけが使える）──
+  // 権限の関門は Rust 側。ここは中継するだけ。戻り値は JSON ならオブジェクトで返る
+  "  var aiListeners=[];" +
+  "  function emitAiTerminalEvent(p){" +
+  "    aiListeners.slice().forEach(function(fn){try{fn(p);}catch(err){}});" +
+  "  }" +
+  "  function ai(name,params,long){" +
+  "    return call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_AI_TERMINAL_PREFIX) + "+name,params||{}," +
+  "      long?" + BRIDGE_LONG_TIMEOUT_MS + ":undefined);" +
+  "  }" +
+  "  var aiTerminal={" +
+  "    open:function(opts){return ai('open',opts,true);}," +
+  "    write:function(terminalId,text,submit){" +
+  "      var p={terminalId:terminalId,text:text};" +
+  "      if(submit!==undefined)p.submit=submit;" +
+  "      return ai('write',p);" +
+  "    }," +
+  "    sendKeys:function(terminalId,keys){return ai('sendKeys',{terminalId:terminalId,keys:keys});}," +
+  "    read:function(terminalId,opts){" +
+  "      var p={terminalId:terminalId};" +
+  "      if(opts&&opts.maxBytes!==undefined)p.maxBytes=opts.maxBytes;" +
+  "      if(opts&&opts.fromCursor!==undefined)p.fromCursor=opts.fromCursor;" +
+  "      return ai('read',p);" +
+  "    }," +
+  "    inspectPrompt:function(terminalId){return ai('inspectPrompt',{terminalId:terminalId});}," +
+  "    answerPrompt:function(terminalId,answer){return ai('answerPrompt',{terminalId:terminalId,answer:answer},true);}," +
+  "    close:function(terminalId){return ai('close',{terminalId:terminalId});}," +
+  "    list:function(){return ai('list',{});}," +
+  "    onEvent:function(fn){" +
+  "      aiListeners.push(fn);" +
+  "      return function(){aiListeners=aiListeners.filter(function(f){return f!==fn;});};" +
+  "    }" +
+  "  };" +
   "  window.__oretachi={" +
   "    getMemory:getMemory," +
   "    setMemory:setMemory," +
@@ -501,7 +574,8 @@ export const ARTIFACT_BRIDGE_JS =
   "    subscribeMemory:subscribe," +
   "    callTool:callTool," +
   "    fs:fs," +
-  "    call:call" +
+  "    call:call," +
+  "    aiTerminal:aiTerminal" +
   "  };" +
   // `state` は setMemory ごとに別オブジェクトへ差し替わるので、スナップショットを
   // 掴ませないようゲッターにする（`oretachi.memory` は常に最新を指す）

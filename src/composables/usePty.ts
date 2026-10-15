@@ -18,7 +18,9 @@ export function usePty() {
     onOutput: (data: Uint8Array) => void,
     onExit: () => void,
     shell?: string,
-    cwd?: string
+    cwd?: string,
+    /** host が予約した terminal_id（インスタンス専用 AI ターミナル）。Rust が予約を検証し、cwd も予約時の値に差し替える */
+    reservedTerminalId?: string
   ): Promise<void> {
     // 既存セッションをクリーンアップ
     await cleanup();
@@ -30,6 +32,7 @@ export function usePty() {
       cols,
       shell: shell ?? null,
       cwd: cwd ?? null,
+      terminalId: reservedTerminalId ?? null,
     });
 
     sessionId.value = id;

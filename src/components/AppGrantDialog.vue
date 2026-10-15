@@ -22,7 +22,7 @@ const view = computed(() =>
   buildPermissionView(props.request.resolved, props.request.previous, props.request.dangerousTools),
 );
 
-/** 最も強い警告（ワイルドカードの越境先・既定拒否パスの解除）を含むときは、確認チェックを必須にする */
+/** 最も強い警告（ワイルドカードの越境先・既定拒否パスの解除・専用 AI ターミナル）を含むときは、確認チェックを必須にする */
 const understood = ref(false);
 watch(
   () => props.request.requestId,
@@ -34,6 +34,7 @@ const isChange = computed(() => props.request.kind === "change");
 const hasAnyRow = computed(() => view.value.rows.length > 0);
 const hasWildcard = computed(() => view.value.rows.some((r) => r.wildcard));
 const hasSensitive = computed(() => view.value.rows.some((r) => r.kind === "fsSensitive"));
+const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiTerminal"));
 </script>
 
 <template>
@@ -80,6 +81,11 @@ const hasSensitive = computed(() => view.value.rows.some((r) => r.kind === "fsSe
               <div v-if="r.wildcard" class="why">{{ t("wildcardWarning") }}</div>
               <div v-else class="why neutral">{{ t("pinnedToId") }}</div>
             </template>
+            <template v-else-if="r.kind === 'aiTerminal'">
+              <span class="kind">{{ t("kindAiTerminal") }}</span>
+              <strong>{{ t("aiTerminalSummary", { spec: r.value }) }}</strong>
+              <div class="why">{{ t("aiTerminalWarning") }}</div>
+            </template>
             <template v-else-if="r.kind === 'fs'">
               <span class="kind">{{ r.access === "write" ? t("kindFsWrite") : t("kindFsRead") }}</span>
               <code class="path">{{ r.label }}</code>
@@ -112,6 +118,7 @@ const hasSensitive = computed(() => view.value.rows.some((r) => r.kind === "fsSe
             <li v-for="r in view.removed" :key="r.kind + r.value">
               <s v-if="r.kind === 'target'">{{ r.label }}</s>
               <s v-else-if="r.kind === 'memory'">{{ t("memoryMax", { bytes: r.value }) }}</s>
+              <s v-else-if="r.kind === 'aiTerminal'">{{ t("aiTerminalSummary", { spec: r.value }) }}</s>
               <s v-else-if="r.kind === 'fs'"><code>{{ r.access }} {{ r.label }}</code></s>
               <s v-else><code>{{ r.value }}</code></s>
             </li>
@@ -125,6 +132,8 @@ const hasSensitive = computed(() => view.value.rows.some((r) => r.kind === "fsSe
           <template v-if="hasWildcard">{{ t("understand") }}</template>
           <template v-if="hasWildcard && hasSensitive"> </template>
           <template v-if="hasSensitive">{{ t("understandSensitive") }}</template>
+          <template v-if="hasAiTerminal && (hasWildcard || hasSensitive)"> </template>
+          <template v-if="hasAiTerminal">{{ t("understandAiTerminal") }}</template>
         </span>
       </label>
 
@@ -352,6 +361,9 @@ const hasSensitive = computed(() => view.value.rows.some((r) => r.kind === "fsSe
     "kindTool": "MCP tool",
     "kindTarget": "Reach worktree",
     "kindMemory": "Memory",
+    "kindAiTerminal": "AI terminal",
+    "aiTerminalSummary": "Open dedicated AI terminals ({spec})",
+    "aiTerminalWarning": "Starts an agent that runs with the same authority as you (it can run arbitrary commands and edit files in this worktree). The app can type into it, read its output and answer its permission dialogs. This is the strongest permission.",
     "kindFsRead": "Read files",
     "kindFsWrite": "Write files",
     "kindFsSensitive": "Files",
@@ -370,6 +382,7 @@ const hasSensitive = computed(() => view.value.rows.some((r) => r.kind === "fsSe
     "removed": "No longer requested",
     "understand": "I understand this lets the app reach worktrees I did not choose individually.",
     "understandSensitive": "I understand this lets the app run commands with my authority by editing hook and workflow files.",
+    "understandAiTerminal": "I understand this lets the app start an agent that runs with my authority and drive it.",
     "changeHint": "Denying stops the app.",
     "waiting": "{count} more approval request(s) are waiting.",
     "approve": "Allow and start",
@@ -392,6 +405,9 @@ const hasSensitive = computed(() => view.value.rows.some((r) => r.kind === "fsSe
     "kindTool": "MCP ツール",
     "kindTarget": "届くワークツリー",
     "kindMemory": "メモリー",
+    "kindAiTerminal": "AI ターミナル",
+    "aiTerminalSummary": "専用の AI ターミナルを開く（{spec}）",
+    "aiTerminalWarning": "あなたと同じ権限で動くエージェントを起動します（このワークツリーで任意のコマンド実行やファイル編集ができます）。アプリはそのエージェントへ入力し、出力を読み、許可ダイアログに回答できます。最も強い権限です。",
     "kindFsRead": "ファイルの読み取り",
     "kindFsWrite": "ファイルの書き込み",
     "kindFsSensitive": "ファイル",
@@ -410,6 +426,7 @@ const hasSensitive = computed(() => view.value.rows.some((r) => r.kind === "fsSe
     "removed": "申請から外れたもの",
     "understand": "個別に選んでいないワークツリーにもアプリが届くことを理解しました。",
     "understandSensitive": "フックやワークフローのファイルを書き換えて、私の権限でコマンドを実行できてしまうことを理解しました。",
+    "understandAiTerminal": "アプリが私の権限で動くエージェントを起動し、操作できることを理解しました。",
     "changeHint": "拒否するとアプリは停止します。",
     "waiting": "ほかに {count} 件の承認要求が待っています。",
     "approve": "許可して起動",

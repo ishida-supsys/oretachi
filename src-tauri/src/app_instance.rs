@@ -767,13 +767,23 @@ fn release(app: &AppHandle, label: &str) -> Option<(String, String)> {
     };
     removed.map(|(inst, ids)| {
         emit_grant_cancelled(app, &ids);
+        // インスタンスが開いた専用 AI ターミナルも、停止とともにすべて閉じる（再起動での復元はしない）。
+        // ホットリロードは `release` を通らないので、リロードをまたいで維持される。
+        crate::ai_terminal::close_all_for_instance(app, &(inst.worktree_id.clone(), inst.artifact_id.clone()));
         (inst.worktree_id, inst.artifact_id)
     })
 }
 
+/// 表示用のアプリ名（manifest の `name`）。読めなければ artifact_id。
+pub(crate) fn instance_app_name(app: &AppHandle, ctx: &InstanceContext) -> String {
+    read_app_artifact(app, &ctx.worktree_id, &ctx.artifact_id)
+        .map(|a| a.manifest.name)
+        .unwrap_or_else(|_| ctx.artifact_id.clone())
+}
+
 // ─── 停止 ───────────────────────────────────────────────────────────
 
-fn label_for_key(app: &AppHandle, worktree_id: &str, artifact_id: &str) -> Option<String> {
+pub(crate) fn label_for_key(app: &AppHandle, worktree_id: &str, artifact_id: &str) -> Option<String> {
     let reg = app.state::<AppInstanceRegistry>();
     let inner = reg.0.lock().ok()?;
     inner.by_key.get(&(worktree_id.to_string(), artifact_id.to_string())).cloned()
@@ -980,6 +990,17 @@ pub async fn check_permission_change(app: &AppHandle, worktree_id: &str, artifac
                     Some(Ok(())) => {}
                 }
                 add_log(&app2, &wt, &aid, "info", "再承認されました");
+                // aiTerminal 権限が外れたなら、開いている専用 AI ターミナルを閉じる。権限が無いと
+                // 以後は操作できず、持ち主の居ない端末が残ってしまうため（上限が下がっただけなら
+                // 既存の端末は残し、新しく開く分から効く）
+                let ai_revoked = app2
+                    .state::<AppGrantStore>()
+                    .get(&wt, &aid)
+                    .map(|g| g.resolved.ai_terminal.is_none())
+                    .unwrap_or(true);
+                if ai_revoked {
+                    crate::ai_terminal::close_all_for_instance(&app2, &(wt.clone(), aid.clone()));
+                }
                 // 上限が下がっていれば、ここで超過を知らせる（データは消さない）
                 refresh_memory_bytes(&app2, &wt, &aid, true).await;
                 request_reload(&app2, &label, "再承認");
@@ -1462,7 +1483,7 @@ mod tests {
     use crate::app_manifest::{MemoryPermission, RequestedPermissions};
 
     fn perms(max: u64) -> RequestedPermissions {
-        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), fs: None }
+        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None }
     }
 
     #[test]

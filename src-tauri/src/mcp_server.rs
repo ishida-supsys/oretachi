@@ -789,6 +789,10 @@ pub struct SetDescriptionPayload {
     /// ExitPlanMode フックが stdin で受け取った hook JSON 文字列（生）
     #[serde(rename = "hookJson")]
     pub hook_json: Option<String>,
+    /// 送ってきたタブの terminal_id（`ORETACHI_TERMINAL_ID`）。インスタンス専用 AI ターミナル
+    /// （#372）のプラン承認でワークツリーの description を書き換えないために使う。
+    #[serde(default, rename = "terminalId")]
+    pub terminal_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -972,7 +976,7 @@ pub struct ArtifactParams {
     pub confirm_delete: Option<String>,
     #[schemars(description = "true にすると、このアーティファクトが oretachi のビューアで開かれている間 MCP 由来の書き込み (update / rewrite / artifact_module / artifact_store command=write,delete) を拒否する。ユーザーが操作中のアーティファクトを裏から書き換えないためのフラグで、読み取りは常に許可される。create / update / rewrite のいずれでも設定でき、省略時は既存アーティファクトの設定を引き継ぐ (明示的に false を渡すと解除)。ロック中は解除もできないので、外したい場合はユーザーにウィンドウを閉じてもらう。**守られるのはビューアが「いま表示している」1件だけ**で、ウィンドウが開いたままでもユーザーが別のアーティファクトへ切り替えている間は書き込める点に注意 (裏で入力を消したくないレポートは、ユーザーがそのページに留まっている前提になる)")]
     pub locked_while_open: Option<bool>,
-    #[schemars(description = "**アプリ形式のアーティファクトにする** manifest (application/vnd.ant.react の create / rewrite のみ)。`{ \"name\": \"表示名\", \"description\": \"…\", \"version\": \"1.0.0\", \"permissions\": { \"mcp\": { \"tools\": [\"notify_worktree\"], \"targets\": [\"ワークツリー名\" | \"*\" | \"workgroup:<ID か名前>\" | \"repo:<リポジトリ名>\"] }, \"memory\": { \"maxBytes\": 65536 } } }`。permissions は**宣言したものだけ**が使える（未宣言は常に拒否）。mcp.tools は oretachi_write_terminal 等の呼べるツールの部分集合、mcp.targets は他ワークツリーへ届かせたい宛先（省略 = 自ワークツリーのみ。ワイルドカードは承認後に作られるワークツリーにも当たる）、memory は書くなら maxBytes 必須。fs / db / network / subWindow / wasm / aiTerminal はまだ使えない（エラー）。**この manifest だけでは何も動かない**: ユーザーがアーティファクトウィンドウの起動画面から起動し、承認ダイアログで許可して初めて権限が有効になる（AI が manifest を書いても権限は得られない）。省略時は既存の manifest を引き継ぐ。外す手段は無い（別 id で作る）。app 付きは通常のビューアでは動かず、callTool も通常のビューア / Web ビューアからは拒否される")]
+    #[schemars(description = "**アプリ形式のアーティファクトにする** manifest (application/vnd.ant.react の create / rewrite のみ)。`{ \"name\": \"表示名\", \"description\": \"…\", \"version\": \"1.0.0\", \"permissions\": { \"mcp\": { \"tools\": [\"notify_worktree\"], \"targets\": [\"ワークツリー名\" | \"*\" | \"workgroup:<ID か名前>\" | \"repo:<リポジトリ名>\"] }, \"memory\": { \"maxBytes\": 65536 } } }`。permissions は**宣言したものだけ**が使える（未宣言は常に拒否）。mcp.tools は oretachi_write_terminal 等の呼べるツールの部分集合、mcp.targets は他ワークツリーへ届かせたい宛先（省略 = 自ワークツリーのみ。ワイルドカードは承認後に作られるワークツリーにも当たる）、memory は書くなら maxBytes 必須、aiTerminal は専用 AI ターミナルを開く権限（agents は [\"claude\"] のみ、maxConcurrent は 1〜4。ユーザーと同じ権限で動くエージェントを起動できるので最も強い警告になる。権限モード・権限スキップ・許可ツールの指定は v1 ではできない）。fs / db / network / subWindow / wasm はまだ使えない（エラー）。**この manifest だけでは何も動かない**: ユーザーがアーティファクトウィンドウの起動画面から起動し、承認ダイアログで許可して初めて権限が有効になる（AI が manifest を書いても権限は得られない）。省略時は既存の manifest を引き継ぐ。外す手段は無い（別 id で作る）。app 付きは通常のビューアでは動かず、callTool も通常のビューア / Web ビューアからは拒否される")]
     pub app: Option<serde_json::Value>,
     #[schemars(description = "create/rewrite時: app の代わりに、このパスの JSON ファイルを読んで manifest として登録する（スキル同梱の app.json など）。app とは排他。読める場所は file_path と同じ")]
     pub app_file_path: Option<String>,
@@ -4583,6 +4587,14 @@ impl NotifyService {
 
         let mut items: Vec<serde_json::Value> = Vec::new();
         for info in raw {
+            // インスタンス専用 AI ターミナル（#372）なら、所有しているアプリ（インスタンス）を示す
+            let owner = crate::ai_terminal::owner_of(&self.app_handle, &info.terminal_id).map(|o| {
+                serde_json::json!({
+                    "worktreeId": o.worktree_id,
+                    "artifactId": o.artifact_id,
+                    "appName": o.app_name,
+                })
+            });
             let matched_wt = info
                 .cwd
                 .as_deref()
@@ -4606,6 +4618,7 @@ impl NotifyService {
                 "status": status,
                 "exitCode": info.exit_code,
                 "lastCommandExitCode": info.last_command_exit_code,
+                "ownerInstance": owner,
             }));
         }
 
@@ -6858,6 +6871,52 @@ pub(crate) async fn call_tool_for_app_instance(
     call_tool_scoped(app_handle, worktree_id, artifact_id, tool, params, Some(resolved)).await
 }
 
+/// インスタンス専用 AI ターミナルの操作（write / send_keys / read / inspect_prompt / answer_prompt）。
+///
+/// **所有の検査は呼び出し側（`ai_terminal`）が済ませている**前提で、session_id は host が
+/// レジストリから引いた値。既存の端末ツールの実装（指紋検査・書き込みロック等）をそのまま使う。
+/// `policy` は `None`: 専用端末は常に自ワークツリー内なので越境は起きず、起きても購読が無く拒否される。
+pub(crate) async fn call_owned_terminal_tool(
+    app_handle: &AppHandle,
+    worktree_id: &str,
+    artifact_id: &str,
+    tool: &str,
+    params: serde_json::Value,
+) -> Result<String, String> {
+    if !matches!(
+        tool,
+        "oretachi_write_terminal"
+            | "oretachi_send_keys"
+            | "oretachi_read_terminal"
+            | "oretachi_inspect_prompt"
+            | "oretachi_answer_prompt"
+    ) {
+        return Err(format!("ツール '{}' は専用 AI ターミナルでは使えません", tool));
+    }
+    // 宛先は session の**現在の** cwd から引かれる。専用端末の中のエージェントが他ワークツリーの
+    // ディレクトリへ `cd` していると、購読関係があるだけで越境が通ってしまい、アプリが承認された
+    // `mcp.targets` を超える。専用端末は自ワークツリーの中だけを扱うので、ここで一致を求める。
+    let session_id = params
+        .get("session_id")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok())
+        .ok_or_else(|| format!("{} には session_id (数値) が必須です", tool))?;
+    let settings = app_handle.state::<SettingsManager>().get();
+    let dest = app_handle
+        .state::<crate::pty_manager::PtyManager>()
+        .list_sessions()
+        .into_iter()
+        .find(|s| s.session_id == session_id && s.exit_code.is_none())
+        .and_then(|s| s.cwd)
+        .and_then(|c| resolve_worktree_by_cwd(&settings, &c).map(|w| w.id.clone()));
+    if dest.as_deref() != Some(worktree_id) {
+        return Err(
+            "この端末の作業ディレクトリが、アプリのワークツリーの外を指しています。操作できません".to_string(),
+        );
+    }
+    call_tool_scoped(app_handle, worktree_id, artifact_id, tool, params, None).await
+}
+
 /// 越境の 1 段目（アプリのみ）: 宛先が承認済みの `mcp.targets` に当たるか。
 /// 2 段目（既存の購読関係）は `authorize_cross_worktree_session` が見る。
 fn check_app_cross_target(
@@ -6918,7 +6977,12 @@ pub(crate) fn resolve_app_permissions(
             Some(ResolvedMcp { tools: m.tools.clone(), targets })
         }
     };
-    Ok(ResolvedPermissions { mcp, memory: requested.memory, fs: None })
+    Ok(ResolvedPermissions {
+        mcp,
+        memory: requested.memory,
+        ai_terminal: requested.ai_terminal.clone(),
+        fs: None,
+    })
 }
 
 async fn call_tool_scoped(
@@ -7128,7 +7192,10 @@ fn resolve_subscriber(
         // 待たないので、直後に `subscriber_terminal_id` で SELECT すると行がまだ死んだ
         // タブの ID を向いていて 0 件に見える。そういうツールは `resolve_subscriber` の
         // あとで `rebind_and_wait` を await すること（`await_rebind` ヘルパ）。
-        crate::event_delivery::request_rebind(app_handle, id.to_string());
+        // 専用 AI ターミナルは、ワークツリーの孤児購読を引き取らない（#372）
+        if !crate::ai_terminal::is_owned(app_handle, id) {
+            crate::event_delivery::request_rebind(app_handle, id.to_string());
+        }
         return sessions
             .iter()
             .find(|s| s.terminal_id == id)
@@ -7162,9 +7229,14 @@ fn resolve_subscriber(
             None,
         ));
     };
+    // インスタンス専用 AI ターミナル（#372）は候補から外す。外さないと、メインのセッションの
+    // `poll_inbox` / `ack_message` / `notify_worktree` が「AI 端末が 2 個ある」で失敗する。
+    // アプリ自身の呼び出し（terminal_id なし）も同じ経路を通る。
+    let owned = crate::ai_terminal::owned_terminal_ids(app_handle);
     let candidates: Vec<&crate::pty_manager::SessionInfo> = sessions
         .iter()
         .filter(|s| s.exit_code.is_none() && s.is_ai_agent)
+        .filter(|s| !owned.contains(&s.terminal_id))
         .filter(|s| {
             s.cwd
                 .as_deref()
@@ -7547,6 +7619,30 @@ async fn notify_handler(
     State(app_handle): State<AppHandle>,
     Json(payload): Json<NotifyPayload>,
 ) -> StatusCode {
+    // インスタンス専用 AI ターミナル（#372）のフックは、ワークツリーの通知（トレイ・タスクバーの
+    // バッジ・OS 通知・購読配送・自動承認のトリガー）に一切積まない。インスタンスのデバッグログと
+    // インスタンスへのイベントへ回す。PreToolUse / PostToolUse は量が多くログを埋めるので流さない。
+    // 作業ディレクトリがワークツリーのサブディレクトリだと projectDir が完全一致で解決できないため、
+    // ワークツリーの解決より前に terminal_id で判定する。
+    if let Some(tid) = payload.terminal_id.as_deref() {
+        if crate::ai_terminal::is_owned(&app_handle, tid) {
+            if let Some(ev) = payload.event.as_deref() {
+                let internal =
+                    should_skip_subagent_notify(payload.agent.as_deref(), payload.kind.as_deref(), payload.body.as_deref());
+                if matches!(ev, "Stop" | "Notification" | "PermissionRequest") && !internal {
+                    crate::ai_terminal::forward_event(
+                        &app_handle,
+                        tid,
+                        ev,
+                        default_kind_for_event(ev).as_str(),
+                        payload.body.as_deref(),
+                    );
+                }
+            }
+            return StatusCode::OK;
+        }
+    }
+
     let settings = app_handle.state::<SettingsManager>().get();
 
     // ワークツリー: project_dir から逆引き。見つからなければ後方互換の worktree 名で解決。
@@ -7810,6 +7906,15 @@ async fn set_description_handler(
     State(app_handle): State<AppHandle>,
     Json(payload): Json<SetDescriptionPayload>,
 ) -> StatusCode {
+    // インスタンス専用 AI ターミナル（#372）のプランは、ワークツリーの description にしない。
+    if payload
+        .terminal_id
+        .as_deref()
+        .map(|t| crate::ai_terminal::is_owned(&app_handle, t.trim()))
+        .unwrap_or(false)
+    {
+        return StatusCode::OK;
+    }
     let settings = app_handle.state::<SettingsManager>().get();
 
     // ワークツリー: project_dir から逆引き。無ければ後方互換の worktree 名。
@@ -7867,6 +7972,21 @@ async fn session_context_handler(
     State(app_handle): State<AppHandle>,
     Json(payload): Json<SessionContextPayload>,
 ) -> Json<serde_json::Value> {
+    // インスタンス専用 AI ターミナル（#372）: グループ・ホームのプロンプトの代わりにインスタンス指定の
+    // プロンプトを注入し、inbox の要約は付けない。/clear・compact・再起動のたびの SessionStart でも
+    // 毎回ここへ来るので、レジストリに登録した内容が再注入される。
+    // （terminal_id の自己注入はサイドカー側で行われる）
+    if let Some(tid) = payload.terminal_id.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        if crate::ai_terminal::is_owned(&app_handle, tid) {
+            let prompt = crate::ai_terminal::system_prompt(&app_handle, tid).filter(|s| !s.trim().is_empty());
+            log::info!(
+                "[session-context] owned ai terminal={} prompt_len={:?}",
+                tid,
+                prompt.as_ref().map(|p| p.len())
+            );
+            return Json(serde_json::json!({ "prompt": prompt, "inbox": serde_json::Value::Null, "digestId": serde_json::Value::Null }));
+        }
+    }
     let settings = app_handle.state::<SettingsManager>().get();
     let prompt = payload
         .project_dir
@@ -8113,6 +8233,17 @@ async fn prompt_context_handler(
         }
     };
     let (inbox, digest_id) = split_digest(inbox);
+
+    // インスタンス専用 AI ターミナル（#372）: description の更新を促す注入を出さない
+    // （スロットルも消費しない）。inbox は自分の購読分だけなので、そのまま返す。
+    if payload
+        .terminal_id
+        .as_deref()
+        .map(|t| crate::ai_terminal::is_owned(&app_handle, t.trim()))
+        .unwrap_or(false)
+    {
+        return Json(serde_json::json!({ "skip": true, "inbox": inbox, "digestId": digest_id }));
+    }
 
     let settings = app_handle.state::<SettingsManager>().get();
     let Some(wt) = payload
@@ -10156,6 +10287,7 @@ mod tests {
                 targets: targets.iter().map(|s| s.to_string()).collect(),
             }),
             memory: None,
+            ai_terminal: None,
             fs: None,
         }
     }
@@ -10192,6 +10324,7 @@ mod tests {
                 targets: vec![mcp.targets[0].clone()],
             }),
             memory: None,
+            ai_terminal: None,
             fs: None,
         };
         assert!(crate::app_manifest::authorize_app_cross_target(&r, &dest).is_ok());

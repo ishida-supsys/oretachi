@@ -263,6 +263,8 @@ fn send_set_description(project_dir: &str, hook_json: Option<&str>) -> Result<()
     if let Some(j) = hook_json {
         payload["hookJson"] = serde_json::Value::String(j.to_string());
     }
+    // インスタンス専用 AI ターミナル（#372）のプランで description を書き換えないよう、送り主を載せる
+    attach_terminal_id(&mut payload, read_terminal_id().as_deref());
     post_json("/set-description", &payload)
 }
 

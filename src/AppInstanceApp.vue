@@ -18,6 +18,7 @@ import { buildVendorHead, buildReactSrcdoc } from "./utils/reactArtifactSrcdoc";
 import { loadVendors } from "./utils/reactArtifactVendors";
 import { createCspNonce } from "./utils/artifactCspViolation";
 import {
+  ARTIFACT_BRIDGE_METHOD_AI_TERMINAL_PREFIX,
   ARTIFACT_BRIDGE_METHOD_FLUSHED,
   ARTIFACT_BRIDGE_METHOD_FS_LIST,
   ARTIFACT_BRIDGE_METHOD_FS_READ,
@@ -29,8 +30,10 @@ import {
   postArtifactBridgeResult,
   postArtifactBridgeMemoryChanged,
   postArtifactBridgeFlush,
+  postArtifactBridgeAiTerminalEvent,
   type ArtifactBridgeRequest,
 } from "./utils/artifactMemory";
+import { aiTerminalCommandFor } from "./utils/aiTerminalBridge";
 
 interface Bootstrap {
   worktreeId: string;
@@ -155,6 +158,18 @@ async function handleBridgeRequest(request: ArtifactBridgeRequest) {
     }
     return;
   }
+  // 専用 AI ターミナル。所有・権限・上限の検査と許可・拒否のログは Rust がすべて行う
+  if (request.method.startsWith(ARTIFACT_BRIDGE_METHOD_AI_TERMINAL_PREFIX)) {
+    try {
+      const cmd = aiTerminalCommandFor(request.method, request.params);
+      if (!cmd) throw new Error(`このアプリでは使えない API です: ${request.method}`);
+      const result = await invoke<unknown>(cmd.command, cmd.args);
+      reply(request, { ok: true, result });
+    } catch (e) {
+      reply(request, { ok: false, error: errorText(e) });
+    }
+    return;
+  }
   reply(request, { ok: false, error: `このアプリでは使えない API です: ${request.method}` });
 }
 
@@ -250,6 +265,12 @@ onMounted(async () => {
     // リスナーは bootstrap の前に張る。読み込み中に来たリロード依頼を取りこぼさないため
     // （宛先はこのウィンドウだけ。Rust が `emit_to(label)` で送る）
     unlisteners.push(await getCurrentWebviewWindow().listen("app-instance-reload", scheduleReload));
+    // 専用 AI ターミナルのフックイベント（Stop など）。Rust が `emit_to(label)` で、このウィンドウだけへ送る
+    unlisteners.push(
+      await getCurrentWebviewWindow().listen<Record<string, unknown>>("app-ai-terminal-event", (event) => {
+        if (nonce.value) postArtifactBridgeAiTerminalEvent(frame.value, event.payload, nonce.value);
+      }),
+    );
     // メモリーの外部更新は全体イベント。自分のアーティファクトのものだけ拾う
     unlisteners.push(
       await listen<{ scope: string; scopeId: string; artifactId: string }>("artifact-state-changed", (event) => {

@@ -33,6 +33,8 @@ const props = defineProps<{
   terminalAiSessions?: Map<number, AiSessionInfo>;
   /** タブ（フロントの terminalId）→ 未 ack のワークツリーイベント件数（#120 §7） */
   terminalUnread?: Map<number, number>;
+  /** タブ（フロントの terminalId）→ 所有しているアプリ。インスタンス専用 AI ターミナル（#372）の印 */
+  terminalOwned?: Map<number, { appName: string }>;
 }>();
 
 const emit = defineEmits<{
@@ -50,8 +52,11 @@ const emit = defineEmits<{
 function tabTooltip(tid: number): string {
   const title = props.terminalEntries.get(tid)?.title ?? `Terminal ${tid}`;
   const session = props.terminalAiSessions?.get(tid);
-  if (session) return `${title}\nSession: ${session.sessionId}`;
-  return title;
+  const owner = props.terminalOwned?.get(tid);
+  const lines = [title];
+  if (owner) lines.push(t("ownedTerminal", { name: owner.appName }));
+  if (session) lines.push(`Session: ${session.sessionId}`);
+  return lines.join("\n");
 }
 
 // アクティブターミナルのWebセッション情報
@@ -270,8 +275,14 @@ function overlayStyle(zone: DropZone): Record<string, string> {
           <span v-if="terminalUnread?.get(tid)" class="tab-unread" :title="t('unreadEvents')">
             {{ terminalUnread.get(tid) }}
           </span>
+          <!-- インスタンス専用 AI ターミナル（#372）。通常の AI タブ（microchip）と見分けられる別アイコン -->
           <span
-            v-if="terminalAgentStatus?.get(tid) || terminalAiSessions?.get(tid)"
+            v-if="terminalOwned?.has(tid)"
+            class="pi pi-box text-[10px] text-[#f9e2af] shrink-0"
+            :title="t('ownedTerminal', { name: terminalOwned.get(tid)?.appName ?? '' })"
+          />
+          <span
+            v-else-if="terminalAgentStatus?.get(tid) || terminalAiSessions?.get(tid)"
             class="pi pi-microchip text-[10px] text-[#a6e3a1] shrink-0"
             title="AI Agent"
           />
@@ -523,14 +534,16 @@ function overlayStyle(zone: DropZone): Record<string, string> {
     "noTerminals": "No terminals",
     "openWebSession": "Open web session",
     "teleportSession": "Teleport (resume locally)",
-    "unreadEvents": "Unread worktree events"
+    "unreadEvents": "Unread worktree events",
+    "ownedTerminal": "Dedicated AI terminal of the app \"{name}\" (opened and controlled by that app)"
   },
   "ja": {
     "addTerminal": "ターミナルを追加",
     "noTerminals": "ターミナルがありません",
     "openWebSession": "Webセッションを開く",
     "teleportSession": "テレポート（ローカルで再開）",
-    "unreadEvents": "未読のワークツリーイベント"
+    "unreadEvents": "未読のワークツリーイベント",
+    "ownedTerminal": "アプリ「{name}」の専用 AI ターミナル（そのアプリが開いて操作しています）"
   }
 }
 </i18n>

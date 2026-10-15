@@ -7,6 +7,9 @@ import type {
   TerminalUnread,
 } from "../types/event";
 import { buildSubscriptionCounts } from "../utils/subscriptionCounts";
+import { useOwnedAiTerminals } from "./useOwnedAiTerminals";
+
+const { isOwnedSession: isOwnedSessionId } = useOwnedAiTerminals();
 
 /** ワークツリー間イベントの購読状態（issue #120 §7 / #125）。
  *
@@ -26,10 +29,11 @@ export const terminalUnread = ref<Map<number, number>>(new Map());
 export const liveTerminals = ref<TerminalUnread[]>([]);
 export const isLoading = ref(false);
 
-/** 手動引き継ぎの候補: 生存している AI エージェント端末。 */
+/** 手動引き継ぎの候補: 生存している AI エージェント端末。
+ *  インスタンス専用 AI ターミナル（#372）は含めない（ワークツリーの購読を引き取らない端末）。 */
 export const agentTerminals = computed(() =>
   liveTerminals.value
-    .filter((tm) => tm.isAiAgent)
+    .filter((tm) => tm.isAiAgent && !isOwnedSessionId(tm.sessionId))
     .map((tm) => ({
       sessionId: tm.sessionId,
       worktreeId: tm.worktreeId,
