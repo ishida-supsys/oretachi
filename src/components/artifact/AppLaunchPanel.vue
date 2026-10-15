@@ -8,7 +8,7 @@ import type {
   AppLaunchApi,
   AppLogEntry,
 } from "../../types/appInstance";
-import { buildPermissionView, formatGrantedAt } from "../../utils/appPermissionView";
+import { buildPermissionView, formatGrantedAt, isKnownRowKind } from "../../utils/appPermissionView";
 
 const { t } = useI18n();
 
@@ -217,7 +217,24 @@ function hhmmss(ms: number): string {
                 {{ t("granted.subWindowFlag_" + r.value) }}
                 <span v-if="r.severity === 'danger'" class="tag">{{ t("granted.overlayTag") }}</span>
               </template>
-              <template v-else>{{ t("granted.memory", { bytes: r.value }) }}</template>
+              <template v-else-if="r.kind === 'fs'">
+                {{ r.access === "write" ? t("granted.fsWrite") : t("granted.fsRead") }}:
+                <code>{{ r.label }}</code>
+              </template>
+              <template v-else-if="r.kind === 'fsSensitive'">
+                {{ t("granted.fsSensitive") }}
+                <span class="tag">{{ t("granted.sensitiveTag") }}</span>
+              </template>
+              <template v-else-if="r.kind === 'db'">
+                {{ r.access === "write" ? t("granted.dbWrite") : t("granted.dbRead") }}:
+                <code>{{ r.label }}</code>
+              </template>
+              <template v-else-if="r.kind === 'dbSensitive'">
+                {{ t("granted.dbSensitive") }}
+                <span class="tag">{{ t("granted.sensitiveTag") }}</span>
+              </template>
+              <template v-else-if="r.kind === 'memory'">{{ t("granted.memory", { bytes: r.value }) }}</template>
+              <template v-else-if="!isKnownRowKind(r.kind)">{{ r.kind }}: <code>{{ r.value }}</code></template>
             </li>
             <li v-if="permissionView.rows.length === 0" class="none">{{ t("granted.none") }}</li>
             <li v-if="permissionView.ownWorktreeOnly && permissionView.rows.some((r) => r.kind === 'tool')" class="none">
@@ -480,6 +497,13 @@ function hhmmss(ms: number): string {
       "memory": "Memory up to {bytes} bytes",
       "aiTerminal": "Dedicated AI terminals ({spec})",
       "aiTerminalTag": "same authority as you",
+      "fsRead": "Read files",
+      "fsWrite": "Write files",
+      "fsSensitive": "Write to files that run commands (.git/hooks, .claude/, .github/workflows, ...)",
+      "dbRead": "Read database (read-only)",
+      "dbWrite": "Read and write database",
+      "dbSensitive": "Databases in files that run commands (.git/, .claude/, .github/workflows, ...)",
+      "sensitiveTag": "default-denied paths allowed",
       "network": "Network",
       "subWindow": "Sub-windows (up to {spec})",
       "subWindowFlag_transparent": "Sub-window: transparent",
@@ -519,6 +543,13 @@ function hhmmss(ms: number): string {
       "memory": "メモリー 最大 {bytes} バイト",
       "aiTerminal": "専用 AI ターミナル（{spec}）",
       "aiTerminalTag": "あなたと同等の権限",
+      "fsRead": "ファイルの読み取り",
+      "fsWrite": "ファイルの書き込み",
+      "fsSensitive": "コマンドが走るファイル（.git/hooks・.claude/・.github/workflows など）への書き込み",
+      "dbRead": "データベースの読み取り（読み取り専用）",
+      "dbWrite": "データベースの読み書き",
+      "dbSensitive": "コマンドが走るファイル（.git/・.claude/・.github/workflows など）の場所へのデータベース配置",
+      "sensitiveTag": "既定拒否パスを許可",
       "network": "ネットワーク",
       "subWindow": "サブウィンドウ（最大 {spec}）",
       "subWindowFlag_transparent": "サブウィンドウ: 透明",

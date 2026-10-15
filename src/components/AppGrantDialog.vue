@@ -44,6 +44,7 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
         {{ isChange ? t("titleChange", { name: request.appName }) : t("titleStart", { name: request.appName }) }}
       </h3>
 
+      <div class="dialog-body">
       <div class="meta">
         <div><span class="label">{{ t("worktree") }}</span> {{ request.worktreeName }}</div>
         <div>
@@ -172,6 +173,7 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
 
       <p v-if="isChange" class="hint">{{ t("changeHint") }}</p>
       <p v-if="waiting > 0" class="hint">{{ t("waiting", { count: waiting }) }}</p>
+      </div>
 
       <div class="dialog-actions">
         <button class="btn-cancel" :disabled="busy" @click="emit('reject')">
@@ -203,13 +205,21 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
   width: 520px;
   max-width: 94vw;
   max-height: 90vh;
-  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
   color: #cdd6f4;
+}
+/* 本文だけスクロールさせ、承認 / 拒否のボタンは常に見える位置に固定する */
+.dialog-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
 }
 .dialog-title {
   font-size: 16px;
   font-weight: 600;
   margin: 0 0 12px;
+  flex-shrink: 0;
   color: #f9e2af;
 }
 .meta {
@@ -341,6 +351,8 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
   color: #6c7086;
 }
 .dialog-actions {
+  flex-shrink: 0;
+  padding-top: 12px;
   display: flex;
   justify-content: flex-end;
   gap: 8px;

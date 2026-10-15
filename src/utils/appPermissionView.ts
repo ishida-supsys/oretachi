@@ -15,23 +15,33 @@ import type { AppResolvedFs, AppResolvedPermissions } from "../types/appInstance
 
 export type PermissionSeverity = "normal" | "danger" | "critical";
 
+export const PERMISSION_ROW_KINDS = [
+  "tool",
+  "target",
+  "memory",
+  "aiTerminal",
+  "fs",
+  "fsSensitive",
+  "db",
+  "dbSensitive",
+  "network",
+  "subWindow",
+  "subWindowFlag",
+] as const;
+
+export type PermissionRowKind = (typeof PERMISSION_ROW_KINDS)[number];
+
+/** 描画側が分岐で扱える種別か。false の行は種別名と値をそのまま出す（別種別の文言に落とさない） */
+export function isKnownRowKind(kind: string): kind is PermissionRowKind {
+  return (PERMISSION_ROW_KINDS as readonly string[]).includes(kind);
+}
+
 export interface PermissionRow {
   /**
    * `fs` / `db`: FS・DB のスコープ 1 件（`access` と、解決済みの絶対パス `label`。DB の read は読み取り専用）。
    * `fsSensitive` / `dbSensitive`: 既定拒否パスの解除
    */
-  kind:
-    | "tool"
-    | "target"
-    | "memory"
-    | "aiTerminal"
-    | "fs"
-    | "fsSensitive"
-    | "db"
-    | "dbSensitive"
-    | "network"
-    | "subWindow"
-    | "subWindowFlag";
+  kind: PermissionRowKind;
   /** サブウィンドウは `<最大数>×<幅>x<高さ>`、`subWindowFlag` は `transparent` / `frameless` / `alwaysOnTop` / `position`。ツール名 / 越境先の `stored` / `maxBytes` の文字列 / `claude×N`（件数の変更も差分に出る）/ FS・DB は `<read|write>:<scheme>:<絶対パス>` / ネットワークは正規化済みの URL プレフィックス */
   value: string;
   /** 越境先のときの表示名 / FS・DB のときの表示用の絶対パス */
