@@ -2,6 +2,7 @@ mod ai_commit_message;
 mod ai_description;
 mod ai_judge;
 mod ai_provider;
+mod app_fs;
 mod app_grant;
 mod app_instance;
 mod app_manifest;
@@ -2482,6 +2483,10 @@ pub fn run() {
             app_instance::app_instance_bootstrap,
             app_instance::app_instance_report,
             app_instance::app_call_mcp_tool,
+            app_fs::app_fs_read,
+            app_fs::app_fs_write,
+            app_fs::app_fs_list,
+            app_fs::app_fs_remove,
             app_instance::app_set_memory,
             app_instance::app_get_memory,
             app_instance::app_grant_respond,
