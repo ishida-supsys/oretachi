@@ -16,6 +16,7 @@ import {
   ARTIFACT_BRIDGE_PUSH_MARKER,
   ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED,
   ARTIFACT_STANDALONE_FLAG,
+  ARTIFACT_APP_FLAG,
 } from "./artifactMemory";
 
 interface PostedRequest {
@@ -37,13 +38,14 @@ interface Bridge {
 
 function setupBridge(
   initialMemory: Record<string, unknown>,
-  options?: { standalone?: boolean },
+  options?: { standalone?: boolean; app?: boolean },
 ) {
   const posted: PostedRequest[] = [];
   let onMessage: ((event: { data: unknown }) => void) | null = null;
 
   const fakeWindow: Record<string, unknown> = {
     [ARTIFACT_STANDALONE_FLAG]: options?.standalone === true,
+    [ARTIFACT_APP_FLAG]: options?.app === true,
     addEventListener(type: string, fn: (event: { data: unknown }) => void) {
       if (type === "message") onMessage = fn;
     },
@@ -357,5 +359,239 @@ describe("ARTIFACT_BRIDGE_JS", () => {
     await vi.advanceTimersByTimeAsync(400);
     expect(posted).toHaveLength(0);
     await rejected;
+  });
+});
+
+// アプリ（常駐ウィンドウ）だけに効く: 保存の最大待ちと、拒否された書き込みの巻き戻し（#387）
+describe("ARTIFACT_BRIDGE_JS: app の最大待ちと巻き戻し", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  const ok = { ok: true };
+  const rejectedByHost = { ok: false, error: "メモリーがこのアプリの承認済み最大サイズを超えています" };
+
+  it("100ms 間隔で書き続けても、最大待ち内に保存され Promise が解決する", async () => {
+    const { bridge, posted, reply } = setupBridge({}, { app: true });
+    const first = bridge.setMemoryKey("c", 0);
+    for (let n = 1; n < 10; n++) {
+      await vi.advanceTimersByTimeAsync(100);
+      void bridge.setMemoryKey("c", n);
+    }
+    // 900ms 経過。debounce（400ms）は毎回延びて明けていないが、1000ms で必ず送る
+    expect(posted).toHaveLength(0);
+    await vi.advanceTimersByTimeAsync(100);
+    expect(posted).toHaveLength(1);
+    expect(posted[0].params.memory).toEqual({ c: 9 });
+    reply(posted[0].requestId, ok);
+    await expect(first).resolves.toBeUndefined();
+  });
+
+  it("書き続ける間、最大待ちごとに保存が続く", async () => {
+    const { bridge, posted, reply } = setupBridge({}, { app: true });
+    const answered = new Set<string>();
+    for (let n = 0; n < 30; n++) {
+      void bridge.setMemoryKey("c", n);
+      await vi.advanceTimersByTimeAsync(100);
+      for (const req of posted) {
+        if (!answered.has(req.requestId)) {
+          answered.add(req.requestId);
+          reply(req.requestId, ok);
+        }
+      }
+      await vi.advanceTimersByTimeAsync(0);
+    }
+    expect(posted.length).toBeGreaterThanOrEqual(3);
+  });
+
+  it("通常のアーティファクト（app でない）は書き続ける間は保存しない（挙動不変）", async () => {
+    const { bridge, posted } = setupBridge({});
+    for (let n = 0; n < 20; n++) {
+      void bridge.setMemoryKey("c", n);
+      await vi.advanceTimersByTimeAsync(100);
+    }
+    expect(posted).toHaveLength(0);
+  });
+
+  it("止まれば従来どおり debounce で保存し、最大待ちで二重に送らない", async () => {
+    const { bridge, posted, reply } = setupBridge({}, { app: true });
+    const p = bridge.setMemoryKey("a", 1);
+    await vi.advanceTimersByTimeAsync(400);
+    expect(posted).toHaveLength(1);
+    reply(posted[0].requestId, ok);
+    await p;
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(posted).toHaveLength(1);
+  });
+
+  it("host に拒否されたら reject し、拒否された値を state から外して通知する", async () => {
+    const { bridge, posted, reply } = setupBridge({ keep: 1 }, { app: true });
+    const seen: Record<string, unknown>[] = [];
+    bridge.subscribeMemory((m) => seen.push(m));
+    const p = bridge.setMemoryKey("big", "x");
+    const rejected = expect(p).rejects.toThrow("最大サイズ");
+    await vi.advanceTimersByTimeAsync(400);
+    reply(posted[0].requestId, rejectedByHost);
+    await rejected;
+    expect(bridge.getMemory()).toEqual({ keep: 1 });
+    expect(seen[seen.length - 1]).toEqual({ keep: 1 });
+  });
+
+  it("拒否のあと、無関係なキーの書き込みは通り、拒否された値は再送されない", async () => {
+    const { bridge, posted, reply } = setupBridge({}, { app: true });
+    const p1 = bridge.setMemoryKey("big", "x");
+    const r1 = expect(p1).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(400);
+    reply(posted[0].requestId, rejectedByHost);
+    await r1;
+
+    for (const key of ["a", "b", "c"]) {
+      const p = bridge.setMemoryKey(key, 1);
+      await vi.advanceTimersByTimeAsync(400);
+      const req = posted[posted.length - 1];
+      expect("big" in (req.params.memory as object)).toBe(false);
+      reply(req.requestId, ok);
+      await expect(p).resolves.toBeUndefined();
+    }
+    // 拒否された memory.set は最初の 1 回だけ（以後は全部通った）
+    expect(posted).toHaveLength(4);
+  });
+
+  it("同じ debounce 窓に入った無関係なキーも、同じ batch として reject・巻き戻しになる", async () => {
+    const { bridge, posted, reply } = setupBridge({}, { app: true });
+    const p1 = bridge.setMemoryKey("big", "x");
+    const p2 = bridge.setMemoryKey("other", 1);
+    const r1 = expect(p1).rejects.toThrow();
+    const r2 = expect(p2).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(400);
+    reply(posted[0].requestId, rejectedByHost);
+    await r1;
+    await r2;
+    expect(bridge.getMemory()).toEqual({});
+  });
+
+  it("送信中に別キーへ書いた値は、巻き戻しで消えない", async () => {
+    const { bridge, posted, reply } = setupBridge({}, { app: true });
+    const p1 = bridge.setMemoryKey("big", "x");
+    const r1 = expect(p1).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(400);
+    void bridge.setMemoryKey("later", 2);
+    reply(posted[0].requestId, rejectedByHost);
+    await r1;
+    expect(bridge.getMemory()).toEqual({ later: 2 });
+    await vi.advanceTimersByTimeAsync(400);
+    expect(posted[1].params.memory).toEqual({ later: 2 });
+  });
+
+  it("送信中に同じキーへ書き直した値は、巻き戻しで消えない", async () => {
+    const { bridge, posted, reply } = setupBridge({ k: "old" }, { app: true });
+    const p1 = bridge.setMemoryKey("k", "huge");
+    const r1 = expect(p1).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(400);
+    void bridge.setMemoryKey("k", "small");
+    reply(posted[0].requestId, rejectedByHost);
+    await r1;
+    expect(bridge.getMemory()).toEqual({ k: "small" });
+  });
+
+  it("setMemory でキーを削除した書き込みが拒否されたら、そのキーを復元する", async () => {
+    const { bridge, posted, reply } = setupBridge({ a: 1, b: 2 }, { app: true });
+    const p = bridge.setMemory({ a: 1 });
+    const r = expect(p).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(400);
+    reply(posted[0].requestId, rejectedByHost);
+    await r;
+    expect(bridge.getMemory()).toEqual({ a: 1, b: 2 });
+  });
+
+  it("state を直接書き換えるアプリで、送信中に書いた別キーは拒否の巻き戻しで消えない", async () => {
+    const { bridge, posted, reply } = setupBridge({ a: 1 }, { app: true });
+    const p = bridge.setMemory((s: Record<string, unknown>) => {
+      s.big = "x";
+      return s;
+    });
+    const r = expect(p).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(400);
+    // 送信中（返信前）に同じ state オブジェクトへ別キーを直接書く
+    bridge.getMemory().other = 2;
+    reply(posted[0].requestId, rejectedByHost);
+    await r;
+    expect(bridge.getMemory()).toEqual({ a: 1, other: 2 });
+  });
+
+  it("setMemory で state を直接書き換えて返すアプリでも、拒否で巻き戻る", async () => {
+    const { bridge, posted, reply } = setupBridge({ a: 1 }, { app: true });
+    const p = bridge.setMemory((s: Record<string, unknown>) => {
+      s.big = "x";
+      return s;
+    });
+    const r = expect(p).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(400);
+    reply(posted[0].requestId, rejectedByHost);
+    await r;
+    expect(bridge.getMemory()).toEqual({ a: 1 });
+  });
+
+  it("成功した保存は次の拒否の巻き戻し先になる", async () => {
+    const { bridge, posted, reply } = setupBridge({}, { app: true });
+    const p1 = bridge.setMemoryKey("a", 1);
+    await vi.advanceTimersByTimeAsync(400);
+    reply(posted[0].requestId, ok);
+    await p1;
+    const p2 = bridge.setMemoryKey("a", 2);
+    const r2 = expect(p2).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(400);
+    reply(posted[1].requestId, rejectedByHost);
+    await r2;
+    expect(bridge.getMemory()).toEqual({ a: 1 });
+  });
+
+  it("送信中に外から差し替わったあとの拒否は巻き戻さない（外の書き込みを消さない）", async () => {
+    const { bridge, posted, reply, push } = setupBridge({ n: 1 }, { app: true });
+    const p = bridge.setMemoryKey("n", 5);
+    const r = expect(p).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(400);
+    // 外から n=5 が書かれた（値は送信中の値と偶然同じ）
+    push({
+      [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+      event: ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED,
+      memory: { n: 5, fromMcp: true },
+    });
+    reply(posted[0].requestId, rejectedByHost);
+    await r;
+    expect(bridge.getMemory()).toEqual({ n: 5, fromMcp: true });
+  });
+
+  it("タイムアウト（拒否ではない）では巻き戻さない", async () => {
+    const { bridge, posted } = setupBridge({}, { app: true });
+    const p = bridge.setMemoryKey("a", 1);
+    const r = expect(p).rejects.toThrow("oretachi bridge timeout");
+    await vi.advanceTimersByTimeAsync(400);
+    expect(posted).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(10000);
+    await r;
+    expect(bridge.getMemory()).toEqual({ a: 1 });
+  });
+
+  it("iframe 側の上限超過判定でも巻き戻す（無関係なキーが以後通る）", async () => {
+    const { bridge, posted, reply } = setupBridge({}, { app: true });
+    const p1 = bridge.setMemoryKey("big", "x".repeat(ARTIFACT_MEMORY_MAX_BYTES));
+    const r1 = expect(p1).rejects.toThrow("too large");
+    await vi.advanceTimersByTimeAsync(400);
+    await r1;
+    expect(bridge.getMemory()).toEqual({});
+    const p2 = bridge.setMemoryKey("a", 1);
+    await vi.advanceTimersByTimeAsync(400);
+    reply(posted[0].requestId, ok);
+    await expect(p2).resolves.toBeUndefined();
+  });
+
+  it("通常のアーティファクトは、拒否されても巻き戻さない（従来どおり）", async () => {
+    const { bridge, posted, reply } = setupBridge({});
+    const p = bridge.setMemoryKey("big", "x");
+    const r = expect(p).rejects.toThrow();
+    await vi.advanceTimersByTimeAsync(400);
+    reply(posted[0].requestId, rejectedByHost);
+    await r;
+    expect(bridge.getMemory()).toEqual({ big: "x" });
   });
 });

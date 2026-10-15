@@ -4,7 +4,7 @@
  */
 
 import { ARTIFACT_LINK_INTERCEPT_JS } from "./artifactFrameLink";
-import { ARTIFACT_BRIDGE_JS, ARTIFACT_BRIDGE_NONCE_GLOBAL, ARTIFACT_STANDALONE_FLAG } from "./artifactMemory";
+import { ARTIFACT_APP_FLAG, ARTIFACT_BRIDGE_JS, ARTIFACT_BRIDGE_NONCE_GLOBAL, ARTIFACT_STANDALONE_FLAG } from "./artifactMemory";
 
 function htmlEscape(str: string): string {
   return str
@@ -164,6 +164,11 @@ export function buildReactSrcdoc(
      */
     standalone?: boolean;
     /**
+     * アプリ（常駐ウィンドウのシェル）の iframe として組み立てる。メモリー保存に最大待ちと、
+     * 拒否された書き込みの巻き戻しが効く（`ARTIFACT_APP_FLAG` の説明を参照）。通常のビューアは付けない
+     */
+    app?: boolean;
+    /**
      * srcdoc ごとの nonce。ブリッジが全リクエストに載せ、親（常駐ウィンドウのシェル）が突き合わせる。
      * iframe を差し替えても `contentWindow` は同一なので、前の文書の遅延メッセージを弾くために使う
      * （`ARTIFACT_BRIDGE_NONCE_GLOBAL` の説明を参照）。
@@ -200,6 +205,9 @@ export function buildReactSrcdoc(
     // ブリッジは読み込み時にフラグを見るので、必ずブリッジより先に立てる
     (options?.standalone
       ? openTag("window[" + JSON.stringify(ARTIFACT_STANDALONE_FLAG) + "]=true;") + "\n"
+      : "") +
+    (options?.app
+      ? openTag("window[" + JSON.stringify(ARTIFACT_APP_FLAG) + "]=true;") + "\n"
       : "") +
     (options?.nonce !== undefined
       ? openTag("window[" + JSON.stringify(ARTIFACT_BRIDGE_NONCE_GLOBAL) + "]=" + JSON.stringify(options.nonce) + ";") + "\n"

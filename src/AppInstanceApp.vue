@@ -85,6 +85,7 @@ const srcdoc = computed(() =>
   boot.value && vendorHead.value && nonce.value
     ? buildReactSrcdoc(vendorHead.value, boot.value.content, boot.value.modules, boot.value.memory, {
         nonce: nonce.value,
+        app: true,
         ...(boot.value.subWindow
           ? {
               subWindow: { id: boot.value.subWindow.id, params: boot.value.subWindow.params },
