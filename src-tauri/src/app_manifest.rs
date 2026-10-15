@@ -16,12 +16,20 @@ use std::collections::BTreeSet;
 
 /// 将来の sub-issue が受理するようになる権限キー。#370 の時点では「未対応」として manifest 不正扱い
 /// にする（黙って無視すると、申請したつもりの権限が効かないまま承認だけ通ることになる）。
-const RESERVED_PERMISSION_KEYS: &[&str] = &["subWindow", "wasm"];
+const RESERVED_PERMISSION_KEYS: &[&str] = &["wasm"];
 
 /// `aiTerminal.agents` で指定できるエージェント（v1 は Claude Code のみ）。
 pub const AI_TERMINAL_AGENTS: &[&str] = &["claude"];
 /// `aiTerminal.maxConcurrent` の上限（インスタンスごと）。
 pub const AI_TERMINAL_MAX_CONCURRENT_CAP: u32 = 4;
+
+/// `subWindow.maxCount` の上限（インスタンスごと）。
+pub const SUB_WINDOW_MAX_COUNT_CAP: u32 = 4;
+/// `subWindow.maxWidth` / `maxHeight` の下限と上限。透明な領域もクリックを受けるので上限は小さめにする
+pub const SUB_WINDOW_DIM_MIN: u32 = 64;
+pub const SUB_WINDOW_DIM_CAP: u32 = 1024;
+const SUB_WINDOW_DEFAULT_WIDTH: u32 = 480;
+const SUB_WINDOW_DEFAULT_HEIGHT: u32 = 640;
 
 const MAX_NAME_CHARS: usize = 100;
 const MAX_DESCRIPTION_CHARS: usize = 500;
@@ -69,6 +77,31 @@ pub struct AiTerminalPermission {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkPermission {
     pub allow: Vec<String>,
+}
+
+/// manifest の `subWindow`。インスタンスが専用サブウィンドウ（`appinst-<n>-w<k>`）を開くための申請。
+///
+/// 数・大きさの上限と、見た目・位置の権限（透明・枠なし・常に前面・位置の指定）を**個別に**申請させる。
+/// 省略した値は既定で埋めて正規化する（変化検知が既定の書き分けで揺れないように）。
+/// 透明・枠なしのウィンドウは、小さくても他のウィンドウの上に重なって操作を横取りできるので、
+/// 承認ダイアログでは注意の対象にする。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SubWindowPermission {
+    /// 同時に開ける数（1〜`SUB_WINDOW_MAX_COUNT_CAP`）
+    pub max_count: u32,
+    /// 開くウィンドウの幅・高さの上限（論理ピクセル。`SUB_WINDOW_DIM_MIN`〜`SUB_WINDOW_DIM_CAP`）
+    pub max_width: u32,
+    pub max_height: u32,
+    #[serde(default)]
+    pub transparent: bool,
+    #[serde(default)]
+    pub frameless: bool,
+    #[serde(default)]
+    pub always_on_top: bool,
+    /// 位置の指定（開くときの x / y・移動・ドラッグ）。無いと位置は OS 任せ
+    #[serde(default)]
+    pub position: bool,
 }
 
 /// manifest の `fs`。`read` / `write` は `worktree://<相対>` / `artifact://<相対>` のディレクトリ
@@ -124,6 +157,9 @@ pub struct RequestedPermissions {
     /// manifest の `network`。Rust 側のプロキシ（`app_net.rs`）が通す URL プレフィックス
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkPermission>,
+    /// manifest の `subWindow`。専用サブウィンドウ（`app_subwindow.rs`）の上限と、申請した見た目の権限
+    #[serde(default, rename = "subWindow", skip_serializing_if = "Option::is_none")]
+    pub sub_window: Option<SubWindowPermission>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -169,6 +205,9 @@ pub struct ResolvedPermissions {
     pub db: Option<ResolvedFs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkPermission>,
+    /// 解決で変わるものがない（承認した値がそのまま関門の入力になる）
+    #[serde(default, rename = "subWindow", skip_serializing_if = "Option::is_none")]
+    pub sub_window: Option<SubWindowPermission>,
 }
 
 /// host 側に保存する承認。キーはアーティファクト識別子（`<worktreeId>/<artifactId>`）。
@@ -271,6 +310,7 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
             "fs" => out.fs = parse_scoped(val, ScopedKind::Fs)?,
             "db" => out.db = parse_scoped(val, ScopedKind::Db)?,
             "network" => out.network = parse_network(val)?,
+            "subWindow" => out.sub_window = parse_sub_window(val)?,
             k if RESERVED_PERMISSION_KEYS.contains(&k) => {
                 return Err(format!(
                     "権限 '{}' はこの版ではまだ使えません（対応する機能が未実装です）。manifest から外してください",
@@ -279,7 +319,7 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
             }
             other => {
                 return Err(format!(
-                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs / db / network / aiTerminal だけです",
+                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs / db / network / subWindow / aiTerminal だけです",
                     other
                 ));
             }
@@ -363,6 +403,51 @@ fn parse_network(v: &serde_json::Value) -> Result<Option<NetworkPermission>, Str
         return Ok(None);
     }
     Ok(Some(NetworkPermission { allow: set.into_iter().collect() }))
+}
+
+fn parse_sub_window(v: &serde_json::Value) -> Result<Option<SubWindowPermission>, String> {
+    let obj = expect_object(v, "app.permissions.subWindow")?;
+    const KEYS: &[&str] = &["maxCount", "maxWidth", "maxHeight", "transparent", "frameless", "alwaysOnTop", "position"];
+    if let Some(k) = obj.keys().find(|k| !KEYS.contains(&k.as_str())) {
+        return Err(format!(
+            "app.permissions.subWindow の未知のキー '{}' です（{} だけ）",
+            k,
+            KEYS.join(" / ")
+        ));
+    }
+    let uint = |key: &str, default: u32, min: u32, max: u32| -> Result<u32, String> {
+        match obj.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(default),
+            Some(n) => {
+                let n = n
+                    .as_u64()
+                    .ok_or_else(|| format!("app.permissions.subWindow.{} は正の整数である必要があります", key))?;
+                if n < min as u64 || n > max as u64 {
+                    return Err(format!(
+                        "app.permissions.subWindow.{} は {}〜{} の範囲で指定してください（指定: {}）",
+                        key, min, max, n
+                    ));
+                }
+                Ok(n as u32)
+            }
+        }
+    };
+    let flag = |key: &str| -> Result<bool, String> {
+        match obj.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(false),
+            Some(serde_json::Value::Bool(b)) => Ok(*b),
+            Some(_) => Err(format!("app.permissions.subWindow.{} は true / false である必要があります", key)),
+        }
+    };
+    Ok(Some(SubWindowPermission {
+        max_count: uint("maxCount", 1, 1, SUB_WINDOW_MAX_COUNT_CAP)?,
+        max_width: uint("maxWidth", SUB_WINDOW_DEFAULT_WIDTH, SUB_WINDOW_DIM_MIN, SUB_WINDOW_DIM_CAP)?,
+        max_height: uint("maxHeight", SUB_WINDOW_DEFAULT_HEIGHT, SUB_WINDOW_DIM_MIN, SUB_WINDOW_DIM_CAP)?,
+        transparent: flag("transparent")?,
+        frameless: flag("frameless")?,
+        always_on_top: flag("alwaysOnTop")?,
+        position: flag("position")?,
+    }))
 }
 
 fn parse_memory(v: &serde_json::Value) -> Result<Option<MemoryPermission>, String> {
@@ -644,6 +729,44 @@ mod tests {
             let e = err(json!({ "name": "x", "permissions": { *key: {} }}));
             assert!(e.contains("まだ使えません"), "{key}: {e}");
         }
+    }
+
+    #[test]
+    fn parses_sub_window_permission_with_defaults() {
+        let m = ok(json!({ "name": "x", "permissions": { "subWindow": {} }}));
+        let s = m.permissions.sub_window.unwrap();
+        assert_eq!((s.max_count, s.max_width, s.max_height), (1, 480, 640));
+        assert!(!s.transparent && !s.frameless && !s.always_on_top && !s.position);
+        let m = ok(json!({ "name": "x", "permissions": { "subWindow": {
+            "maxCount": 2, "maxWidth": 300, "maxHeight": 400,
+            "transparent": true, "frameless": true, "alwaysOnTop": true, "position": true
+        }}}));
+        let s = m.permissions.sub_window.unwrap();
+        assert_eq!((s.max_count, s.max_width, s.max_height), (2, 300, 400));
+        assert!(s.transparent && s.frameless && s.always_on_top && s.position);
+    }
+
+    #[test]
+    fn rejects_bad_sub_window_permission() {
+        let p = |v: serde_json::Value| err(json!({ "name": "x", "permissions": { "subWindow": v }}));
+        assert!(p(json!([])).contains("JSON オブジェクト"));
+        assert!(p(json!({ "skipTaskbar": true })).contains("未知のキー"));
+        assert!(p(json!({ "maxCount": 0 })).contains("maxCount"));
+        assert!(p(json!({ "maxCount": SUB_WINDOW_MAX_COUNT_CAP + 1 })).contains("maxCount"));
+        assert!(p(json!({ "maxWidth": SUB_WINDOW_DIM_CAP + 1 })).contains("maxWidth"));
+        assert!(p(json!({ "maxHeight": SUB_WINDOW_DIM_MIN - 1 })).contains("maxHeight"));
+        assert!(p(json!({ "maxWidth": "big" })).contains("maxWidth"));
+        assert!(p(json!({ "transparent": "yes" })).contains("transparent"));
+    }
+
+    #[test]
+    fn sub_window_change_requires_reapproval_only_when_the_set_changes() {
+        let a = ok(json!({ "name": "x", "permissions": { "subWindow": { "transparent": true }}}));
+        // 既定を明示しても同じ集合
+        let same = ok(json!({ "name": "y", "permissions": { "subWindow": { "transparent": true, "maxCount": 1, "maxWidth": 480 }}}));
+        let wider = ok(json!({ "name": "x", "permissions": { "subWindow": { "transparent": true, "alwaysOnTop": true }}}));
+        assert_eq!(a.permissions, same.permissions);
+        assert_ne!(a.permissions, wider.permissions);
     }
 
     #[test]
@@ -966,6 +1089,7 @@ mod tests {
             fs: None,
             db: None,
             network: None,
+            sub_window: None,
         }
     }
 
@@ -1004,6 +1128,7 @@ mod tests {
                 fs: None,
                 db: None,
                 network: None,
+                sub_window: None,
             },
             resolved: resolved(&["notify_worktree"], &["wt-b"]),
         };

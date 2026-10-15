@@ -726,7 +726,7 @@ pub async fn app_net_fetch(
     let policy = Arc::new(Policy::new(&allow, own_ports(&app)));
 
     let reg = app.state::<AppNetRegistry>();
-    let (id, abort_reg) = reg.begin(window.label()).map_err(|e| {
+    let (id, abort_reg) = reg.begin(&ctx.instance_label).map_err(|e| {
         log_failure(&app, &ctx, &method, &url, &e);
         e
     })?;
@@ -735,7 +735,7 @@ pub async fn app_net_fetch(
         Ok(r) => r,
         Err(_) => Err("アプリの再読み込みまたは停止で通信を中断しました".to_string()),
     };
-    reg.end(window.label(), id);
+    reg.end(&ctx.instance_label, id);
     if let Err(e) = &result {
         log_failure(&app, &ctx, &method, &url, e);
     }

@@ -42,6 +42,17 @@ export interface AppResolvedFs {
   allowSensitivePaths: boolean;
 }
 
+/** 専用サブウィンドウの申請（承認した値そのもの。解決で変わるものがない） */
+export interface AppSubWindowPermission {
+  maxCount: number;
+  maxWidth: number;
+  maxHeight: number;
+  transparent: boolean;
+  frameless: boolean;
+  alwaysOnTop: boolean;
+  position: boolean;
+}
+
 export interface AppResolvedPermissions {
   mcp?: { tools: string[]; targets: AppResolvedTarget[] };
   memory?: { maxBytes: number };
@@ -51,6 +62,7 @@ export interface AppResolvedPermissions {
   db?: AppResolvedFs;
   /** Rust プロキシが通す URL プレフィックス（正規化済み） */
   network?: { allow: string[] };
+  subWindow?: AppSubWindowPermission;
 }
 
 export interface AppRequestedPermissions {
@@ -60,6 +72,7 @@ export interface AppRequestedPermissions {
   fs?: { read: string[]; write: string[]; allowSensitivePaths: boolean };
   db?: { read: string[]; write: string[]; allowSensitivePaths: boolean };
   network?: { allow: string[] };
+  subWindow?: AppSubWindowPermission;
 }
 
 export interface AppGrant {

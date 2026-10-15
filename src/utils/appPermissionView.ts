@@ -20,8 +20,19 @@ export interface PermissionRow {
    * `fs` / `db`: FS・DB のスコープ 1 件（`access` と、解決済みの絶対パス `label`。DB の read は読み取り専用）。
    * `fsSensitive` / `dbSensitive`: 既定拒否パスの解除
    */
-  kind: "tool" | "target" | "memory" | "aiTerminal" | "fs" | "fsSensitive" | "db" | "dbSensitive" | "network";
-  /** ツール名 / 越境先の `stored` / `maxBytes` の文字列 / `claude×N`（件数の変更も差分に出る）/ FS・DB は `<read|write>:<scheme>:<絶対パス>` / ネットワークは正規化済みの URL プレフィックス */
+  kind:
+    | "tool"
+    | "target"
+    | "memory"
+    | "aiTerminal"
+    | "fs"
+    | "fsSensitive"
+    | "db"
+    | "dbSensitive"
+    | "network"
+    | "subWindow"
+    | "subWindowFlag";
+  /** サブウィンドウは `<最大数>×<幅>x<高さ>`、`subWindowFlag` は `transparent` / `frameless` / `alwaysOnTop` / `position`。ツール名 / 越境先の `stored` / `maxBytes` の文字列 / `claude×N`（件数の変更も差分に出る）/ FS・DB は `<read|write>:<scheme>:<絶対パス>` / ネットワークは正規化済みの URL プレフィックス */
   value: string;
   /** 越境先のときの表示名 / FS・DB のときの表示用の絶対パス */
   label: string;
@@ -106,6 +117,28 @@ function rowsOf(perm: AppResolvedPermissions, dangerous: ReadonlySet<string>): P
       wildcard: false,
       added: false,
     });
+  }
+  // サブウィンドウ: 数と大きさの上限を 1 行、申請した見た目・位置の権限を 1 件ごとに 1 行。
+  // 透明・枠なし・常に前面は、他のウィンドウの上に重なって操作を横取りできるので danger。位置の指定は normal
+  if (perm.subWindow) {
+    const sw = perm.subWindow;
+    rows.push({
+      kind: "subWindow",
+      value: `${sw.maxCount}×${sw.maxWidth}x${sw.maxHeight}`,
+      label: `${sw.maxCount}×${sw.maxWidth}x${sw.maxHeight}`,
+      severity: "normal",
+      wildcard: false,
+      added: false,
+    });
+    const flags: [string, boolean, PermissionSeverity][] = [
+      ["transparent", sw.transparent, "danger"],
+      ["frameless", sw.frameless, "danger"],
+      ["alwaysOnTop", sw.alwaysOnTop, "danger"],
+      ["position", sw.position, "normal"],
+    ];
+    for (const [flag, on, severity] of flags) {
+      if (on) rows.push({ kind: "subWindowFlag", value: flag, label: flag, severity, wildcard: false, added: false });
+    }
   }
   if (perm.fs) rows.push(...scopeRows(perm.fs, "fs", "fsSensitive"));
   if (perm.db) rows.push(...scopeRows(perm.db, "db", "dbSensitive"));

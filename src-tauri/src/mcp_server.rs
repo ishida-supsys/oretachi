@@ -6985,6 +6985,7 @@ pub(crate) fn resolve_app_permissions(
         db: None,
         // URL プレフィックスは解決で変わるものがない（承認した値がそのまま関門の入力になる）
         network: requested.network.clone(),
+        sub_window: requested.sub_window,
     })
 }
 
@@ -10294,6 +10295,7 @@ mod tests {
             fs: None,
             db: None,
             network: None,
+            sub_window: None,
         }
     }
 
@@ -10333,6 +10335,7 @@ mod tests {
             fs: None,
             db: None,
             network: None,
+            sub_window: None,
         };
         assert!(crate::app_manifest::authorize_app_cross_target(&r, &dest).is_ok());
         let dest_other = cross_worktree_dest_targets(&settings, "wt-other");

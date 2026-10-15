@@ -549,12 +549,12 @@ async fn prepare(window: &tauri::Window, app: &AppHandle, path: &str) -> Result<
     let reg = app.state::<AppDbRegistry>();
     let key = (real.clone(), writable);
     // 停止済みのインスタンスには、既存の接続も新しい接続も渡さない
-    if reg.is_dead(window.label()) {
+    if reg.is_dead(&ctx.instance_label) {
         let e = "アプリが停止しました".to_string();
         log_failure(app, &ctx, "open", path, "", &e);
         return Err(e);
     }
-    if let Some(shared) = reg.get(window.label(), &key) {
+    if let Some(shared) = reg.get(&ctx.instance_label, &key) {
         return Ok(Call { ctx, shared });
     }
     // 開くと（write なら）ファイルとディレクトリを作る。停止・削除と競って、消した後の同梱領域を
@@ -564,7 +564,7 @@ async fn prepare(window: &tauri::Window, app: &AppHandle, path: &str) -> Result<
         log_failure(app, &ctx, "open", path, "", &e);
         e
     })?;
-    match reg.insert(window.label(), key, conn) {
+    match reg.insert(&ctx.instance_label, key, conn) {
         Ok(InsertOutcome::Inserted(shared)) | Ok(InsertOutcome::Existing(shared)) => Ok(Call { ctx, shared }),
         Err((e, conn)) => {
             let _ = conn.close().await;
@@ -641,7 +641,7 @@ pub async fn app_db_close(window: tauri::Window, app: AppHandle, path: String) -
             e
         })?;
     let reg = app.state::<AppDbRegistry>();
-    match reg.remove(window.label(), &(real, writable)) {
+    match reg.remove(&ctx.instance_label, &(real, writable)) {
         Some(shared) => {
             close_all(vec![shared]).await;
             Ok(true)

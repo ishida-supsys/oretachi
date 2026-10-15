@@ -15,7 +15,7 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
 - **manifest だけでは何も動かない。** AI が書いた manifest は信頼されない。ユーザーがアーティファクトウィンドウの**起動画面**で起動し、承認ダイアログで許可して初めて権限が有効になる。承認の前に、あなたが API を呼べるようにする手段は無い。
 - **宣言したものだけが使える。** manifest に無い権限（ツール・越境先・メモリー）は、承認済みでも常に拒否される。
 - **通常のビューアでは動かない。** `app` 付きのアーティファクトは起動画面を出す。実行は承認後の常駐ウィンドウの中（`sandbox` iframe）。Web ビューアでは起動できない。
-- 今の版で書ける権限は `mcp`（`tools` と `targets`）、`memory`（`maxBytes` 必須）、`fs`、`db`（下記）、`aiTerminal`（`agents` と `maxConcurrent` 必須）、`network`（`allow` に URL プレフィックス。下記）だけ。`subWindow` / `wasm` は未対応で、書くとエラーになる。
+- 今の版で書ける権限は `mcp`（`tools` と `targets`）、`memory`（`maxBytes` 必須）、`fs`、`db`（下記）、`aiTerminal`（`agents` と `maxConcurrent` 必須）、`network`（`allow` に URL プレフィックス。下記）、`subWindow`（専用サブウィンドウ。下記）だけ。`wasm` は未対応で、書くとエラーになる。
 - コード（content / modules）を更新しても再承認は要らず、起動中なら**承認を保ったまま iframe がリロードされる**（フルリロード。メモリー以外の JS の状態は失われる）。**権限（manifest の `permissions`）を変えたときだけ**、起動中なら直ちに再承認のダイアログが出る。承認までは旧権限のまま動き（リロードもされない）、新しい権限が要る呼び出しは拒否される。承認でリロード、拒否で停止。
 
 ## manifest
@@ -58,6 +58,11 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
   - 同じ DB へ複数のアプリが書くのは避ける（ロックの競合で `database is locked` になりうる）。`artifact://` に専用の DB を置くのが無難。
 
 - `network`: アプリが通信してよい URL のプレフィックス。`{ "allow": ["https://api.example.com/v1/"] }`（最大 20 件）。`http` / `https` のみで、`?` / `#` / `user:pass@` は書けない。**この配下にだけ**通信でき、承認ダイアログにはプレフィックスがそのまま出る（平文の `http` は警告つき）。**ループバック・プライベート IP・oretachi 自身のポートは常に拒否され、解除する手段は無い**（`localhost` や `192.168.x.x` を書くと manifest がエラーになる）。
+
+- `subWindow`: アプリが専用のウィンドウ（透明・枠なしも可。アシスタントキャラクターの表示など）を開く申請。省略したキーは既定で埋まる。`{ "maxCount": 1, "maxWidth": 480, "maxHeight": 640, "transparent": true, "frameless": true, "alwaysOnTop": true, "position": true }`
+  - `maxCount`: 同時に開ける数（1〜4、既定 1）。`maxWidth` / `maxHeight`: 開くウィンドウの大きさの上限（64〜1024 ピクセル、既定 480 × 640）。
+  - `transparent` / `frameless` / `alwaysOnTop` / `position`: 透明な背景・枠（タイトルバー）なし・常に前面・位置の指定と移動。**申請したものだけ**使える（既定は全部 false）。透明・枠なし・常に前面は他のウィンドウに重なれるので、承認ダイアログで強調される。**本当に要るものだけ**書く。
+  - 開いたウィンドウのタイトルとタスクバーには必ずアプリ名が付き、タスクバーには常に出る（ユーザーが見つけて閉じられるように）。
 
 ## ネットワーク API（`net`）
 
@@ -147,6 +152,23 @@ artifact_file(command: "delete", id: "<アプリ id>", project_dir: <作業デ�
 
 - アプリのアーティファクトが先に存在している必要がある（`create` の後に `put`）。承認は要らない（あなたはもともとユーザーと同等の権限を持つ）。
 - アプリ側から読むには、manifest の `fs.read` に `artifact://` を宣言しておく。DB として開くなら `db` に `artifact://` を宣言する（初期 DB を `put` しておき、`write` のスコープで開けば読み書きできる）。
+
+## サブウィンドウ API（`subWindow`）
+
+`subWindow` を承認されたアプリだけが、`const { subWindow } = require('oretachi')` で使える。**開いたウィンドウの中では、同じアプリのコードがもう 1 つ動く**（別の HTML を指定するのではない）。`subWindow.info` が `null` なら常駐ウィンドウ側、非 null（`{ id, params }`）なら開かれたウィンドウ側なので、それで描き分ける。メモリー・`fs`・`db`・`net`・`aiTerminal` などは、どちらのウィンドウからも同じ承認で呼べる（メモリーはアプリ全体で 1 つ。2 つのウィンドウから書くと後勝ちなので、書く側を片方に決めると安全）。
+
+| 呼び出し | 内容 |
+|---|---|
+| `subWindow.open({ width, height, x, y, title, transparent, frameless, alwaysOnTop, resizable, params })` | ウィンドウを開く。`{ id }` が返る。省略した大きさは `maxWidth` × `maxHeight`。`x` と `y` はそろえて指定（`position` が要る。省略 = 画面中央）。`transparent` / `frameless` / `alwaysOnTop` は申請した場合だけ true にできる。`params`（JSON、16KB まで）は開かれた側が `subWindow.info.params` で読む |
+| `subWindow.close(id)` | 自分が開いたウィンドウを閉じる |
+| `subWindow.list()` | 開いているウィンドウの一覧（`id`・大きさ・見た目・`params`） |
+| `subWindow.setPosition(id, x, y)` / `subWindow.setSize(id, width, height)` | 移動（`position` が要る）/ 大きさの変更（`maxWidth` / `maxHeight` の範囲内） |
+| `subWindow.startDrag()` | 枠なしウィンドウをドラッグで動かす。**開かれたウィンドウの `mousedown` ハンドラの中で**呼ぶ（`position` が要る） |
+| `subWindow.onClosed(fn)` | ユーザーがウィンドウを閉じたとき `{ event: "closed", id }` を受け取る。解除関数が返る（`close()` で自分で閉じたときは来ない） |
+
+- 透明にするには、アプリ側でも背景を塗らないこと。文書の背景は透明に上書きされるが、`bg-white` のような要素の背景は残る。Windows 10 でも WebView の透過背景で動く（OS の合成に依存する方式ではない）。
+- ウィンドウが閉じても、インスタンスは止まらない。インスタンスを停止すると、開いたウィンドウはすべて閉じる。コードの更新によるリロードでは**ウィンドウを維持**し、中の iframe が作り直される（`list()` で取り直す）。再起動では復元しない。
+- 数の上限は `maxCount`（アプリごと）と全体 8 個。上限・見た目の権限を超える呼び出しは拒否され、デバッグログに残る。再承認で権限が狭まったときは、収まらなくなったウィンドウが閉じる。
 
 ## AI ターミナル API
 

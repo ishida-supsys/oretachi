@@ -82,6 +82,16 @@ export const ARTIFACT_BRIDGE_PUSH_AI_TERMINAL_EVENT = "aiTerminal.event";
  */
 export const ARTIFACT_BRIDGE_METHOD_AI_TERMINAL_PREFIX = "aiTerminal.";
 
+/** `ARTIFACT_BRIDGE_PUSH_MARKER` の通知種別: 自分が開いたサブウィンドウがユーザーに閉じられた。`payload` は `{ event: "closed", id }` */
+export const ARTIFACT_BRIDGE_PUSH_SUB_WINDOW_EVENT = "subWindow.event";
+
+/**
+ * 専用サブウィンドウ API の method 接頭辞。`subWindow.open` / `.close` / `.list` / `.setPosition` /
+ * `.setSize` / `.startDrag`。params は Rust コマンドの引数に写す（`subWindowBridge.ts`）。
+ * 権限（manifest の `subWindow`）・上限・見た目の検査は Rust 側（`app_subwindow`）の関門で、ここは中継だけ。
+ */
+export const ARTIFACT_BRIDGE_METHOD_SUB_WINDOW_PREFIX = "subWindow.";
+
 /**
  * アプリ（`app` 付きアーティファクト）のファイルシステム API。パスは `worktree://<相対>` /
  * `artifact://<相対>` だけ。判定は Rust 側（`app_fs::resolve_scoped_path`）。通常のビューアはこれらを
@@ -268,6 +278,29 @@ export function postArtifactBridgeAiTerminalEvent(
   }
 }
 
+/** サブウィンドウのイベント（閉じられた）を iframe へ知らせる。応答の無い一方向通知 */
+export function postArtifactBridgeSubWindowEvent(
+  frame: HTMLIFrameElement | null,
+  payload: Record<string, unknown>,
+  nonce?: string,
+): void {
+  const target = frame?.contentWindow;
+  if (!target) return;
+  try {
+    target.postMessage(
+      {
+        [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+        event: ARTIFACT_BRIDGE_PUSH_SUB_WINDOW_EVENT,
+        payload: JSON.parse(JSON.stringify(payload ?? {})),
+        ...(nonce !== undefined ? { nonce } : {}),
+      },
+      "*",
+    );
+  } catch (e) {
+    console.warn("サブウィンドウのイベントを iframe へ送れませんでした", e);
+  }
+}
+
 /** debounce 待ちの保存を送り切るよう iframe へ頼む（アプリのリロード前）。完了は `ARTIFACT_BRIDGE_METHOD_FLUSHED` */
 export function postArtifactBridgeFlush(frame: HTMLIFrameElement | null, nonce?: string): void {
   const target = frame?.contentWindow;
@@ -331,6 +364,8 @@ export const ARTIFACT_BRIDGE_JS =
   "        flushNow();" +
   "      else if(d.event===" + JSON.stringify(ARTIFACT_BRIDGE_PUSH_AI_TERMINAL_EVENT) + ")" +
   "        emitAiTerminalEvent(d.payload);" +
+  "      else if(d.event===" + JSON.stringify(ARTIFACT_BRIDGE_PUSH_SUB_WINDOW_EVENT) + ")" +
+  "        emitSubWindowEvent(d.payload);" +
   "      return;" +
   "    }" +
   "    if(d[" + JSON.stringify(ARTIFACT_BRIDGE_RESULT_MARKER) + "]!==true)return;" +
@@ -629,6 +664,35 @@ export const ARTIFACT_BRIDGE_JS =
   "      return function(){aiListeners=aiListeners.filter(function(f){return f!==fn;});};" +
   "    }" +
   "  };" +
+  // ── 専用サブウィンドウ（manifest の `subWindow` 権限が承認されたアプリだけが使える）──
+  // 中身は同じアプリ（このコードが、開いたウィンドウの中でも動く）。`info` は開かれた側だけ非 null
+  // （`{ id, params }`）なので、それで描き分ける。権限・上限・見た目の関門は Rust 側。ここは中継だけ
+  "  var subInfo=null;" +
+  "  try{" +
+  "    var subEl=document.getElementById('_subwindow');" +
+  "    if(subEl&&subEl.value)subInfo=JSON.parse(subEl.value);" +
+  "  }catch(err){subInfo=null;}" +
+  "  var swListeners=[];" +
+  "  function emitSubWindowEvent(p){" +
+  "    swListeners.slice().forEach(function(fn){try{fn(p);}catch(err){}});" +
+  "  }" +
+  "  function sw(name,params){" +
+  "    return call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_SUB_WINDOW_PREFIX) + "+name,params||{});" +
+  "  }" +
+  "  var subWindow={" +
+  "    info:subInfo," +
+  "    open:function(opts){return sw('open',opts||{});}," +
+  "    close:function(id){return sw('close',{id:id});}," +
+  "    list:function(){return sw('list',{});}," +
+  "    setPosition:function(id,x,y){return sw('setPosition',{id:id,x:x,y:y});}," +
+  "    setSize:function(id,width,height){return sw('setSize',{id:id,width:width,height:height});}," +
+  // マウスが押されている間に呼ぶこと（mousedown ハンドラから）。枠なしウィンドウをドラッグで動かす
+  "    startDrag:function(){return sw('startDrag',{});}," +
+  "    onClosed:function(fn){" +
+  "      swListeners.push(fn);" +
+  "      return function(){swListeners=swListeners.filter(function(f){return f!==fn;});};" +
+  "    }" +
+  "  };" +
   "  window.__oretachi={" +
   "    getMemory:getMemory," +
   "    setMemory:setMemory," +
@@ -641,7 +705,8 @@ export const ARTIFACT_BRIDGE_JS =
   "    db:db," +
   "    net:net," +
   "    call:call," +
-  "    aiTerminal:aiTerminal" +
+  "    aiTerminal:aiTerminal," +
+  "    subWindow:subWindow" +
   "  };" +
   // `state` は setMemory ごとに別オブジェクトへ差し替わるので、スナップショットを
   // 掴ませないようゲッターにする（`oretachi.memory` は常に最新を指す）

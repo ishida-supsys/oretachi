@@ -9,6 +9,11 @@
  *   ブリッジの `mcp.call` も `app_call_mcp_tool`（ラベルで識別）へ素通しするだけで、
  *   許可・拒否の判断はここではしない（唯一の関門は Rust）。
  * - 閉じる = 隠す（Rust が prevent_close で hide にする）。インスタンスは継続する。
+ *
+ * このシェルは**サブウィンドウ（`appinst-<n>-w<k>`、透明・枠なしも可）でも同じものが動く**。
+ * 中身は同じアプリで、`bootstrap.subWindow` が非 null のとき（サブウィンドウ）だけ、アプリへ
+ * `oretachi.subWindow.info`（`{ id, params }`）を渡す。サブウィンドウはユーザーが閉じれば実際に閉じる
+ * （Rust 側。インスタンスは止まらない）。API の関門は常駐ウィンドウと同じ（唯一の関門は Rust）。
  */
 import { ref, computed, onMounted, onBeforeUnmount } from "vue";
 import { invoke } from "@tauri-apps/api/core";
@@ -30,14 +35,17 @@ import {
   ARTIFACT_BRIDGE_METHOD_FS_WRITE,
   ARTIFACT_BRIDGE_METHOD_MCP_CALL,
   ARTIFACT_BRIDGE_METHOD_MEMORY_SET,
+  ARTIFACT_BRIDGE_METHOD_SUB_WINDOW_PREFIX,
   readArtifactBridgeRequest,
   postArtifactBridgeResult,
   postArtifactBridgeMemoryChanged,
   postArtifactBridgeFlush,
   postArtifactBridgeAiTerminalEvent,
+  postArtifactBridgeSubWindowEvent,
   type ArtifactBridgeRequest,
 } from "./utils/artifactMemory";
 import { aiTerminalCommandFor } from "./utils/aiTerminalBridge";
+import { subWindowCommandFor } from "./utils/subWindowBridge";
 
 interface Bootstrap {
   worktreeId: string;
@@ -48,6 +56,8 @@ interface Bootstrap {
   modules: Record<string, string>;
   /** 保存済みのメモリー。memory 権限が承認されていないアプリには空 */
   memory: Record<string, unknown>;
+  /** サブウィンドウのシェルだけ非 null。常駐ウィンドウは null */
+  subWindow: { id: string; params: unknown; transparent: boolean; frameless: boolean } | null;
 }
 
 /** コード更新が連続したとき（モジュールを何本も書き換える等）に 1 回へまとめる待ち */
@@ -75,9 +85,23 @@ const srcdoc = computed(() =>
   boot.value && vendorHead.value && nonce.value
     ? buildReactSrcdoc(vendorHead.value, boot.value.content, boot.value.modules, boot.value.memory, {
         nonce: nonce.value,
+        ...(boot.value.subWindow
+          ? {
+              subWindow: { id: boot.value.subWindow.id, params: boot.value.subWindow.params },
+              transparentBackground: boot.value.subWindow.transparent,
+            }
+          : {}),
       })
     : "",
 );
+
+/** 透明なサブウィンドウでは、シェルの背景も透明にする（webview の透過が見えるように） */
+function applyWindowBackground(b: Bootstrap) {
+  const transparent = b.subWindow?.transparent === true;
+  const bg = transparent ? "transparent" : "#1e1e2e";
+  document.documentElement.style.background = transparent ? "transparent" : "";
+  document.body.style.background = bg;
+}
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -217,6 +241,18 @@ async function handleBridgeRequest(request: ArtifactBridgeRequest) {
     }
     return;
   }
+  // 専用サブウィンドウ。権限・上限・見た目の検査と許可・拒否のログは Rust がすべて行う
+  if (request.method.startsWith(ARTIFACT_BRIDGE_METHOD_SUB_WINDOW_PREFIX)) {
+    try {
+      const cmd = subWindowCommandFor(request.method, request.params);
+      if (!cmd) throw new Error(`このアプリでは使えない API です: ${request.method}`);
+      const result = await invoke<unknown>(cmd.command, cmd.args);
+      reply(request, { ok: true, result });
+    } catch (e) {
+      reply(request, { ok: false, error: errorText(e) });
+    }
+    return;
+  }
   // 専用 AI ターミナル。所有・権限・上限の検査と許可・拒否のログは Rust がすべて行う
   if (request.method.startsWith(ARTIFACT_BRIDGE_METHOD_AI_TERMINAL_PREFIX)) {
     try {
@@ -286,6 +322,7 @@ async function doReload() {
     await flushFrame();
     const next = await invoke<Bootstrap>("app_instance_bootstrap");
     boot.value = next;
+    applyWindowBackground(next);
     nonce.value = createCspNonce();
     report("info", "リロードしました");
   } catch (e) {
@@ -330,6 +367,13 @@ onMounted(async () => {
         if (nonce.value) postArtifactBridgeAiTerminalEvent(frame.value, event.payload, nonce.value);
       }),
     );
+    // 自分が開いたサブウィンドウがユーザーに閉じられた通知（Rust が `emit_to(label)` で、このインスタンスの
+    // ウィンドウだけへ送る）
+    unlisteners.push(
+      await getCurrentWebviewWindow().listen<Record<string, unknown>>("app-subwindow-event", (event) => {
+        if (nonce.value) postArtifactBridgeSubWindowEvent(frame.value, event.payload, nonce.value);
+      }),
+    );
     // メモリーの外部更新は全体イベント。自分のアーティファクトのものだけ拾う
     unlisteners.push(
       await listen<{ scope: string; scopeId: string; artifactId: string }>("artifact-state-changed", (event) => {
@@ -345,6 +389,7 @@ onMounted(async () => {
       loadVendors(),
     ]);
     boot.value = b;
+    applyWindowBackground(b);
     vendorHead.value = buildVendorHead(vendors.react, vendors.reactDom, vendors.babel, vendors.tailwind);
     nonce.value = createCspNonce();
   } catch (e) {
@@ -361,7 +406,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="appinst-shell">
+  <div class="appinst-shell" :class="{ transparent: boot?.subWindow?.transparent }">
     <div v-if="loadError" class="shell-error">{{ loadError }}</div>
     <iframe
       v-else-if="srcdoc"
@@ -369,6 +414,7 @@ onBeforeUnmount(() => {
       :srcdoc="srcdoc"
       sandbox="allow-scripts"
       class="app-frame"
+      :class="{ transparent: boot?.subWindow?.transparent }"
     />
     <div v-else class="shell-loading">…</div>
   </div>
@@ -385,6 +431,11 @@ onBeforeUnmount(() => {
   flex: 1;
   border: none;
   background: #fff;
+}
+/* 透明なサブウィンドウ。iframe のページ側も透明にして、アプリが塗った部分だけが見えるようにする */
+.appinst-shell.transparent,
+.app-frame.transparent {
+  background: transparent;
 }
 .shell-error,
 .shell-loading {

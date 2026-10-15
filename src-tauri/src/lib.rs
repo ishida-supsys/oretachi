@@ -5,6 +5,7 @@ mod ai_provider;
 mod ai_terminal;
 mod app_db;
 mod app_net;
+mod app_subwindow;
 mod app_fs;
 mod app_grant;
 mod app_instance;
@@ -2414,6 +2415,7 @@ pub fn run() {
         .manage(ai_terminal::SpawnWaiters::default())
         .manage(app_db::AppDbRegistry::default())
         .manage(app_net::AppNetRegistry::default())
+        .manage(app_subwindow::AppSubWindowRegistry::default())
         .manage(mcp_server::NotificationRegistry::default())
         .manage(mcp_server::CloseWorktreeAckRegistry::default())
         .manage(mcp_server::ImportWorktreeAckRegistry::default())
@@ -2540,6 +2542,12 @@ pub fn run() {
             app_db::app_db_execute,
             app_db::app_db_close,
             app_net::app_net_fetch,
+            app_subwindow::app_subwindow_open,
+            app_subwindow::app_subwindow_close,
+            app_subwindow::app_subwindow_list,
+            app_subwindow::app_subwindow_set_position,
+            app_subwindow::app_subwindow_set_size,
+            app_subwindow::app_subwindow_start_drag,
             app_instance::app_set_memory,
             app_instance::app_get_memory,
             app_instance::app_grant_respond,

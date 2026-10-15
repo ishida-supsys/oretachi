@@ -212,6 +212,11 @@ function hhmmss(ms: number): string {
                 <span class="tag">{{ t("granted.aiTerminalTag") }}</span>
               </template>
               <template v-else-if="r.kind === 'network'">{{ t("granted.network") }}: <code>{{ r.label }}</code></template>
+              <template v-else-if="r.kind === 'subWindow'">{{ t("granted.subWindow", { spec: r.label }) }}</template>
+              <template v-else-if="r.kind === 'subWindowFlag'">
+                {{ t("granted.subWindowFlag_" + r.value) }}
+                <span v-if="r.severity === 'danger'" class="tag">{{ t("granted.overlayTag") }}</span>
+              </template>
               <template v-else>{{ t("granted.memory", { bytes: r.value }) }}</template>
             </li>
             <li v-if="permissionView.rows.length === 0" class="none">{{ t("granted.none") }}</li>
@@ -476,6 +481,12 @@ function hhmmss(ms: number): string {
       "aiTerminal": "Dedicated AI terminals ({spec})",
       "aiTerminalTag": "same authority as you",
       "network": "Network",
+      "subWindow": "Sub-windows (up to {spec})",
+      "subWindowFlag_transparent": "Sub-window: transparent",
+      "subWindowFlag_frameless": "Sub-window: no title bar",
+      "subWindowFlag_alwaysOnTop": "Sub-window: always on top",
+      "subWindowFlag_position": "Sub-window: choose position",
+      "overlayTag": "can overlay other windows",
       "none": "No permissions",
       "ownOnly": "MCP calls reach this worktree only"
     },
@@ -509,6 +520,12 @@ function hhmmss(ms: number): string {
       "aiTerminal": "専用 AI ターミナル（{spec}）",
       "aiTerminalTag": "あなたと同等の権限",
       "network": "ネットワーク",
+      "subWindow": "サブウィンドウ（最大 {spec}）",
+      "subWindowFlag_transparent": "サブウィンドウ: 透明",
+      "subWindowFlag_frameless": "サブウィンドウ: 枠なし",
+      "subWindowFlag_alwaysOnTop": "サブウィンドウ: 常に前面",
+      "subWindowFlag_position": "サブウィンドウ: 位置の指定",
+      "overlayTag": "他のウィンドウに重なれます",
       "none": "権限なし",
       "ownOnly": "MCP 呼び出しはこのワークツリーだけに届きます"
     },

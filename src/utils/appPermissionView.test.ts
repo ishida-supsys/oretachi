@@ -244,6 +244,48 @@ describe("buildPermissionView", () => {
     });
   });
 
+  describe("subWindow", () => {
+    const sw = { maxCount: 2, maxWidth: 300, maxHeight: 400, transparent: false, frameless: false, alwaysOnTop: false, position: false };
+
+    it("shows the limits as one row and nothing else when no appearance is requested", () => {
+      const v = buildPermissionView({ subWindow: sw }, null, DANGEROUS);
+      expect(v.rows).toHaveLength(1);
+      expect(v.rows[0]).toMatchObject({ kind: "subWindow", value: "2×300x400", severity: "normal" });
+      expect(v.hasDanger).toBe(false);
+    });
+
+    it("marks transparent / frameless / always-on-top as danger and position as normal", () => {
+      const v = buildPermissionView(
+        { subWindow: { ...sw, transparent: true, frameless: true, alwaysOnTop: true, position: true } },
+        null,
+        DANGEROUS,
+      );
+      const flags = v.rows.filter((r) => r.kind === "subWindowFlag");
+      expect(flags.map((r) => [r.value, r.severity])).toEqual([
+        ["transparent", "danger"],
+        ["frameless", "danger"],
+        ["alwaysOnTop", "danger"],
+        ["position", "normal"],
+      ]);
+      expect(v.hasDanger).toBe(true);
+      expect(v.hasCritical).toBe(false);
+    });
+
+    it("shows a newly requested appearance as added and a dropped one as removed on re-approval", () => {
+      const before = { subWindow: { ...sw, transparent: true } };
+      const after = { subWindow: { ...sw, alwaysOnTop: true } };
+      const v = buildPermissionView(after, before, DANGEROUS);
+      expect(v.rows.filter((r) => r.added).map((r) => r.value)).toEqual(["alwaysOnTop"]);
+      expect(v.removed.map((r) => r.value)).toEqual(["transparent"]);
+    });
+
+    it("shows a changed limit as a removed and an added row", () => {
+      const v = buildPermissionView({ subWindow: { ...sw, maxCount: 3 } }, { subWindow: sw }, DANGEROUS);
+      expect(v.rows[0]).toMatchObject({ value: "3×300x400", added: true });
+      expect(v.removed.map((r) => r.value)).toEqual(["2×300x400"]);
+    });
+  });
+
   describe("displayFsPath", () => {
     it("strips the Windows extended-length prefixes for display only", () => {
       expect(displayFsPath(String.raw`\\?\C:\x\y`)).toBe(String.raw`C:\x\y`);

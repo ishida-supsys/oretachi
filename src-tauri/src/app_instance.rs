@@ -107,6 +107,9 @@ struct Inner {
 /// 認可の入口で使う、呼び出し元インスタンスの身元。
 #[derive(Debug, Clone)]
 pub struct InstanceContext {
+    /// 常駐ウィンドウ（`appinst-<n>`）のラベル。サブウィンドウから呼ばれても**インスタンスの**ラベル。
+    /// DB 接続・実行中の通信など、インスタンスごとに持つ資源のキーに使う
+    pub instance_label: String,
     pub worktree_id: String,
     pub artifact_id: String,
     pub reapproval_pending: bool,
@@ -348,6 +351,9 @@ fn validate_ids(worktree_id: &str, artifact_id: &str) -> Result<(), String> {
 
 /// ラベルから呼び出し元インスタンスを引く。**Running のものだけ**を返す（Starting は拒否）。
 pub fn context_for_label(app: &AppHandle, label: &str) -> Result<InstanceContext, String> {
+    // サブウィンドウ（`appinst-<n>-w<k>`）は、所有するインスタンスとして扱う。同じ grant・同じ関門を通る
+    let label = crate::app_subwindow::parent_label(app, label).unwrap_or_else(|| label.to_string());
+    let label = label.as_str();
     let reg = app.state::<AppInstanceRegistry>();
     let inner = reg.0.lock().map_err(|_| "レジストリのロックが壊れています".to_string())?;
     let inst = inner
@@ -358,6 +364,7 @@ pub fn context_for_label(app: &AppHandle, label: &str) -> Result<InstanceContext
         return Err("このアプリはまだ起動処理中です".to_string());
     }
     Ok(InstanceContext {
+        instance_label: label.to_string(),
         worktree_id: inst.worktree_id.clone(),
         artifact_id: inst.artifact_id.clone(),
         reapproval_pending: inst.pending.is_some(),
@@ -774,6 +781,8 @@ fn release(app: &AppHandle, label: &str) -> Option<(String, String)> {
         crate::app_db::on_instance_released(app, label);
         // 実行中のネットワーク通信は中断し、以後は出せなくする
         crate::app_net::on_instance_released(app, label);
+        // インスタンスが開いたサブウィンドウもすべて閉じる（再起動での復元はしない）
+        crate::app_subwindow::on_instance_released(app, label);
         // インスタンスが開いた専用 AI ターミナルも、停止とともにすべて閉じる（再起動での復元はしない）。
         // ホットリロードは `release` を通らないので、リロードをまたいで維持される。
         crate::ai_terminal::close_all_for_instance(app, &(inst.worktree_id.clone(), inst.artifact_id.clone()));
@@ -824,6 +833,10 @@ pub async fn app_instance_stop(
 /// レジストリに幽霊を残さない。
 pub fn on_window_destroyed(app: &AppHandle, label: &str) {
     if !label.starts_with(LABEL_PREFIX) {
+        return;
+    }
+    // サブウィンドウが閉じても、インスタンスは止めない（所有者の管理から外して、アプリへ知らせるだけ）
+    if crate::app_subwindow::on_window_destroyed(app, label) {
         return;
     }
     if let Some((wt, art)) = release(app, label) {
@@ -1002,6 +1015,8 @@ pub async fn check_permission_change(app: &AppHandle, worktree_id: &str, artifac
                 add_log(&app2, &wt, &aid, "info", "再承認されました");
                 // 開いている DB は閉じる。次の呼び出しが新しい権限セットで開き直す
                 crate::app_db::on_grant_replaced(&app2, &label);
+                // 権限が狭まって収まらなくなったサブウィンドウは閉じる（残りは維持）
+                crate::app_subwindow::on_grant_replaced(&app2, &label);
                 // aiTerminal 権限が外れたなら、開いている専用 AI ターミナルを閉じる。権限が無いと
                 // 以後は操作できず、持ち主の居ない端末が残ってしまうため（上限が下がっただけなら
                 // 既存の端末は残し、新しく開く分から効く）
@@ -1053,9 +1068,12 @@ fn request_reload(app: &AppHandle, label: &str, reason: &str) {
     // 通信中のネットワークリクエストは中断する（前提 10。DB・端末・メモリは維持）。再承認の承認後も
     // ここを通る。古い iframe への応答は nonce で捨てられるので、中断は資源を空けるためのもの
     crate::app_net::on_reload(app, label);
-    // 宛先はこのウィンドウだけ。他のインスタンスへ漏らさない
-    if let Err(e) = app.emit_to(label, "app-instance-reload", reason) {
-        log::warn!("[app-instance] {} へのリロード依頼に失敗: {}", label, e);
+    // 宛先はこのインスタンスのウィンドウだけ（常駐ウィンドウと、所有するサブウィンドウ）。
+    // サブウィンドウは作り直さず、中の iframe だけが再接続する（前提 10）。他のインスタンスへ漏らさない
+    for target in std::iter::once(label.to_string()).chain(crate::app_subwindow::labels_for_instance(app, label)) {
+        if let Err(e) = app.emit_to(target.as_str(), "app-instance-reload", reason) {
+            log::warn!("[app-instance] {} へのリロード依頼に失敗: {}", target, e);
+        }
     }
 }
 
@@ -1431,6 +1449,8 @@ pub async fn app_instance_bootstrap(window: tauri::Window, app: AppHandle) -> Re
         "appName": art.manifest.name,
         "content": art.raw.get("content").cloned().unwrap_or(serde_json::Value::String(String::new())),
         "modules": art.raw.get("modules").cloned().unwrap_or_else(|| serde_json::json!({})),
+        // サブウィンドウのシェルだけに入る（常駐ウィンドウは null）。アプリは `oretachi.subWindow.info` で読む
+        "subWindow": crate::app_subwindow::info_for_label(&app, window.label()),
     }))
 }
 
@@ -1498,7 +1518,7 @@ mod tests {
     use crate::app_manifest::{MemoryPermission, RequestedPermissions};
 
     fn perms(max: u64) -> RequestedPermissions {
-        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None, db: None, network: None }
+        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None, db: None, network: None, sub_window: None }
     }
 
     #[test]
