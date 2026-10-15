@@ -99,7 +99,9 @@ const srcdoc = computed(() =>
 function applyWindowBackground(b: Bootstrap) {
   const transparent = b.subWindow?.transparent === true;
   const bg = transparent ? "transparent" : "#1e1e2e";
-  document.documentElement.style.background = transparent ? "transparent" : "";
+  // styles.css は `html, body { background: var(--bg-base) !important }` なので、インラインの指定では
+  // 上書きできない。`transparent-mode`（--bg-base を透明にする）で透かす
+  document.documentElement.classList.toggle("transparent-mode", transparent);
   document.body.style.background = bg;
 }
 

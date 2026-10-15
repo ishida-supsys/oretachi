@@ -155,7 +155,7 @@ artifact_file(command: "delete", id: "<アプリ id>", project_dir: <作業デ�
 
 ## サブウィンドウ API（`subWindow`）
 
-`subWindow` を承認されたアプリだけが、`const { subWindow } = require('oretachi')` で使える。**開いたウィンドウの中では、同じアプリのコードがもう 1 つ動く**（別の HTML を指定するのではない）。`subWindow.info` が `null` なら常駐ウィンドウ側、非 null（`{ id, params }`）なら開かれたウィンドウ側なので、それで描き分ける。メモリー・`fs`・`db`・`net`・`aiTerminal` などは、どちらのウィンドウからも同じ承認で呼べる（メモリーはアプリ全体で 1 つ。2 つのウィンドウから書くと後勝ちなので、書く側を片方に決めると安全）。
+`subWindow` を承認されたアプリだけが、`const { subWindow } = require('oretachi')` で使える。**開いたウィンドウの中では、同じアプリのコードがもう 1 つ動く**（別の HTML を指定するのではない）。`subWindow.info` が `null` なら常駐ウィンドウ側、非 null（`{ id, params }`）なら開かれたウィンドウ側なので、それで描き分ける。メモリー・`fs`・`db`・`net`・`aiTerminal` などは、どちらのウィンドウからも同じ承認で呼べる（メモリーはアプリ全体で 1 つで、書き込みは全置換。2 つのウィンドウが別のキーを同時に書くと後勝ちで片方が消えるので、書く側を片方に決めると安全）。
 
 | 呼び出し | 内容 |
 |---|---|

@@ -314,10 +314,19 @@ pub fn on_instance_released(app: &AppHandle, parent: &str) {
 
 /// 再承認で権限セットが入れ替わった。新しい権限に収まらないウィンドウを閉じる（残りは維持する）。
 pub fn on_grant_replaced(app: &AppHandle, parent: &str) {
-    let entries: Vec<(String, SubEntry)> = with_inner(app, |i| {
+    let mut entries: Vec<(String, SubEntry)> = with_inner(app, |i| {
         i.by_label.iter().filter(|(_, e)| e.parent == parent).map(|(l, e)| (l.clone(), e.clone())).collect()
     })
     .unwrap_or_default();
+    // ユーザーのリサイズで記録とずれているので、実寸（論理ピクセル）で判定する
+    for (label, e) in entries.iter_mut() {
+        if let Some(w) = app.get_webview_window(label) {
+            if let (Ok(size), Ok(scale)) = (w.inner_size(), w.scale_factor()) {
+                e.width = (size.width as f64 / scale).round() as u32;
+                e.height = (size.height as f64 / scale).round() as u32;
+            }
+        }
+    }
     let Some((_, first)) = entries.first() else { return };
     let perm = app
         .state::<AppGrantStore>()
@@ -416,6 +425,12 @@ pub async fn app_subwindow_open(
         Ok(r) => r,
         Err(e) => return denied(&app, &ctx, "open", e),
     };
+    // 枠を確保した後でもう一度、インスタンスが生きているかを見る。`release` は先にインスタンスを外してから
+    // `on_instance_released` を呼ぶので、この検査が通れば、以後の停止は `on_instance_released` が掃除する
+    if crate::app_instance::context_for_label(&app, &ctx.instance_label).is_err() {
+        with_inner(&app, |i| i.by_label.remove(&label));
+        return Err("アプリが停止したためサブウィンドウを開きませんでした".to_string());
+    }
 
     let app_name = crate::app_instance::instance_app_name(&app, &ctx);
     // タイトルには必ずアプリ名を付ける（枠なしでもタスクバーで、どのアプリのウィンドウか分かる）
@@ -448,11 +463,11 @@ pub async fn app_subwindow_open(
         with_inner(&app, |i| i.by_label.remove(&label));
         return denied(&app, &ctx, "open", format!("サブウィンドウを作れませんでした: {}", e));
     }
-    // 作っている間にインスタンスが止まっていたら、孤児にしない
+    // 作っている間に、停止された（管理から外されて破棄待ち）か、ユーザーに閉じられたら、孤児にしない
     let still_owned = with_inner(&app, |i| i.by_label.contains_key(&label)).unwrap_or(false);
     if !still_owned {
         destroy(&app, &label);
-        return Err("アプリが停止したためサブウィンドウを開きませんでした".to_string());
+        return Err("サブウィンドウは開いた直後に閉じられました（アプリの停止かユーザー操作）".to_string());
     }
     crate::app_instance::add_log(
         &app,
