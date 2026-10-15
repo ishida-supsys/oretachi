@@ -72,13 +72,17 @@ function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
 }
 
-function reply(request: ArtifactBridgeRequest, outcome: { ok: true; result?: unknown } | { ok: false; error: string }) {
-  postArtifactBridgeResult(frame.value, request.requestId, outcome, nonce.value);
-}
-
 let flushWaiter: (() => void) | null = null;
 
+// onMessage から同期で呼ぶこと（受信時点の nonce を捕捉するため）
 async function handleBridgeRequest(request: ArtifactBridgeRequest) {
+  // 応答に載せる nonce は**リクエストを受けた時点**のもの。返信時の nonce.value だと、待っている間に
+  // リロードされたとき旧文書宛の応答が新文書の nonce を付けて届き、新文書の同じ requestId の待ちを解いてしまう
+  const docNonce = nonce.value;
+  const reply = (
+    req: ArtifactBridgeRequest,
+    outcome: { ok: true; result?: unknown } | { ok: false; error: string },
+  ) => postArtifactBridgeResult(frame.value, req.requestId, outcome, docNonce);
   if (request.method === ARTIFACT_BRIDGE_METHOD_FLUSHED) {
     // 応答は返さない（リロード前の flush の完了通知）
     flushWaiter?.();
@@ -186,10 +190,13 @@ async function doReload() {
 
 /** MCP の `artifact_store` が外からメモリーを書き換えたので、iframe へ押し込む（応答の無い一方向通知） */
 async function pushExternalMemory() {
-  if (!nonce.value) return;
+  const docNonce = nonce.value;
+  if (!docNonce) return;
   try {
     const memory = await invoke<Record<string, unknown>>("app_get_memory");
-    postArtifactBridgeMemoryChanged(frame.value, memory, nonce.value);
+    // 読んでいる間にリロードされたなら捨てる（新文書は新しい bootstrap で最新を読んでいる）
+    if (docNonce !== nonce.value) return;
+    postArtifactBridgeMemoryChanged(frame.value, memory, docNonce);
   } catch {
     // memory 権限が無いアプリには押し込まない（Rust が拒否する）
   }

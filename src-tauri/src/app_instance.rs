@@ -1008,6 +1008,25 @@ pub async fn on_artifact_changed(app: &AppHandle, worktree_id: &str, artifact_id
         );
         return;
     }
+    // 権限が変わっているのに再承認の保留が立っていない（権限の解決に失敗した等）なら、リロードしない。
+    // 旧権限のまま新しいコードを動かさないため（関門は保存済みの grant だけを見るので迂回にはならない）
+    let unchanged = match (
+        read_app_artifact(app, worktree_id, artifact_id),
+        app.state::<AppGrantStore>().get(worktree_id, artifact_id),
+    ) {
+        (Ok(art), Some(saved)) => !app_manifest::requested_changed(&saved.requested, &art.manifest.permissions),
+        _ => false,
+    };
+    if !unchanged {
+        add_log(
+            app,
+            worktree_id,
+            artifact_id,
+            "warn",
+            "権限の再承認を要求できなかったか manifest を読めないため、リロードしません（旧版のまま継続）",
+        );
+        return;
+    }
     request_reload(app, &label, "コードの更新");
 }
 
