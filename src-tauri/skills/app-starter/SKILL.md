@@ -118,6 +118,22 @@ await fs.remove('artifact://data/cache.bin');                         // ファ�
 - 書き込みは一時ファイル経由の置き換えで、途中で落ちても壊れたファイルは残らない。`createDirs` を付けないと、親ディレクトリが無いときは失敗する。
 - **ファイルの中身は信頼しない入力として扱う**（ワークツリーのファイルは AI や他のツールが書ける）。
 
+## wasm の実行
+
+専用の API は無い。`fs.readBytes` で wasm のバイト列を読み、iframe の中で `WebAssembly.instantiate` する。Rust 側のランタイムは使わず、CSP（`script-src 'unsafe-inline' 'unsafe-eval'`）のままで動く（`connect-src` は `'none'` のまま。バイト列から instantiate するので fetch は要らない）。
+
+```js
+import { fs } from 'oretachi';
+const bytes = await fs.readBytes('artifact://engine.wasm');   // manifest の fs.read に artifact:// が必要
+const { instance } = await WebAssembly.instantiate(bytes, { env: { log: (n) => console.log(n) } });
+instance.exports.add(2, 3);
+```
+
+- `readBytes` は 1 回 8MiB まで。それを超える wasm は読めない（`artifact_file put` は 32MB まで置けるが、アプリから読めるのは 8MiB まで）。
+- 読めるのは `fs.read` で承認された範囲の wasm だけ。範囲外のパスは `fs` が拒否する（wasm 側にファイルやネットワークのホスト関数は渡らない。`imports` に渡したものだけが呼べる）。
+- **`fetch('artifact://…')` や `WebAssembly.instantiateStreaming` は使えない**（CSP で外部通信を塞いでいる）。必ず `readBytes` → `instantiate` にする。
+- wasm はアプリのコードと同じ sandbox iframe の中で動く。fuel やメモリ上限は掛からないので、無限ループはそのインスタンスの iframe を固めうる（固まったときの回復は再読み込みやインスタンスの停止になる。実機では未検証）。信頼できない wasm は動かさないこと。
+
 ## 同梱バイナリを `artifact://` へ置く（`artifact_file`）
 
 wasm や初期 DB のようなバイナリは、`artifact` / `artifact_module` の `file_path`（UTF-8 テキスト 1MB まで）では渡せない。`artifact_file` でスキル同梱のファイルを `artifact://` へコピーする（1 ファイル 32MB まで）。コピー元に読めるのは、ワークツリー追加先ディレクトリ配下と oretachi プラグインディレクトリ配下だけ。
