@@ -340,34 +340,84 @@ fn canonicalize_allow_missing_tail(path: &Path) -> Result<PathBuf, String> {
     }
 }
 
+/// 解決の失敗。スコープの外か、それ以外（不正なパス・ルートの変化・既定拒否など）か。
+/// DB の解決が「Write で外れたら Read を試す」ために区別する。
+#[derive(Debug)]
+struct ScopeError {
+    out_of_scope: bool,
+    message: String,
+}
+
+impl ScopeError {
+    fn other(message: String) -> Self {
+        Self { out_of_scope: false, message }
+    }
+}
+
 /// `uri` を、承認されたスコープの範囲内の**実パス**へ解決する。範囲外・不正は `Err`。
 ///
 /// 返すパスは `canonicalize` 済みの形で、呼び出し側はこれに対して I/O する（生の結合パスを使わない）。
 pub(crate) fn resolve_scoped_path(fs: &ResolvedFs, uri: &str, access: Access) -> Result<PathBuf, String> {
-    let (scheme, comps) = split_uri(uri)?;
+    resolve_scoped_inner(fs, uri, access, false).map_err(|e| e.message)
+}
+
+/// DB ファイルの置き場所を解決する。戻りの `bool` は**書き込み可で開くか**。
+///
+/// 読み書きの区別は API のメソッドでは付けられない（`query` でも `INSERT … RETURNING` は書ける）ので、
+/// 開くときのフラグで強制する。先に Write のスコープで解決し、該当すれば読み書き・作成可。外れたら
+/// Read のスコープで解決し、読み取り専用で開く。既定拒否パスは read でも掛ける
+/// （DB の副産物の `-journal` / `-wal` が同じディレクトリに出るため）。
+pub(crate) fn resolve_db_path(fs: &ResolvedFs, uri: &str) -> Result<(PathBuf, bool), String> {
+    match resolve_scoped_inner(fs, uri, Access::Write, true) {
+        Ok(p) => Ok((p, true)),
+        Err(e) if e.out_of_scope => resolve_scoped_inner(fs, uri, Access::Read, true)
+            .map(|p| (p, false))
+            .map_err(|e| {
+                if e.out_of_scope {
+                    format!("'{}' は承認された範囲の外です", uri)
+                } else {
+                    e.message
+                }
+            }),
+        Err(e) => Err(e.message),
+    }
+}
+
+fn resolve_scoped_inner(
+    fs: &ResolvedFs,
+    uri: &str,
+    access: Access,
+    sensitive_on_read: bool,
+) -> Result<PathBuf, ScopeError> {
+    let (scheme, comps) = split_uri(uri).map_err(ScopeError::other)?;
     let root = match scheme {
         Scheme::Worktree => fs.worktree_root.as_deref(),
         Scheme::Artifact => fs.artifact_root.as_deref(),
     }
-    .ok_or_else(|| format!("このアプリには {}// の権限が承認されていません", scheme.name()))?;
+    .ok_or_else(|| ScopeError::other(format!("このアプリには {}// の権限が承認されていません", scheme.name())))?;
     let root = Path::new(root);
 
     // ルートが承認時から動いていない（移動・削除・差し替えされていない）こと。
     // 無いルートの下へ書くと、ワークツリーのディレクトリごと作り直してしまう
-    let live_root = std::fs::canonicalize(root)
-        .map_err(|e| format!("{}// のルートを解決できません（移動または削除された可能性があります）: {}", scheme.name(), e))?;
+    let live_root = std::fs::canonicalize(root).map_err(|e| {
+        ScopeError::other(format!(
+            "{}// のルートを解決できません（移動または削除された可能性があります）: {}",
+            scheme.name(),
+            e
+        ))
+    })?;
     if live_root != root {
-        return Err(format!(
+        return Err(ScopeError::other(format!(
             "{}// のルートが承認時から変わっています。アプリを再承認してください",
             scheme.name()
-        ));
+        )));
     }
 
     let mut lexical = root.to_path_buf();
     for c in &comps {
         lexical.push(c);
     }
-    let canonical = canonicalize_allow_missing_tail(&lexical)?;
+    let canonical = canonicalize_allow_missing_tail(&lexical).map_err(ScopeError::other)?;
 
     let want_write = access == Access::Write;
     let in_scope = fs
@@ -375,26 +425,31 @@ pub(crate) fn resolve_scoped_path(fs: &ResolvedFs, uri: &str, access: Access) ->
         .iter()
         .any(|s| s.scheme == scheme.name() && s.write == want_write && canonical.starts_with(&s.path));
     if !in_scope {
-        return Err(format!(
-            "'{}' は承認された{}範囲の外です",
-            uri,
-            if want_write { "書き込み" } else { "読み取り" }
-        ));
+        return Err(ScopeError {
+            out_of_scope: true,
+            message: format!(
+                "'{}' は承認された{}範囲の外です",
+                uri,
+                if want_write { "書き込み" } else { "読み取り" }
+            ),
+        });
     }
 
-    if want_write && scheme == Scheme::Worktree && !fs.allow_sensitive_paths {
+    if (want_write || sensitive_on_read) && scheme == Scheme::Worktree && !fs.allow_sensitive_paths {
         let rel = canonical
             .strip_prefix(root)
-            .map_err(|_| format!("'{}' は承認された書き込み範囲の外です", uri))?;
+            .map_err(|_| ScopeError::other(format!("'{}' は承認された範囲の外です", uri)))?;
         if let Some(hit) = rel
             .components()
             .map(|c| c.as_os_str().to_string_lossy())
             .find(|c| is_sensitive_name(c))
         {
-            return Err(format!(
-                "'{}' は既定で書き込みを拒否するパス（{}）を含みます。manifest の fs.allowSensitivePaths を承認された場合だけ書けます",
-                uri, hit
-            ));
+            return Err(ScopeError::other(format!(
+                "'{}' は既定で{}を拒否するパス（{}）を含みます。manifest の allowSensitivePaths を承認された場合だけ使えます",
+                uri,
+                if want_write && !sensitive_on_read { "書き込み" } else { "DB の置き場所にすること" },
+                hit
+            )));
         }
     }
     Ok(canonical)

@@ -118,8 +118,8 @@ mod tests {
     fn grant(max: u64) -> AppGrant {
         AppGrant {
             granted_at: 1,
-            requested: RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), fs: None },
-            resolved: ResolvedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), fs: None },
+            requested: RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), fs: None, db: None },
+            resolved: ResolvedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), fs: None, db: None },
         }
     }
 

@@ -144,6 +144,68 @@ describe("buildPermissionView", () => {
     });
   });
 
+  describe("db", () => {
+    const scope = (scheme: "worktree" | "artifact", prefix: string, path: string, write: boolean) => ({
+      scheme,
+      prefix,
+      path,
+      write,
+    });
+
+    it("shows resolved absolute paths; a read scope is normal and a write scope is danger", () => {
+      const perm: AppResolvedPermissions = {
+        db: {
+          worktreeRoot: String.raw`\\?\C:\wt`,
+          scopes: [
+            scope("worktree", "ro/", String.raw`\\?\C:\wt\ro`, false),
+            scope("worktree", "data/", String.raw`\\?\C:\wt\data`, true),
+          ],
+          allowSensitivePaths: false,
+        },
+      };
+      const v = buildPermissionView(perm, null, DANGEROUS);
+      expect(v.rows.map((r) => [r.kind, r.access, r.label, r.severity])).toEqual([
+        ["db", "read", String.raw`C:\wt\ro`, "normal"],
+        ["db", "write", String.raw`C:\wt\data`, "danger"],
+      ]);
+      expect(v.hasDanger).toBe(true);
+      expect(v.hasCritical).toBe(false);
+    });
+
+    it("keeps db and fs rows apart even for the same path", () => {
+      const same = { scopes: [scope("artifact", "", "/data/a", true)], allowSensitivePaths: false };
+      const v = buildPermissionView({ fs: same, db: same }, null, DANGEROUS);
+      expect(v.rows.map((r) => r.kind)).toEqual(["fs", "db"]);
+      // db を新しく申請したときは、fs が同じでも db の行だけが「追加」になる
+      const w = buildPermissionView({ fs: same, db: same }, { fs: same }, DANGEROUS);
+      expect(w.rows.filter((r) => r.added).map((r) => r.kind)).toEqual(["db"]);
+    });
+
+    it("treats lifting the sensitive-path denylist for db as the strongest warning", () => {
+      const perm: AppResolvedPermissions = {
+        db: { scopes: [scope("worktree", "", "/home/u/wt", false)], allowSensitivePaths: true },
+      };
+      const v = buildPermissionView(perm, null, DANGEROUS);
+      expect(v.rows.map((r) => [r.kind, r.severity])).toEqual([
+        ["db", "normal"],
+        ["dbSensitive", "critical"],
+      ]);
+      expect(v.hasCritical).toBe(true);
+    });
+
+    it("lists a narrowed db scope as removed", () => {
+      const before: AppResolvedPermissions = {
+        db: { scopes: [scope("artifact", "", "/data/a", true)], allowSensitivePaths: true },
+      };
+      const after: AppResolvedPermissions = {
+        db: { scopes: [scope("artifact", "", "/data/a", false)], allowSensitivePaths: false },
+      };
+      const v = buildPermissionView(after, before, DANGEROUS);
+      expect(v.removed.map((r) => r.kind).sort()).toEqual(["db", "dbSensitive"]);
+      expect(v.rows.filter((r) => r.added).map((r) => r.access)).toEqual(["read"]);
+    });
+  });
+
   describe("displayFsPath", () => {
     it("strips the Windows extended-length prefixes for display only", () => {
       expect(displayFsPath(String.raw`\\?\C:\x\y`)).toBe(String.raw`C:\x\y`);

@@ -16,8 +16,7 @@ use std::collections::BTreeSet;
 
 /// 将来の sub-issue が受理するようになる権限キー。#370 の時点では「未対応」として manifest 不正扱い
 /// にする（黙って無視すると、申請したつもりの権限が効かないまま承認だけ通ることになる）。
-const RESERVED_PERMISSION_KEYS: &[&str] =
-    &["db", "network", "subWindow", "wasm", "aiTerminal"];
+const RESERVED_PERMISSION_KEYS: &[&str] = &["network", "subWindow", "wasm", "aiTerminal"];
 
 const MAX_NAME_CHARS: usize = 100;
 const MAX_DESCRIPTION_CHARS: usize = 500;
@@ -93,6 +92,10 @@ pub struct RequestedPermissions {
     pub memory: Option<MemoryPermission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fs: Option<RequestedFs>,
+    /// manifest の `db`。形は `fs` と同じ（DB ファイルの置き場所のスコープ）。read のスコープの DB は
+    /// 読み取り専用で開く。`allowSensitivePaths` は read / write の両方の既定拒否を解く
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db: Option<RequestedFs>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -132,6 +135,8 @@ pub struct ResolvedPermissions {
     pub memory: Option<MemoryPermission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fs: Option<ResolvedFs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db: Option<ResolvedFs>,
 }
 
 /// host 側に保存する承認。キーはアーティファクト識別子（`<worktreeId>/<artifactId>`）。
@@ -230,7 +235,8 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
         match key.as_str() {
             "mcp" => out.mcp = parse_mcp(val)?,
             "memory" => out.memory = parse_memory(val)?,
-            "fs" => out.fs = parse_fs(val)?,
+            "fs" => out.fs = parse_scoped(val, ScopedKind::Fs)?,
+            "db" => out.db = parse_scoped(val, ScopedKind::Db)?,
             k if RESERVED_PERMISSION_KEYS.contains(&k) => {
                 return Err(format!(
                     "権限 '{}' はこの版ではまだ使えません（対応する機能が未実装です）。manifest から外してください",
@@ -239,7 +245,7 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
             }
             other => {
                 return Err(format!(
-                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs だけです",
+                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs / db だけです",
                     other
                 ));
             }
@@ -343,27 +349,48 @@ pub fn check_memory_size(memory: &serde_json::Value, max_bytes: u64) -> Result<u
     Ok(size)
 }
 
-fn parse_fs(v: &serde_json::Value) -> Result<Option<RequestedFs>, String> {
-    let obj = expect_object(v, "app.permissions.fs")?;
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScopedKind {
+    Fs,
+    Db,
+}
+
+impl ScopedKind {
+    fn key(self) -> &'static str {
+        match self {
+            ScopedKind::Fs => "fs",
+            ScopedKind::Db => "db",
+        }
+    }
+}
+
+/// `fs` と `db` の共通の解析。どちらも `read` / `write` のスコープと `allowSensitivePaths` を持つ。
+///
+/// 既定拒否パスの事前検査だけ違う: `fs` は write のスコープだけ、`db` は read も対象にする
+/// （DB ファイルの置き場所としても使えない。読み取り専用で開いても、同じディレクトリに副産物ができる）。
+fn parse_scoped(v: &serde_json::Value, kind: ScopedKind) -> Result<Option<RequestedFs>, String> {
+    let key_name = kind.key();
+    let what = format!("app.permissions.{}", key_name);
+    let obj = expect_object(v, &what)?;
     if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "read" | "write" | "allowSensitivePaths")) {
         return Err(format!(
-            "app.permissions.fs の未知のキー '{}' です（read / write / allowSensitivePaths だけ）",
-            k
+            "{} の未知のキー '{}' です（read / write / allowSensitivePaths だけ）",
+            what, k
         ));
     }
     let allow_sensitive_paths = match obj.get("allowSensitivePaths") {
         None | Some(serde_json::Value::Null) => false,
         Some(serde_json::Value::Bool(b)) => *b,
-        Some(_) => return Err("app.permissions.fs.allowSensitivePaths は真偽値である必要があります".to_string()),
+        Some(_) => return Err(format!("{}.allowSensitivePaths は真偽値である必要があります", what)),
     };
     let normalize = |key: &str| -> Result<Vec<String>, String> {
-        let raw = string_list(obj, key, &format!("app.permissions.fs.{}", key))?;
+        let raw = string_list(obj, key, &format!("{}.{}", what, key))?;
         let mut set = BTreeSet::new();
         for item in &raw {
             set.insert(crate::app_fs::normalize_scope(item)?);
         }
         if set.len() > MAX_FS_SCOPES {
-            return Err(format!("app.permissions.fs.{} は {} 件までです", key, MAX_FS_SCOPES));
+            return Err(format!("{}.{} は {} 件までです", what, key, MAX_FS_SCOPES));
         }
         Ok(set.into_iter().collect())
     };
@@ -371,16 +398,27 @@ fn parse_fs(v: &serde_json::Value) -> Result<Option<RequestedFs>, String> {
     let write = normalize("write")?;
     if read.is_empty() && write.is_empty() {
         if allow_sensitive_paths {
-            return Err("app.permissions.fs.allowSensitivePaths は read / write と一緒に指定してください".to_string());
+            return Err(format!("{}.allowSensitivePaths は read / write と一緒に指定してください", what));
         }
         return Ok(None);
     }
     if !allow_sensitive_paths {
-        // 承認ダイアログへ行く前に、書けないと分かっている申請は manifest 不正として返す
-        if let Some(s) = write.iter().find(|s| crate::app_fs::scope_hits_sensitive(s)) {
+        // 承認ダイアログへ行く前に、使えないと分かっている申請は manifest 不正として返す
+        let checked: Vec<(&str, &String)> = match kind {
+            ScopedKind::Fs => write.iter().map(|s| ("write", s)).collect(),
+            ScopedKind::Db => read
+                .iter()
+                .map(|s| ("read", s))
+                .chain(write.iter().map(|s| ("write", s)))
+                .collect(),
+        };
+        if let Some((list, s)) = checked.into_iter().find(|(_, s)| crate::app_fs::scope_hits_sensitive(s)) {
             return Err(format!(
-                "app.permissions.fs.write の '{}' は既定で書き込みを拒否するパス（{}）を含みます。本当に必要なら allowSensitivePaths: true を指定してください（承認ダイアログで最も強い警告が出ます）",
+                "{}.{} の '{}' は既定で{}を拒否するパス（{}）を含みます。本当に必要なら allowSensitivePaths: true を指定してください（承認ダイアログで最も強い警告が出ます）",
+                what,
+                list,
                 s,
+                if kind == ScopedKind::Db { "DB の置き場所にすること" } else { "書き込み" },
                 crate::app_fs::SENSITIVE_NAMES.join(" / ")
             ));
         }
@@ -681,6 +719,73 @@ mod tests {
     }
 
     #[test]
+    fn legacy_grant_without_db_deserializes_as_no_db() {
+        // #373 までに保存された grant（db キー無し）は、DB 権限なしとして読める
+        let raw = r#"{"grantedAt":1,"requested":{"fs":{"read":[],"write":["artifact://"]}},"resolved":{"memory":{"maxBytes":10}}}"#;
+        let g: AppGrant = serde_json::from_str(raw).unwrap();
+        assert!(g.resolved.db.is_none() && g.requested.db.is_none());
+        assert!(g.requested.fs.is_some());
+    }
+
+    #[test]
+    fn db_scopes_are_normalized_like_fs_and_kept_separate_from_fs() {
+        let m = ok(json!({ "name": "x", "permissions": {
+            "db": { "read": ["worktree://ro\\"], "write": ["artifact://", "artifact://"] }
+        }}));
+        let db = m.permissions.db.unwrap();
+        assert_eq!(db.read, vec!["worktree://ro/"]);
+        assert_eq!(db.write, vec!["artifact://"]);
+        assert!(!db.allow_sensitive_paths);
+        // fs の申請とは独立（db を申請しても fs の権限にはならない）
+        assert!(m.permissions.fs.is_none());
+    }
+
+    #[test]
+    fn db_rejects_raw_paths_unknown_keys_and_lone_flag() {
+        for bad in [
+            json!({ "read": ["/etc/x.db"] }),
+            json!({ "write": ["C:/x.db"] }),
+            json!({ "write": ["worktree://../x"] }),
+            json!({ "write": ["artifact://"], "mode": "rw" }),
+            json!({ "allowSensitivePaths": true }),
+        ] {
+            // パスの不正はパス側のメッセージ、キーの不正は app.permissions.db 付きのメッセージで返る
+            let e = err(json!({ "name": "x", "permissions": { "db": bad.clone() }}));
+            assert!(!e.is_empty(), "{bad}");
+        }
+        let e = err(json!({ "name": "x", "permissions": { "db": { "mode": "rw" } }}));
+        assert!(e.contains("app.permissions.db"), "{e}");
+        let e = err(json!({ "name": "x", "permissions": { "db": { "allowSensitivePaths": true } }}));
+        assert!(e.contains("app.permissions.db"), "{e}");
+        // 空は権限なし
+        assert!(ok(json!({ "name": "x", "permissions": { "db": {} }})).permissions.db.is_none());
+    }
+
+    #[test]
+    fn db_sensitive_paths_are_refused_even_for_read() {
+        // fs は read なら既定拒否パスでも申請できるが、db は read でも不可（副産物が同じ場所に出る）
+        assert!(parse_manifest(&json!({ "name": "x", "permissions": { "fs": { "read": ["worktree://.git/"] } }})).is_ok());
+        for list in ["read", "write"] {
+            let e = err(json!({ "name": "x", "permissions": { "db": { list: ["worktree://.git/"] } }}));
+            assert!(e.contains("allowSensitivePaths") && e.contains(&format!("db.{}", list)), "{list}: {e}");
+        }
+        let m = ok(json!({ "name": "x", "permissions": {
+            "db": { "read": ["worktree://.git/"], "allowSensitivePaths": true }
+        }}));
+        assert!(m.permissions.db.unwrap().allow_sensitive_paths);
+    }
+
+    #[test]
+    fn db_change_requires_reapproval() {
+        let a = ok(json!({ "name": "x", "permissions": { "db": { "write": ["artifact://"] } }}));
+        let b = ok(json!({ "name": "x", "permissions": { "db": { "write": ["artifact://data/"] } }}));
+        let none = ok(json!({ "name": "x" }));
+        assert!(requested_changed(&a.permissions, &b.permissions));
+        assert!(requested_changed(&a.permissions, &none.permissions));
+        assert!(!requested_changed(&a.permissions, &a.permissions.clone()));
+    }
+
+    #[test]
     fn legacy_artifact_without_app_is_none() {
         let raw = r#"{"id":"a","type":"application/vnd.ant.react","title":"t","content":"c","created_at":1,"updated_at":1}"#;
         let value: serde_json::Value = serde_json::from_str(raw).unwrap();
@@ -703,6 +808,7 @@ mod tests {
             }),
             memory: None,
             fs: None,
+            db: None,
         }
     }
 
@@ -738,6 +844,7 @@ mod tests {
                 mcp: Some(RequestedMcp { tools: vec!["notify_worktree".into()], targets: vec!["wt-b".into()] }),
                 memory: Some(MemoryPermission { max_bytes: 10 }),
                 fs: None,
+                db: None,
             },
             resolved: resolved(&["notify_worktree"], &["wt-b"]),
         };

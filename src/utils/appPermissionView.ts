@@ -1,11 +1,11 @@
-import type { AppResolvedPermissions } from "../types/appInstance";
+import type { AppResolvedFs, AppResolvedPermissions } from "../types/appInstance";
 
 /**
  * 承認ダイアログに並べる権限の行を組み立てる純関数（描画は呼び出し側）。
  *
  * - `critical`: 最も強い警告。ワイルドカードの越境先（今後作られるワークツリーも含み、メインの
- *   クローンの端末にも届く）と、FS の既定拒否パス解除（`.git/hooks` などへ書けるので任意コード実行になる）。
- * - `danger`: ユーザーと同等の権限（任意コマンド実行）になりうるツールと、ファイルの書き込み。
+ *   クローンの端末にも届く）と、FS / DB の既定拒否パス解除（`.git/hooks` などへ書けるので任意コード実行になる）。
+ * - `danger`: ユーザーと同等の権限（任意コマンド実行）になりうるツールと、ファイル・DB の書き込み。
  * - `normal`: それ以外。
  *
  * 再承認のときは、直前に有効だった権限との差分（追加された行・外れた行）を出す。
@@ -15,15 +15,18 @@ import type { AppResolvedPermissions } from "../types/appInstance";
 export type PermissionSeverity = "normal" | "danger" | "critical";
 
 export interface PermissionRow {
-  /** `fs`: FS のスコープ 1 件（`access` と、解決済みの絶対パス `label`）。`fsSensitive`: 既定拒否パスの解除 */
-  kind: "tool" | "target" | "memory" | "fs" | "fsSensitive";
-  /** ツール名 / 越境先の `stored` / `maxBytes` の文字列 / FS は `<read|write>:<scheme>:<絶対パス>` */
+  /**
+   * `fs` / `db`: FS・DB のスコープ 1 件（`access` と、解決済みの絶対パス `label`。DB の read は読み取り専用）。
+   * `fsSensitive` / `dbSensitive`: 既定拒否パスの解除
+   */
+  kind: "tool" | "target" | "memory" | "fs" | "fsSensitive" | "db" | "dbSensitive";
+  /** ツール名 / 越境先の `stored` / `maxBytes` の文字列 / FS・DB は `<read|write>:<scheme>:<絶対パス>` */
   value: string;
-  /** 越境先のときの表示名 / FS のときの表示用の絶対パス */
+  /** 越境先のときの表示名 / FS・DB のときの表示用の絶対パス */
   label: string;
-  /** `fs` 行のアクセス種別 */
+  /** `fs` / `db` 行のアクセス種別 */
   access?: "read" | "write";
-  /** `fs` 行のスキーム（`worktree://` / `artifact://` のどちらの領域か） */
+  /** `fs` / `db` 行のスキーム（`worktree://` / `artifact://` のどちらの領域か） */
   scheme?: "worktree" | "artifact";
   severity: PermissionSeverity;
   /** 越境先がワイルドカードか（承認後に作られるワークツリーにも当たる） */
@@ -87,30 +90,36 @@ function rowsOf(perm: AppResolvedPermissions, dangerous: ReadonlySet<string>): P
       added: false,
     });
   }
-  if (perm.fs) {
-    for (const s of perm.fs.scopes) {
-      const shown = displayFsPath(s.path);
-      rows.push({
-        kind: "fs",
-        value: `${s.write ? "write" : "read"}:${s.scheme}:${s.path}`,
-        label: shown,
-        access: s.write ? "write" : "read",
-        scheme: s.scheme,
-        severity: s.write ? "danger" : "normal",
-        wildcard: false,
-        added: false,
-      });
-    }
-    if (perm.fs.allowSensitivePaths) {
-      rows.push({
-        kind: "fsSensitive",
-        value: "allowSensitivePaths",
-        label: "allowSensitivePaths",
-        severity: "critical",
-        wildcard: false,
-        added: false,
-      });
-    }
+  if (perm.fs) rows.push(...scopeRows(perm.fs, "fs", "fsSensitive"));
+  if (perm.db) rows.push(...scopeRows(perm.db, "db", "dbSensitive"));
+  return rows;
+}
+
+/** FS / DB のスコープの行（両者は同じ形で、種別だけ違う） */
+function scopeRows(
+  scoped: AppResolvedFs,
+  kind: "fs" | "db",
+  sensitiveKind: "fsSensitive" | "dbSensitive",
+): PermissionRow[] {
+  const rows: PermissionRow[] = scoped.scopes.map((s) => ({
+    kind,
+    value: `${s.write ? "write" : "read"}:${s.scheme}:${s.path}`,
+    label: displayFsPath(s.path),
+    access: s.write ? "write" : "read",
+    scheme: s.scheme,
+    severity: s.write ? "danger" : "normal",
+    wildcard: false,
+    added: false,
+  }));
+  if (scoped.allowSensitivePaths) {
+    rows.push({
+      kind: sensitiveKind,
+      value: "allowSensitivePaths",
+      label: "allowSensitivePaths",
+      severity: "critical",
+      wildcard: false,
+      added: false,
+    });
   }
   return rows;
 }

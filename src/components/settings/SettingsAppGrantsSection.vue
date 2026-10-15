@@ -55,6 +55,10 @@ function summary(item: AppGrantListItem): string {
   const fsWrite = v.rows.filter((r) => r.kind === "fs" && r.access === "write").length;
   if (fsRead + fsWrite > 0) parts.push(t("summaryFs", { read: fsRead, write: fsWrite }));
   if (v.rows.some((r) => r.kind === "fsSensitive")) parts.push(t("summaryFsSensitive"));
+  const dbRead = v.rows.filter((r) => r.kind === "db" && r.access === "read").length;
+  const dbWrite = v.rows.filter((r) => r.kind === "db" && r.access === "write").length;
+  if (dbRead + dbWrite > 0) parts.push(t("summaryDb", { read: dbRead, write: dbWrite }));
+  if (v.rows.some((r) => r.kind === "dbSensitive")) parts.push(t("summaryDbSensitive"));
   return parts.length > 0 ? parts.join(" / ") : t("summaryNone");
 }
 
@@ -179,6 +183,8 @@ onBeforeUnmount(() => {
     "summaryMemory": "memory {bytes} B",
     "summaryFs": "files (read {read} / write {write})",
     "summaryFsSensitive": "writes to hook/workflow files",
+    "summaryDb": "databases (read-only {read} / read-write {write})",
+    "summaryDbSensitive": "databases in hook/workflow locations",
     "summaryNone": "no permissions"
   },
   "ja": {
@@ -199,6 +205,8 @@ onBeforeUnmount(() => {
     "summaryMemory": "メモリー {bytes} B",
     "summaryFs": "ファイル（読 {read} / 書 {write}）",
     "summaryFsSensitive": "フック・ワークフローのファイルへの書き込み",
+    "summaryDb": "データベース（読み取り専用 {read} / 読み書き {write}）",
+    "summaryDbSensitive": "フック・ワークフローの場所のデータベース",
     "summaryNone": "権限なし"
   }
 }

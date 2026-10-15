@@ -38,12 +38,15 @@ export interface AppResolvedPermissions {
   mcp?: { tools: string[]; targets: AppResolvedTarget[] };
   memory?: { maxBytes: number };
   fs?: AppResolvedFs;
+  /** DB ファイルの置き場所のスコープ（形は fs と同じ。read のスコープの DB は読み取り専用） */
+  db?: AppResolvedFs;
 }
 
 export interface AppRequestedPermissions {
   mcp?: { tools: string[]; targets: string[] };
   memory?: { maxBytes: number };
   fs?: { read: string[]; write: string[]; allowSensitivePaths: boolean };
+  db?: { read: string[]; write: string[]; allowSensitivePaths: boolean };
 }
 
 export interface AppGrant {

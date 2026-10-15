@@ -87,6 +87,20 @@ export const ARTIFACT_BRIDGE_METHOD_FS_WRITE = "fs.write";
 export const ARTIFACT_BRIDGE_METHOD_FS_LIST = "fs.list";
 export const ARTIFACT_BRIDGE_METHOD_FS_REMOVE = "fs.remove";
 
+/**
+ * アプリの SQLite API。DB ファイルの場所は FS と同じ `worktree://` / `artifact://` のパスで、
+ * 判定は Rust 側（`app_db`）。通常のビューアは処理しないので「使えない API」として失敗する。
+ *
+ * - `db.query`:   `{ path, sql, params? }` → `{ columns, rows }`（rows は行ごとの配列）
+ * - `db.execute`: `{ path, sql, params? }` → `{ rowsAffected, lastInsertRowid }`
+ * - `db.close`:   `{ path }` → 閉じたら true（接続は host が持つ。停止まで開いたままでもよい）
+ *
+ * params は null / 真偽値 / 数値 / 文字列 / `{ $blob: base64 }`。BLOB は結果でも `{ $blob: base64 }`。
+ */
+export const ARTIFACT_BRIDGE_METHOD_DB_QUERY = "db.query";
+export const ARTIFACT_BRIDGE_METHOD_DB_EXECUTE = "db.execute";
+export const ARTIFACT_BRIDGE_METHOD_DB_CLOSE = "db.close";
+
 /** 応答が返らないまま Promise が残り続けないようにするタイムアウト（iframe 側） */
 const BRIDGE_TIMEOUT_MS = 10000;
 /**
@@ -492,6 +506,21 @@ export const ARTIFACT_BRIDGE_JS =
   "      return fsPath(path)||call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_FS_REMOVE) + ",{path:path});" +
   "    }" +
   "  };" +
+  // ── データベース（アプリのみ。承認された範囲の外・禁止された SQL は Rust 側が拒否する）──
+  "  function dbCall(method,path,sql,params){" +
+  "    if(typeof path!=='string'||path==='')" +
+  "      return Promise.reject(new Error('db expects a path like worktree://dir/app.db or artifact://app.db'));" +
+  "    if(method!==" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_DB_CLOSE) + "&&typeof sql!=='string')" +
+  "      return Promise.reject(new Error('db expects an SQL string'));" +
+  "    if(params!=null&&!Array.isArray(params))" +
+  "      return Promise.reject(new Error('db params must be an array'));" +
+  "    return call(method,{path:path,sql:sql,params:params||[]});" +
+  "  }" +
+  "  var db={" +
+  "    query:function(path,sql,params){return dbCall(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_DB_QUERY) + ",path,sql,params);}," +
+  "    execute:function(path,sql,params){return dbCall(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_DB_EXECUTE) + ",path,sql,params);}," +
+  "    close:function(path){return dbCall(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_DB_CLOSE) + ",path);}" +
+  "  };" +
   "  window.__oretachi={" +
   "    getMemory:getMemory," +
   "    setMemory:setMemory," +
@@ -501,6 +530,7 @@ export const ARTIFACT_BRIDGE_JS =
   "    subscribeMemory:subscribe," +
   "    callTool:callTool," +
   "    fs:fs," +
+  "    db:db," +
   "    call:call" +
   "  };" +
   // `state` は setMemory ごとに別オブジェクトへ差し替わるので、スナップショットを

@@ -3648,6 +3648,7 @@ dependencies = [
  "glob",
  "hmac",
  "libc",
+ "libsqlite3-sys",
  "log",
  "notify",
  "notify-debouncer-mini",
