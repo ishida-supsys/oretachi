@@ -18,7 +18,10 @@
 //! - `load_extension()`: 関数として拒否する（拡張のロードは既定でも無効）。
 //! - `PRAGMA temp_store_directory` / `data_store_directory`: 任意のディレクトリへファイルを作れる。
 //!
-//! 加えて `SQLITE_LIMIT_ATTACHED` を 1 にし（VACUUM が使う 1 本だけ）、`DEFENSIVE` を立てる。
+//! - `PRAGMA max_page_count` / `page_size` の変更: DB のサイズ上限（下記）を外せてしまう。
+//!
+//! 加えて `SQLITE_LIMIT_ATTACHED` を 1 にし（VACUUM が使う 1 本だけ）、`SQLITE_LIMIT_LENGTH` を絞り、
+//! `DEFENSIVE` を立てる。
 //!
 //! # 資源
 //!
@@ -31,7 +34,7 @@ use base64::Engine;
 use futures_util::TryStreamExt;
 use serde::Serialize;
 use serde_json::Value as Json;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteJournalMode, SqliteRow};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteConnection, SqliteRow};
 use sqlx::{Column, ConnectOptions, Connection, Row, TypeInfo, Value, ValueRef};
 use std::collections::{HashMap, HashSet};
 use std::ffi::{c_char, c_int, c_void, CStr};
@@ -46,6 +49,12 @@ pub const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 pub const MAX_ROWS: usize = 10_000;
 /// 1 回の `query` が返せる結果の概算サイズ（FS の 1 回の読み書きの上限と同じ）。
 pub const MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
+/// 書き込み可で開く DB のファイルサイズの上限（`max_page_count` × 既定のページサイズ 4096）。
+/// 超える書き込みは `database or disk is full` で失敗する。既存の DB がこれより大きくても読み取りはできる。
+pub const MAX_DB_BYTES: u64 = 256 * 1024 * 1024;
+const DEFAULT_PAGE_SIZE: u64 = 4096;
+/// 1 つの文字列 / BLOB / SQL 文の最大長（`zeroblob(1e9)` のような一括確保を防ぐ）。
+const MAX_VALUE_BYTES: c_int = 16 * 1024 * 1024;
 /// 1 インスタンスが同時に開ける DB の数。
 pub const MAX_CONNECTIONS_PER_INSTANCE: usize = 8;
 const MAX_SQL_BYTES: usize = 1024 * 1024;
@@ -71,6 +80,8 @@ impl Default for Limits {
 
 /// 任意のディレクトリへファイルを作れる PRAGMA。
 const DENIED_PRAGMAS: &[&str] = &["temp_store_directory", "data_store_directory"];
+/// 読むのは構わないが、値を設定するとサイズの上限が外れる PRAGMA。
+const READ_ONLY_PRAGMAS: &[&str] = &["max_page_count", "page_size"];
 
 /// SQLite の authorizer。状態は持たない。`SQLITE_OK` で許可、`SQLITE_DENY` で準備（prepare）を失敗させる。
 unsafe extern "C" fn authorizer(
@@ -102,6 +113,12 @@ unsafe extern "C" fn authorizer(
         },
         ffi::SQLITE_PRAGMA => match text(arg1) {
             Some(name) if DENIED_PRAGMAS.iter().any(|p| p.eq_ignore_ascii_case(&name)) => ffi::SQLITE_DENY,
+            // arg2 は PRAGMA に渡された値（読むだけなら NULL）
+            Some(name)
+                if READ_ONLY_PRAGMAS.iter().any(|p| p.eq_ignore_ascii_case(&name)) && !arg2.is_null() =>
+            {
+                ffi::SQLITE_DENY
+            }
             _ => ffi::SQLITE_OK,
         },
         _ => ffi::SQLITE_OK,
@@ -120,6 +137,7 @@ async fn harden(conn: &mut SqliteConnection) -> Result<(), String> {
             return Err(format!("authorizer を設定できません（SQLite のエラーコード {}）", rc));
         }
         ffi::sqlite3_limit(db, ffi::SQLITE_LIMIT_ATTACHED, 1);
+        ffi::sqlite3_limit(db, ffi::SQLITE_LIMIT_LENGTH, MAX_VALUE_BYTES);
         // 失敗しても致命的ではない（writable_schema などの防御が効かないだけ）。戻り値は見ない
         let mut _out: c_int = 0;
         ffi::sqlite3_db_config(db, ffi::SQLITE_DBCONFIG_DEFENSIVE, 1 as c_int, &mut _out as *mut c_int);
@@ -128,6 +146,8 @@ async fn harden(conn: &mut SqliteConnection) -> Result<(), String> {
 }
 
 /// 実行時間の上限を張る。上限を超えると SQLite が実行を中断する（`interrupted`）。
+/// 呼ばれるのは VM の命令の間だけなので、ロック待ち（`BUSY_TIMEOUT`）の間は止まらない。
+/// 実際の最大は上限 + `BUSY_TIMEOUT`（iframe ブリッジの 10 秒には収まる）。
 async fn arm_deadline(conn: &mut SqliteConnection, timeout: Duration) -> Result<(), String> {
     let deadline = Instant::now() + timeout;
     let mut handle = conn.lock_handle().await.map_err(|e| format!("接続を設定できません: {}", e))?;
@@ -147,16 +167,18 @@ pub async fn open_connection(path: &Path, writable: bool) -> Result<SqliteConnec
             std::fs::create_dir_all(parent).map_err(|e| format!("ディレクトリを作れません: {}", e))?;
         }
     }
-    let mut conn = SqliteConnectOptions::new()
+    let mut options = SqliteConnectOptions::new()
         .filename(path)
         .read_only(!writable)
         .create_if_missing(writable)
-        .busy_timeout(BUSY_TIMEOUT)
-        // sqlx の既定は WAL。読み取り専用では切り替えられず、`-wal` / `-shm` も増える
-        .journal_mode(SqliteJournalMode::Delete)
-        .connect()
-        .await
-        .map_err(|e| format!("DB を開けません: {}", e))?;
+        .busy_timeout(BUSY_TIMEOUT);
+    // journal_mode は指定しない（sqlx は求められない限り設定しない）。既存の DB のモードを黙って変えず、
+    // WAL の DB を読み取り専用で開けなくなることも避ける。サイズの上限は authorizer を張る前に設定する
+    // （張った後は max_page_count を変えられない）
+    if writable {
+        options = options.pragma("max_page_count", (MAX_DB_BYTES / DEFAULT_PAGE_SIZE).to_string());
+    }
+    let mut conn = options.connect().await.map_err(|e| format!("DB を開けません: {}", e))?;
     if let Err(e) = harden(&mut conn).await {
         let _ = conn.close().await;
         return Err(e);
@@ -344,11 +366,16 @@ struct Inner {
     /// 停止したインスタンスのラベル（ラベルは再利用されない）。開いている最中の接続が、停止の後に
     /// 台帳へ入ってしまわないようにする
     dead: HashSet<String>,
-    closing: Vec<tauri::async_runtime::JoinHandle<()>>,
+    /// 実行中の「閉じるタスク」の数。0 になると `closed` を通知する
+    closing: usize,
 }
 
 #[derive(Default)]
-pub struct AppDbRegistry(std::sync::Mutex<Inner>);
+pub struct AppDbRegistry {
+    inner: Arc<std::sync::Mutex<Inner>>,
+    /// 閉じるタスクが 1 つ終わるたびに通知する（`drain_closes` が複数同時に待てる）
+    closed: Arc<tokio::sync::Notify>,
+}
 
 enum InsertOutcome {
     Inserted(Shared),
@@ -357,13 +384,17 @@ enum InsertOutcome {
 }
 
 impl AppDbRegistry {
+    fn is_dead(&self, label: &str) -> bool {
+        self.inner.lock().map(|i| i.dead.contains(label)).unwrap_or(true)
+    }
+
     fn get(&self, label: &str, key: &(PathBuf, bool)) -> Option<Shared> {
-        let inner = self.0.lock().ok()?;
+        let inner = self.inner.lock().ok()?;
         inner.conns.get(label)?.get(key).cloned()
     }
 
     fn insert(&self, label: &str, key: (PathBuf, bool), conn: SqliteConnection) -> Result<InsertOutcome, (String, SqliteConnection)> {
-        let Ok(mut inner) = self.0.lock() else {
+        let Ok(mut inner) = self.inner.lock() else {
             return Err(("DB 台帳のロックが壊れています".to_string(), conn));
         };
         if inner.dead.contains(label) {
@@ -386,13 +417,13 @@ impl AppDbRegistry {
     }
 
     fn remove(&self, label: &str, key: &(PathBuf, bool)) -> Option<Shared> {
-        let mut inner = self.0.lock().ok()?;
+        let mut inner = self.inner.lock().ok()?;
         inner.conns.get_mut(label)?.remove(key)
     }
 
     /// そのインスタンスの接続を台帳から外して返す（閉じはしない）。`stopped` なら以後は開けない。
     fn take_instance(&self, label: &str, stopped: bool) -> Vec<Shared> {
-        let Ok(mut inner) = self.0.lock() else { return Vec::new() };
+        let Ok(mut inner) = self.inner.lock() else { return Vec::new() };
         if stopped {
             inner.dead.insert(label.to_string());
         }
@@ -404,20 +435,32 @@ impl AppDbRegistry {
         if conns.is_empty() {
             return;
         }
-        let handle = tauri::async_runtime::spawn(close_all(conns));
-        if let Ok(mut inner) = self.0.lock() {
-            inner.closing.push(handle);
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.closing += 1;
         }
+        let inner = self.inner.clone();
+        let notify = self.closed.clone();
+        tauri::async_runtime::spawn(async move {
+            close_all(conns).await;
+            if let Ok(mut i) = inner.lock() {
+                i.closing = i.closing.saturating_sub(1);
+            }
+            notify.notify_waiters();
+        });
     }
 
-    /// これまでに起こした「閉じるタスク」がすべて終わるまで待つ。
+    /// これまでに起こした「閉じるタスク」がすべて終わるまで待つ。複数の呼び出しが同時に待てる。
     pub async fn drain_closes(&self) {
-        let handles = match self.0.lock() {
-            Ok(mut inner) => std::mem::take(&mut inner.closing),
-            Err(_) => return,
-        };
-        for h in handles {
-            let _ = h.await;
+        loop {
+            // 通知を取りこぼさないよう、数を見る前に待ちを登録する
+            let notified = self.closed.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            let pending = self.inner.lock().map(|i| i.closing).unwrap_or(0);
+            if pending == 0 {
+                return;
+            }
+            notified.await;
         }
     }
 }
@@ -505,9 +548,18 @@ async fn prepare(window: &tauri::Window, app: &AppHandle, path: &str) -> Result<
 
     let reg = app.state::<AppDbRegistry>();
     let key = (real.clone(), writable);
+    // 停止済みのインスタンスには、既存の接続も新しい接続も渡さない
+    if reg.is_dead(window.label()) {
+        let e = "アプリが停止しました".to_string();
+        log_failure(app, &ctx, "open", path, "", &e);
+        return Err(e);
+    }
     if let Some(shared) = reg.get(window.label(), &key) {
         return Ok(Call { ctx, shared });
     }
+    // 開くと（write なら）ファイルとディレクトリを作る。停止・削除と競って、消した後の同梱領域を
+    // 作り直してしまった場合に片付けられるよう、作る前の状態を覚えておく
+    let existed = real.exists();
     let conn = open_connection(&real, writable).await.map_err(|e| {
         log_failure(app, &ctx, "open", path, "", &e);
         e
@@ -516,6 +568,13 @@ async fn prepare(window: &tauri::Window, app: &AppHandle, path: &str) -> Result<
         Ok(InsertOutcome::Inserted(shared)) | Ok(InsertOutcome::Existing(shared)) => Ok(Call { ctx, shared }),
         Err((e, conn)) => {
             let _ = conn.close().await;
+            if writable && !existed {
+                // 停止との競合で作ってしまった空の DB を残さない（同じ id で作り直した別物に引き継がれる）
+                let _ = std::fs::remove_file(&real);
+                if let Some(parent) = real.parent() {
+                    let _ = std::fs::remove_dir(parent); // 空のときだけ消える
+                }
+            }
             log_failure(app, &ctx, "open", path, "", &e);
             Err(e)
         }
@@ -853,6 +912,84 @@ mod tests {
                 .unwrap();
             assert_eq!(r.rows, vec![vec![json!(1), json!(2), json!(0.5), json!("s")]]);
             c.close().await.unwrap();
+        });
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn size_limits_cannot_be_lifted_from_sql() {
+        let (base, fs) = setup("quota", &[], &["artifact://"], false);
+        run(async {
+            let mut c = open_uri(&fs, "artifact://q.db").await.unwrap();
+            // 読むのは構わない。設定は拒否される
+            let r = q(&mut c, "PRAGMA max_page_count").await.unwrap();
+            assert_eq!(r.rows, vec![vec![json!(MAX_DB_BYTES / DEFAULT_PAGE_SIZE)]]);
+            expect_err(x(&mut c, "PRAGMA max_page_count = 2147483646").await, "許可されていません");
+            expect_err(x(&mut c, "PRAGMA page_size = 65536").await, "許可されていません");
+            // 1 つの値の最大長（zeroblob での一括確保）
+            expect_err(q(&mut c, "SELECT zeroblob(1000000000)").await, "too big");
+            // 上限に達したら書き込みが失敗する（max_page_count を小さくして再現する代わりに、現在値で検算）
+            x(&mut c, "CREATE TABLE t (v BLOB)").await.unwrap();
+            c.close().await.unwrap();
+        });
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn existing_wal_database_opens_read_only_and_keeps_its_journal_mode() {
+        let (base, fs) = setup("wal", &["worktree://ro/"], &["worktree://rw/"], false);
+        std::fs::create_dir_all(base.join("wt").join("ro")).unwrap();
+        run(async {
+            // ユーザーが WAL で作った DB を用意する
+            let seed = base.join("wt").join("ro").join("wal.db");
+            let mut c = open_connection(&seed, true).await.unwrap();
+            q(&mut c, "PRAGMA journal_mode = WAL").await.unwrap();
+            x(&mut c, "CREATE TABLE t (v INTEGER)").await.unwrap();
+            x(&mut c, "INSERT INTO t VALUES (1)").await.unwrap();
+            c.close().await.unwrap();
+
+            // read スコープ（読み取り専用）で開いて読める
+            let mut c = open_uri(&fs, "worktree://ro/wal.db").await.expect("open read-only");
+            assert_eq!(q(&mut c, "SELECT v FROM t").await.unwrap().rows, vec![vec![json!(1)]]);
+            c.close().await.unwrap();
+
+            // write スコープで開いても、journal_mode を黙って変えない
+            let mut c = open_connection(&seed, true).await.unwrap();
+            assert_eq!(q(&mut c, "PRAGMA journal_mode").await.unwrap().rows, vec![vec![json!("wal")]]);
+            c.close().await.unwrap();
+        });
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn several_waiters_can_drain_closes_at_once() {
+        let (base, fs) = setup("drain", &[], &["artifact://"], false);
+        run(async {
+            let reg = Arc::new(AppDbRegistry::default());
+            let (path, writable) = crate::app_fs::resolve_db_path(&fs, "artifact://d.db").unwrap();
+            let c = open_connection(&path, writable).await.unwrap();
+            let shared = match reg.insert("appinst-1", (path.clone(), writable), c) {
+                Ok(InsertOutcome::Inserted(s)) => s,
+                _ => panic!("insert"),
+            };
+            // 接続を掴んだまま停止し、閉じが保留になっている間に複数の待ち手が同時に待つ
+            let guard = shared.lock().await;
+            reg.spawn_close(reg.take_instance("appinst-1", true));
+            let waiters: Vec<_> = (0..3)
+                .map(|_| {
+                    let r = reg.clone();
+                    tauri::async_runtime::spawn(async move { r.drain_closes().await })
+                })
+                .collect();
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            assert!(waiters.iter().all(|w| !w.inner().is_finished()), "must still be waiting for the close");
+            drop(guard);
+            for w in waiters {
+                tokio::time::timeout(Duration::from_secs(5), w).await.expect("drain finished").unwrap();
+            }
+            assert!(shared.lock().await.is_none(), "closed before drain returned");
+            // 閉じてあるので、ファイルを消せる
+            std::fs::remove_file(&path).expect("no open handle left");
         });
         let _ = std::fs::remove_dir_all(&base);
     }

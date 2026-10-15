@@ -71,8 +71,8 @@ await db.close(P);   // 任意。接続は host が持ち、停止まで開い�
 
 - パラメータは `null` / 真偽値（0・1 になる）/ 数値 / 文字列 / `{ $blob: '<base64>' }`。BLOB は結果でも `{ $blob: '<base64>' }`。**2^53 を超える整数は JSON の数値では正確に扱えない**（TEXT で持つ）。
 - 接続は 1 つのアプリ・1 つの DB につき 1 本なので、`BEGIN` と `COMMIT` を別の呼び出しに分けても同じ接続で実行される（途中で例外になったら `ROLLBACK` すること）。接続はリロードをまたいで残り、アプリの停止で閉じる。
-- **使えない SQL**（拒否は Promise の reject と、起動画面のデバッグログ）: `ATTACH DATABASE`（空文字列の一時 DB を除く）、`VACUUM INTO`、`load_extension()`、`PRAGMA temp_store_directory` / `data_store_directory`。通常の `VACUUM` は使える。
-- 上限: 1 回の実行 5 秒（超えると中断）、`query` の結果は 10,000 行・約 8MiB まで、同時に開ける DB は 1 アプリ 8 個まで。結果が 0 行のときは `columns` が空になる。
+- **使えない SQL**（拒否は Promise の reject と、起動画面のデバッグログ）: `ATTACH DATABASE`（空文字列の一時 DB を除く）、`VACUUM INTO`、`load_extension()`、`PRAGMA temp_store_directory` / `data_store_directory`、`PRAGMA max_page_count` / `page_size` の変更（読むのは可）。通常の `VACUUM` は使える。
+- 上限: 1 回の実行 5 秒（超えると中断）、`query` の結果は 10,000 行・約 8MiB まで、同時に開ける DB は 1 アプリ 8 個まで、読み書きで開く DB のファイルは 256MiB まで（超える書き込みは `database or disk is full`）、1 つの文字列・BLOB は 16MiB まで。DB の `journal_mode` は変更しない（WAL の DB もそのまま使える）。結果が 0 行のときは `columns` が空になる。
 - **DB の中身は信頼しない入力として扱う**（`artifact://` の DB は `artifact_file put` で配れるし、`worktree://` の DB は AI や他のツールが書ける）。
 
 ## ファイル API（`fs`）
