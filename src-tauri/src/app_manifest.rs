@@ -17,13 +17,14 @@ use std::collections::BTreeSet;
 /// 将来の sub-issue が受理するようになる権限キー。#370 の時点では「未対応」として manifest 不正扱い
 /// にする（黙って無視すると、申請したつもりの権限が効かないまま承認だけ通ることになる）。
 const RESERVED_PERMISSION_KEYS: &[&str] =
-    &["fs", "db", "network", "subWindow", "wasm", "aiTerminal"];
+    &["db", "network", "subWindow", "wasm", "aiTerminal"];
 
 const MAX_NAME_CHARS: usize = 100;
 const MAX_DESCRIPTION_CHARS: usize = 500;
 const MAX_VERSION_CHARS: usize = 50;
 const MAX_TARGETS: usize = 20;
 const MAX_TARGET_CHARS: usize = 200;
+const MAX_FS_SCOPES: usize = 20;
 
 /// 生成元スキルの記録。**表示専用**で、権限セットには含めない。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -48,12 +49,50 @@ pub struct MemoryPermission {
     pub max_bytes: u64,
 }
 
+/// manifest の `fs`。`read` / `write` は `worktree://<相対>` / `artifact://<相対>` のディレクトリ
+/// プレフィックス（正規化済み・ソート・重複除去済み）。`write` は `read` を含意しない。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestedFs {
+    pub read: Vec<String>,
+    pub write: Vec<String>,
+    /// 既定拒否パス（`.git/` など）への書き込みを許すか。最も強い警告の対象
+    #[serde(default)]
+    pub allow_sensitive_paths: bool,
+}
+
+/// 承認時に解決した FS のスコープ 1 件。`path` は解決済みの絶対パス（ルートは canonicalize 済み）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedFsScope {
+    /// "worktree" | "artifact"
+    pub scheme: String,
+    /// 正規化済みの相対プレフィックス（`out/` など。ルート全体は空）
+    pub prefix: String,
+    pub path: String,
+    pub write: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedFs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_root: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_root: Option<String>,
+    pub scopes: Vec<ResolvedFsScope>,
+    #[serde(default)]
+    pub allow_sensitive_paths: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RequestedPermissions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp: Option<RequestedMcp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryPermission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs: Option<RequestedFs>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +130,8 @@ pub struct ResolvedPermissions {
     pub mcp: Option<ResolvedMcp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryPermission>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs: Option<ResolvedFs>,
 }
 
 /// host 側に保存する承認。キーはアーティファクト識別子（`<worktreeId>/<artifactId>`）。
@@ -153,7 +194,7 @@ fn optional_text(
 
 /// `app` オブジェクトを検証して manifest にする。
 ///
-/// `permissions` 内の未知キーは**拒否**する（fail closed）。#370 が受理するのは `mcp` と `memory` だけで、
+/// `permissions` 内の未知キーは**拒否**する（fail closed）。受理するのは `mcp` / `memory` / `fs` だけで、
 /// 後続 sub-issue が足す予定のキーは「未対応」として別メッセージで拒否する。
 pub fn parse_manifest(app: &serde_json::Value) -> Result<AppManifest, String> {
     let obj = expect_object(app, "app")?;
@@ -189,6 +230,7 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
         match key.as_str() {
             "mcp" => out.mcp = parse_mcp(val)?,
             "memory" => out.memory = parse_memory(val)?,
+            "fs" => out.fs = parse_fs(val)?,
             k if RESERVED_PERMISSION_KEYS.contains(&k) => {
                 return Err(format!(
                     "権限 '{}' はこの版ではまだ使えません（対応する機能が未実装です）。manifest から外してください",
@@ -197,7 +239,7 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
             }
             other => {
                 return Err(format!(
-                    "未知の権限 '{}' です。指定できるのは mcp / memory だけです",
+                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs だけです",
                     other
                 ));
             }
@@ -299,6 +341,51 @@ pub fn check_memory_size(memory: &serde_json::Value, max_bytes: u64) -> Result<u
         ));
     }
     Ok(size)
+}
+
+fn parse_fs(v: &serde_json::Value) -> Result<Option<RequestedFs>, String> {
+    let obj = expect_object(v, "app.permissions.fs")?;
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "read" | "write" | "allowSensitivePaths")) {
+        return Err(format!(
+            "app.permissions.fs の未知のキー '{}' です（read / write / allowSensitivePaths だけ）",
+            k
+        ));
+    }
+    let allow_sensitive_paths = match obj.get("allowSensitivePaths") {
+        None | Some(serde_json::Value::Null) => false,
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(_) => return Err("app.permissions.fs.allowSensitivePaths は真偽値である必要があります".to_string()),
+    };
+    let normalize = |key: &str| -> Result<Vec<String>, String> {
+        let raw = string_list(obj, key, &format!("app.permissions.fs.{}", key))?;
+        let mut set = BTreeSet::new();
+        for item in &raw {
+            set.insert(crate::app_fs::normalize_scope(item)?);
+        }
+        if set.len() > MAX_FS_SCOPES {
+            return Err(format!("app.permissions.fs.{} は {} 件までです", key, MAX_FS_SCOPES));
+        }
+        Ok(set.into_iter().collect())
+    };
+    let read = normalize("read")?;
+    let write = normalize("write")?;
+    if read.is_empty() && write.is_empty() {
+        if allow_sensitive_paths {
+            return Err("app.permissions.fs.allowSensitivePaths は read / write と一緒に指定してください".to_string());
+        }
+        return Ok(None);
+    }
+    if !allow_sensitive_paths {
+        // 承認ダイアログへ行く前に、書けないと分かっている申請は manifest 不正として返す
+        if let Some(s) = write.iter().find(|s| crate::app_fs::scope_hits_sensitive(s)) {
+            return Err(format!(
+                "app.permissions.fs.write の '{}' は既定で書き込みを拒否するパス（{}）を含みます。本当に必要なら allowSensitivePaths: true を指定してください（承認ダイアログで最も強い警告が出ます）",
+                s,
+                crate::app_fs::SENSITIVE_NAMES.join(" / ")
+            ));
+        }
+    }
+    Ok(Some(RequestedFs { read, write, allow_sensitive_paths }))
 }
 
 /// 保存済みの `requested` と、いまの manifest の `requested` が違うか（＝再承認が要るか）。
@@ -525,6 +612,75 @@ mod tests {
     }
 
     #[test]
+    fn fs_scopes_are_normalized_sorted_and_deduplicated() {
+        let m = ok(json!({ "name": "x", "permissions": { "fs": {
+            "read": ["worktree://src\\sub", "artifact://", " worktree://src/sub/ "],
+            "write": ["worktree://out/"]
+        }}}));
+        let fs = m.permissions.fs.unwrap();
+        assert_eq!(fs.read, vec!["artifact://", "worktree://src/sub/"]);
+        assert_eq!(fs.write, vec!["worktree://out/"]);
+        assert!(!fs.allow_sensitive_paths);
+    }
+
+    #[test]
+    fn fs_rejects_raw_paths_escapes_and_unknown_keys() {
+        for bad in ["C:\\x", "/etc", "src/", "worktree://../x", "worktree://a/../b", "worktree://a:b", "http://x"] {
+            let e = err(json!({ "name": "x", "permissions": { "fs": { "read": [bad] }}}));
+            assert!(e.contains("fs") || e.contains(bad), "{bad}: {e}");
+        }
+        assert!(err(json!({ "name": "x", "permissions": { "fs": { "read": ["artifact://"], "all": true }}})).contains("未知のキー"));
+        assert!(err(json!({ "name": "x", "permissions": { "fs": { "read": "artifact://" }}})).contains("配列"));
+        assert!(err(json!({ "name": "x", "permissions": { "fs": { "read": ["artifact://"], "allowSensitivePaths": "yes" }}})).contains("真偽値"));
+        let many: Vec<String> = (0..21).map(|i| format!("artifact://d{}/", i)).collect();
+        assert!(err(json!({ "name": "x", "permissions": { "fs": { "read": many }}})).contains("件まで"));
+    }
+
+    #[test]
+    fn fs_write_to_sensitive_paths_needs_allow_sensitive_paths() {
+        for p in ["worktree://.git/", "worktree://a/.github/workflows/", "worktree://.claude/", "worktree://.vscode/"] {
+            let e = err(json!({ "name": "x", "permissions": { "fs": { "write": [p] }}}));
+            assert!(e.contains("allowSensitivePaths"), "{p}: {e}");
+            // 読むだけなら要らない
+            ok(json!({ "name": "x", "permissions": { "fs": { "read": [p] }}}));
+            // 解除を申請すれば受理される（ダイアログで最も強い警告になる）
+            let m = ok(json!({ "name": "x", "permissions": { "fs": { "write": [p], "allowSensitivePaths": true }}}));
+            assert!(m.permissions.fs.unwrap().allow_sensitive_paths);
+        }
+        // ルート全体への write は申請できる（拒否パスは呼び出し時に実パスで弾く）
+        ok(json!({ "name": "x", "permissions": { "fs": { "write": ["worktree://"] }}}));
+    }
+
+    #[test]
+    fn fs_empty_means_no_permission_and_flag_alone_is_invalid() {
+        let m = ok(json!({ "name": "x", "permissions": { "fs": { "read": [], "write": [] }}}));
+        assert!(m.permissions.fs.is_none());
+        assert!(err(json!({ "name": "x", "permissions": { "fs": { "allowSensitivePaths": true }}})).contains("read / write"));
+    }
+
+    #[test]
+    fn fs_change_requires_reapproval_but_order_does_not() {
+        let a = ok(json!({ "name": "x", "permissions": { "fs": { "read": ["worktree://a/", "worktree://b/"] }}}));
+        let b = ok(json!({ "name": "x", "permissions": { "fs": { "read": ["worktree://b/", "worktree://a/"] }}}));
+        assert!(!requested_changed(&a.permissions, &b.permissions));
+        let narrower = ok(json!({ "name": "x", "permissions": { "fs": { "read": ["worktree://a/"] }}}));
+        assert!(requested_changed(&a.permissions, &narrower.permissions));
+        let flagged = ok(json!({ "name": "x", "permissions": { "fs": { "write": ["worktree://.git/"], "allowSensitivePaths": true }}}));
+        let flagged_again = ok(json!({ "name": "x", "permissions": { "fs": { "write": ["worktree://.git/"], "allowSensitivePaths": true }}}));
+        assert!(!requested_changed(&flagged.permissions, &flagged_again.permissions));
+        let read_only = ok(json!({ "name": "x", "permissions": { "fs": { "read": ["worktree://.git/"] }}}));
+        assert!(requested_changed(&flagged.permissions, &read_only.permissions));
+    }
+
+    #[test]
+    fn legacy_grant_without_fs_deserializes_as_no_fs() {
+        // #370 / #371 で保存された grant（fs キー無し）は、FS 権限なしとして読める
+        let raw = r#"{"grantedAt":1,"requested":{"memory":{"maxBytes":10}},"resolved":{"memory":{"maxBytes":10}}}"#;
+        let g: AppGrant = serde_json::from_str(raw).unwrap();
+        assert!(g.resolved.fs.is_none() && g.requested.fs.is_none());
+    }
+
+    #[test]
     fn legacy_artifact_without_app_is_none() {
         let raw = r#"{"id":"a","type":"application/vnd.ant.react","title":"t","content":"c","created_at":1,"updated_at":1}"#;
         let value: serde_json::Value = serde_json::from_str(raw).unwrap();
@@ -546,6 +702,7 @@ mod tests {
                     .collect(),
             }),
             memory: None,
+            fs: None,
         }
     }
 
@@ -580,6 +737,7 @@ mod tests {
             requested: RequestedPermissions {
                 mcp: Some(RequestedMcp { tools: vec!["notify_worktree".into()], targets: vec!["wt-b".into()] }),
                 memory: Some(MemoryPermission { max_bytes: 10 }),
+                fs: None,
             },
             resolved: resolved(&["notify_worktree"], &["wt-b"]),
         };

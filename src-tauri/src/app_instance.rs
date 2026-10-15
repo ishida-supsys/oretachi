@@ -332,7 +332,7 @@ fn require_viewer_or_main(window: &tauri::Window) -> Result<(), String> {
     require_viewer(window)
 }
 
-fn require_instance_window(window: &tauri::Window) -> Result<(), String> {
+pub(crate) fn require_instance_window(window: &tauri::Window) -> Result<(), String> {
     if window.label().starts_with(LABEL_PREFIX) {
         Ok(())
     } else {
@@ -529,9 +529,30 @@ pub async fn app_grant_respond(
 
 // ─── 起動 ───────────────────────────────────────────────────────────
 
-fn build_resolved(app: &AppHandle, requested: &RequestedPermissions) -> Result<ResolvedPermissions, String> {
+/// 承認時の解決。MCP の越境先（ワークツリー名 → ID）と、FS のスコープ（絶対パス）をここで確定する。
+/// ダイアログに出した集合をそのまま grant へ保存するので、解決はこの 1 回だけ。
+fn build_resolved(
+    app: &AppHandle,
+    worktree_id: &str,
+    artifact_id: &str,
+    requested: &RequestedPermissions,
+) -> Result<ResolvedPermissions, String> {
     let settings = app.state::<crate::settings::SettingsManager>().get();
-    crate::mcp_server::resolve_app_permissions(&settings, requested)
+    let mut resolved = crate::mcp_server::resolve_app_permissions(&settings, requested)?;
+    if let Some(fs) = &requested.fs {
+        // ホーム / リポジトリ擬似ワークツリーは全ワークツリーの祖先・メインクローンになりうるので、
+        // worktree:// の根にしない（None を渡して拒否させる）
+        let worktree_path = settings
+            .worktrees
+            .iter()
+            .find(|w| w.id == worktree_id)
+            .filter(|w| !w.is_home && !w.is_repository)
+            .map(|w| std::path::PathBuf::from(&w.path));
+        let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let artifact_dir = crate::app_fs::artifact_files_dir(&data_dir, worktree_id, artifact_id)?;
+        resolved.fs = Some(crate::app_fs::resolve_requested_fs(fs, worktree_path.as_deref(), &artifact_dir)?);
+    }
+    Ok(resolved)
 }
 
 #[tauri::command]
@@ -579,7 +600,7 @@ async fn start_inner(
 
     if needs_approval {
         // 解決は 1 回だけ。ダイアログに出した集合をそのまま保存する
-        let resolved = build_resolved(app, &requested)?;
+        let resolved = build_resolved(app, worktree_id, artifact_id, &requested)?;
         let (request_id, rx) = {
             let reg = app.state::<AppInstanceRegistry>();
             let mut inner = reg.0.lock().map_err(|_| "レジストリのロックが壊れています".to_string())?;
@@ -784,6 +805,16 @@ pub fn on_artifact_deleted(app: &AppHandle, worktree_id: &str, artifact_id: &str
     if let Err(e) = app.state::<AppGrantStore>().remove(worktree_id, artifact_id) {
         log::warn!("[app-instance] grant の削除に失敗: {}", e);
     }
+    // artifact:// の同梱領域も一緒に消す（停止の後。開いているハンドルが無くなってから）。
+    // 残すと、同じ id で作り直した別物が前のアプリのファイルを引き継ぐ
+    match app.path().app_data_dir() {
+        Ok(dir) => {
+            if let Err(e) = crate::app_fs::remove_artifact_files(&dir, worktree_id, artifact_id) {
+                log::warn!("[app-instance] 同梱領域の削除に失敗: {}", e);
+            }
+        }
+        Err(e) => log::warn!("[app-instance] app_data_dir を取得できません: {}", e),
+    }
 }
 
 /// ワークツリーのアーティファクトを丸ごと消す経路（`delete_artifacts`）。
@@ -803,6 +834,14 @@ pub fn on_worktree_artifacts_deleted(app: &AppHandle, worktree_id: &str) {
     }
     if let Err(e) = app.state::<AppGrantStore>().remove_worktree(worktree_id) {
         log::warn!("[app-instance] grant の一括削除に失敗: {}", e);
+    }
+    match app.path().app_data_dir() {
+        Ok(dir) => {
+            if let Err(e) = crate::app_fs::remove_worktree_artifact_files(&dir, worktree_id) {
+                log::warn!("[app-instance] 同梱領域の一括削除に失敗: {}", e);
+            }
+        }
+        Err(e) => log::warn!("[app-instance] app_data_dir を取得できません: {}", e),
     }
 }
 
@@ -870,7 +909,7 @@ pub async fn check_permission_change(app: &AppHandle, worktree_id: &str, artifac
         }
     }
 
-    let resolved = match build_resolved(app, &requested) {
+    let resolved = match build_resolved(app, worktree_id, artifact_id, &requested) {
         Ok(r) => r,
         Err(e) => {
             add_log(app, worktree_id, artifact_id, "error", format!("新しい権限を解決できません（旧セットのまま継続）: {}", e));
@@ -1406,7 +1445,7 @@ mod tests {
     use crate::app_manifest::{MemoryPermission, RequestedPermissions};
 
     fn perms(max: u64) -> RequestedPermissions {
-        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }) }
+        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), fs: None }
     }
 
     #[test]

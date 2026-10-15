@@ -17,14 +17,33 @@ export interface AppResolvedTarget {
   wildcard: boolean;
 }
 
+/** 承認時に解決した FS のスコープ 1 件。`path` は解決済みの絶対パス（Windows では拡張長パス接頭辞付きのことがある） */
+export interface AppResolvedFsScope {
+  scheme: "worktree" | "artifact";
+  /** 正規化済みの相対プレフィックス（`out/`。ルート全体は空） */
+  prefix: string;
+  path: string;
+  write: boolean;
+}
+
+export interface AppResolvedFs {
+  worktreeRoot?: string;
+  artifactRoot?: string;
+  scopes: AppResolvedFsScope[];
+  /** 既定拒否パス（`.git/` など）への書き込みを許すか。最も強い警告の対象 */
+  allowSensitivePaths: boolean;
+}
+
 export interface AppResolvedPermissions {
   mcp?: { tools: string[]; targets: AppResolvedTarget[] };
   memory?: { maxBytes: number };
+  fs?: AppResolvedFs;
 }
 
 export interface AppRequestedPermissions {
   mcp?: { tools: string[]; targets: string[] };
   memory?: { maxBytes: number };
+  fs?: { read: string[]; write: string[]; allowSensitivePaths: boolean };
 }
 
 export interface AppGrant {

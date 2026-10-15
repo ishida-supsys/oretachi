@@ -19,6 +19,10 @@ import { loadVendors } from "./utils/reactArtifactVendors";
 import { createCspNonce } from "./utils/artifactCspViolation";
 import {
   ARTIFACT_BRIDGE_METHOD_FLUSHED,
+  ARTIFACT_BRIDGE_METHOD_FS_LIST,
+  ARTIFACT_BRIDGE_METHOD_FS_READ,
+  ARTIFACT_BRIDGE_METHOD_FS_REMOVE,
+  ARTIFACT_BRIDGE_METHOD_FS_WRITE,
   ARTIFACT_BRIDGE_METHOD_MCP_CALL,
   ARTIFACT_BRIDGE_METHOD_MEMORY_SET,
   readArtifactBridgeRequest,
@@ -113,6 +117,40 @@ async function handleBridgeRequest(request: ArtifactBridgeRequest) {
       reply(request, { ok: true, result });
     } catch (e) {
       // 拒否の理由は Rust がデバッグログへ残している。ここはアプリへ返すだけ
+      reply(request, { ok: false, error: errorText(e) });
+    }
+    return;
+  }
+  if (
+    request.method === ARTIFACT_BRIDGE_METHOD_FS_READ ||
+    request.method === ARTIFACT_BRIDGE_METHOD_FS_WRITE ||
+    request.method === ARTIFACT_BRIDGE_METHOD_FS_LIST ||
+    request.method === ARTIFACT_BRIDGE_METHOD_FS_REMOVE
+  ) {
+    const path = request.params.path;
+    if (typeof path !== "string" || path === "") {
+      reply(request, { ok: false, error: "fs にはパス（worktree://… / artifact://…）が必要です" });
+      return;
+    }
+    try {
+      // 許可・拒否の判断は Rust（`app_fs_*`）。拒否の理由はデバッグログへ残る。ここは素通しするだけ
+      let result: unknown;
+      if (request.method === ARTIFACT_BRIDGE_METHOD_FS_READ) {
+        result = await invoke("app_fs_read", { path, encoding: String(request.params.encoding ?? "utf8") });
+      } else if (request.method === ARTIFACT_BRIDGE_METHOD_FS_WRITE) {
+        result = await invoke("app_fs_write", {
+          path,
+          data: typeof request.params.data === "string" ? request.params.data : "",
+          encoding: String(request.params.encoding ?? "utf8"),
+          createDirs: request.params.createDirs === true,
+        });
+      } else if (request.method === ARTIFACT_BRIDGE_METHOD_FS_LIST) {
+        result = await invoke("app_fs_list", { path });
+      } else {
+        result = await invoke("app_fs_remove", { path });
+      }
+      reply(request, { ok: true, result });
+    } catch (e) {
       reply(request, { ok: false, error: errorText(e) });
     }
     return;

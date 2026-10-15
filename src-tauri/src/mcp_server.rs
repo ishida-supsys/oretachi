@@ -110,13 +110,18 @@ async fn read_artifact_source_file(
     app_handle: &AppHandle,
     file_path: &str,
 ) -> Result<String, McpError> {
+    let (roots, base_dir) = source_file_roots(app_handle);
+    read_file_within_roots(&roots, &base_dir, file_path).await
+}
+
+/// `file_path` 引数の許可ルート（設定由来の固定値）と、相対パスの基準ディレクトリ。
+/// プラグインディレクトリは dev などで未生成のことがあるので、存在しないものは呼び出し先で候補から落とされる。
+fn source_file_roots(app_handle: &AppHandle) -> (Vec<PathBuf>, String) {
     let base_dir = app_handle
         .state::<SettingsManager>()
         .get()
         .worktree_base_dir
         .clone();
-    // 許可ルート。プラグインディレクトリは dev などで未生成のことがあるので、
-    // 存在しないものは呼び出し先で候補から落とされる。
     let roots = [
         Some(PathBuf::from(&base_dir)).filter(|_| !base_dir.trim().is_empty()),
         crate::claude_plugin::marketplace_dir(app_handle).ok(),
@@ -124,7 +129,7 @@ async fn read_artifact_source_file(
     .into_iter()
     .flatten()
     .collect::<Vec<_>>();
-    read_file_within_roots(&roots, &base_dir, file_path).await
+    (roots, base_dir)
 }
 
 /// `read_artifact_source_file` の本体。許可ルートを引数で受けてテスト可能にしてある。
@@ -133,6 +138,17 @@ async fn read_file_within_roots(
     base_dir: &str,
     file_path: &str,
 ) -> Result<String, McpError> {
+    let resolved = resolve_file_within_roots(allowed_roots, base_dir, file_path).await?;
+    read_resolved_source_file(&resolved, file_path).await
+}
+
+/// `file_path` を許可ルート配下の実パス（`canonicalize` 済み）へ解決する。
+/// テキスト読み取り（`file_path` 引数）と、バイナリの同梱（`artifact_file put`）で共用する。
+async fn resolve_file_within_roots(
+    allowed_roots: &[PathBuf],
+    base_dir: &str,
+    file_path: &str,
+) -> Result<PathBuf, McpError> {
     // Windows では `is_absolute()` が false でも `Path::join` がベースを捨てる形が
     // いくつかある（ドライブ相対 `C:foo`、ルート相対 `\bar`、verbatim `\\?\C:\x`）。
     // いずれもルート判定で fail-closed になるが、「相対パスは追加先ディレクトリ基準」
@@ -201,8 +217,12 @@ async fn read_file_within_roots(
             None,
         ));
     }
+    Ok(resolved)
+}
 
-    let meta = tokio_fs::metadata(&resolved).await.map_err(|e| {
+/// 解決済みの実パスを UTF-8 テキストとして読む（上限 [`ARTIFACT_SOURCE_FILE_MAX_BYTES`]）。
+async fn read_resolved_source_file(resolved: &std::path::Path, file_path: &str) -> Result<String, McpError> {
+    let meta = tokio_fs::metadata(resolved).await.map_err(|e| {
         McpError::invalid_params(format!("file_path '{}' を読めません: {}", file_path, e), None)
     })?;
     if !meta.is_file() {
@@ -223,7 +243,7 @@ async fn read_file_within_roots(
         ));
     }
 
-    let bytes = tokio_fs::read(&resolved).await.map_err(|e| {
+    let bytes = tokio_fs::read(resolved).await.map_err(|e| {
         McpError::invalid_params(format!("file_path '{}' を読めません: {}", file_path, e), None)
     })?;
     // BOM 付き UTF-8 はエディタが勝手に付けることがある。そのまま JSX として
@@ -1334,6 +1354,29 @@ pub struct ArtifactStoreParams {
     pub data: Option<serde_json::Value>,
     #[schemars(description = "任意: write/delete 前に read で得た updated_at を渡すと、その間に他から書き換えられていた場合にエラーになる (楽観ロック)。省略すると後勝ちで上書きする")]
     pub expected_updated_at: Option<u64>,
+}
+
+/// `artifact_file` のパラメータ。アプリ（`app` 付きアーティファクト）の同梱領域 `artifact://` へ
+/// バイナリを届ける。`artifact_module` の `file_path` は UTF-8 テキストで 1MB までなので、wasm や
+/// 初期 DB のようなバイナリは別ツールにしている。
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ArtifactFileParams {
+    #[schemars(description = "操作の種類: \"put\"(ファイルを同梱領域へコピー) / \"list\"(同梱ファイルの一覧) / \"delete\"(同梱ファイル・ディレクトリの削除)")]
+    pub command: String,
+    #[schemars(description = "アーティファクトID（存在するもの）")]
+    pub id: String,
+    #[schemars(description = "現在の作業ディレクトリ。これを渡すのが最も確実。HOMEタブやリポジトリルートで作業している場合は repository/branch では特定できないため必須")]
+    pub project_dir: Option<String>,
+    #[schemars(description = "対象ワークツリーID（project_dir で特定できない場合に指定）")]
+    pub worktree_id: Option<String>,
+    #[schemars(description = "リポジトリ名。project_dir を渡す場合は不要。指定する場合は branch と両方セットで")]
+    pub repository: Option<String>,
+    #[schemars(description = "ブランチ名。project_dir を渡す場合は不要。指定する場合は repository と両方セットで")]
+    pub branch: Option<String>,
+    #[schemars(description = "put / delete 時必須: 同梱領域内のパス `artifact://<相対>`（例: `artifact://engine.wasm`、`artifact://data/seed.db`）。delete で `artifact://` を渡すと同梱領域を空にする。`..`・絶対パス・Windows の予約名は拒否される")]
+    pub path: Option<String>,
+    #[schemars(description = "put 時必須: コピー元ファイル。相対パスはワークツリー追加先ディレクトリ基準。読めるのは**ワークツリー追加先ディレクトリ配下**と **oretachi プラグインディレクトリ (claude-plugins) 配下**のファイルだけ（スキル同梱の templates/ など）。バイナリのままコピーされ、1 ファイル 32MB まで")]
+    pub file_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -2498,6 +2541,193 @@ impl NotifyService {
             }
             other => Err(McpError::invalid_params(
                 format!("不明なコマンド '{}'. read / write / delete のいずれかを指定してください", other),
+                None,
+            )),
+        }
+    }
+
+    #[tool(description = "アプリ（manifest の `app` を持つ React アーティファクト）の同梱領域 `artifact://` を操作する。アプリは承認された fs 権限の範囲でこの領域を読み書きできる。put: スキル同梱の wasm や初期 DB などのバイナリを `file_path` から `artifact://<相対>` へコピー（`artifact_module` の file_path は UTF-8 テキスト 1MB までで、バイナリは通らない）, list: 同梱ファイルの一覧, delete: 同梱ファイル・ディレクトリの削除。同梱領域はアーティファクトを削除すると一緒に消える。アーティファクトの転送・エクスポート・インポートでは持ち出されない（移した先で put し直すこと）。対象は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は project_dir が必須", annotations(read_only_hint = true))]
+    async fn artifact_file(
+        &self,
+        Parameters(ArtifactFileParams {
+            command, id,
+            project_dir, worktree_id: target_worktree_id,
+            repository, branch,
+            path, file_path,
+        }): Parameters<ArtifactFileParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings = self.app_handle.state::<SettingsManager>().get();
+        let wt = resolve_artifact_worktree(
+            &settings,
+            target_worktree_id.as_deref(),
+            project_dir.as_deref(),
+            repository.as_deref(),
+            branch.as_deref(),
+        )?;
+        let worktree_id = wt.id.clone();
+        validate_artifact_id(&id)?;
+
+        let data_dir = self.app_handle.path().app_data_dir()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        // 本体が無い ID の同梱領域は、どこからも消せない孤児になる
+        let artifact_path = data_dir.join("artifacts").join(&worktree_id).join(format!("{}.json", id));
+        if !artifact_path.is_file() {
+            return Err(McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None));
+        }
+        let files_dir = crate::app_fs::artifact_files_dir(&data_dir, &worktree_id, &id)
+            .map_err(|e| McpError::invalid_params(e, None))?;
+
+        // `artifact://<相対>` の相対部を成分へ（スキーム違い・絶対パス・`..` などはここで拒否）
+        let parse_target = |what: &str| -> Result<Vec<String>, McpError> {
+            let p = path.as_deref().ok_or_else(|| {
+                McpError::invalid_params(format!("{} には path（artifact://<相対>）が必須です", what), None)
+            })?;
+            match crate::app_fs::split_uri(p).map_err(|e| McpError::invalid_params(e, None))? {
+                (crate::app_fs::Scheme::Artifact, comps) => Ok(comps),
+                (crate::app_fs::Scheme::Worktree, _) => Err(McpError::invalid_params(
+                    "path は artifact://<相対> の形で指定してください（worktree:// へは書けません）".to_string(),
+                    None,
+                )),
+            }
+        };
+
+        match command.as_str() {
+            "put" => {
+                let comps = parse_target("put")?;
+                if comps.is_empty() {
+                    return Err(McpError::invalid_params("put の path にはファイル名が必要です".to_string(), None));
+                }
+                let src = file_path.as_deref().ok_or_else(|| {
+                    McpError::invalid_params("put には file_path が必須です".to_string(), None)
+                })?;
+                let (roots, base_dir) = source_file_roots(&self.app_handle);
+                let resolved = resolve_file_within_roots(&roots, &base_dir, src).await?;
+                let meta = tokio_fs::metadata(&resolved).await.map_err(|e| {
+                    McpError::invalid_params(format!("file_path '{}' を読めません: {}", src, e), None)
+                })?;
+                if !meta.is_file() {
+                    return Err(McpError::invalid_params(format!("file_path '{}' はファイルではありません", src), None));
+                }
+                if meta.len() > crate::app_fs::MAX_BUNDLE_FILE_BYTES {
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "file_path '{}' は {} バイトあり、上限 {} バイトを超えています",
+                            src, meta.len(), crate::app_fs::MAX_BUNDLE_FILE_BYTES
+                        ),
+                        None,
+                    ));
+                }
+                let mut dest = files_dir.clone();
+                for c in &comps {
+                    dest.push(c);
+                }
+                if dest.is_dir() {
+                    return Err(McpError::invalid_params("path はディレクトリです（ファイルを指定してください）".to_string(), None));
+                }
+                let parent = dest.parent().map(|p| p.to_path_buf())
+                    .ok_or_else(|| McpError::internal_error("親ディレクトリがありません".to_string(), None))?;
+                tokio_fs::create_dir_all(&parent).await
+                    .map_err(|e| McpError::internal_error(format!("ディレクトリを作れません: {}", e), None))?;
+                // 途中で落ちても壊れたファイルを残さない（起動中のアプリが読んでいても半端な中身を見ない）
+                let tmp = parent.join(format!(
+                    ".{}.oretachi-put-{}.tmp",
+                    comps.last().map(String::as_str).unwrap_or("f"),
+                    std::process::id()
+                ));
+                let renamed = match tokio_fs::copy(&resolved, &tmp).await {
+                    Ok(_) => tokio_fs::rename(&tmp, &dest).await,
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = renamed {
+                    let _ = tokio_fs::remove_file(&tmp).await;
+                    return Err(McpError::internal_error(format!("コピーに失敗: {}", e), None));
+                }
+                log::info!(
+                    "[mcp] artifact_file command=put id={} worktree_id={} path={} bytes={}",
+                    id, worktree_id, path.as_deref().unwrap_or(""), meta.len()
+                );
+                let result = serde_json::json!({ "path": path, "bytes": meta.len() });
+                Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+            }
+            "list" => {
+                let dir = files_dir.clone();
+                let files = tokio::task::spawn_blocking(move || {
+                    let mut out: Vec<serde_json::Value> = Vec::new();
+                    let mut truncated = false;
+                    let mut stack: Vec<(std::path::PathBuf, String, usize)> = vec![(dir, String::new(), 0)];
+                    'walk: while let Some((d, rel, depth)) = stack.pop() {
+                        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+                        for ent in rd.flatten() {
+                            let Ok(ft) = ent.file_type() else { continue };
+                            let name = ent.file_name().to_string_lossy().into_owned();
+                            let child = format!("{}{}", rel, name);
+                            if ft.is_dir() {
+                                if depth < 16 {
+                                    stack.push((ent.path(), format!("{}/", child), depth + 1));
+                                }
+                            } else if ft.is_file() {
+                                if out.len() >= crate::app_fs::MAX_LIST_ENTRIES {
+                                    truncated = true;
+                                    break 'walk;
+                                }
+                                let size = ent.metadata().map(|m| m.len()).unwrap_or(0);
+                                out.push(serde_json::json!({ "path": format!("artifact://{}", child), "bytes": size }));
+                            }
+                        }
+                    }
+                    out.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+                    serde_json::json!({ "files": out, "truncated": truncated })
+                })
+                .await
+                .map_err(|e| McpError::internal_error(format!("task join error: {}", e), None))?;
+                Ok(CallToolResult::success(vec![Content::text(files.to_string())]))
+            }
+            "delete" => {
+                let comps = parse_target("delete")?;
+                let mut target = files_dir.clone();
+                for c in &comps {
+                    target.push(c);
+                }
+                let dir = files_dir.clone();
+                let removed = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+                    let Ok(meta) = std::fs::symlink_metadata(&target) else { return Ok(false) };
+                    // 同梱領域の外へ出ていないことを確認してから消す（リンクを辿って外を消さない）
+                    let real = std::fs::canonicalize(&target).map_err(|e| e.to_string())?;
+                    let root = std::fs::canonicalize(&dir).map_err(|e| e.to_string())?;
+                    if !real.starts_with(&root) {
+                        return Err("path が同梱領域の外を指しています".to_string());
+                    }
+                    if meta.is_dir() {
+                        if real == root {
+                            // 領域そのものは残し、中身だけ空にする
+                            for ent in std::fs::read_dir(&real).map_err(|e| e.to_string())?.flatten() {
+                                let p = ent.path();
+                                if ent.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                                    std::fs::remove_dir_all(&p).map_err(|e| e.to_string())?;
+                                } else {
+                                    std::fs::remove_file(&p).map_err(|e| e.to_string())?;
+                                }
+                            }
+                        } else {
+                            std::fs::remove_dir_all(&real).map_err(|e| e.to_string())?;
+                        }
+                    } else {
+                        std::fs::remove_file(&real).map_err(|e| e.to_string())?;
+                    }
+                    Ok(true)
+                })
+                .await
+                .map_err(|e| McpError::internal_error(format!("task join error: {}", e), None))?
+                .map_err(|e| McpError::invalid_params(e, None))?;
+                log::info!(
+                    "[mcp] artifact_file command=delete id={} worktree_id={} path={} removed={}",
+                    id, worktree_id, path.as_deref().unwrap_or(""), removed
+                );
+                let result = serde_json::json!({ "path": path, "removed": removed });
+                Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+            }
+            other => Err(McpError::invalid_params(
+                format!("未知の command: '{}'（put / list / delete）", other),
                 None,
             )),
         }
@@ -6688,7 +6918,7 @@ pub(crate) fn resolve_app_permissions(
             Some(ResolvedMcp { tools: m.tools.clone(), targets })
         }
     };
-    Ok(ResolvedPermissions { mcp, memory: requested.memory })
+    Ok(ResolvedPermissions { mcp, memory: requested.memory, fs: None })
 }
 
 async fn call_tool_scoped(
@@ -9926,6 +10156,7 @@ mod tests {
                 targets: targets.iter().map(|s| s.to_string()).collect(),
             }),
             memory: None,
+            fs: None,
         }
     }
 
@@ -9961,6 +10192,7 @@ mod tests {
                 targets: vec![mcp.targets[0].clone()],
             }),
             memory: None,
+            fs: None,
         };
         assert!(crate::app_manifest::authorize_app_cross_target(&r, &dest).is_ok());
         let dest_other = cross_worktree_dest_targets(&settings, "wt-other");
