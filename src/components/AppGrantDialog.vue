@@ -22,7 +22,7 @@ const view = computed(() =>
   buildPermissionView(props.request.resolved, props.request.previous, props.request.dangerousTools),
 );
 
-/** 最も強い警告（ワイルドカードの越境先・専用 AI ターミナル）を含むときは、確認チェックを必須にする */
+/** 最も強い警告（ワイルドカードの越境先・既定拒否パスの解除・専用 AI ターミナル）を含むときは、確認チェックを必須にする */
 const understood = ref(false);
 watch(
   () => props.request.requestId,
@@ -32,6 +32,9 @@ const canApprove = computed(() => !props.busy && (!view.value.hasCritical || und
 
 const isChange = computed(() => props.request.kind === "change");
 const hasAnyRow = computed(() => view.value.rows.length > 0);
+const hasWildcard = computed(() => view.value.rows.some((r) => r.wildcard));
+const hasSensitive = computed(() => view.value.rows.some((r) => r.kind === "fsSensitive"));
+const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiTerminal"));
 </script>
 
 <template>
@@ -83,6 +86,20 @@ const hasAnyRow = computed(() => view.value.rows.length > 0);
               <strong>{{ t("aiTerminalSummary", { spec: r.value }) }}</strong>
               <div class="why">{{ t("aiTerminalWarning") }}</div>
             </template>
+            <template v-else-if="r.kind === 'fs'">
+              <span class="kind">{{ r.access === "write" ? t("kindFsWrite") : t("kindFsRead") }}</span>
+              <code class="path">{{ r.label }}</code>
+              <div class="why neutral">
+                {{ r.scheme === "worktree" ? t("fsWorktree", { name: request.worktreeName }) : t("fsArtifact") }}
+              </div>
+              <div v-if="r.access === 'write'" class="why">{{ t("fsWriteWarning") }}</div>
+              <div v-else-if="r.scheme === 'worktree'" class="why neutral">{{ t("fsReadNote") }}</div>
+            </template>
+            <template v-else-if="r.kind === 'fsSensitive'">
+              <span class="kind">{{ t("kindFsSensitive") }}</span>
+              <strong>{{ t("fsSensitiveTitle") }}</strong>
+              <div class="why">{{ t("fsSensitiveWarning") }}</div>
+            </template>
             <template v-else>
               <span class="kind">{{ t("kindMemory") }}</span>
               {{ t("memoryMax", { bytes: r.value }) }}
@@ -102,6 +119,7 @@ const hasAnyRow = computed(() => view.value.rows.length > 0);
               <s v-if="r.kind === 'target'">{{ r.label }}</s>
               <s v-else-if="r.kind === 'memory'">{{ t("memoryMax", { bytes: r.value }) }}</s>
               <s v-else-if="r.kind === 'aiTerminal'">{{ t("aiTerminalSummary", { spec: r.value }) }}</s>
+              <s v-else-if="r.kind === 'fs'"><code>{{ r.access }} {{ r.label }}</code></s>
               <s v-else><code>{{ r.value }}</code></s>
             </li>
           </ul>
@@ -110,7 +128,13 @@ const hasAnyRow = computed(() => view.value.rows.length > 0);
 
       <label v-if="view.hasCritical" class="understand">
         <input v-model="understood" type="checkbox" />
-        {{ t("understand") }}
+        <span>
+          <template v-if="hasWildcard">{{ t("understand") }}</template>
+          <template v-if="hasWildcard && hasSensitive"> </template>
+          <template v-if="hasSensitive">{{ t("understandSensitive") }}</template>
+          <template v-if="hasAiTerminal && (hasWildcard || hasSensitive)"> </template>
+          <template v-if="hasAiTerminal">{{ t("understandAiTerminal") }}</template>
+        </span>
       </label>
 
       <p v-if="isChange" class="hint">{{ t("changeHint") }}</p>
@@ -340,14 +364,25 @@ const hasAnyRow = computed(() => view.value.rows.length > 0);
     "kindAiTerminal": "AI terminal",
     "aiTerminalSummary": "Open dedicated AI terminals ({spec})",
     "aiTerminalWarning": "Starts an agent that runs with the same authority as you (it can run arbitrary commands and edit files in this worktree). The app can type into it, read its output and answer its permission dialogs. This is the strongest permission.",
+    "kindFsRead": "Read files",
+    "kindFsWrite": "Write files",
+    "kindFsSensitive": "Files",
     "dangerTool": "Same authority as you (can run arbitrary commands in a terminal or start agents)",
     "wildcardWarning": "Includes worktrees created in the future, and reaches terminals in the main clone as well. This is the strongest permission.",
     "pinnedToId": "Fixed to this worktree by its ID at approval time (renaming it does not change the target)",
     "memoryMax": "Persistent memory up to {bytes} bytes",
+    "fsWorktree": "Inside the worktree \"{name}\" (this app's own worktree). Everything outside this folder, including through links, is refused.",
+    "fsArtifact": "This app's private storage area. It is deleted together with the artifact.",
+    "fsWriteWarning": "The app can create, overwrite and delete files here.",
+    "fsReadNote": "Reading is not filtered: secrets stored inside (such as .env or .git/config) are readable too.",
+    "fsSensitiveTitle": "Allowed to write to files that run commands (.git/hooks, .claude/, .github/workflows, ...)",
+    "fsSensitiveWarning": "Normally refused: .git/, .github/, .claude/, .vscode/, .idea/, .husky/, .devcontainer/, .mcp.json, .envrc, CLAUDE.md, AGENTS.md and similar agent/tool config files. Writing there lets the app make commands run later with your authority (git hooks, Claude Code hooks, CI, editor tasks). This is the strongest permission.",
     "noPerms": "No permissions requested. The app cannot call any API.",
     "ownOnly": "MCP calls reach only \"{name}\" (this app's own worktree).",
     "removed": "No longer requested",
-    "understand": "I understand the permissions marked in red give this app authority beyond what I chose individually.",
+    "understand": "I understand this lets the app reach worktrees I did not choose individually.",
+    "understandSensitive": "I understand this lets the app run commands with my authority by editing hook and workflow files.",
+    "understandAiTerminal": "I understand this lets the app start an agent that runs with my authority and drive it.",
     "changeHint": "Denying stops the app.",
     "waiting": "{count} more approval request(s) are waiting.",
     "approve": "Allow and start",
@@ -373,14 +408,25 @@ const hasAnyRow = computed(() => view.value.rows.length > 0);
     "kindAiTerminal": "AI ターミナル",
     "aiTerminalSummary": "専用の AI ターミナルを開く（{spec}）",
     "aiTerminalWarning": "あなたと同じ権限で動くエージェントを起動します（このワークツリーで任意のコマンド実行やファイル編集ができます）。アプリはそのエージェントへ入力し、出力を読み、許可ダイアログに回答できます。最も強い権限です。",
+    "kindFsRead": "ファイルの読み取り",
+    "kindFsWrite": "ファイルの書き込み",
+    "kindFsSensitive": "ファイル",
     "dangerTool": "あなたと同等の権限です（端末で任意のコマンドを実行したり、エージェントを起動したりできます）",
     "wildcardWarning": "今後作られるワークツリーも含み、メインのクローンの端末にも届きます。最も強い権限です。",
     "pinnedToId": "承認時点の ID でこのワークツリーに固定されます（改名しても対象は変わりません）",
     "memoryMax": "永続メモリー 最大 {bytes} バイト",
+    "fsWorktree": "ワークツリー「{name}」（このアプリ自身のワークツリー）の中だけです。このフォルダの外は、リンク経由でも拒否されます。",
+    "fsArtifact": "このアプリ専用の保存領域です。アーティファクトを削除すると一緒に消えます。",
+    "fsWriteWarning": "アプリはここでファイルを作成・上書き・削除できます。",
+    "fsReadNote": "読み取りは絞り込まれません。範囲内にある秘密（.env や .git/config など）も読めます。",
+    "fsSensitiveTitle": "コマンドが走るファイル（.git/hooks・.claude/・.github/workflows など）への書き込みを許可",
+    "fsSensitiveWarning": "通常は拒否されるパスです: .git/ / .github/ / .claude/ / .vscode/ / .idea/ / .husky/ / .devcontainer/ / .mcp.json / .envrc / CLAUDE.md / AGENTS.md など、エージェントやツールの設定ファイル。ここへ書けると、あなたの権限で後からコマンドを実行させられます（git フック・Claude Code のフック・CI・エディタのタスク）。最も強い権限です。",
     "noPerms": "権限は申請されていません。アプリはどの API も呼べません。",
     "ownOnly": "MCP 呼び出しは「{name}」（このアプリ自身のワークツリー）だけに届きます。",
     "removed": "申請から外れたもの",
-    "understand": "赤く表示された権限が、個別に選んでいない範囲にまでアプリの権限を広げることを理解しました。",
+    "understand": "個別に選んでいないワークツリーにもアプリが届くことを理解しました。",
+    "understandSensitive": "フックやワークフローのファイルを書き換えて、私の権限でコマンドを実行できてしまうことを理解しました。",
+    "understandAiTerminal": "アプリが私の権限で動くエージェントを起動し、操作できることを理解しました。",
     "changeHint": "拒否するとアプリは停止します。",
     "waiting": "ほかに {count} 件の承認要求が待っています。",
     "approve": "許可して起動",

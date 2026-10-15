@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { buildPermissionView } from "./appPermissionView";
+import { buildPermissionView, displayFsPath } from "./appPermissionView";
 import type { AppResolvedPermissions } from "../types/appInstance";
 
 const DANGEROUS = [
@@ -80,5 +80,91 @@ describe("buildPermissionView", () => {
     const v = buildPermissionView({ mcp: { tools: ["notify_worktree"], targets: [] } }, null, DANGEROUS);
     expect(v.rows.every((r) => !r.added)).toBe(true);
     expect(v.removed).toEqual([]);
+  });
+
+  describe("fs", () => {
+    const scope = (scheme: "worktree" | "artifact", prefix: string, path: string, write: boolean) => ({
+      scheme,
+      prefix,
+      path,
+      write,
+    });
+
+    it("shows resolved absolute paths with read as normal and write as danger", () => {
+      const perm: AppResolvedPermissions = {
+        fs: {
+          worktreeRoot: String.raw`\\?\C:\wt`,
+          scopes: [
+            scope("worktree", "src/", String.raw`\\?\C:\wt\src`, false),
+            scope("worktree", "out/", String.raw`\\?\C:\wt\out`, true),
+          ],
+          allowSensitivePaths: false,
+        },
+      };
+      const v = buildPermissionView(perm, null, DANGEROUS);
+      expect(v.rows.map((r) => [r.kind, r.access, r.label, r.severity])).toEqual([
+        ["fs", "read", String.raw`C:\wt\src`, "normal"],
+        ["fs", "write", String.raw`C:\wt\out`, "danger"],
+      ]);
+      expect(v.hasDanger).toBe(true);
+      expect(v.hasCritical).toBe(false);
+    });
+
+    it("treats lifting the sensitive-path denylist as the strongest warning", () => {
+      const perm: AppResolvedPermissions = {
+        fs: {
+          scopes: [scope("worktree", "", "/home/u/wt", true)],
+          allowSensitivePaths: true,
+        },
+      };
+      const v = buildPermissionView(perm, null, DANGEROUS);
+      expect(v.rows.map((r) => [r.kind, r.severity])).toEqual([
+        ["fs", "danger"],
+        ["fsSensitive", "critical"],
+      ]);
+      expect(v.hasCritical).toBe(true);
+      // ワイルドカードの越境先ではないので、「他ワークツリーに届く」警告の根拠にはしない
+      expect(v.rows.some((r) => r.wildcard)).toBe(false);
+    });
+
+    it("reports a widened fs scope as added and the old one as removed", () => {
+      const before: AppResolvedPermissions = {
+        fs: { scopes: [scope("artifact", "", "/data/a", false)], allowSensitivePaths: false },
+      };
+      const after: AppResolvedPermissions = {
+        fs: {
+          scopes: [scope("artifact", "", "/data/a", false), scope("artifact", "data/", "/data/a/data", true)],
+          allowSensitivePaths: true,
+        },
+      };
+      const v = buildPermissionView(after, before, DANGEROUS);
+      expect(v.rows.filter((r) => r.added).map((r) => r.kind).sort()).toEqual(["fs", "fsSensitive"]);
+      expect(v.removed).toEqual([]);
+    });
+
+    it("lists a narrowed fs scope as removed", () => {
+      const before: AppResolvedPermissions = {
+        fs: {
+          scopes: [scope("artifact", "", "/data/a", false), scope("artifact", "data/", "/data/a/data", true)],
+          allowSensitivePaths: true,
+        },
+      };
+      const after: AppResolvedPermissions = {
+        fs: { scopes: [scope("artifact", "", "/data/a", false)], allowSensitivePaths: false },
+      };
+      expect(buildPermissionView(after, before, DANGEROUS).removed.map((r) => r.kind).sort()).toEqual([
+        "fs",
+        "fsSensitive",
+      ]);
+    });
+  });
+
+  describe("displayFsPath", () => {
+    it("strips the Windows extended-length prefixes for display only", () => {
+      expect(displayFsPath(String.raw`\\?\C:\x\y`)).toBe(String.raw`C:\x\y`);
+      expect(displayFsPath(String.raw`\\?\UNC\srv\share\x`)).toBe(String.raw`\\srv\share\x`);
+      expect(displayFsPath(String.raw`C:\plain`)).toBe(String.raw`C:\plain`);
+      expect(displayFsPath("/home/u/wt")).toBe("/home/u/wt");
+    });
   });
 });

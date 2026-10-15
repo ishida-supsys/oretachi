@@ -82,6 +82,21 @@ export const ARTIFACT_BRIDGE_PUSH_AI_TERMINAL_EVENT = "aiTerminal.event";
  */
 export const ARTIFACT_BRIDGE_METHOD_AI_TERMINAL_PREFIX = "aiTerminal.";
 
+/**
+ * アプリ（`app` 付きアーティファクト）のファイルシステム API。パスは `worktree://<相対>` /
+ * `artifact://<相対>` だけ。判定は Rust 側（`app_fs::resolve_scoped_path`）。通常のビューアはこれらを
+ * 処理しないので「使えない API」として失敗する。
+ *
+ * - `fs.read`:   `{ path, encoding: "utf8" | "base64" }` → 本文の文字列
+ * - `fs.write`:  `{ path, data, encoding, createDirs }` → 書き込んだバイト数
+ * - `fs.list`:   `{ path }` → `{ entries: [{ name, kind, size, modifiedMs }], truncated }`
+ * - `fs.remove`: `{ path }`（ファイルのみ）
+ */
+export const ARTIFACT_BRIDGE_METHOD_FS_READ = "fs.read";
+export const ARTIFACT_BRIDGE_METHOD_FS_WRITE = "fs.write";
+export const ARTIFACT_BRIDGE_METHOD_FS_LIST = "fs.list";
+export const ARTIFACT_BRIDGE_METHOD_FS_REMOVE = "fs.remove";
+
 /** 応答が返らないまま Promise が残り続けないようにするタイムアウト（iframe 側） */
 const BRIDGE_TIMEOUT_MS = 10000;
 /**
@@ -476,6 +491,47 @@ export const ARTIFACT_BRIDGE_JS =
   "      try{return JSON.parse(text);}catch(err){return text;}" +
   "    });" +
   "  }" +
+  // ── ファイルシステム（アプリのみ。承認された範囲の外は Rust 側が拒否する）──
+  "  function bytesToB64(u8){" +
+  "    var s='',CH=0x8000;" +
+  "    for(var i=0;i<u8.length;i+=CH)s+=String.fromCharCode.apply(null,u8.subarray(i,i+CH));" +
+  "    return btoa(s);" +
+  "  }" +
+  "  function b64ToBytes(b){" +
+  "    var s=atob(b),u=new Uint8Array(s.length);" +
+  "    for(var i=0;i<s.length;i++)u[i]=s.charCodeAt(i);" +
+  "    return u;" +
+  "  }" +
+  "  function fsPath(path){" +
+  "    if(typeof path!=='string'||path==='')" +
+  "      return Promise.reject(new Error('fs expects a path like worktree://dir/file or artifact://file'));" +
+  "    return null;" +
+  "  }" +
+  "  function fsWrite(path,data,encoding,opts){" +
+  "    return fsPath(path)||call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_FS_WRITE) + "," +
+  "      {path:path,data:data,encoding:encoding,createDirs:!!(opts&&opts.createDirs)});" +
+  "  }" +
+  "  var fs={" +
+  "    readText:function(path){" +
+  "      return fsPath(path)||call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_FS_READ) + "," +
+  "        {path:path,encoding:'utf8'});" +
+  "    }," +
+  "    readBytes:function(path){" +
+  "      return (fsPath(path)||call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_FS_READ) + "," +
+  "        {path:path,encoding:'base64'})).then(b64ToBytes);" +
+  "    }," +
+  "    writeText:function(path,text,opts){return fsWrite(path,String(text),'utf8',opts);}," +
+  "    writeBytes:function(path,bytes,opts){" +
+  "      var u8=bytes instanceof Uint8Array?bytes:new Uint8Array(bytes);" +
+  "      return fsWrite(path,bytesToB64(u8),'base64',opts);" +
+  "    }," +
+  "    list:function(path){" +
+  "      return fsPath(path)||call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_FS_LIST) + ",{path:path});" +
+  "    }," +
+  "    remove:function(path){" +
+  "      return fsPath(path)||call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_FS_REMOVE) + ",{path:path});" +
+  "    }" +
+  "  };" +
   // ── 専用 AI ターミナル（manifest の `aiTerminal` 権限が承認されたアプリだけが使える）──
   // 権限の関門は Rust 側。ここは中継するだけ。戻り値は JSON ならオブジェクトで返る
   "  var aiListeners=[];" +
@@ -517,6 +573,7 @@ export const ARTIFACT_BRIDGE_JS =
   "    useMemory:useMemory," +
   "    subscribeMemory:subscribe," +
   "    callTool:callTool," +
+  "    fs:fs," +
   "    call:call," +
   "    aiTerminal:aiTerminal" +
   "  };" +

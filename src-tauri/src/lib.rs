@@ -3,6 +3,7 @@ mod ai_description;
 mod ai_judge;
 mod ai_provider;
 mod ai_terminal;
+mod app_fs;
 mod app_grant;
 mod app_instance;
 mod app_manifest;
@@ -2524,6 +2525,10 @@ pub fn run() {
             ai_terminal::app_ai_terminal_list,
             ai_terminal::ai_terminal_spawn_result,
             ai_terminal::list_owned_ai_terminals,
+            app_fs::app_fs_read,
+            app_fs::app_fs_write,
+            app_fs::app_fs_list,
+            app_fs::app_fs_remove,
             app_instance::app_set_memory,
             app_instance::app_get_memory,
             app_instance::app_grant_respond,
