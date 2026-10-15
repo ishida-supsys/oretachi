@@ -339,6 +339,8 @@ describe("ブリッジ本体: net.fetch", () => {
     await expect(b.oretachi.net.fetch("")).rejects.toThrow(/URL/);
     await expect(b.oretachi.net.fetch(123)).rejects.toThrow(/URL/);
     await expect(b.oretachi.net.fetch("https://a.example.com/", { headers: "x" })).rejects.toThrow(/headers/);
+    await expect(b.oretachi.net.fetch("https://a.example.com/", { headers: [null] })).rejects.toThrow(/headers/);
+    await expect(b.oretachi.net.fetch("https://a.example.com/", { headers: ["ab"] })).rejects.toThrow(/headers/);
     await expect(b.oretachi.net.fetch("https://a.example.com/", { body: { a: 1 } })).rejects.toThrow(/body/);
     expect(b.sent).toHaveLength(0);
   });

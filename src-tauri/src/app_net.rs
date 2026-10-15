@@ -147,6 +147,10 @@ fn embedded_v4(ip: Ipv6Addr) -> Option<Ipv4Addr> {
     if s[..5] == [0, 0, 0, 0, 0] && s[5] == 0xffff {
         return Some(v4(s[6], s[7]));
     }
+    // ::ffff:0:a.b.c.d（IPv4-translated, ::ffff:0:0/96）
+    if s[..4] == [0, 0, 0, 0] && s[4] == 0xffff && s[5] == 0 {
+        return Some(v4(s[6], s[7]));
+    }
     // ::a.b.c.d（compat。::1 と :: は別途 v6 側で弾く）
     if s[..6] == [0, 0, 0, 0, 0, 0] {
         return Some(v4(s[6], s[7]));
@@ -167,8 +171,12 @@ fn v6_is_forbidden(ip: Ipv6Addr) -> bool {
         return true;
     }
     let s = ip.segments();
-    if (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80 {
-        return true; // ULA fc00::/7, link-local fe80::/10
+    if (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80 || (s[0] & 0xffc0) == 0xfec0 {
+        return true; // ULA fc00::/7, link-local fe80::/10, site-local fec0::/10
+    }
+    // discard 100::/64, Teredo 2001::/32（トンネル経由で内側の v4 に化けうる）
+    if (s[0] == 0x100 && s[1..4] == [0, 0, 0]) || (s[0] == 0x2001 && s[1] == 0) {
+        return true;
     }
     // 64:ff9b:1::/48（ローカル用 NAT64）は内包アドレスが分からないので一律拒否
     if s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1 {
@@ -437,14 +445,19 @@ pub async fn perform(
     let redirect_policy = {
         let policy = policy.clone();
         let denied = denied.clone();
+        let origin = parsed.clone();
         reqwest::redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() >= MAX_REDIRECTS {
                 return attempt.error(format!("リダイレクトが {} 回を超えました", MAX_REDIRECTS));
             }
-            match policy.check_url(attempt.url()) {
+            // 別オリジンへのリダイレクトは、承認済みのプレフィックスであっても追わない。reqwest が
+            // 落とすのは Authorization / Cookie 等だけで、アプリが付けた x-api-key などの
+            // ヘッダーや本文（307/308）が別のホストへ渡ってしまうため
+            let result = policy.check_url(attempt.url()).and_then(|()| check_redirect_origin(&origin, attempt.url()));
+            match result {
                 Ok(()) => attempt.follow(),
                 Err(e) => {
-                    let msg = format!("リダイレクト先 {} は許可されていません: {}", attempt.url(), e);
+                    let msg = format!("リダイレクト先 {} は許可されていません: {}", loggable_url(attempt.url().as_str()), e);
                     if let Ok(mut d) = denied.lock() {
                         d.get_or_insert_with(|| msg.clone());
                     }
@@ -515,6 +528,19 @@ pub async fn perform(
         body,
         body_encoding: body_encoding.to_string(),
     })
+}
+
+/// リダイレクト先が元のリクエストと同じオリジンか（http → https への格上げだけは、同じホストなら許す）。
+fn check_redirect_origin(origin: &reqwest::Url, next: &reqwest::Url) -> Result<(), String> {
+    let same_origin = origin.scheme() == next.scheme()
+        && origin.host_str() == next.host_str()
+        && origin.port_or_known_default() == next.port_or_known_default();
+    let https_upgrade = origin.scheme() == "http" && next.scheme() == "https" && origin.host_str() == next.host_str();
+    if same_origin || https_upgrade {
+        Ok(())
+    } else {
+        Err("別のオリジン（スキーム・ホスト・ポート）へのリダイレクトは追いません".to_string())
+    }
 }
 
 /// reqwest は `rustls-no-provider` で使っているので、暗号プロバイダ（ring）が要る。起動時（`lib.rs`）にも
@@ -652,9 +678,22 @@ fn caller_net(
     Ok((ctx, net.allow))
 }
 
-fn truncate_url(url: &str) -> String {
-    let mut s: String = url.chars().take(LOG_URL_CHARS).collect();
-    if url.chars().count() > LOG_URL_CHARS {
+/// ログ・エラー文に出す URL。クエリと fragment は落とす（API キーなどの秘密が載りうる）。
+/// 長さも切る（リダイレクトの Location は任意長にできる）。
+fn loggable_url(url: &str) -> String {
+    let shown = match reqwest::Url::parse(url) {
+        Ok(mut u) => {
+            u.set_query(None);
+            u.set_fragment(None);
+            let _ = u.set_username("");
+            let _ = u.set_password(None);
+            u.to_string()
+        }
+        // 解釈できないものは、? 以降を落として出す
+        Err(_) => url.split(['?', '#']).next().unwrap_or("").to_string(),
+    };
+    let mut s: String = shown.chars().take(LOG_URL_CHARS).collect();
+    if shown.chars().count() > LOG_URL_CHARS {
         s.push('…');
     }
     s.replace(['\r', '\n'], " ")
@@ -663,7 +702,7 @@ fn truncate_url(url: &str) -> String {
 /// 拒否・失敗はデバッグログ（アプリのログとアプリのログファイル）へ残す。成功は残さない。
 fn log_failure(app: &AppHandle, ctx: &crate::app_instance::InstanceContext, method: &str, url: &str, error: &str) {
     let note = if ctx.reapproval_pending { "（再承認待ちのため、新しい権限はまだ使えません）" } else { "" };
-    let url = truncate_url(url);
+    let url = loggable_url(url);
     log::debug!("[app-net] 拒否 {} {}/{} {} — {}", method, ctx.worktree_id, ctx.artifact_id, url, error);
     crate::app_instance::add_log(
         app,
@@ -842,6 +881,7 @@ mod tests {
             "::1", "::", "fe80::1", "fc00::1", "fd12:3456::1", "ff02::1",
             "::ffff:127.0.0.1", "::ffff:10.0.0.1", "::ffff:169.254.169.254", "::127.0.0.1",
             "64:ff9b::7f00:1", "64:ff9b::a00:1", "64:ff9b:1::1",
+            "::ffff:0:7f00:1", "::ffff:0:a00:1", "fec0::1", "100::1", "2001:0:4136:e378:8000:63bf:3fff:fdd2",
             "2002:7f00:1::1", "2002:0a00:0001::",
         ];
         for s in bad {
@@ -1015,6 +1055,26 @@ mod tests {
         assert!(e.contains("リダイレクト先"), "{}", e);
         let e = perform(policy.clone(), lookup.clone(), &format!("{}/api/loop", base), init()).await.unwrap_err();
         assert!(e.contains("リダイレクト"), "{}", e);
+    }
+
+    #[test]
+    fn cross_origin_redirects_are_refused_but_https_upgrade_is_allowed() {
+        let o = url("http://a.example.com/x");
+        assert!(check_redirect_origin(&o, &url("http://a.example.com/y")).is_ok());
+        assert!(check_redirect_origin(&o, &url("https://a.example.com/y")).is_ok()); // 格上げ
+        assert!(check_redirect_origin(&o, &url("http://b.example.com/y")).is_err());
+        assert!(check_redirect_origin(&o, &url("http://a.example.com:8080/y")).is_err());
+        let s = url("https://a.example.com/x");
+        assert!(check_redirect_origin(&s, &url("http://a.example.com/y")).is_err()); // 格下げは不可
+        assert!(check_redirect_origin(&s, &url("https://b.example.com/y")).is_err());
+    }
+
+    #[test]
+    fn logged_urls_drop_query_fragment_and_credentials() {
+        assert_eq!(loggable_url("https://a.example.com/p?key=SECRET#f"), "https://a.example.com/p");
+        assert_eq!(loggable_url("https://u:pw@a.example.com/p?k=1"), "https://a.example.com/p");
+        assert_eq!(loggable_url("not a url?secret=1"), "not a url");
+        assert!(loggable_url(&format!("https://a.example.com/{}", "x".repeat(1000))).chars().count() <= LOG_URL_CHARS + 1);
     }
 
     #[tokio::test]

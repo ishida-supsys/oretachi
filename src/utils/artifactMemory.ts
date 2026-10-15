@@ -576,7 +576,10 @@ export const ARTIFACT_BRIDGE_JS =
   // 通信は Rust のプロキシが出す。許可・拒否の判断は Rust 側で、ここは引数の形を整えるだけ
   "  function netHeaders(h){" +
   "    if(h==null)return [];" +
-  "    if(Array.isArray(h))return h.map(function(p){return [String(p[0]),String(p[1])];});" +
+  "    if(Array.isArray(h)){" +
+  "      for(var i=0;i<h.length;i++){if(!Array.isArray(h[i])||h[i].length!==2)return null;}" +
+  "      return h.map(function(p){return [String(p[0]),String(p[1])];});" +
+  "    }" +
   "    if(typeof h==='object')return Object.keys(h).map(function(k){return [k,String(h[k])];});" +
   "    return null;" +
   "  }" +
