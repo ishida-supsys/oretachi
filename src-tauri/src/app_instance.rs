@@ -1070,11 +1070,7 @@ fn request_reload(app: &AppHandle, label: &str, reason: &str) {
     crate::app_net::on_reload(app, label);
     // 宛先はこのインスタンスのウィンドウだけ（常駐ウィンドウと、所有するサブウィンドウ）。
     // サブウィンドウは作り直さず、中の iframe だけが再接続する（前提 10）。他のインスタンスへ漏らさない
-    for target in std::iter::once(label.to_string()).chain(crate::app_subwindow::labels_for_instance(app, label)) {
-        if let Err(e) = app.emit_to(target.as_str(), "app-instance-reload", reason) {
-            log::warn!("[app-instance] {} へのリロード依頼に失敗: {}", target, e);
-        }
-    }
+    crate::app_subwindow::emit_to_instance(app, label, "app-instance-reload", reason);
 }
 
 /// 起動中インスタンスの更新を、どの書き込み経路でも同じに扱うための直列化。

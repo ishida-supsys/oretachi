@@ -823,8 +823,10 @@ pub fn forward_event(app: &AppHandle, terminal_id: &str, event: &str, kind: &str
         format!("AI 端末 {} のイベント: {}{}", short(terminal_id), event, text.as_deref().map(|t| format!(" — {}", t)).unwrap_or_default()),
     );
     if let Some(label) = app_instance::label_for_key(app, &owner.worktree_id, &owner.artifact_id) {
-        let _ = app.emit_to(
-            label,
+        // 常駐ウィンドウと、このインスタンスのサブウィンドウのどちらの iframe でも `onEvent` が発火する
+        crate::app_subwindow::emit_to_instance(
+            app,
+            &label,
             "app-ai-terminal-event",
             json!({ "terminalId": terminal_id, "event": event, "kind": kind, "body": text }),
         );

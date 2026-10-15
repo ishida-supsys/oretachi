@@ -256,6 +256,16 @@ pub fn labels_for_instance(app: &AppHandle, parent: &str) -> Vec<String> {
     .unwrap_or_default()
 }
 
+/// インスタンスのウィンドウ（常駐ウィンドウと、所有するサブウィンドウ）すべてへイベントを送る。
+/// 宛先はこのインスタンスのウィンドウだけ（他のインスタンスへ漏らさない）。
+pub fn emit_to_instance<S: Serialize + Clone>(app: &AppHandle, instance_label: &str, event: &str, payload: S) {
+    for target in std::iter::once(instance_label.to_string()).chain(labels_for_instance(app, instance_label)) {
+        if let Err(e) = app.emit_to(target.as_str(), event, payload.clone()) {
+            log::warn!("[app-subwindow] {} へ {} を送れませんでした: {}", target, event, e);
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SubWindowInfo {
@@ -337,10 +347,7 @@ pub fn on_grant_replaced(app: &AppHandle, parent: &str) {
 pub fn on_window_destroyed(app: &AppHandle, label: &str) -> bool {
     let Some(Some(entry)) = with_inner(app, |i| i.by_label.remove(label)) else { return false };
     crate::app_instance::add_log(app, &entry.key.0, &entry.key.1, "info", format!("サブウィンドウ {} が閉じられました", entry.id));
-    let payload = serde_json::json!({ "event": "closed", "id": entry.id });
-    for target in std::iter::once(entry.parent.clone()).chain(labels_for_instance(app, &entry.parent)) {
-        let _ = app.emit_to(target.as_str(), "app-subwindow-event", payload.clone());
-    }
+    emit_to_instance(app, &entry.parent, "app-subwindow-event", serde_json::json!({ "event": "closed", "id": entry.id }));
     true
 }
 
@@ -422,6 +429,8 @@ pub async fn app_subwindow_open(
         // 最小化させない（WebView2 が最小化でタイマーを間引くため。常駐ウィンドウと同じ理由）
         .minimizable(false)
         .resizable(v.resizable)
+        // ユーザーのリサイズでも、承認済みの大きさの上限を超えさせない
+        .max_inner_size(perm.max_width as f64, perm.max_height as f64)
         .decorations(!v.frameless)
         .transparent(v.transparent)
         .always_on_top(v.always_on_top)
