@@ -100,6 +100,12 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
               <strong>{{ t("fsSensitiveTitle") }}</strong>
               <div class="why">{{ t("fsSensitiveWarning") }}</div>
             </template>
+            <template v-else-if="r.kind === 'network'">
+              <span class="kind">{{ t("kindNetwork") }}</span>
+              <code class="path">{{ r.label }}</code>
+              <div v-if="r.severity === 'danger'" class="why">{{ t("networkHttpWarning") }}</div>
+              <div v-else class="why neutral">{{ t("networkNote") }}</div>
+            </template>
             <template v-else-if="r.kind === 'db'">
               <span class="kind">{{ r.access === "write" ? t("kindDbWrite") : t("kindDbRead") }}</span>
               <code class="path">{{ r.label }}</code>
@@ -133,6 +139,7 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
               <s v-if="r.kind === 'target'">{{ r.label }}</s>
               <s v-else-if="r.kind === 'memory'">{{ t("memoryMax", { bytes: r.value }) }}</s>
               <s v-else-if="r.kind === 'aiTerminal'">{{ t("aiTerminalSummary", { spec: r.value }) }}</s>
+              <s v-else-if="r.kind === 'network'"><code>{{ r.label }}</code></s>
               <s v-else-if="r.kind === 'fs' || r.kind === 'db'"><code>{{ r.kind }} {{ r.access }} {{ r.label }}</code></s>
               <s v-else><code>{{ r.value }}</code></s>
             </li>
@@ -381,6 +388,9 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
     "kindFsRead": "Read files",
     "kindFsWrite": "Write files",
     "kindFsSensitive": "Files",
+    "kindNetwork": "Network access",
+    "networkNote": "The app can send any data to, and read any response from, URLs under this prefix (redirects are re-checked). Your own PC, private networks and oretachi itself are always refused.",
+    "networkHttpWarning": "Plain HTTP (not encrypted): anyone on the network path can read or alter what the app sends and receives. The app can send any data to URLs under this prefix.",
     "kindDbRead": "Read database (read-only)",
     "kindDbWrite": "Read and write database",
     "kindDbSensitive": "Database",
@@ -432,6 +442,9 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
     "kindFsRead": "ファイルの読み取り",
     "kindFsWrite": "ファイルの書き込み",
     "kindFsSensitive": "ファイル",
+    "kindNetwork": "ネットワーク通信",
+    "networkNote": "この URL プレフィックス配下へ任意のデータを送り、応答を読めます（リダイレクト先も再検査されます）。この PC 自身・プライベートネットワーク・oretachi 自身へは常に届きません。",
+    "networkHttpWarning": "平文の HTTP（暗号化されません）: 通信経路上の誰でも、アプリの送受信を読んだり改ざんしたりできます。アプリはこの URL プレフィックス配下へ任意のデータを送れます。",
     "kindDbRead": "データベースの読み取り（読み取り専用）",
     "kindDbWrite": "データベースの読み書き",
     "kindDbSensitive": "データベース",

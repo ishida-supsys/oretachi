@@ -772,6 +772,8 @@ fn release(app: &AppHandle, label: &str) -> Option<(String, String)> {
         emit_grant_cancelled(app, &ids);
         // DB の接続も閉じる（前提 10: インスタンスの停止ですべて閉じる）。閉じは非同期
         crate::app_db::on_instance_released(app, label);
+        // 実行中のネットワーク通信は中断し、以後は出せなくする
+        crate::app_net::on_instance_released(app, label);
         // インスタンスが開いた専用 AI ターミナルも、停止とともにすべて閉じる（再起動での復元はしない）。
         // ホットリロードは `release` を通らないので、リロードをまたいで維持される。
         crate::ai_terminal::close_all_for_instance(app, &(inst.worktree_id.clone(), inst.artifact_id.clone()));
@@ -1048,6 +1050,9 @@ fn request_reload(app: &AppHandle, label: &str, reason: &str) {
         format!("リロードします（{}）。承認とメモリーは維持されます", reason),
     );
     emit_changed(app, &key.0, &key.1);
+    // 通信中のネットワークリクエストは中断する（前提 10。DB・端末・メモリは維持）。再承認の承認後も
+    // ここを通る。古い iframe への応答は nonce で捨てられるので、中断は資源を空けるためのもの
+    crate::app_net::on_reload(app, label);
     // 宛先はこのウィンドウだけ。他のインスタンスへ漏らさない
     if let Err(e) = app.emit_to(label, "app-instance-reload", reason) {
         log::warn!("[app-instance] {} へのリロード依頼に失敗: {}", label, e);
@@ -1493,7 +1498,7 @@ mod tests {
     use crate::app_manifest::{MemoryPermission, RequestedPermissions};
 
     fn perms(max: u64) -> RequestedPermissions {
-        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None, db: None }
+        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None, db: None, network: None }
     }
 
     #[test]

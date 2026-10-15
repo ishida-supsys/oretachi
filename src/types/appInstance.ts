@@ -49,6 +49,8 @@ export interface AppResolvedPermissions {
   fs?: AppResolvedFs;
   /** DB ファイルの置き場所のスコープ（形は fs と同じ。read のスコープの DB は読み取り専用） */
   db?: AppResolvedFs;
+  /** Rust プロキシが通す URL プレフィックス（正規化済み） */
+  network?: { allow: string[] };
 }
 
 export interface AppRequestedPermissions {
@@ -57,6 +59,7 @@ export interface AppRequestedPermissions {
   aiTerminal?: AppAiTerminalPermission;
   fs?: { read: string[]; write: string[]; allowSensitivePaths: boolean };
   db?: { read: string[]; write: string[]; allowSensitivePaths: boolean };
+  network?: { allow: string[] };
 }
 
 export interface AppGrant {

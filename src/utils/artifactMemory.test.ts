@@ -10,6 +10,7 @@ import {
   ARTIFACT_BRIDGE_METHOD_FLUSHED,
   ARTIFACT_BRIDGE_NONCE_GLOBAL,
   ARTIFACT_BRIDGE_JS,
+  ARTIFACT_BRIDGE_METHOD_NET_FETCH,
   readArtifactBridgeRequest,
   postArtifactBridgeResult,
   postArtifactBridgeMemoryChanged,
@@ -312,3 +313,47 @@ describe("ブリッジ本体: nonce と flush", () => {
     expect("nonce" in b.sent[0]).toBe(false);
   });
 });
+
+describe("ブリッジ本体: net.fetch", () => {
+  it("引数の形を整えて net.fetch として中継する（headers はオブジェクトでも配列でもよい）", () => {
+    const b = runBridge({ nonce: "n1" });
+    void b.oretachi.net
+      .fetch("https://api.example.com/v1/x", { method: "POST", headers: { A: "1", B: 2 }, body: "hi" })
+      .catch(() => {});
+    const m = b.sent[0];
+    expect(m.method).toBe(ARTIFACT_BRIDGE_METHOD_NET_FETCH);
+    expect(m.params).toMatchObject({
+      url: "https://api.example.com/v1/x",
+      method: "POST",
+      headers: [["A", "1"], ["B", "2"]],
+      body: "hi",
+    });
+    void b.oretachi.net.fetch("https://api.example.com/", { headers: [["X", "y"]] }).catch(() => {});
+    expect(b.sent[1].params.headers).toEqual([["X", "y"]]);
+    void b.oretachi.net.fetch("https://api.example.com/").catch(() => {});
+    expect(b.sent[2].params.headers).toEqual([]);
+  });
+
+  it("URL・headers・body の型が不正なら、Rust へ送らず reject する", async () => {
+    const b = runBridge({ nonce: "n1" });
+    await expect(b.oretachi.net.fetch("")).rejects.toThrow(/URL/);
+    await expect(b.oretachi.net.fetch(123)).rejects.toThrow(/URL/);
+    await expect(b.oretachi.net.fetch("https://a.example.com/", { headers: "x" })).rejects.toThrow(/headers/);
+    await expect(b.oretachi.net.fetch("https://a.example.com/", { body: { a: 1 } })).rejects.toThrow(/body/);
+    expect(b.sent).toHaveLength(0);
+  });
+
+  it("Rust の拒否は Error として reject される", async () => {
+    const b = runBridge({ nonce: "n1" });
+    const p = b.oretachi.net.fetch("https://evil.example.com/");
+    b.deliver({
+      [ARTIFACT_BRIDGE_RESULT_MARKER]: true,
+      requestId: b.sent[0].requestId,
+      nonce: "n1",
+      ok: false,
+      error: "承認された URL プレフィックスに含まれていません",
+    });
+    await expect(p).rejects.toThrow("承認された URL プレフィックス");
+  });
+});
+

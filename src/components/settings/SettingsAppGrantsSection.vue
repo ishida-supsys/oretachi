@@ -61,6 +61,8 @@ function summary(item: AppGrantListItem): string {
   const dbWrite = v.rows.filter((r) => r.kind === "db" && r.access === "write").length;
   if (dbRead + dbWrite > 0) parts.push(t("summaryDb", { read: dbRead, write: dbWrite }));
   if (v.rows.some((r) => r.kind === "dbSensitive")) parts.push(t("summaryDbSensitive"));
+  const net = v.rows.filter((r) => r.kind === "network").length;
+  if (net > 0) parts.push(t("summaryNetwork", { count: net }));
   return parts.length > 0 ? parts.join(" / ") : t("summaryNone");
 }
 
@@ -188,6 +190,7 @@ onBeforeUnmount(() => {
     "summaryFsSensitive": "writes to hook/workflow files",
     "summaryDb": "databases (read-only {read} / read-write {write})",
     "summaryDbSensitive": "databases in hook/workflow locations",
+    "summaryNetwork": "network ({count} URL prefixes)",
     "summaryNone": "no permissions"
   },
   "ja": {
@@ -211,6 +214,7 @@ onBeforeUnmount(() => {
     "summaryFsSensitive": "フック・ワークフローのファイルへの書き込み",
     "summaryDb": "データベース（読み取り専用 {read} / 読み書き {write}）",
     "summaryDbSensitive": "フック・ワークフローの場所のデータベース",
+    "summaryNetwork": "ネットワーク（URL プレフィックス {count} 件）",
     "summaryNone": "権限なし"
   }
 }

@@ -976,7 +976,7 @@ pub struct ArtifactParams {
     pub confirm_delete: Option<String>,
     #[schemars(description = "true にすると、このアーティファクトが oretachi のビューアで開かれている間 MCP 由来の書き込み (update / rewrite / artifact_module / artifact_store command=write,delete) を拒否する。ユーザーが操作中のアーティファクトを裏から書き換えないためのフラグで、読み取りは常に許可される。create / update / rewrite のいずれでも設定でき、省略時は既存アーティファクトの設定を引き継ぐ (明示的に false を渡すと解除)。ロック中は解除もできないので、外したい場合はユーザーにウィンドウを閉じてもらう。**守られるのはビューアが「いま表示している」1件だけ**で、ウィンドウが開いたままでもユーザーが別のアーティファクトへ切り替えている間は書き込める点に注意 (裏で入力を消したくないレポートは、ユーザーがそのページに留まっている前提になる)")]
     pub locked_while_open: Option<bool>,
-    #[schemars(description = "**アプリ形式のアーティファクトにする** manifest (application/vnd.ant.react の create / rewrite のみ)。`{ \"name\": \"表示名\", \"description\": \"…\", \"version\": \"1.0.0\", \"permissions\": { \"mcp\": { \"tools\": [\"notify_worktree\"], \"targets\": [\"ワークツリー名\" | \"*\" | \"workgroup:<ID か名前>\" | \"repo:<リポジトリ名>\"] }, \"memory\": { \"maxBytes\": 65536 } } }`。permissions は**宣言したものだけ**が使える（未宣言は常に拒否）。mcp.tools は oretachi_write_terminal 等の呼べるツールの部分集合、mcp.targets は他ワークツリーへ届かせたい宛先（省略 = 自ワークツリーのみ。ワイルドカードは承認後に作られるワークツリーにも当たる）、memory は書くなら maxBytes 必須、aiTerminal は専用 AI ターミナルを開く権限（agents は [\"claude\"] のみ、maxConcurrent は 1〜4。ユーザーと同じ権限で動くエージェントを起動できるので最も強い警告になる。権限モード・権限スキップ・許可ツールの指定は v1 ではできない）。fs は `{ \"read\": [\"worktree://src/\"], \"write\": [\"artifact://\"] }`（worktree:// / artifact:// のディレクトリ接頭辞）、db は fs と同じ形で SQLite の DB ファイルの置き場所（read のスコープの DB は読み取り専用、既定拒否パスは read でも使えない）。network / subWindow / wasm はまだ使えない（エラー）。**この manifest だけでは何も動かない**: ユーザーがアーティファクトウィンドウの起動画面から起動し、承認ダイアログで許可して初めて権限が有効になる（AI が manifest を書いても権限は得られない）。省略時は既存の manifest を引き継ぐ。外す手段は無い（別 id で作る）。app 付きは通常のビューアでは動かず、callTool も通常のビューア / Web ビューアからは拒否される")]
+    #[schemars(description = "**アプリ形式のアーティファクトにする** manifest (application/vnd.ant.react の create / rewrite のみ)。`{ \"name\": \"表示名\", \"description\": \"…\", \"version\": \"1.0.0\", \"permissions\": { \"mcp\": { \"tools\": [\"notify_worktree\"], \"targets\": [\"ワークツリー名\" | \"*\" | \"workgroup:<ID か名前>\" | \"repo:<リポジトリ名>\"] }, \"memory\": { \"maxBytes\": 65536 } } }`。permissions は**宣言したものだけ**が使える（未宣言は常に拒否）。mcp.tools は oretachi_write_terminal 等の呼べるツールの部分集合、mcp.targets は他ワークツリーへ届かせたい宛先（省略 = 自ワークツリーのみ。ワイルドカードは承認後に作られるワークツリーにも当たる）、memory は書くなら maxBytes 必須、aiTerminal は専用 AI ターミナルを開く権限（agents は [\"claude\"] のみ、maxConcurrent は 1〜4。ユーザーと同じ権限で動くエージェントを起動できるので最も強い警告になる。権限モード・権限スキップ・許可ツールの指定は v1 ではできない）。fs は `{ \"read\": [\"worktree://src/\"], \"write\": [\"artifact://\"] }`（worktree:// / artifact:// のディレクトリ接頭辞）、db は fs と同じ形で SQLite の DB ファイルの置き場所（read のスコープの DB は読み取り専用、既定拒否パスは read でも使えない）。network は `{ \"allow\": [\"https://api.example.com/v1/\"] }`（URL プレフィックスの許可リスト。アプリは net.fetch でこの配下にだけ通信できる。リダイレクト先も再検査される。ループバック・プライベート IP・oretachi 自身のポートは常に拒否で、解除する手段は無い）。subWindow / wasm はまだ使えない（エラー）。**この manifest だけでは何も動かない**: ユーザーがアーティファクトウィンドウの起動画面から起動し、承認ダイアログで許可して初めて権限が有効になる（AI が manifest を書いても権限は得られない）。省略時は既存の manifest を引き継ぐ。外す手段は無い（別 id で作る）。app 付きは通常のビューアでは動かず、callTool も通常のビューア / Web ビューアからは拒否される")]
     pub app: Option<serde_json::Value>,
     #[schemars(description = "create/rewrite時: app の代わりに、このパスの JSON ファイルを読んで manifest として登録する（スキル同梱の app.json など）。app とは排他。読める場所は file_path と同じ")]
     pub app_file_path: Option<String>,
@@ -6983,6 +6983,8 @@ pub(crate) fn resolve_app_permissions(
         ai_terminal: requested.ai_terminal.clone(),
         fs: None,
         db: None,
+        // URL プレフィックスは解決で変わるものがない（承認した値がそのまま関門の入力になる）
+        network: requested.network.clone(),
     })
 }
 
@@ -10291,6 +10293,7 @@ mod tests {
             ai_terminal: None,
             fs: None,
             db: None,
+            network: None,
         }
     }
 
@@ -10329,6 +10332,7 @@ mod tests {
             ai_terminal: None,
             fs: None,
             db: None,
+            network: None,
         };
         assert!(crate::app_manifest::authorize_app_cross_target(&r, &dest).is_ok());
         let dest_other = cross_worktree_dest_targets(&settings, "wt-other");

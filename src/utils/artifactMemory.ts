@@ -111,6 +111,17 @@ export const ARTIFACT_BRIDGE_METHOD_DB_QUERY = "db.query";
 export const ARTIFACT_BRIDGE_METHOD_DB_EXECUTE = "db.execute";
 export const ARTIFACT_BRIDGE_METHOD_DB_CLOSE = "db.close";
 
+/**
+ * アプリのネットワーク API。iframe の CSP は `connect-src 'none'` のまま、通信は Rust のプロキシ
+ * （`app_net`）が出す。manifest の `network.allow`（URL プレフィックス）の外・リダイレクト先・
+ * ループバック／プライベート IP・oretachi 自身のポートは Rust 側が拒否する。
+ *
+ * - `net.fetch`: `{ url, init? }` → `{ status, statusText, url, headers, body, bodyEncoding }`
+ *   - init: `{ method?, headers?（[[名前, 値], …] かオブジェクト）, body?, bodyEncoding?: "utf8"|"base64", responseType?: "text"|"base64" }`
+ *   - 4xx / 5xx でも reject せず status で返す（fetch と同じ）。拒否・上限超過・タイムアウトは reject
+ */
+export const ARTIFACT_BRIDGE_METHOD_NET_FETCH = "net.fetch";
+
 /** 応答が返らないまま Promise が残り続けないようにするタイムアウト（iframe 側） */
 const BRIDGE_TIMEOUT_MS = 10000;
 /**
@@ -561,6 +572,27 @@ export const ARTIFACT_BRIDGE_JS =
   "    execute:function(path,sql,params){return dbCall(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_DB_EXECUTE) + ",path,sql,params);}," +
   "    close:function(path){return dbCall(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_DB_CLOSE) + ",path);}" +
   "  };" +
+  // ── ネットワーク（manifest の `network` 権限が承認されたアプリだけが使える）──
+  // 通信は Rust のプロキシが出す。許可・拒否の判断は Rust 側で、ここは引数の形を整えるだけ
+  "  function netHeaders(h){" +
+  "    if(h==null)return [];" +
+  "    if(Array.isArray(h))return h.map(function(p){return [String(p[0]),String(p[1])];});" +
+  "    if(typeof h==='object')return Object.keys(h).map(function(k){return [k,String(h[k])];});" +
+  "    return null;" +
+  "  }" +
+  "  var net={" +
+  "    fetch:function(url,init){" +
+  "      if(typeof url!=='string'||url==='')" +
+  "        return Promise.reject(new Error('net.fetch expects an absolute URL string'));" +
+  "      init=init||{};" +
+  "      var headers=netHeaders(init.headers);" +
+  "      if(headers===null)return Promise.reject(new Error('net.fetch headers must be an object or an array of [name, value]'));" +
+  "      var p={url:url,method:init.method,headers:headers,body:init.body,bodyEncoding:init.bodyEncoding,responseType:init.responseType};" +
+  "      if(p.body!=null&&typeof p.body!=='string')" +
+  "        return Promise.reject(new Error('net.fetch body must be a string (for binary, pass base64 text with bodyEncoding base64)'));" +
+  "      return call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_NET_FETCH) + ",p," + BRIDGE_LONG_TIMEOUT_MS + ");" +
+  "    }" +
+  "  };" +
   // ── 専用 AI ターミナル（manifest の `aiTerminal` 権限が承認されたアプリだけが使える）──
   // 権限の関門は Rust 側。ここは中継するだけ。戻り値は JSON ならオブジェクトで返る
   "  var aiListeners=[];" +
@@ -604,6 +636,7 @@ export const ARTIFACT_BRIDGE_JS =
   "    callTool:callTool," +
   "    fs:fs," +
   "    db:db," +
+  "    net:net," +
   "    call:call," +
   "    aiTerminal:aiTerminal" +
   "  };" +

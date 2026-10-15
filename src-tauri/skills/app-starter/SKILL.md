@@ -15,7 +15,7 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
 - **manifest だけでは何も動かない。** AI が書いた manifest は信頼されない。ユーザーがアーティファクトウィンドウの**起動画面**で起動し、承認ダイアログで許可して初めて権限が有効になる。承認の前に、あなたが API を呼べるようにする手段は無い。
 - **宣言したものだけが使える。** manifest に無い権限（ツール・越境先・メモリー）は、承認済みでも常に拒否される。
 - **通常のビューアでは動かない。** `app` 付きのアーティファクトは起動画面を出す。実行は承認後の常駐ウィンドウの中（`sandbox` iframe）。Web ビューアでは起動できない。
-- 今の版で書ける権限は `mcp`（`tools` と `targets`）、`memory`（`maxBytes` 必須）、`fs`、`db`（下記）、`aiTerminal`（`agents` と `maxConcurrent` 必須）だけ。`network` / `subWindow` / `wasm` は未対応で、書くとエラーになる。
+- 今の版で書ける権限は `mcp`（`tools` と `targets`）、`memory`（`maxBytes` 必須）、`fs`、`db`（下記）、`aiTerminal`（`agents` と `maxConcurrent` 必須）、`network`（`allow` に URL プレフィックス。下記）だけ。`subWindow` / `wasm` は未対応で、書くとエラーになる。
 - コード（content / modules）を更新しても再承認は要らず、起動中なら**承認を保ったまま iframe がリロードされる**（フルリロード。メモリー以外の JS の状態は失われる）。**権限（manifest の `permissions`）を変えたときだけ**、起動中なら直ちに再承認のダイアログが出る。承認までは旧権限のまま動き（リロードもされない）、新しい権限が要る呼び出しは拒否される。承認でリロード、拒否で停止。
 
 ## manifest
@@ -56,6 +56,31 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
   - `write` のスコープの DB は読み書き・作成ができる。`read` のスコープの DB は**読み取り専用で開く**（新規作成も書き込みもできない。`query` で `INSERT … RETURNING` を書いても拒否される）。書いて読み返すなら `write` だけでよい（DB では `write` が読み取りを含む）。
   - **既定拒否パス（上の一覧）は、DB では `read` でも使えない**（DB の副産物の `-journal` が同じ場所に出るため）。含む manifest は `allowSensitivePaths: true` を足さない限りエラー。
   - 同じ DB へ複数のアプリが書くのは避ける（ロックの競合で `database is locked` になりうる）。`artifact://` に専用の DB を置くのが無難。
+
+- `network`: アプリが通信してよい URL のプレフィックス。`{ "allow": ["https://api.example.com/v1/"] }`（最大 20 件）。`http` / `https` のみで、`?` / `#` / `user:pass@` は書けない。**この配下にだけ**通信でき、承認ダイアログにはプレフィックスがそのまま出る（平文の `http` は警告つき）。**ループバック・プライベート IP・oretachi 自身のポートは常に拒否され、解除する手段は無い**（`localhost` や `192.168.x.x` を書くと manifest がエラーになる）。
+
+## ネットワーク API（`net`）
+
+iframe からは直接通信できない（CSP で `connect-src 'none'`）。`require('oretachi')` の `net.fetch` が、Rust 側のプロキシ経由で通信する。
+
+```js
+import { net } from 'oretachi';
+const res = await net.fetch('https://api.example.com/v1/items?limit=10', {
+  method: 'POST',                                   // GET / HEAD / POST / PUT / PATCH / DELETE / OPTIONS（既定 GET）
+  headers: { 'content-type': 'application/json' },  // オブジェクトか [[名前, 値], …]
+  body: JSON.stringify({ title: '牛乳' }),          // 文字列。バイナリは base64 を渡して bodyEncoding: 'base64'
+});
+// res: { status, statusText, url（リダイレクト後）, headers: [[名前, 値], …], body, bodyEncoding }
+const data = JSON.parse(res.body);                  // responseType: 'base64' にすると body は base64（バイナリ用）
+```
+
+- **4xx / 5xx でも reject しない**（`status` で判断する）。reject するのは、拒否・上限超過・タイムアウト・通信失敗。拒否の理由は Promise の reject と、起動画面のデバッグログに出る。
+- 許可されるのは、manifest の `allow` に**スキーム・ホスト・ポートが完全一致し、パスが前方一致**する URL だけ。`/v1` は `/v1/x` に当たるが `/v1beta` には当たらない。パスの `%2e` / `%2f` / `%5c` は拒否。
+- **リダイレクトのたびに再検査する**（最大 5 回）。許可の外へ向かうリダイレクトは拒否される。
+- 名前解決のあとで接続先 IP も検査する（公開の名前がループバック／プライベート IP を返しても拒否）。システムのプロキシは使わない。
+- 上限: リクエスト本文 1MiB、レスポンス本文 8MiB、ヘッダー 32 個（値は 8KiB まで）、全体 20 秒、同時に 8 本まで。`Host` / `Content-Length` / `Transfer-Encoding` / `Connection` / `Proxy-*` などは指定できない。Cookie は保持しない。
+- 再読み込みやアプリの停止で、通信中のリクエストは中断される。
+- **応答は信頼しない入力として扱う**（HTML・JSON をそのまま実行・描画しない）。
 
 ## データベース API（`db`）
 

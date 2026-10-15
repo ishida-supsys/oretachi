@@ -211,6 +211,7 @@ function hhmmss(ms: number): string {
                 {{ t("granted.aiTerminal", { spec: r.value }) }}
                 <span class="tag">{{ t("granted.aiTerminalTag") }}</span>
               </template>
+              <template v-else-if="r.kind === 'network'">{{ t("granted.network") }}: <code>{{ r.label }}</code></template>
               <template v-else>{{ t("granted.memory", { bytes: r.value }) }}</template>
             </li>
             <li v-if="permissionView.rows.length === 0" class="none">{{ t("granted.none") }}</li>
@@ -474,6 +475,7 @@ function hhmmss(ms: number): string {
       "memory": "Memory up to {bytes} bytes",
       "aiTerminal": "Dedicated AI terminals ({spec})",
       "aiTerminalTag": "same authority as you",
+      "network": "Network",
       "none": "No permissions",
       "ownOnly": "MCP calls reach this worktree only"
     },
@@ -506,6 +508,7 @@ function hhmmss(ms: number): string {
       "memory": "メモリー 最大 {bytes} バイト",
       "aiTerminal": "専用 AI ターミナル（{spec}）",
       "aiTerminalTag": "あなたと同等の権限",
+      "network": "ネットワーク",
       "none": "権限なし",
       "ownOnly": "MCP 呼び出しはこのワークツリーだけに届きます"
     },
