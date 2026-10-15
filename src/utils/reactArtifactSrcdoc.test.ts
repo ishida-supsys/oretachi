@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { artifactSrcdocSourceKey, buildReactSrcdoc, buildVendorHead } from "./reactArtifactSrcdoc";
-import { ARTIFACT_STANDALONE_FLAG } from "./artifactMemory";
+import { ARTIFACT_APP_FLAG, ARTIFACT_STANDALONE_FLAG } from "./artifactMemory";
 
 describe("artifactSrcdocSourceKey", () => {
   it("content が同じでもモジュールが変われば別のキーになる", () => {
@@ -43,6 +43,17 @@ describe("buildReactSrcdoc", () => {
     const html = buildReactSrcdoc("<html><head></head>", "const App = () => null;");
     // ブリッジ本体はフラグを「読む」ので、見るのは立てているかどうか
     expect(html).not.toContain(`window["${ARTIFACT_STANDALONE_FLAG}"]=true;`);
+  });
+
+  it("app ではブリッジより先にアプリフラグを立て、未指定なら立てない", () => {
+    const plain = buildReactSrcdoc("<html><head></head>", "const App = () => null;");
+    expect(plain).not.toContain(`window["${ARTIFACT_APP_FLAG}"]=true;`);
+    const html = buildReactSrcdoc("<html><head></head>", "const App = () => null;", undefined, undefined, {
+      app: true,
+    });
+    const flagAt = html.indexOf(`window["${ARTIFACT_APP_FLAG}"]=true;`);
+    expect(flagAt).toBeGreaterThan(-1);
+    expect(flagAt).toBeLessThan(html.indexOf("__oretachi="));
   });
 
   it("standalone ではブリッジより先にフラグを立てる", () => {

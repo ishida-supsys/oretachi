@@ -150,6 +150,17 @@ const BRIDGE_LONG_TIMEOUT_MS = 30000;
  */
 const MEMORY_FLUSH_DEBOUNCE_MS = 400;
 /**
+ * アプリ（`ARTIFACT_APP_FLAG`）だけに掛ける、保存の最大待ち。debounce は末尾だけなので、
+ * 100ms 間隔で書き続けるアプリは一度も保存されず Promise も解決しなかった。保留が空から始まって
+ * この時間が経ったら、書き続けていても必ず 1 回 flush する。
+ *
+ * 1 秒にした理由: 書き続けるアプリでも保存が最大 1 秒遅れに収まり（iframe が消えたとき失う範囲も
+ * 1 秒）、host の書き込み（サイドカー書き込み＋使用量の再計測・通知）は高々 1 回/秒＋往復待ちに
+ * 抑えられる。debounce（400ms）の 2.5 倍なので、止まれば 400ms で保存される普通の入力には影響しない。
+ * 通常の React アーティファクトの保存タイミングは変えない。
+ */
+const MEMORY_FLUSH_MAX_WAIT_MS = 1000;
+/**
  * メモリーのサイズ上限。判定の本体は Rust 側（`ARTIFACT_MEMORY_MAX_BYTES`）で、
  * ここは無駄な IPC 往復を省くための早期判定。JS は UTF-16 コードユニット数を数えるので
  * マルチバイト文字ではここを通っても Rust 側で落ちる（Rust が最終判断）。
@@ -331,6 +342,13 @@ export function postArtifactBridgeFlush(frame: HTMLIFrameElement | null, nonce?:
 export const ARTIFACT_STANDALONE_FLAG = "__oretachiStandalone";
 
 /**
+ * アプリ（`app` 付きアーティファクトの常駐ウィンドウ）の iframe であることを示すグローバルフラグ。
+ * `reactArtifactSrcdoc.ts` がブリッジより前に立てる。立っているときだけ、メモリー保存に
+ * 最大待ち（`MEMORY_FLUSH_MAX_WAIT_MS`）と、拒否された書き込みの巻き戻しが効く。
+ */
+export const ARTIFACT_APP_FLAG = "__oretachiApp";
+
+/**
  * iframe 内に注入するブリッジ本体。`window.__oretachi` を定義し、
  * `reactArtifactSrcdoc.ts` の makeRequire が `require('oretachi')` として返す。
  *
@@ -341,6 +359,7 @@ export const ARTIFACT_STANDALONE_FLAG = "__oretachiStandalone";
 export const ARTIFACT_BRIDGE_JS =
   "(function(){" +
   "  var standalone=window[" + JSON.stringify(ARTIFACT_STANDALONE_FLAG) + "]===true;" +
+  "  var isApp=window[" + JSON.stringify(ARTIFACT_APP_FLAG) + "]===true;" +
   // srcdoc ごとの nonce（任意）。読んだらグローバルは消す
   "  var NONCE=window[" + JSON.stringify(ARTIFACT_BRIDGE_NONCE_GLOBAL) + "];" +
   "  try{delete window[" + JSON.stringify(ARTIFACT_BRIDGE_NONCE_GLOBAL) + "];}catch(err){}" +
@@ -374,7 +393,10 @@ export const ARTIFACT_BRIDGE_JS =
   "    delete pending[d.requestId];" +
   "    clearTimeout(p.timer);" +
   "    if(d.ok)p.resolve(d.result);" +
-  "    else p.reject(new Error(String(d.error||'oretachi bridge error')));" +
+  // host が返した失敗（権限なし・maxBytes 超過のほか、host 側の書き込みエラーも含む。いずれも
+  // 「host に保存されなかった」ので iframe の state を host に合わせて巻き戻す）には印を付ける。タイムアウト・送信失敗と区別して、
+  // メモリーの巻き戻し（拒否のときだけ）に使う
+  "    else{var re=new Error(String(d.error||'oretachi bridge error'));re.bridgeRejected=true;p.reject(re);}" +
   "  });" +
   "  function call(method,params,timeoutMs){" +
   "    if(standalone)return Promise.reject(new Error(" +
@@ -426,17 +448,52 @@ export const ARTIFACT_BRIDGE_JS =
   "    var l=idleWaiters;idleWaiters=[];" +
   "    l.forEach(function(f){f();});" +
   "  }" +
+  // アプリ限定: 最後に保存が確定したスナップショットと、外から差し替わった回数。
+  // 拒否された書き込みを state から戻すために使う（下の rollback を参照）
+  // committed は浅いコピーで持つ（setMemory(s=>{s.x=1;return s;}) のように state を直接書き換える
+  // アプリでも、base が一緒に書き換わって差分が消えないように）
+  "  function copy(o){var c={};for(var k in o)if(Object.prototype.hasOwnProperty.call(o,k))c[k]=o[k];return c;}" +
+  "  var committed=copy(state);" +
+  "  var gen=0;" +
+  "  var maxTimer=null;" +
+  "  function has(o,k){return Object.prototype.hasOwnProperty.call(o,k);}" +
+  // 拒否された保存を iframe の state から外す。残すと以後の保存が毎回その値ごと送られて拒否され、
+  // 無関係なキーの書き込みまで通らなくなる。送った差分（sent と base の違うキー）だけを、
+  // 「いまの state がまだ sent の値のまま」のものに限って base へ戻す（送信中に別の値へ書かれたものは残す）。
+  // 送信中に外から state が差し替わっていたら（gen が違う）何もしない（古い base へ戻すと外の書き込みを消す）
+  "  function rollback(sent,base,g){" +
+  "    if(!isApp||g!==gen)return;" +
+  "    var next=copy(state),changed=false,k;" +
+  "    var keys={};" +
+  "    for(k in sent)if(has(sent,k))keys[k]=1;" +
+  "    for(k in base)if(has(base,k))keys[k]=1;" +
+  "    Object.keys(keys).forEach(function(key){" +
+  "      var inS=has(sent,key),inB=has(base,key);" +
+  "      if(inS&&inB&&sent[key]===base[key])return;" +
+  "      if(has(state,key)!==inS||(inS&&state[key]!==sent[key]))return;" +
+  "      if(inB)next[key]=base[key];else delete next[key];" +
+  "      changed=true;" +
+  "    });" +
+  "    if(changed){state=next;notify();}" +
+  "  }" +
   "  function flush(){" +
   "    flushTimer=null;" +
   "    if(inflight||waiters.length===0)return;" +
+  "    if(maxTimer!==null){clearTimeout(maxTimer);maxTimer=null;}" +
   "    var batch=waiters;" +
   "    waiters=[];" +
-  // 上限超過は往復させずここで落とす（Rust 側でも同じ判定をしている）
-  "    var json=JSON.stringify(state);" +
+  // sent は浅いコピーで持つ（state を直接書き換えるアプリで、送信中の書き込みが sent も書き換えて
+  // committed への反映と rollback の「まだ sent のまま」判定が狂わないように）
+  "    var sent=copy(state),base=committed,g=gen;" +
+  // 上限超過は往復させずここで落とす（Rust 側でも同じ判定をしている）。
+  // 同じ debounce 窓に入った無関係なキーの書き込みも、同じ batch なので一緒に reject・巻き戻しになる
+  "    var json=JSON.stringify(sent);" +
   "    if(json.length>" + ARTIFACT_MEMORY_MAX_BYTES + "){" +
   "      var tooLarge=new Error('oretachi memory too large: '+json.length+' > '+" +
   ARTIFACT_MEMORY_MAX_BYTES + ");" +
+  "      rollback(sent,base,g);" +
   "      batch.forEach(function(w){w.reject(tooLarge);});" +
+  "      checkIdle();" +
   "      return;" +
   "    }" +
   // 単体ファイルには保存先が無い。メモリ上の state はそのまま生きているので、
@@ -445,17 +502,27 @@ export const ARTIFACT_BRIDGE_JS =
   "    inflight=true;" +
   // 前の保存が返ってから、その間に積まれた分をまとめて送り直す
   "    var done=function(){inflight=false;if(waiters.length>0)flush();checkIdle();};" +
-  "    call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_MEMORY_SET) + ",{memory:state}).then(function(){" +
+  "    call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_MEMORY_SET) + ",{memory:sent}).then(function(){" +
+  "      if(g===gen)committed=copy(sent);" +
   "      batch.forEach(function(w){w.resolve();});" +
   "      done();" +
   "    },function(err){" +
+  // host の拒否だけ巻き戻す（タイムアウト・送信失敗は保存の成否が分からないので値を残す）
+  "      if(err&&err.bridgeRejected)rollback(sent,base,g);" +
   "      batch.forEach(function(w){w.reject(err);});" +
   "      done();" +
   "    });" +
   "  }" +
+  // 最大待ちの満了。書き続けていて debounce が明けないときに、保留を送り切る
+  "  function fireMax(){" +
+  "    maxTimer=null;" +
+  "    if(flushTimer!==null){clearTimeout(flushTimer);flushTimer=null;}" +
+  "    flush();" +
+  "  }" +
   "  function flushNow(){" +
   "    if(standalone)return;" +
   "    if(flushTimer!==null){clearTimeout(flushTimer);flushTimer=null;}" +
+  "    if(maxTimer!==null){clearTimeout(maxTimer);maxTimer=null;}" +
   "    idleWaiters.push(function(){" +
   "      try{" +
   "        var m={requestId:'f'+(++seq),method:" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_FLUSHED) + ",params:{}};" +
@@ -472,6 +539,7 @@ export const ARTIFACT_BRIDGE_JS =
   "      waiters.push({resolve:resolve,reject:reject});" +
   "      if(flushTimer!==null)clearTimeout(flushTimer);" +
   "      flushTimer=setTimeout(flush," + MEMORY_FLUSH_DEBOUNCE_MS + ");" +
+  "      if(isApp&&maxTimer===null)maxTimer=setTimeout(fireMax," + MEMORY_FLUSH_MAX_WAIT_MS + ");" +
   "    });" +
   "  }" +
   // 外から差し替わったストアを取り込む。全置換（ストアの意味論が全置換なので）。
@@ -480,10 +548,12 @@ export const ARTIFACT_BRIDGE_JS =
   "  function applyExternalMemory(next){" +
   "    if(!next||typeof next!=='object'||Array.isArray(next))return;" +
   "    state=next;" +
+  "    committed=copy(next);gen++;" +
   // debounce 待ちだった入力は押し流された。そのまま flush すると押し込まれた値を
   // 送って「保存できた」と resolve してしまう（呼び出し側の値はどこにも残らない）。
   // 保存されなかったことを reject で伝える
   "    if(flushTimer!==null){clearTimeout(flushTimer);flushTimer=null;}" +
+  "    if(maxTimer!==null){clearTimeout(maxTimer);maxTimer=null;}" +
   "    var dropped=waiters;" +
   "    waiters=[];" +
   "    if(dropped.length>0){" +
@@ -504,8 +574,7 @@ export const ARTIFACT_BRIDGE_JS =
   "    return replace((typeof next==='function')?next(state):next);" +
   "  }" +
   "  function patch(key,value){" +
-  "    var next={};" +
-  "    for(var k in state)if(Object.prototype.hasOwnProperty.call(state,k))next[k]=state[k];" +
+  "    var next=copy(state);" +
   "    if(value===undefined)delete next[key];" +
   "    else next[key]=value;" +
   "    return replace(next);" +
