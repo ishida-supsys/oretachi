@@ -19,6 +19,7 @@ import { loadVendors } from "./utils/reactArtifactVendors";
 import { createCspNonce } from "./utils/artifactCspViolation";
 import {
   ARTIFACT_BRIDGE_METHOD_DB_CLOSE,
+  ARTIFACT_BRIDGE_METHOD_NET_FETCH,
   ARTIFACT_BRIDGE_METHOD_DB_EXECUTE,
   ARTIFACT_BRIDGE_METHOD_DB_QUERY,
   ARTIFACT_BRIDGE_METHOD_AI_TERMINAL_PREFIX,
@@ -184,6 +185,32 @@ async function handleBridgeRequest(request: ArtifactBridgeRequest) {
           { path, sql, params },
         );
       }
+      reply(request, { ok: true, result });
+    } catch (e) {
+      reply(request, { ok: false, error: errorText(e) });
+    }
+    return;
+  }
+  if (request.method === ARTIFACT_BRIDGE_METHOD_NET_FETCH) {
+    const url = request.params.url;
+    if (typeof url !== "string" || url === "") {
+      reply(request, { ok: false, error: "net.fetch には URL が必要です" });
+      return;
+    }
+    try {
+      // 許可・拒否の判断（URL プレフィックス・リダイレクト・IP・上限）は Rust（`app_net_fetch`）。
+      // 拒否の理由はデバッグログへ残る。ここは素通しするだけ
+      const p = request.params;
+      const result = await invoke("app_net_fetch", {
+        url,
+        init: {
+          method: typeof p.method === "string" ? p.method : undefined,
+          headers: Array.isArray(p.headers) ? p.headers : [],
+          body: typeof p.body === "string" ? p.body : undefined,
+          bodyEncoding: typeof p.bodyEncoding === "string" ? p.bodyEncoding : undefined,
+          responseType: typeof p.responseType === "string" ? p.responseType : undefined,
+        },
+      });
       reply(request, { ok: true, result });
     } catch (e) {
       reply(request, { ok: false, error: errorText(e) });

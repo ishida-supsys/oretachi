@@ -64,7 +64,12 @@ sha2 = "0.10"
 hmac = "0.12"
 # Web閲覧の dev モード用フォールバック(vite devUrl へのプロキシ)専用。
 # tauri-plugin-updater が既に依存しているため、追加の重複ビルドは無い。
-reqwest = { version = "0.13", default-features = false }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+# アプリ API のネットワーク（app_net.rs）の HTTPS 用。reqwest を rustls-no-provider で使うので、
+# 暗号プロバイダ（ring。tauri-plugin-updater が既に使っている）を起動時に自分で入れる
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# app_net.rs が URL のホスト種別（url::Host）を見る。reqwest が既に依存している版
+url = "2"
 # Web閲覧の自動更新(SSE)ストリーム組み立て用（既に他クレート経由の推移依存で
 # 取得済みなので、新規ダウンロードは発生しない）
 futures-util = "0.3"

@@ -4,6 +4,7 @@ mod ai_judge;
 mod ai_provider;
 mod ai_terminal;
 mod app_db;
+mod app_net;
 mod app_fs;
 mod app_grant;
 mod app_instance;
@@ -2251,6 +2252,9 @@ fn subscribe_webview2_diagnostics(window: &tauri::WebviewWindow) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // reqwest は rustls-no-provider で使っている。暗号プロバイダは自分で入れる（updater が更新確認で
+    // 遅れて入れるのを待つと、それまで HTTPS が失敗する）。すでに入っていれば Err なので無視する
+    app_net::ensure_crypto_provider();
     // Windows: インストーラ起動由来の RedirectionGuard 緩和策 (Enforce=1) を検出したら
     // explorer.exe 経由でセルフリローンチする (Issue #70)。リローンチ時は exit(0) して戻らない。
     // この時点ではロガー未初期化のため、結果は setup() に持ち越して記録する。
@@ -2409,6 +2413,7 @@ pub fn run() {
         .manage(ai_terminal::AiTerminalRegistry::default())
         .manage(ai_terminal::SpawnWaiters::default())
         .manage(app_db::AppDbRegistry::default())
+        .manage(app_net::AppNetRegistry::default())
         .manage(mcp_server::NotificationRegistry::default())
         .manage(mcp_server::CloseWorktreeAckRegistry::default())
         .manage(mcp_server::ImportWorktreeAckRegistry::default())
@@ -2534,6 +2539,7 @@ pub fn run() {
             app_db::app_db_query,
             app_db::app_db_execute,
             app_db::app_db_close,
+            app_net::app_net_fetch,
             app_instance::app_set_memory,
             app_instance::app_get_memory,
             app_instance::app_grant_respond,

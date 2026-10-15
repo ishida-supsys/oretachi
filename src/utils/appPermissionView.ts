@@ -20,8 +20,8 @@ export interface PermissionRow {
    * `fs` / `db`: FS・DB のスコープ 1 件（`access` と、解決済みの絶対パス `label`。DB の read は読み取り専用）。
    * `fsSensitive` / `dbSensitive`: 既定拒否パスの解除
    */
-  kind: "tool" | "target" | "memory" | "aiTerminal" | "fs" | "fsSensitive" | "db" | "dbSensitive";
-  /** ツール名 / 越境先の `stored` / `maxBytes` の文字列 / `claude×N`（件数の変更も差分に出る）/ FS・DB は `<read|write>:<scheme>:<絶対パス>` */
+  kind: "tool" | "target" | "memory" | "aiTerminal" | "fs" | "fsSensitive" | "db" | "dbSensitive" | "network";
+  /** ツール名 / 越境先の `stored` / `maxBytes` の文字列 / `claude×N`（件数の変更も差分に出る）/ FS・DB は `<read|write>:<scheme>:<絶対パス>` / ネットワークは正規化済みの URL プレフィックス */
   value: string;
   /** 越境先のときの表示名 / FS・DB のときの表示用の絶対パス */
   label: string;
@@ -94,6 +94,18 @@ function rowsOf(perm: AppResolvedPermissions, dangerous: ReadonlySet<string>): P
   if (perm.aiTerminal) {
     const value = `${perm.aiTerminal.agents.join("+")}×${perm.aiTerminal.maxConcurrent}`;
     rows.push({ kind: "aiTerminal", value, label: value, severity: "critical", wildcard: false, added: false });
+  }
+  // ネットワーク: Rust プロキシが通す URL プレフィックス 1 件ごとに 1 行。平文 http は盗聴・改ざんを
+  // 受けうるので danger（https は normal）。ループバック等は常に拒否されるので、ここでは出さない
+  for (const prefix of perm.network?.allow ?? []) {
+    rows.push({
+      kind: "network",
+      value: prefix,
+      label: prefix,
+      severity: prefix.startsWith("http://") ? "danger" : "normal",
+      wildcard: false,
+      added: false,
+    });
   }
   if (perm.fs) rows.push(...scopeRows(perm.fs, "fs", "fsSensitive"));
   if (perm.db) rows.push(...scopeRows(perm.db, "db", "dbSensitive"));

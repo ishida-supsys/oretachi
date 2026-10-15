@@ -16,7 +16,7 @@ use std::collections::BTreeSet;
 
 /// 将来の sub-issue が受理するようになる権限キー。#370 の時点では「未対応」として manifest 不正扱い
 /// にする（黙って無視すると、申請したつもりの権限が効かないまま承認だけ通ることになる）。
-const RESERVED_PERMISSION_KEYS: &[&str] = &["network", "subWindow", "wasm"];
+const RESERVED_PERMISSION_KEYS: &[&str] = &["subWindow", "wasm"];
 
 /// `aiTerminal.agents` で指定できるエージェント（v1 は Claude Code のみ）。
 pub const AI_TERMINAL_AGENTS: &[&str] = &["claude"];
@@ -62,6 +62,13 @@ pub struct AiTerminalPermission {
     pub agents: Vec<String>,
     /// 同時に開ける数（1〜`AI_TERMINAL_MAX_CONCURRENT_CAP`）。
     pub max_concurrent: u32,
+}
+
+/// manifest の `network`。`allow` は URL プレフィックス（`app_net::normalize_prefix` で正規化済み・
+/// ソート・重複除去済み）。承認時にそのまま解決済みの形にもなる（解決で変わるものがない）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NetworkPermission {
+    pub allow: Vec<String>,
 }
 
 /// manifest の `fs`。`read` / `write` は `worktree://<相対>` / `artifact://<相対>` のディレクトリ
@@ -114,6 +121,9 @@ pub struct RequestedPermissions {
     /// 読み取り専用で開く。`allowSensitivePaths` は read / write の両方の既定拒否を解く
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub db: Option<RequestedFs>,
+    /// manifest の `network`。Rust 側のプロキシ（`app_net.rs`）が通す URL プレフィックス
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkPermission>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -157,6 +167,8 @@ pub struct ResolvedPermissions {
     pub fs: Option<ResolvedFs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub db: Option<ResolvedFs>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkPermission>,
 }
 
 /// host 側に保存する承認。キーはアーティファクト識別子（`<worktreeId>/<artifactId>`）。
@@ -219,7 +231,7 @@ fn optional_text(
 
 /// `app` オブジェクトを検証して manifest にする。
 ///
-/// `permissions` 内の未知キーは**拒否**する（fail closed）。受理するのは `mcp` / `memory` / `fs` だけで、
+/// `permissions` 内の未知キーは**拒否**する（fail closed）。受理するのは `mcp` / `memory` / `fs` / `db` / `network` / `aiTerminal` だけで、
 /// 後続 sub-issue が足す予定のキーは「未対応」として別メッセージで拒否する。
 pub fn parse_manifest(app: &serde_json::Value) -> Result<AppManifest, String> {
     let obj = expect_object(app, "app")?;
@@ -258,6 +270,7 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
             "aiTerminal" => out.ai_terminal = parse_ai_terminal(val)?,
             "fs" => out.fs = parse_scoped(val, ScopedKind::Fs)?,
             "db" => out.db = parse_scoped(val, ScopedKind::Db)?,
+            "network" => out.network = parse_network(val)?,
             k if RESERVED_PERMISSION_KEYS.contains(&k) => {
                 return Err(format!(
                     "権限 '{}' はこの版ではまだ使えません（対応する機能が未実装です）。manifest から外してください",
@@ -266,7 +279,7 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
             }
             other => {
                 return Err(format!(
-                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs / db / aiTerminal だけです",
+                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs / db / network / aiTerminal だけです",
                     other
                 ));
             }
@@ -330,6 +343,26 @@ fn parse_mcp(v: &serde_json::Value) -> Result<Option<RequestedMcp>, String> {
         return Err(format!("targets の要素が長すぎます（{} 文字まで）: {}", MAX_TARGET_CHARS, t));
     }
     Ok(Some(RequestedMcp { tools, targets }))
+}
+
+fn parse_network(v: &serde_json::Value) -> Result<Option<NetworkPermission>, String> {
+    let obj = expect_object(v, "app.permissions.network")?;
+    if let Some(k) = obj.keys().find(|k| k.as_str() != "allow") {
+        // ループバック・プライベート IP・oretachi 自身のポートを許す設定は v1 にはない
+        return Err(format!("app.permissions.network の未知のキー '{}' です（allow だけ）", k));
+    }
+    let raw = string_list(obj, "allow", "app.permissions.network.allow")?;
+    let mut set = BTreeSet::new();
+    for item in &raw {
+        set.insert(crate::app_net::normalize_prefix(item)?);
+    }
+    if set.len() > crate::app_net::MAX_PREFIXES {
+        return Err(format!("app.permissions.network.allow は {} 件までです", crate::app_net::MAX_PREFIXES));
+    }
+    if set.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(NetworkPermission { allow: set.into_iter().collect() }))
 }
 
 fn parse_memory(v: &serde_json::Value) -> Result<Option<MemoryPermission>, String> {
@@ -614,6 +647,44 @@ mod tests {
     }
 
     #[test]
+    fn parses_network_permission() {
+        let m = ok(json!({ "name": "x", "permissions": { "network": { "allow": [
+            "https://b.example.com", "HTTPS://api.example.com/v1/", "https://b.example.com/"
+        ] }}}));
+        // 正規化・ソート・重複除去
+        assert_eq!(
+            m.permissions.network.unwrap().allow,
+            vec!["https://api.example.com/v1/", "https://b.example.com/"]
+        );
+        // 空なら権限なし
+        assert!(ok(json!({ "name": "x", "permissions": { "network": { "allow": [] }}})).permissions.network.is_none());
+    }
+
+    #[test]
+    fn rejects_bad_network_permission() {
+        let p = |v: serde_json::Value| err(json!({ "name": "x", "permissions": { "network": v }}));
+        // 解除オプションは無い（未知キー）
+        assert!(p(json!({ "allow": ["https://a.example.com/"], "allowPrivateNetwork": true })).contains("未知のキー"));
+        assert!(p(json!({ "allow": "https://a.example.com/" })).contains("配列"));
+        assert!(p(json!({ "allow": ["ftp://a.example.com/"] })).contains("http"));
+        assert!(p(json!({ "allow": ["http://127.0.0.1:8080/"] })).contains("ループバック"));
+        assert!(p(json!({ "allow": ["http://localhost/"] })).contains("ループバック"));
+        assert!(p(json!({ "allow": ["https://u:p@a.example.com/"] })).contains("認証情報"));
+        let many: Vec<String> = (0..=crate::app_net::MAX_PREFIXES).map(|i| format!("https://h{}.example.com/", i)).collect();
+        assert!(p(json!({ "allow": many })).contains("件まで"));
+    }
+
+    #[test]
+    fn network_change_requires_reapproval() {
+        let a = ok(json!({ "name": "x", "permissions": { "network": { "allow": ["https://a.example.com/"] }}}));
+        let b = ok(json!({ "name": "x", "permissions": { "network": { "allow": ["https://a.example.com/", "https://b.example.com/"] }}}));
+        let c = ok(json!({ "name": "renamed", "permissions": { "network": { "allow": ["https://a.example.com/"] }}}));
+        assert!(requested_changed(&a.permissions, &b.permissions));
+        assert!(requested_changed(&b.permissions, &a.permissions)); // 狭まる変更でも出す
+        assert!(!requested_changed(&a.permissions, &c.permissions)); // 名前だけの変更では出さない
+    }
+
+    #[test]
     fn parses_ai_terminal_permission() {
         let m = ok(json!({ "name": "x", "permissions": { "aiTerminal": { "agents": ["claude", "claude"], "maxConcurrent": 2 }}}));
         let t = m.permissions.ai_terminal.unwrap();
@@ -894,6 +965,7 @@ mod tests {
             ai_terminal: None,
             fs: None,
             db: None,
+            network: None,
         }
     }
 
@@ -931,6 +1003,7 @@ mod tests {
                 ai_terminal: Some(AiTerminalPermission { agents: vec!["claude".into()], max_concurrent: 2 }),
                 fs: None,
                 db: None,
+                network: None,
             },
             resolved: resolved(&["notify_worktree"], &["wt-b"]),
         };

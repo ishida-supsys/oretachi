@@ -221,6 +221,29 @@ describe("buildPermissionView", () => {
     });
   });
 
+  describe("network", () => {
+    it("lists one row per URL prefix; https is normal and plain http is danger", () => {
+      const perm: AppResolvedPermissions = {
+        network: { allow: ["https://api.example.com/v1/", "http://plain.example.com/"] },
+      };
+      const v = buildPermissionView(perm, null, DANGEROUS);
+      expect(v.rows.map((r) => [r.kind, r.label, r.severity])).toEqual([
+        ["network", "https://api.example.com/v1/", "normal"],
+        ["network", "http://plain.example.com/", "danger"],
+      ]);
+      expect(v.hasDanger).toBe(true);
+      expect(v.hasCritical).toBe(false);
+    });
+
+    it("shows only the added prefix as added and a dropped prefix as removed on re-approval", () => {
+      const before: AppResolvedPermissions = { network: { allow: ["https://a.example.com/", "https://b.example.com/"] } };
+      const after: AppResolvedPermissions = { network: { allow: ["https://a.example.com/", "https://c.example.com/"] } };
+      const v = buildPermissionView(after, before, DANGEROUS);
+      expect(v.rows.filter((r) => r.added).map((r) => r.value)).toEqual(["https://c.example.com/"]);
+      expect(v.removed.map((r) => r.value)).toEqual(["https://b.example.com/"]);
+    });
+  });
+
   describe("displayFsPath", () => {
     it("strips the Windows extended-length prefixes for display only", () => {
       expect(displayFsPath(String.raw`\\?\C:\x\y`)).toBe(String.raw`C:\x\y`);
