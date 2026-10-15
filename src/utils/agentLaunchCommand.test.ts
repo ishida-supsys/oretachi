@@ -15,18 +15,30 @@ describe("buildClaudeLaunchCommand", () => {
     expect(buildClaudeLaunchCommand({ isPowerShell: true })).toBe("claude\r");
     expect(buildClaudeLaunchCommand({ flags: "--model opus", isPowerShell: false })).toBe("claude --model opus\r");
   });
+
+  it("puts -- before an untrusted prompt so that it can never be read as a flag", () => {
+    expect(
+      buildClaudeLaunchCommand({ flags: '--model "opus"', tempPath: "/tmp/p.txt", isPowerShell: false, endOfOptions: true }),
+    ).toBe('claude --model "opus" -- "$(cat "/tmp/p.txt")"; rm "/tmp/p.txt"\r');
+    expect(buildClaudeLaunchCommand({ tempPath: "C:\\t\\p.txt", isPowerShell: true, endOfOptions: true })).toBe(
+      '$p = Get-Content "C:\\t\\p.txt" -Raw -Encoding UTF8; claude -- "$p"; Remove-Item "C:\\t\\p.txt"\r',
+    );
+    // プロンプトが無いときは `--` も付けない
+    expect(buildClaudeLaunchCommand({ isPowerShell: false, endOfOptions: true })).toBe("claude\r");
+  });
 });
 
 describe("owned AI terminal flags", () => {
   it("never adds permission flags", () => {
     expect(ownedAiTerminalFlags()).toBeUndefined();
     expect(ownedAiTerminalFlags("")).toBeUndefined();
-    expect(ownedAiTerminalFlags("claude-opus-4-1")).toBe("--model claude-opus-4-1");
-    expect(ownedAiTerminalFlags("sonnet[1m]")).toBe("--model sonnet[1m]");
+    expect(ownedAiTerminalFlags("claude-opus-4-1")).toBe('--model "claude-opus-4-1"');
+    // [ ] はグロブにならないよう引用符で包む
+    expect(ownedAiTerminalFlags("sonnet[1m]")).toBe('--model "sonnet[1m]"');
   });
 
-  it("rejects model names that could inject shell syntax", () => {
-    for (const bad of ["a b", "a;b", "$(x)", 'a"b', "a`b", "a|b", "a&b", "a\nb", "x".repeat(101)]) {
+  it("rejects model names that could inject shell syntax or another flag", () => {
+    for (const bad of ["a b", "a;b", "$(x)", 'a"b', "a`b", "a|b", "a&b", "a\nb", "-x", "--dangerously-skip-permissions", "x".repeat(101)]) {
       expect(isSafeModelName(bad)).toBe(false);
       expect(() => ownedAiTerminalFlags(bad)).toThrow();
     }

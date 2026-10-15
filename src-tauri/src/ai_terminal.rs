@@ -217,19 +217,38 @@ impl Inner {
         }
     }
 
-    /// インスタンスの全エントリを外す。紐付け済みだった session_id を返す。
-    fn remove_for_instance(&mut self, key: &Key) -> Vec<u32> {
+    /// インスタンス停止時: PTY の無い（予約・起動中の）エントリは外し、紐付け済みのものは**残して**
+    /// session_id を返す。**kill が終わるまで所有の印を外さない**ためで、外してしまうと、終了処理中の
+    /// セッションが「所有外の AI 端末」になり、`resolve_subscriber` の候補や孤児購読の引き取り対象、
+    /// 終了時の Stop フックによるバッジ・トレイへの積み上げに巻き込まれる。
+    /// 死んだエントリは `prune`（kill 完了後・次回の参照時）が落とす。
+    fn kill_targets_for_instance(&mut self, key: &Key) -> Vec<u32> {
         let mut sids = Vec::new();
         self.entries.retain(|_, e| {
             if &e.key != key {
                 return true;
             }
-            if let Phase::Bound(sid) = e.phase {
-                sids.push(sid);
+            match e.phase {
+                Phase::Bound(sid) => {
+                    sids.push(sid);
+                    true
+                }
+                _ => false,
             }
-            false
         });
         sids
+    }
+
+    /// 起動に失敗した `open` の後始末。紐付け済みなら**残して** session_id を返し（kill 完了まで所有の印を保つ。
+    /// 理由は `kill_targets_for_instance`）、未紐付けなら外す。
+    fn discard(&mut self, terminal_id: &str) -> Option<u32> {
+        match self.entries.get(terminal_id).map(|e| e.phase.clone()) {
+            Some(Phase::Bound(sid)) => Some(sid),
+            _ => {
+                self.entries.remove(terminal_id);
+                None
+            }
+        }
     }
 }
 
@@ -265,9 +284,12 @@ pub fn reserve(
     cwd: &str,
     max_concurrent: u32,
 ) -> Result<String, String> {
-    let alive = alive_sessions(app);
     let reg = app.state::<AiTerminalRegistry>();
     let mut inner = reg.0.lock().map_err(|e| format!("lock error: {}", e))?;
+    // 生存の確認は**ロックの内側**で採る。外で採ると、その後に別の `open` が spawn → bind を済ませたとき、
+    // 古いスナップショットで「PTY が居ない」とみなして紐付け済みの端末を落としてしまう
+    // （`pty_spawn` は PTY を作ってから bind するので、ロックの内側なら整合する）
+    let alive = alive_sessions(app);
     inner.reserve(key, app_name, title, system_prompt, cwd, max_concurrent, &alive, Instant::now())
 }
 
@@ -328,20 +350,44 @@ pub fn resolve_owned(app: &AppHandle, key: &Key, terminal_id: &str) -> Result<u3
 
 /// 自インスタンスの生きている端末。
 pub fn list_for(app: &AppHandle, key: &Key) -> Vec<OwnedTerminal> {
-    let alive = alive_sessions(app);
     let reg = app.state::<AiTerminalRegistry>();
     let Ok(mut inner) = reg.0.lock() else { return Vec::new() };
+    let alive = alive_sessions(app); // ロックの内側で採る（`reserve` と同じ理由）
     inner.prune(&alive, Instant::now());
     inner.list_for(key)
 }
 
 /// すべての所有端末（フロントのタブ表示・除外用）。
 pub fn list_all(app: &AppHandle) -> Vec<OwnedTerminal> {
-    let alive = alive_sessions(app);
     let reg = app.state::<AiTerminalRegistry>();
     let Ok(mut inner) = reg.0.lock() else { return Vec::new() };
+    let alive = alive_sessions(app); // ロックの内側で採る（`reserve` と同じ理由）
     inner.prune(&alive, Instant::now());
     inner.list_all()
+}
+
+/// 死んだ端末のエントリを落として、フロントへ知らせる（kill の完了後に呼ぶ）。
+fn prune_now(app: &AppHandle) {
+    {
+        let reg = app.state::<AiTerminalRegistry>();
+        let Ok(mut inner) = reg.0.lock() else { return };
+        let alive = alive_sessions(app);
+        inner.prune(&alive, Instant::now());
+    }
+    emit_owned_changed(app);
+}
+
+/// 起動に失敗した `open` の後始末。PTY が起動済みなら kill し、所有の印は kill が終わるまで保つ。
+pub fn discard(app: &AppHandle, terminal_id: &str) {
+    let sid = {
+        let reg = app.state::<AiTerminalRegistry>();
+        let Ok(mut inner) = reg.0.lock() else { return };
+        inner.discard(terminal_id)
+    };
+    match sid {
+        Some(sid) => kill_sessions(app, vec![sid], "ai-terminal-open-failed"),
+        None => emit_owned_changed(app),
+    }
 }
 
 /// 所有端末の session_id 集合。`pty_manager` の rebind 抑止など、`SessionInfo` から判定する側が使う。
@@ -356,24 +402,27 @@ pub fn close_all_for_instance(app: &AppHandle, key: &Key) {
     let sids = {
         let reg = app.state::<AiTerminalRegistry>();
         let Ok(mut inner) = reg.0.lock() else { return };
-        inner.remove_for_instance(key)
+        inner.kill_targets_for_instance(key)
     };
     emit_owned_changed(app);
     kill_sessions(app, sids, "app-instance-stop");
 }
 
 /// PTY の kill は子プロセスの待ち合わせを含むので、呼び出し元（async コマンド等）を塞がない。
+/// kill が終わってから、死んだエントリを落とす（それまで所有の印は残る）。
 pub fn kill_sessions(app: &AppHandle, sids: Vec<u32>, source: &'static str) {
     if sids.is_empty() {
         return;
     }
     let manager = app.state::<crate::pty_manager::PtyManager>().inner().clone();
+    let app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         for sid in sids {
             if let Err(e) = manager.kill(sid, source) {
                 log::debug!("[ai-terminal] kill session={} failed: {}", sid, e);
             }
         }
+        prune_now(&app);
     });
 }
 
@@ -543,9 +592,7 @@ async fn open_inner(app: &AppHandle, ctx: &InstanceContext, p: OpenParams) -> Re
     match session_id {
         Ok(sid) => Ok(json!({ "terminalId": terminal_id, "sessionId": sid })),
         Err(e) => {
-            if let Some(sid) = cancel(app, &terminal_id) {
-                kill_sessions(app, vec![sid], "ai-terminal-open-failed");
-            }
+            discard(app, &terminal_id);
             Err(format!("AI ターミナルを開けませんでした: {}", e))
         }
     }
@@ -685,7 +732,7 @@ pub async fn app_ai_terminal_close(window: tauri::Window, app: AppHandle, termin
     let r: Result<Value, String> = (|| {
         granted(&app, &ctx)?;
         let sid = resolve_owned(&app, &key_of(&ctx), &terminal_id)?;
-        cancel(&app, &terminal_id);
+        // レジストリからは外さない。kill が終わるまで所有の印を保ち、終わったあとに掃除される
         kill_sessions(&app, vec![sid], "app-ai-terminal-close");
         Ok(json!({ "closed": true }))
     })();
@@ -767,11 +814,13 @@ pub fn forward_event(app: &AppHandle, terminal_id: &str, event: &str, kind: &str
 pub fn validate_model(model: &str) -> Result<(), String> {
     let ok = !model.is_empty()
         && model.chars().count() <= 100
+        // 先頭が `-` だと別のフラグとして解釈される
+        && !model.starts_with('-')
         && model.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '[' | ']'));
     if ok {
         Ok(())
     } else {
-        Err("model には英数字と . _ - [ ] だけを使えます（100 文字まで）".to_string())
+        Err("model には英数字と . _ - [ ] だけを使えます（100 文字まで。先頭に - は使えません）".to_string())
     }
 }
 
@@ -909,18 +958,38 @@ mod tests {
     }
 
     #[test]
-    fn remove_for_instance_returns_bound_sessions_only() {
+    fn instance_stop_keeps_the_owned_mark_until_the_pty_is_gone() {
         let mut inner = Inner::default();
         let a1 = reserve(&mut inner, &key("a"), 3, &alive(&[])).unwrap();
-        let _a2 = reserve(&mut inner, &key("a"), 3, &alive(&[])).unwrap();
+        let a2 = reserve(&mut inner, &key("a"), 3, &alive(&[])).unwrap();
         let b1 = reserve(&mut inner, &key("b"), 3, &alive(&[])).unwrap();
         inner.take_reservation(&a1).unwrap();
         inner.bind(&a1, 5);
         inner.take_reservation(&b1).unwrap();
         inner.bind(&b1, 6);
-        assert_eq!(inner.remove_for_instance(&key("a")), vec![5]);
+        assert_eq!(inner.kill_targets_for_instance(&key("a")), vec![5]);
+        // PTY の無い予約は外れるが、起動済みのものは kill が終わるまで所有のまま
+        // （外すと、終了処理中のセッションが「所有外の AI 端末」になってしまう）
+        assert!(inner.owner_of(&a2).is_none());
+        assert!(inner.owner_of(&a1).is_some());
+        assert!(inner.owner_of(&b1).is_some());
+        // kill の完了後（PTY が居なくなった）の prune で落ちる
+        inner.prune(&alive(&[6]), Instant::now());
         assert!(inner.owner_of(&a1).is_none());
         assert!(inner.owner_of(&b1).is_some());
+    }
+
+    #[test]
+    fn discard_keeps_a_started_terminal_marked_until_it_dies() {
+        let mut inner = Inner::default();
+        let unbound = reserve(&mut inner, &key("a"), 3, &alive(&[])).unwrap();
+        assert_eq!(inner.discard(&unbound), None);
+        assert!(inner.owner_of(&unbound).is_none());
+        let bound = reserve(&mut inner, &key("a"), 3, &alive(&[])).unwrap();
+        inner.take_reservation(&bound).unwrap();
+        inner.bind(&bound, 9);
+        assert_eq!(inner.discard(&bound), Some(9));
+        assert!(inner.owner_of(&bound).is_some());
     }
 
     #[test]
@@ -938,7 +1007,7 @@ mod tests {
     fn model_charset() {
         assert!(validate_model("claude-opus-4-1").is_ok());
         assert!(validate_model("sonnet[1m]").is_ok());
-        for bad in ["", "a b", "a;b", "$(x)", "a\"b", "a`b", "a|b", "a&b", "a\nb"] {
+        for bad in ["", "a b", "a;b", "$(x)", "a\"b", "a`b", "a|b", "a&b", "a\nb", "-x", "--dangerously-skip-permissions"] {
             assert!(validate_model(bad).is_err(), "{bad:?}");
         }
     }

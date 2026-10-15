@@ -549,20 +549,26 @@ export function useTaskExecution(deps: {
    */
   async function buildOwnedAiTerminalCommand(
     wt: { id: string; path: string; name: string; repositoryId: string },
-    opts: { model?: string | null; initialPrompt?: string },
+    opts: { model?: string | null; initialPrompt?: string; cwd?: string },
   ): Promise<string> {
     const flags = ownedAiTerminalFlags(opts.model);
     // SessionStart 注入（インスタンス指定のプロンプト）はプラグイン設定のフックが運ぶ。
-    // タスク実行と同じく、設定が書かれる前に作られたワークツリーにも効くよう先に書く。失敗しても続行
+    // タスク実行と同じく、設定が書かれる前に作られたワークツリーにも効くよう先に書く。失敗しても続行。
+    // 作業ディレクトリがワークツリー直下でないときは、claude が読む cwd 直下の `.claude` にも書く
+    // （サブディレクトリ起動でフックが効かないと、systemPrompt の注入も Stop の振り分けも働かない）
     const repoOfWt = settings.value.repositories.find((r) => r.id === wt.repositoryId);
-    try {
-      await invoke("write_claude_plugin_config", {
-        worktreePath: wt.path,
-        worktreeName: wt.name,
-        hooks: repoOfWt?.notificationHooks ?? [],
-      });
-    } catch (e) {
-      console.warn("[write_claude_plugin_config] failed:", e);
+    const configDirs = [wt.path];
+    if (opts.cwd && opts.cwd !== wt.path) configDirs.push(opts.cwd);
+    for (const dir of configDirs) {
+      try {
+        await invoke("write_claude_plugin_config", {
+          worktreePath: dir,
+          worktreeName: wt.name,
+          hooks: repoOfWt?.notificationHooks ?? [],
+        });
+      } catch (e) {
+        console.warn("[write_claude_plugin_config] failed:", e);
+      }
     }
     const shellLower = (resolveShell(wt.id) ?? "").toLowerCase();
     const isPowerShell =
@@ -571,7 +577,8 @@ export function useTaskExecution(deps: {
       (resolveShell(wt.id) === undefined && platform() === "windows");
     const prompt = opts.initialPrompt ?? "";
     const tempPath = prompt.trim() ? await invoke<string>("write_temp_prompt", { content: prompt }) : undefined;
-    return buildClaudeLaunchCommand({ flags, tempPath, isPowerShell });
+    // プロンプトはアプリ（信頼できない入力）が書いたものなので、`--` で位置引数に固定する
+    return buildClaudeLaunchCommand({ flags, tempPath, isPowerShell, endOfOptions: true });
   }
 
   return {

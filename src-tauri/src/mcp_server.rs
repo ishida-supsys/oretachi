@@ -6663,6 +6663,27 @@ pub(crate) async fn call_owned_terminal_tool(
     ) {
         return Err(format!("ツール '{}' は専用 AI ターミナルでは使えません", tool));
     }
+    // 宛先は session の**現在の** cwd から引かれる。専用端末の中のエージェントが他ワークツリーの
+    // ディレクトリへ `cd` していると、購読関係があるだけで越境が通ってしまい、アプリが承認された
+    // `mcp.targets` を超える。専用端末は自ワークツリーの中だけを扱うので、ここで一致を求める。
+    let session_id = params
+        .get("session_id")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok())
+        .ok_or_else(|| format!("{} には session_id (数値) が必須です", tool))?;
+    let settings = app_handle.state::<SettingsManager>().get();
+    let dest = app_handle
+        .state::<crate::pty_manager::PtyManager>()
+        .list_sessions()
+        .into_iter()
+        .find(|s| s.session_id == session_id && s.exit_code.is_none())
+        .and_then(|s| s.cwd)
+        .and_then(|c| resolve_worktree_by_cwd(&settings, &c).map(|w| w.id.clone()));
+    if dest.as_deref() != Some(worktree_id) {
+        return Err(
+            "この端末の作業ディレクトリが、アプリのワークツリーの外を指しています。操作できません".to_string(),
+        );
+    }
     call_tool_scoped(app_handle, worktree_id, artifact_id, tool, params, None).await
 }
 

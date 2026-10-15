@@ -881,7 +881,8 @@ async function onAddTerminal(
   },
 ) {
   const background = options?.background === true;
-  clearNotificationAndTray(worktreeId);
+  // アプリが専用 AI ターミナルを開くたびに、ユーザー向けの未確認通知・トレイ・バッジを消さない
+  if (!options?.reserved) clearNotificationAndTray(worktreeId);
   if (isDetached(worktreeId)) {
     // detached worktree は handleSubAddTerminalRequest 経由で処理し、pendingCommand 連携は未対応。
     // （専用 AI ターミナルは `ai-terminal-spawn` のリスナーが handleSubAddTerminalRequest を直接呼ぶ）
@@ -1240,12 +1241,20 @@ async function handleSubAddTerminalRequest(
   const terminal = addTerminal(worktreeId);
   terminalWorktreeMap.set(terminal.id, worktreeId);
 
-  const sid = await invoke<number>("pty_spawn", {
-    rows: 24, cols: 80, shell: resolveShell(worktreeId) ?? null,
-    // 予約 ID のときは Rust が予約時に解決した cwd へ差し替える（ここの値は使われない）
-    cwd: options?.reserved?.cwd ?? worktree.path,
-    terminalId: options?.reserved?.terminalId ?? null,
-  });
+  let sid: number;
+  try {
+    sid = await invoke<number>("pty_spawn", {
+      rows: 24, cols: 80, shell: resolveShell(worktreeId) ?? null,
+      // 予約 ID のときは Rust が予約時に解決した cwd へ差し替える（ここの値は使われない）
+      cwd: options?.reserved?.cwd ?? worktree.path,
+      terminalId: options?.reserved?.terminalId ?? null,
+    });
+  } catch (e) {
+    // 起動に失敗したタブをメイン側の state に残さない（残すと settings 側のカウントと表示が食い違う）
+    removeTerminal(worktreeId, terminal.id);
+    terminalWorktreeMap.delete(terminal.id);
+    throw e;
+  }
 
   registerTerminalSession(worktreeId, terminal.id, sid);
 
@@ -1263,7 +1272,32 @@ async function handleSubAddTerminalRequest(
   if (options?.pendingCommand !== undefined) {
     payload.pendingCommand = options.pendingCommand;
   }
+  // 専用 AI ターミナルは、起動コマンドがサブウィンドウで実際に書き込まれたことまで確かめる。
+  // サブウィンドウの ready 待ちがタイムアウトするとコマンドは黙って捨てられ、`open` だけが成功して
+  // 素のシェルが残ってしまうため。待ちはレスポンスを送る**前**に登録する（取りこぼし防止）
+  const done = options?.reserved ? waitSubAddTerminalDone(terminal.id) : null;
   await emitTo(`sub-${worktreeId}`, "sub-add-terminal-response", payload);
+  if (done) {
+    const r = await done;
+    if (!r.ok) throw new Error(r.error ?? "サブウィンドウで端末の起動コマンドを実行できませんでした");
+  }
+}
+
+// サブウィンドウが `sub-add-terminal-response` を処理し終えた合図（起動コマンドを書き込めたか）を待つ
+const subAddDoneWaiters = new Map<number, (r: { ok: boolean; error?: string }) => void>();
+const SUB_ADD_DONE_TIMEOUT_MS = 15000;
+function waitSubAddTerminalDone(terminalId: number): Promise<{ ok: boolean; error?: string }> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      subAddDoneWaiters.delete(terminalId);
+      resolve({ ok: false, error: "サブウィンドウからの応答がありませんでした" });
+    }, SUB_ADD_DONE_TIMEOUT_MS);
+    subAddDoneWaiters.set(terminalId, (r) => {
+      clearTimeout(timer);
+      subAddDoneWaiters.delete(terminalId);
+      resolve(r);
+    });
+  });
 }
 
 async function onMoveToSubWindow(worktreeId: string) {
@@ -1982,7 +2016,7 @@ onMounted(async () => {
       return;
     }
     try {
-      const command = await buildOwnedAiTerminalCommand(targetWt, { model, initialPrompt });
+      const command = await buildOwnedAiTerminalCommand(targetWt, { model, initialPrompt, cwd });
       const reserved = { terminalId, cwd };
       if (isDetached(worktreeId)) {
         // サブウィンドウへ分離済み: メインが pty_spawn して、起動コマンドは pendingCommand として
@@ -1996,6 +2030,10 @@ onMounted(async () => {
       logDebug(`[ai-terminal] ai-terminal-spawn failed: ${e}`);
       await report(false, String(e));
     }
+  });
+
+  await listen<{ terminalId: number; ok: boolean; error?: string }>("sub-add-terminal-done", (event) => {
+    subAddDoneWaiters.get(event.payload.terminalId)?.(event.payload);
   });
 
   await initOwnedAiTerminals();

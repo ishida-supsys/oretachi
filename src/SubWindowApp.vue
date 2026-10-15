@@ -514,6 +514,8 @@ onMounted(async () => {
       mountTerminalsToHosts();
 
       const term = terminalRefs.get(terminalId);
+      // pendingCommand を書き込めたか。メイン（専用 AI ターミナルの open）が結果を待っている
+      let done: { ok: boolean; error?: string } = { ok: true };
       if (term) {
         await term.handleTabActivated();
         term.focus();
@@ -526,13 +528,18 @@ onMounted(async () => {
             const result = await Promise.race([ready.then(() => "ready" as const), timeout]);
             if (result === "ready") {
               await term.write(pendingCommand);
+            } else {
+              done = { ok: false, error: "端末の準備が間に合わず、起動コマンドを書き込めませんでした" };
             }
           } catch (e) {
             // 書き込み失敗は無視 (ターミナルがすでに閉じられている等)
-            void e;
+            done = { ok: false, error: String(e) };
           }
         }
+      } else if (pendingCommand) {
+        done = { ok: false, error: "端末の表示を用意できませんでした" };
       }
+      await emitTo("main", "sub-add-terminal-done", { terminalId, ...done });
     }
   ));
 

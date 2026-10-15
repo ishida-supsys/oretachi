@@ -7,9 +7,12 @@
  * 注入の穴になりやすいため。
  */
 
-/** `claude --model <m>` にそのままシェルへ渡るので、安全な文字種だけを受理する（Rust の `validate_model` と同じ） */
+/**
+ * `claude --model <m>` にそのままシェルへ渡るので、安全な文字種だけを受理する（Rust の `validate_model` と同じ）。
+ * 先頭が `-` だと別のフラグとして解釈されるので拒否する。
+ */
 export function isSafeModelName(model: string): boolean {
-  return model.length > 0 && model.length <= 100 && /^[A-Za-z0-9._\-[\]]+$/.test(model);
+  return model.length > 0 && model.length <= 100 && /^[A-Za-z0-9._[\]][A-Za-z0-9._\-[\]]*$/.test(model);
 }
 
 export interface ClaudeLaunchOptions {
@@ -18,11 +21,19 @@ export interface ClaudeLaunchOptions {
   /** プロンプトを書いた一時ファイルの絶対パス。省略（空）なら、プロンプト無しで起動する */
   tempPath?: string;
   isPowerShell: boolean;
+  /**
+   * プロンプト（位置引数）の前に `--` を置く。**プロンプトが信頼できない入力（アプリ）のときは必須。**
+   * 先頭が `-` の文字列は claude にフラグとして解釈され、Windows の PowerShell 5.1 では `$p` に `"` を
+   * 含めるだけで引数が分割されるので、`--dangerously-skip-permissions` のようなフラグを注入できてしまう。
+   * `--` 以降はすべて位置引数になるので、分割が起きても注入にはならない（プロンプトの中身が変わるだけ）。
+   */
+  endOfOptions?: boolean;
 }
 
 /** 末尾に CR を含む。一時ファイルは起動後に削除する */
 export function buildClaudeLaunchCommand(opts: ClaudeLaunchOptions): string {
-  const base = opts.flags ? `claude ${opts.flags}` : "claude";
+  const head = opts.flags ? `claude ${opts.flags}` : "claude";
+  const base = opts.endOfOptions && opts.tempPath ? `${head} --` : head;
   const tempPath = opts.tempPath;
   if (!tempPath) return `${base}\r`;
   if (opts.isPowerShell) {
@@ -35,5 +46,6 @@ export function buildClaudeLaunchCommand(opts: ClaudeLaunchOptions): string {
 export function ownedAiTerminalFlags(model?: string | null): string | undefined {
   if (model == null || model === "") return undefined;
   if (!isSafeModelName(model)) throw new Error(`model に使えない文字が含まれています: ${model}`);
-  return `--model ${model}`;
+  // 引用符で包む。`[` `]` は bash 系シェルではグロブになり、cwd のファイル名次第で別の文字列になるため
+  return `--model "${model}"`;
 }

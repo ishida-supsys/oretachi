@@ -5,6 +5,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type * as Monaco from "monaco-editor";
 import type { Worktree } from "../types/worktree";
 import type { WorktreeFrameBundle } from "./useWorktreeFrameBundles";
+import { useOwnedAiTerminals } from "./useOwnedAiTerminals";
 
 export type CodeReviewOrigin = "main" | "sub" | "tray";
 
@@ -83,6 +84,8 @@ export function useCodeReviewChat(worktreeId: string, origin: CodeReviewOrigin) 
 
 interface TerminalRef {
   write(data: string): Promise<void>;
+  /** PTY のセッション ID（専用 AI ターミナルの除外判定に使う） */
+  sessionId?: number | null;
 }
 
 export function useCodeReviewChatListener(deps: {
@@ -99,6 +102,8 @@ export function useCodeReviewChatListener(deps: {
   isTrayShowingWorktree: (worktreeId: string) => boolean;
   focusTrayPopup: () => Promise<void>;
 }) {
+  const { isOwnedSession } = useOwnedAiTerminals();
+
   async function setup() {
     await listen<{ worktreeId: string; origin: CodeReviewOrigin } & ChatPayload>(
       "codereview-chat-with-agent",
@@ -107,8 +112,13 @@ export function useCodeReviewChatListener(deps: {
         const wt = deps.worktrees.value.find((w) => w.id === wid);
         if (!wt || wt.terminals.length === 0) return;
 
-        const terminal =
-          wt.terminals.find((t) => deps.terminalAgentStatus.get(t.id)) ?? wt.terminals[0];
+        // インスタンス専用 AI ターミナル（#372）には書き込まない（アプリの会話に割り込んでしまう）
+        const candidates = wt.terminals.filter((t) => {
+          const sid = deps.isDetached(wid) ? deps.getDetachedSessionId(t.id) : deps.terminalRefs.get(t.id)?.sessionId;
+          return !isOwnedSession(sid);
+        });
+        if (candidates.length === 0) return;
+        const terminal = candidates.find((t) => deps.terminalAgentStatus.get(t.id)) ?? candidates[0];
 
         const text =
           startLine === endLine
