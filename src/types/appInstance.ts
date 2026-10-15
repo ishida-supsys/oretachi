@@ -46,6 +46,15 @@ export interface AppInstanceStatus {
   granted: boolean;
   grantedAt: number | null;
   maxInstances: number;
+  /** コード更新・再承認でリロードした回数と最後の時刻（UNIX ミリ秒） */
+  reloadCount: number;
+  lastReloadAt: number | null;
+  /** 承認済みのメモリー最大サイズ（memory 権限が無ければ null） */
+  memoryMaxBytes: number | null;
+  /** 直近に測ったメモリーの使用量（未測定は null） */
+  memoryBytes: number | null;
+  /** 上限を下げた結果、既存データが上限を超えている。書き込みだけ拒否され、読み取りはできる */
+  memoryOverCap: boolean;
 }
 
 export interface AppLogEntry {

@@ -2482,6 +2482,8 @@ pub fn run() {
             app_instance::app_instance_bootstrap,
             app_instance::app_instance_report,
             app_instance::app_call_mcp_tool,
+            app_instance::app_set_memory,
+            app_instance::app_get_memory,
             app_instance::app_grant_respond,
             app_instance::list_pending_app_grants,
             app_instance::list_app_grants,
@@ -2529,6 +2531,9 @@ pub fn run() {
             // 巻き込み終了させる。MCP サーバ spawn や window.show() より前に割り当てて
             // 以降生成される全子プロセスを確実に Job 配下に入れる。
             job_object::assign_current_process_to_job();
+
+            // 起動中のアプリへのコード更新の反映（権限が変われば再承認、変わらなければリロード）
+            app_instance::install_listeners(app.handle());
 
             #[cfg(target_os = "windows")]
             match &redirection_guard_outcome {

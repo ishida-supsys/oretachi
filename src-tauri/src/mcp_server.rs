@@ -2134,11 +2134,9 @@ impl NotifyService {
                 let _ = crate::report_db::insert(&pool.inner().0, "artifact_change:create", &id).await;
             }
         }
-        // 起動中のアプリの manifest の権限が変わったなら、直ちに host 側で再承認を求める。
-        // コードだけの更新では何も起きない（比較するのは権限セットだけ）
-        if data.app.is_some() && matches!(command.as_str(), "create" | "rewrite") {
-            crate::app_instance::check_permission_change(&self.app_handle, &worktree_id, &id).await;
-        }
+        // 起動中のアプリへの反映（権限が変われば再承認、変わらなければリロード）は、上で emit した
+        // `artifact-changed` を `app_instance::install_listeners` が拾って行う。
+        // artifact_module など、アーティファクトを書き換えるどの経路でも同じ扱いにするため
         let summary = serde_json::to_string_pretty(&artifact_mutation_summary(&command, &data))
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(summary)]))
@@ -2462,18 +2460,8 @@ impl NotifyService {
                     let validated = crate::validate_artifact_memory(Some(data))
                         .map_err(|e| McpError::invalid_params(e, None))?;
                     if let (Some(cap), Some(v)) = (app_memory_cap, validated.as_ref()) {
-                        let size = serde_json::to_string(v)
-                            .map(|s| s.len() as u64)
-                            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
-                        if size > cap {
-                            return Err(McpError::invalid_params(
-                                format!(
-                                    "メモリーがこのアプリの承認済み最大サイズを超えています: {} バイト（maxBytes {}）",
-                                    size, cap
-                                ),
-                                None,
-                            ));
-                        }
+                        crate::app_manifest::check_memory_size(v, cap)
+                            .map_err(|e| McpError::invalid_params(e, None))?;
                     }
                     validated
                 } else {
@@ -2487,6 +2475,11 @@ impl NotifyService {
                     "[mcp] artifact_store command={} id={} worktree_id={} updated_at={} expected_updated_at={:?}",
                     command, id, worktree_id, updated_at, expected_updated_at
                 );
+                // 起動中のアプリなら、メモリーの使用量を測り直し、iframe へ外部更新を押し込ませる
+                // （`artifact-state-changed` をシェルが拾う）
+                if app_memory_cap.is_some() {
+                    crate::app_instance::refresh_memory_bytes(&self.app_handle, &worktree_id, &id, false).await;
+                }
                 // 開いているビューアがサイドカーのキャッシュを持っているので更新を知らせる
                 if let Err(e) = self.app_handle.emit("artifact-state-changed", serde_json::json!({
                     "scope": "worktree",

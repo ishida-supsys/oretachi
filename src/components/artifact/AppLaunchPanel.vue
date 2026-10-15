@@ -188,6 +188,12 @@ function hhmmss(ms: number): string {
 
       <p v-if="isStarting" class="info">{{ t("waitingApproval") }}</p>
       <p v-if="status?.reapprovalPending" class="warn">{{ t("reapprovalPending") }}</p>
+      <p v-if="status?.memoryOverCap" class="warn">
+        {{ t("memoryOverCap", { bytes: status.memoryBytes ?? 0, max: status.memoryMaxBytes ?? 0 }) }}
+      </p>
+      <p v-if="isRunning && status && status.reloadCount > 0" class="info">
+        {{ t("reloaded", { count: status.reloadCount, time: formatGrantedAt((status.lastReloadAt ?? 0) / 1000) }) }}
+      </p>
       <p v-if="errorText" class="error">{{ errorText }}</p>
 
       <section class="section">
@@ -452,6 +458,8 @@ function hhmmss(ms: number): string {
     "revoke": "Revoke approval",
     "waitingApproval": "Waiting for you to approve the permissions in the main window…",
     "reapprovalPending": "The manifest's permissions changed and need your approval in the main window. Until then the app keeps running with the old permissions; calls that need the new ones are rejected.",
+    "memoryOverCap": "The saved memory ({bytes} bytes) exceeds the approved maximum ({max} bytes). Nothing was deleted. Writes that do not fit are rejected until it fits; reads still work.",
+    "reloaded": "Reloaded {count} time(s) after code updates (last: {time}). Approval and memory are kept.",
     "granted": {
       "title": "Approved permissions",
       "at": "Approved {time}",
@@ -480,6 +488,8 @@ function hhmmss(ms: number): string {
     "revoke": "承認を取り消す",
     "waitingApproval": "メインウィンドウで権限の承認を待っています…",
     "reapprovalPending": "manifest の権限が変わり、メインウィンドウでの再承認を待っています。承認までは旧権限のまま動作し、新しい権限が要る呼び出しは拒否されます。",
+    "memoryOverCap": "保存済みのメモリー（{bytes} バイト）が承認済みの最大サイズ（{max} バイト）を超えています。データは消していません。収まるまで、収まらない書き込みは拒否されます（読み取りはできます）。",
+    "reloaded": "コードの更新で {count} 回リロードしました（最終: {time}）。承認とメモリーは維持されています。",
     "granted": {
       "title": "承認済みの権限",
       "at": "{time} に承認",

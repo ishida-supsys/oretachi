@@ -16,7 +16,7 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
 - **宣言したものだけが使える。** manifest に無い権限（ツール・越境先・メモリー）は、承認済みでも常に拒否される。
 - **通常のビューアでは動かない。** `app` 付きのアーティファクトは起動画面を出す。実行は承認後の常駐ウィンドウの中（`sandbox` iframe）。Web ビューアでは起動できない。
 - 今の版で書ける権限は `mcp`（`tools` と `targets`）と `memory`（`maxBytes` 必須）だけ。`fs` / `db` / `network` / `subWindow` / `wasm` / `aiTerminal` は未対応で、書くとエラーになる。
-- コード（content / modules）を更新しても再承認は要らない。**権限（manifest の `permissions`）を変えたときだけ**、起動中なら直ちに再承認のダイアログが出る。承認までは旧権限のまま動き、新しい権限が要る呼び出しは拒否される。
+- コード（content / modules）を更新しても再承認は要らず、起動中なら**承認を保ったまま iframe がリロードされる**（フルリロード。メモリー以外の JS の状態は失われる）。**権限（manifest の `permissions`）を変えたときだけ**、起動中なら直ちに再承認のダイアログが出る。承認までは旧権限のまま動き（リロードもされない）、新しい権限が要る呼び出しは拒否される。承認でリロード、拒否で停止。
 
 ## manifest
 
@@ -39,7 +39,14 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
 
 - `mcp.tools`: 呼びたいツールだけを書く。呼べるのは `artifact` ツールの説明にある一覧の部分集合。`oretachi_write_terminal` / `oretachi_send_keys` / `oretachi_answer_prompt` / `oretachi_add_task` は**ユーザーと同等の権限（任意コマンド実行）**として、承認ダイアログで強調される。本当に必要なときだけ宣言する。
 - `mcp.targets`: 他のワークツリーへ届かせたいときだけ書く（省略 = 自ワークツリーのみ）。ワークツリー名 / ID、`*`、`workgroup:<ID か名前>`、`repo:<リポジトリ名>`。**ワイルドカードは最も強い警告になる**（今後作られるワークツリーも含み、メインのクローンの端末にも届く）。名前で書いたワークツリーは承認時に ID へ固定される。越境には、これに加えて既存の購読（`oretachi_subscribe_worktree`）も必要。
-- `memory.maxBytes`: メモリーを使うなら必須。メモリー API 本体はまだ無い（後続）。
+- `memory.maxBytes`: メモリーを使うなら必須（1〜1048576 バイト。書き込み後の JSON のバイト数で数える）。宣言が無い・0 以下・上限超過の manifest は拒否される。承認ダイアログに最大サイズが出る。上限を下げる変更も再承認になり、既存データが新しい上限を超えていても消えない（収まらない書き込みだけ拒否、読み取りは可）。
+
+## メモリー API
+
+`require('oretachi')` の `useMemory` / `getMemory` / `setMemory` / `setMemoryKey` / `clearMemory` / `subscribeMemory` が使える（通常の React アーティファクトと同じ形）。保存先は host 側のストックで、停止・アプリ再起動・ウィンドウを閉じる・リロードをまたいで残る。コードを更新してリロードされても、直前に書いた値（debounce 中のものも）は新しい iframe に引き継がれる。
+
+- 書き込みは host が毎回サイズを検査し、`maxBytes` を超えると Promise が reject される（デバッグログにも残る）。`memory` を宣言していないアプリは、読み書きとも拒否される（初期値は常に空）。
+- AI セッションからの `artifact_store` の write / delete も、同じ `maxBytes` が強制される。書き込まれた値は起動中のアプリへ即座に反映される。**メモリーの中身は信頼しない入力として扱うこと**（AI や他の経路が書ける。`dangerouslySetInnerHTML` や eval に渡さない）。
 
 ## 手順
 

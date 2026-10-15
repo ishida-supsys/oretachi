@@ -40,6 +40,25 @@ export const ARTIFACT_BRIDGE_RESULT_MARKER = "__oretachiArtifactBridgeResult";
 export const ARTIFACT_BRIDGE_PUSH_MARKER = "__oretachiArtifactBridgePush";
 /** `ARTIFACT_BRIDGE_PUSH_MARKER` の通知種別: ストアが外から差し替わった */
 export const ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED = "memory.changed";
+/**
+ * `ARTIFACT_BRIDGE_PUSH_MARKER` の通知種別: debounce 待ちの保存を今すぐ送り切れ（アプリのリロード前）。
+ * iframe は保存が全部終わったら `ARTIFACT_BRIDGE_METHOD_FLUSHED` を送り返す。
+ */
+export const ARTIFACT_BRIDGE_PUSH_MEMORY_FLUSH = "memory.flush";
+
+/** iframe → 親: `ARTIFACT_BRIDGE_PUSH_MEMORY_FLUSH` への完了通知。応答は返さない一方向のリクエスト */
+export const ARTIFACT_BRIDGE_METHOD_FLUSHED = "memory.flushed";
+
+/**
+ * srcdoc ごとの nonce を iframe へ渡すグローバル名（任意）。
+ *
+ * iframe を差し替えても `frame.contentWindow` は同一オブジェクトのままなので、前の文書が仕掛けた
+ * 遅延メッセージが新しい文書の分として届きうる（`artifactCspViolation.ts` と同じ問題）。
+ * nonce があるとき、iframe は全リクエストに載せ、親は一致しないものを捨てる。親からの応答・通知にも
+ * 載せ、iframe は一致しないものを捨てる（requestId が連番なので、前の文書宛の応答が新しい文書の
+ * 同じ番号の待ちを解いてしまうのを防ぐ）。ブリッジは読み込み時に 1 回だけ読んでグローバルを消す。
+ */
+export const ARTIFACT_BRIDGE_NONCE_GLOBAL = "__oretachiBridgeNonce";
 
 /** メモリー全体を保存する。params は `{ memory: object }` */
 export const ARTIFACT_BRIDGE_METHOD_MEMORY_SET = "memory.set";
@@ -85,11 +104,14 @@ export interface ArtifactBridgeRequest {
 export function readArtifactBridgeRequest(
   event: MessageEvent,
   frame: HTMLIFrameElement | null,
+  /** 指定すると、この nonce を載せていないリクエスト（前の文書からの遅延メッセージ）を捨てる */
+  expectedNonce?: string,
 ): ArtifactBridgeRequest | null {
   if (!frame || event.source !== frame.contentWindow) return null;
   const data = event.data as Record<string, unknown> | null;
   if (!data || typeof data !== "object") return null;
   if (data[ARTIFACT_BRIDGE_REQUEST_MARKER] !== true) return null;
+  if (expectedNonce !== undefined && data.nonce !== expectedNonce) return null;
   const requestId = data.requestId;
   const method = data.method;
   if (typeof requestId !== "string" || typeof method !== "string") return null;
@@ -106,6 +128,8 @@ export function postArtifactBridgeResult(
   frame: HTMLIFrameElement | null,
   requestId: string,
   outcome: { ok: true; result?: unknown } | { ok: false; error: string },
+  /** 指定すると応答に載せる。iframe は自分の nonce と違う応答を捨てる */
+  nonce?: string,
 ): void {
   const target = frame?.contentWindow;
   if (!target) return;
@@ -114,6 +138,7 @@ export function postArtifactBridgeResult(
       {
         [ARTIFACT_BRIDGE_RESULT_MARKER]: true,
         requestId,
+        ...(nonce !== undefined ? { nonce } : {}),
         ...outcome,
       },
       "*",
@@ -135,6 +160,7 @@ export function postArtifactBridgeResult(
 export function postArtifactBridgeMemoryChanged(
   frame: HTMLIFrameElement | null,
   memory: Record<string, unknown>,
+  nonce?: string,
 ): void {
   const target = frame?.contentWindow;
   if (!target) return;
@@ -153,6 +179,7 @@ export function postArtifactBridgeMemoryChanged(
         [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
         event: ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED,
         memory: plain,
+        ...(nonce !== undefined ? { nonce } : {}),
       },
       "*",
     );
@@ -160,6 +187,24 @@ export function postArtifactBridgeMemoryChanged(
     // iframe が既に差し替わっている場合など。押し込みは「届かないと外の更新が消える」
     // 経路なので、応答（postArtifactBridgeResult）と違って痕跡を残す
     console.warn("artifact store の push を送れませんでした", e);
+  }
+}
+
+/** debounce 待ちの保存を送り切るよう iframe へ頼む（アプリのリロード前）。完了は `ARTIFACT_BRIDGE_METHOD_FLUSHED` */
+export function postArtifactBridgeFlush(frame: HTMLIFrameElement | null, nonce?: string): void {
+  const target = frame?.contentWindow;
+  if (!target) return;
+  try {
+    target.postMessage(
+      {
+        [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+        event: ARTIFACT_BRIDGE_PUSH_MEMORY_FLUSH,
+        ...(nonce !== undefined ? { nonce } : {}),
+      },
+      "*",
+    );
+  } catch (e) {
+    console.warn("メモリーの flush 要求を送れませんでした", e);
   }
 }
 
@@ -185,6 +230,10 @@ export const ARTIFACT_STANDALONE_FLAG = "__oretachiStandalone";
 export const ARTIFACT_BRIDGE_JS =
   "(function(){" +
   "  var standalone=window[" + JSON.stringify(ARTIFACT_STANDALONE_FLAG) + "]===true;" +
+  // srcdoc ごとの nonce（任意）。読んだらグローバルは消す
+  "  var NONCE=window[" + JSON.stringify(ARTIFACT_BRIDGE_NONCE_GLOBAL) + "];" +
+  "  try{delete window[" + JSON.stringify(ARTIFACT_BRIDGE_NONCE_GLOBAL) + "];}catch(err){}" +
+  "  var hasNonce=typeof NONCE==='string';" +
   // ── リクエスト/レスポンスの土台（メモリー以外の method も後からここに乗る）──
   "  var pending={};" +
   "  var seq=0;" +
@@ -194,10 +243,14 @@ export const ARTIFACT_BRIDGE_JS =
   "    if(e.source!==parent)return;" +
   "    var d=e.data;" +
   "    if(!d||typeof d!=='object')return;" +
-  // 一方向通知（ストアの外部更新）。pending は触らない
+  // 前の文書宛の応答・通知は捨てる（nonce が無い文書では従来どおり何も見ない）
+  "    if(hasNonce&&d.nonce!==NONCE)return;" +
+  // 一方向通知（ストアの外部更新・リロード前の flush 要求）。pending は触らない
   "    if(d[" + JSON.stringify(ARTIFACT_BRIDGE_PUSH_MARKER) + "]===true){" +
   "      if(d.event===" + JSON.stringify(ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED) + ")" +
   "        applyExternalMemory(d.memory);" +
+  "      else if(d.event===" + JSON.stringify(ARTIFACT_BRIDGE_PUSH_MEMORY_FLUSH) + ")" +
+  "        flushNow();" +
   "      return;" +
   "    }" +
   "    if(d[" + JSON.stringify(ARTIFACT_BRIDGE_RESULT_MARKER) + "]!==true)return;" +
@@ -219,8 +272,10 @@ export const ARTIFACT_BRIDGE_JS =
   "      }," + BRIDGE_TIMEOUT_MS + ");" +
   "      pending[id]={resolve:resolve,reject:reject,timer:timer};" +
   "      try{" +
-  "        parent.postMessage({" + JSON.stringify(ARTIFACT_BRIDGE_REQUEST_MARKER) + ":true," +
-  "          requestId:id,method:method,params:params||{}},'*');" +
+  "        var msg={requestId:id,method:method,params:params||{}};" +
+  "        msg[" + JSON.stringify(ARTIFACT_BRIDGE_REQUEST_MARKER) + "]=true;" +
+  "        if(hasNonce)msg.nonce=NONCE;" +
+  "        parent.postMessage(msg,'*');" +
   "      }catch(err){" +
   "        delete pending[id];" +
   "        clearTimeout(timer);" +
@@ -249,6 +304,13 @@ export const ARTIFACT_BRIDGE_JS =
   "  var flushTimer=null;" +
   "  var waiters=[];" +
   "  var inflight=false;" +
+  // リロード前の flush 要求。保存が全部終わった（debounce 待ちも送信中も無い）ら通知する
+  "  var idleWaiters=[];" +
+  "  function checkIdle(){" +
+  "    if(inflight||waiters.length>0||flushTimer!==null)return;" +
+  "    var l=idleWaiters;idleWaiters=[];" +
+  "    l.forEach(function(f){f();});" +
+  "  }" +
   "  function flush(){" +
   "    flushTimer=null;" +
   "    if(inflight||waiters.length===0)return;" +
@@ -267,7 +329,7 @@ export const ARTIFACT_BRIDGE_JS =
   "    if(standalone){batch.forEach(function(w){w.resolve();});return;}" +
   "    inflight=true;" +
   // 前の保存が返ってから、その間に積まれた分をまとめて送り直す
-  "    var done=function(){inflight=false;if(waiters.length>0)flush();};" +
+  "    var done=function(){inflight=false;if(waiters.length>0)flush();checkIdle();};" +
   "    call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_MEMORY_SET) + ",{memory:state}).then(function(){" +
   "      batch.forEach(function(w){w.resolve();});" +
   "      done();" +
@@ -275,6 +337,20 @@ export const ARTIFACT_BRIDGE_JS =
   "      batch.forEach(function(w){w.reject(err);});" +
   "      done();" +
   "    });" +
+  "  }" +
+  "  function flushNow(){" +
+  "    if(standalone)return;" +
+  "    if(flushTimer!==null){clearTimeout(flushTimer);flushTimer=null;}" +
+  "    idleWaiters.push(function(){" +
+  "      try{" +
+  "        var m={requestId:'f'+(++seq),method:" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_FLUSHED) + ",params:{}};" +
+  "        m[" + JSON.stringify(ARTIFACT_BRIDGE_REQUEST_MARKER) + "]=true;" +
+  "        if(hasNonce)m.nonce=NONCE;" +
+  "        parent.postMessage(m,'*');" +
+  "      }catch(err){}" +
+  "    });" +
+  "    flush();" +
+  "    checkIdle();" +
   "  }" +
   "  function schedule(){" +
   "    return new Promise(function(resolve,reject){" +
