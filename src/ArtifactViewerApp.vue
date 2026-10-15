@@ -11,6 +11,7 @@ import ArtifactHtmlView from "./components/artifact/ArtifactHtmlView.vue";
 import ArtifactSvgView from "./components/artifact/ArtifactSvgView.vue";
 import ArtifactMermaidView from "./components/artifact/ArtifactMermaidView.vue";
 import ArtifactReactView from "./components/artifact/ArtifactReactView.vue";
+import AppLaunchPanel from "./components/artifact/AppLaunchPanel.vue";
 import ArtifactTableView from "./components/artifact/ArtifactTableView.vue";
 import ArtifactUrlView from "./components/artifact/ArtifactUrlView.vue";
 import { isTableContentType } from "./utils/csvArtifact";
@@ -927,7 +928,7 @@ onUnmounted(() => {
             <!-- リポジトリスコープにはメニューが無いので、リセットはヘッダーに直接出す
                  （転送でメモリーを引き継ぐため、転送先でもリセットは必要） -->
             <button
-              v-if="isRepositoryScope && selectedArtifact.content_type === 'application/vnd.ant.react'"
+              v-if="isRepositoryScope && selectedArtifact.content_type === 'application/vnd.ant.react' && !selectedArtifact.app"
               class="btn-header"
               :disabled="!hasSelectedMemory"
               :title="t('memory.resetTooltip')"
@@ -1021,7 +1022,7 @@ onUnmounted(() => {
               {{ repositoryName ? t("transfer.labelNamed", { repository: repositoryName }) : t("transfer.label") }}
             </button>
             <button
-              v-if="selectedArtifact.content_type === 'application/vnd.ant.react'"
+              v-if="selectedArtifact.content_type === 'application/vnd.ant.react' && !selectedArtifact.app"
               class="popup-item"
               :disabled="!hasSelectedMemory"
               :title="t('memory.resetTooltip')"
@@ -1070,6 +1071,15 @@ onUnmounted(() => {
           <ArtifactMermaidView
             v-else-if="selectedArtifact.content_type === 'application/vnd.ant.mermaid'"
             :content="selectedArtifact.content"
+          />
+          <!-- アプリ（manifest の app 付き）は iframe を描画しない。通常のビューアの中身は
+               権限を持たないので、起動画面だけを出す（実行は承認後の常駐ウィンドウ） -->
+          <AppLaunchPanel
+            v-else-if="selectedArtifact.content_type === 'application/vnd.ant.react' && selectedArtifact.app"
+            :key="selectedArtifact.id"
+            :artifact="selectedArtifact"
+            :api="capabilities.appLaunch ? dataSource.app : undefined"
+            :unsupported-reason="isRepositoryScope ? 'repository' : 'web'"
           />
           <ArtifactReactView
             v-else-if="selectedArtifact.content_type === 'application/vnd.ant.react'"

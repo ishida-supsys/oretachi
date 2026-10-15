@@ -7,6 +7,7 @@ import Aura from "@primeuix/themes/aura";
 import { attachConsole } from "@tauri-apps/plugin-log";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { platform } from "@tauri-apps/plugin-os";
 import { i18n, setLocale } from "./i18n";
 import { applyUiZoom } from "./composables/useUiZoom";
@@ -14,6 +15,18 @@ import type { AppSettings } from "./types/settings";
 
 const params = new URLSearchParams(window.location.search);
 const mode = params.get("mode");
+
+/**
+ * アプリ形式アーティファクトの常駐ウィンドウ（`appinst-*`）。URL のクエリではなく**ウィンドウラベル**で
+ * 判定する（Rust が採番したラベルは呼び出し元の検査にも使うので、ここも同じものを見る）。
+ * このウィンドウは default.json の glob に含まれず専用 capability しか持たないため、
+ * 設定の読み込み・プラグイン・イベント購読などの共通初期化には**入らず**、最小のシェルだけを載せる。
+ */
+async function mountAppInstance() {
+  document.addEventListener("contextmenu", (e) => e.preventDefault());
+  const { default: AppInstanceApp } = await import("./AppInstanceApp.vue");
+  createApp(AppInstanceApp).mount("#app");
+}
 
 async function mountApp() {
   document.addEventListener("contextmenu", (e) => e.preventDefault());
@@ -85,4 +98,9 @@ async function mountApp() {
     .mount("#app");
 }
 
-mountApp();
+// `getCurrentWindow()` は IPC を使わず、注入済みのメタデータからラベルを読む
+if (getCurrentWindow().label.startsWith("appinst-")) {
+  void mountAppInstance();
+} else {
+  void mountApp();
+}

@@ -103,7 +103,10 @@ describe("httpArtifactDataSource", () => {
         import: false,
         copyPng: false,
         transfer: false,
+        // アプリ形式アーティファクトは Web ビューアでは起動不可（特権 API を HTTP に出さない）
+        appLaunch: false,
       });
+      expect(ctx!.dataSource.app).toBeUndefined();
     });
 
     it("maps `type` to `content_type` for list() and read()", async () => {

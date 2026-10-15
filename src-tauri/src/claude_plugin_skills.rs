@@ -155,6 +155,19 @@ pub const SKILL_FILES: &[(&str, &str)] = &[
         "dev-proposal/templates/data--proposals.example.jsx",
         include_str!("../skills/dev-proposal/templates/data--proposals.example.jsx"),
     ),
+    // --- app-starter ---
+    (
+        "app-starter/SKILL.md",
+        include_str!("../skills/app-starter/SKILL.md"),
+    ),
+    (
+        "app-starter/app.json",
+        include_str!("../skills/app-starter/app.json"),
+    ),
+    (
+        "app-starter/templates/entry-point.jsx",
+        include_str!("../skills/app-starter/templates/entry-point.jsx"),
+    ),
     // --- notification-auto-dismiss ---
     (
         "notification-auto-dismiss/SKILL.md",

@@ -19,6 +19,7 @@ import HotkeyCharDialog from "./components/HotkeyCharDialog.vue";
 import WorktreeSettingsDialog from "./components/WorktreeSettingsDialog.vue";
 import SubscriptionFocusDialog from "./components/SubscriptionFocusDialog.vue";
 import AutoApprovalPromptDialog from "./components/AutoApprovalPromptDialog.vue";
+import AppGrantDialog from "./components/AppGrantDialog.vue";
 import TrayButton from "./components/TrayButton.vue";
 import FirstRunWizard from "./components/wizard/FirstRunWizard.vue";
 import { message } from "@tauri-apps/plugin-dialog";
@@ -44,6 +45,7 @@ import { useAddTaskDialog } from "./composables/useAddTaskDialog";
 import { useTaskExecution } from "./composables/useTaskExecution";
 import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
 import { useAutoApprovalPrompt } from "./composables/useAutoApprovalPrompt";
+import { useAppGrantRequests } from "./composables/useAppGrantRequests";
 import type { FrameNode } from "./types/frame";
 import { useWorktreeFrameBundles, type WorktreeFrameBundle } from "./composables/useWorktreeFrameBundles";
 import { useCodeReviewChatListener } from "./composables/useCodeReviewLineChat";
@@ -105,6 +107,8 @@ const { appliedZoom } = useUiZoom();
 const { worktrees, loadWorktreesFromSettings, syncWorktreesFromSettings, addWorktreePlaceholder, invokeWorktreeAdd, commitWorktree, rollbackWorktree, reorderWorktree, saveWorktreeOrder, restoreWorktreeOrder, addTerminal, removeTerminal, updateTerminalTitle, saveTerminalSession, loadTerminalSession } = useWorktrees();
 const { detachedWorktrees, isDetached, moveToSubWindow, moveToMainWindow, focusSubWindow, unregisterSubWindow, getPendingInitData, clearPendingInitData, getDetachedSessionId, registerTerminalSession, closeAllSubWindows } = useSubWindows();
 const { autoApprovalPromptMap, lastJudgedCommandMap, showAutoApprovalPromptDialog, autoApprovalPromptTargetId, restoreFromSettings: restoreAutoApprovalPrompts, onClickAutoApproval, onSaveAutoApprovalPrompt } = useAutoApprovalPrompt(settings, scheduleSave, isDetached);
+// アプリ形式アーティファクトの権限承認（Rust が起動時 / 起動中の権限変更で要求を送ってくる）
+const { current: appGrantRequest, pendingCount: appGrantPendingCount, responding: appGrantResponding, respond: respondAppGrant } = useAppGrantRequests();
 const { notifications, initNotificationListener, addNotification, clearNotification, clearNotificationIfMatches, purgeStaleNotifications, getNotifiedWorktreeIds, getTotalNotificationCount } = useNotifications();
 // 自動 spawn 拒否のトースト（#120 §7 / #130 / #137）。Rust 側は全 webview へブロードキャスト
 // するので、**そのワークツリーを表示しているウィンドウだけ**が出す。分離済みならサブウィンドウの担当。
@@ -2876,6 +2880,16 @@ onMounted(async () => {
       :last-command="lastJudgedCommandMap.get(autoApprovalPromptTargetId) ?? ''"
       @save="onSaveAutoApprovalPrompt"
       @cancel="showAutoApprovalPromptDialog = false"
+    />
+
+    <!-- アプリ形式アーティファクトの権限承認。権限を得る唯一の経路（manifest は AI が書くので信頼しない） -->
+    <AppGrantDialog
+      v-if="appGrantRequest"
+      :request="appGrantRequest"
+      :waiting="appGrantPendingCount - 1"
+      :busy="appGrantResponding"
+      @approve="respondAppGrant(true)"
+      @reject="respondAppGrant(false)"
     />
 
     <!-- 通知トレイボタン (ワークツリー表示中は非表示) -->

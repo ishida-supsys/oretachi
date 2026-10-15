@@ -379,7 +379,10 @@ pub async fn import_artifact(
 
         // メモリーはアーティファクトの中身に属する状態なので引き継ぐ。
         // ピン止めは取り込み先ローカルの並び順なので持ち込まない。
-        if let Some(state_raw) = read_zip_entry(&mut archive, "state.json")? {
+        // アプリ（`app` 付き）のメモリーは持ち込まない: 承認（maxBytes）の無いまま検証なしで
+        // サイドカーへ入ってしまい、MCP の artifact_store read で読める状態になるため
+        let skip_memory = crate::app_manifest::has_app_marker(&body);
+        if let Some(state_raw) = read_zip_entry(&mut archive, "state.json")?.filter(|_| !skip_memory) {
             if let Ok(serde_json::Value::Object(state)) = serde_json::from_str(&state_raw) {
                 if let Some(memory) = state.get("memory").filter(|v| v.is_object()) {
                     let sidecar = serde_json::json!({

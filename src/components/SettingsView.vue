@@ -18,6 +18,7 @@ import { applyUiZoom } from "../composables/useUiZoom";
 import { NOTIFY_KINDS, type NotifyKind, type NotificationKindSetting } from "../types/settings";
 import { DEFAULT_NOTIFICATION_KIND_SETTINGS, showsBadge } from "../utils/notificationKinds";
 import SettingsHotkeySection from "./settings/SettingsHotkeySection.vue";
+import SettingsAppGrantsSection from "./settings/SettingsAppGrantsSection.vue";
 
 const { t } = useI18n();
 const toast = useToast();
@@ -644,6 +645,9 @@ function getSoundLabel(sound: string | null | undefined): string {
 
     <!-- ホットキー設定 -->
     <SettingsHotkeySection />
+
+    <!-- アプリ形式アーティファクトの承認一覧・取り消し -->
+    <SettingsAppGrantsSection />
 
     <!-- リポジトリ一覧はホームタブのリポジトリパネル（RepositoryPanel.vue）へ移設 -->
 

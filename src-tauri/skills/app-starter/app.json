@@ -1,0 +1,11 @@
+{
+  "name": "Notification Viewer",
+  "description": "このワークツリーを含む未確認通知を一覧し、テスト通知を送る最小のアプリ。",
+  "version": "1.0.0",
+  "source": { "skill": "oretachi:app-starter", "version": "1.0.0" },
+  "permissions": {
+    "mcp": {
+      "tools": ["oretachi_list_worktree_notifications", "notify_worktree"]
+    }
+  }
+}
