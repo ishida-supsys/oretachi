@@ -33,7 +33,7 @@ const canApprove = computed(() => !props.busy && (!view.value.hasCritical || und
 const isChange = computed(() => props.request.kind === "change");
 const hasAnyRow = computed(() => view.value.rows.length > 0);
 const hasWildcard = computed(() => view.value.rows.some((r) => r.wildcard));
-const hasSensitive = computed(() => view.value.rows.some((r) => r.kind === "fsSensitive"));
+const hasSensitive = computed(() => view.value.rows.some((r) => r.kind === "fsSensitive" || r.kind === "dbSensitive"));
 const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiTerminal"));
 </script>
 
@@ -100,6 +100,20 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
               <strong>{{ t("fsSensitiveTitle") }}</strong>
               <div class="why">{{ t("fsSensitiveWarning") }}</div>
             </template>
+            <template v-else-if="r.kind === 'db'">
+              <span class="kind">{{ r.access === "write" ? t("kindDbWrite") : t("kindDbRead") }}</span>
+              <code class="path">{{ r.label }}</code>
+              <div class="why neutral">
+                {{ r.scheme === "worktree" ? t("fsWorktree", { name: request.worktreeName }) : t("fsArtifact") }}
+              </div>
+              <div v-if="r.access === 'write'" class="why">{{ t("dbWriteWarning") }}</div>
+              <div v-else class="why neutral">{{ t("dbReadNote") }}</div>
+            </template>
+            <template v-else-if="r.kind === 'dbSensitive'">
+              <span class="kind">{{ t("kindDbSensitive") }}</span>
+              <strong>{{ t("dbSensitiveTitle") }}</strong>
+              <div class="why">{{ t("dbSensitiveWarning") }}</div>
+            </template>
             <template v-else>
               <span class="kind">{{ t("kindMemory") }}</span>
               {{ t("memoryMax", { bytes: r.value }) }}
@@ -119,7 +133,7 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
               <s v-if="r.kind === 'target'">{{ r.label }}</s>
               <s v-else-if="r.kind === 'memory'">{{ t("memoryMax", { bytes: r.value }) }}</s>
               <s v-else-if="r.kind === 'aiTerminal'">{{ t("aiTerminalSummary", { spec: r.value }) }}</s>
-              <s v-else-if="r.kind === 'fs'"><code>{{ r.access }} {{ r.label }}</code></s>
+              <s v-else-if="r.kind === 'fs' || r.kind === 'db'"><code>{{ r.kind }} {{ r.access }} {{ r.label }}</code></s>
               <s v-else><code>{{ r.value }}</code></s>
             </li>
           </ul>
@@ -367,6 +381,13 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
     "kindFsRead": "Read files",
     "kindFsWrite": "Write files",
     "kindFsSensitive": "Files",
+    "kindDbRead": "Read database (read-only)",
+    "kindDbWrite": "Read and write database",
+    "kindDbSensitive": "Database",
+    "dbWriteWarning": "The app can create SQLite database files here and run any SQL on them (create, change and delete data). It cannot ATTACH other files, VACUUM INTO a file or load extensions.",
+    "dbReadNote": "Opened read-only: existing databases can be queried, but nothing can be written or created. Everything stored inside is readable.",
+    "dbSensitiveTitle": "Allowed to put databases in files that run commands (.git/, .claude/, .github/workflows, ...)",
+    "dbSensitiveWarning": "Normally refused, even read-only: .git/, .github/, .claude/, .vscode/, .idea/, .husky/, .devcontainer/, .mcp.json, .envrc, CLAUDE.md, AGENTS.md and similar agent/tool config files. A database there is a file the tools may read or run. This is the strongest permission.",
     "dangerTool": "Same authority as you (can run arbitrary commands in a terminal or start agents)",
     "wildcardWarning": "Includes worktrees created in the future, and reaches terminals in the main clone as well. This is the strongest permission.",
     "pinnedToId": "Fixed to this worktree by its ID at approval time (renaming it does not change the target)",
@@ -411,6 +432,13 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
     "kindFsRead": "ファイルの読み取り",
     "kindFsWrite": "ファイルの書き込み",
     "kindFsSensitive": "ファイル",
+    "kindDbRead": "データベースの読み取り（読み取り専用）",
+    "kindDbWrite": "データベースの読み書き",
+    "kindDbSensitive": "データベース",
+    "dbWriteWarning": "アプリはここに SQLite のデータベースを作り、任意の SQL（データの作成・変更・削除）を実行できます。他のファイルの ATTACH・VACUUM INTO・拡張のロードはできません。",
+    "dbReadNote": "読み取り専用で開きます。既存のデータベースを検索できますが、書き込みも新規作成もできません。中にあるデータはすべて読めます。",
+    "dbSensitiveTitle": "コマンドが走るファイル（.git/・.claude/・.github/workflows など）の場所へのデータベース配置を許可",
+    "dbSensitiveWarning": "通常は読み取り専用でも拒否されるパスです: .git/ / .github/ / .claude/ / .vscode/ / .idea/ / .husky/ / .devcontainer/ / .mcp.json / .envrc / CLAUDE.md / AGENTS.md など、エージェントやツールの設定ファイル。ここにデータベースがあると、ツールが読んだり実行したりしうるファイルになります。最も強い権限です。",
     "dangerTool": "あなたと同等の権限です（端末で任意のコマンドを実行したり、エージェントを起動したりできます）",
     "wildcardWarning": "今後作られるワークツリーも含み、メインのクローンの端末にも届きます。最も強い権限です。",
     "pinnedToId": "承認時点の ID でこのワークツリーに固定されます（改名しても対象は変わりません）",

@@ -3,6 +3,7 @@ mod ai_description;
 mod ai_judge;
 mod ai_provider;
 mod ai_terminal;
+mod app_db;
 mod app_fs;
 mod app_grant;
 mod app_instance;
@@ -899,7 +900,7 @@ async fn delete_artifacts(app_handle: tauri::AppHandle, worktree_id: String) -> 
     .map_err(|e| format!("task join error: {}", e))??;
     // ワークツリーごと消える経路（クローズ / アーカイブ）。起動中のアプリを止め、承認も消す。
     // 残すと、同じ id で作り直す / インポートした別物が同じ権限セットで承認なしに起動してしまう
-    app_instance::on_worktree_artifacts_deleted(&app_handle, &worktree_id);
+    app_instance::on_worktree_artifacts_deleted(&app_handle, &worktree_id).await;
     if deleted {
         if let Some(pool) = app_handle.try_state::<report_db::ReportPool>() {
             let _ = report_db::insert(&pool.0, "artifact_change:delete", &worktree_id).await;
@@ -934,7 +935,7 @@ async fn delete_artifact(
 
     if deleted {
         // アプリなら起動中のインスタンスを止め、承認（grant）も消す（MCP の delete と同じ）
-        app_instance::on_artifact_deleted(&app_handle, &worktree_id, &artifact_id);
+        app_instance::on_artifact_deleted(&app_handle, &worktree_id, &artifact_id).await;
         let _ = app_handle.emit(
             "artifact-changed",
             serde_json::json!({
@@ -2407,6 +2408,7 @@ pub fn run() {
         .manage(app_instance::AppInstanceRegistry::default())
         .manage(ai_terminal::AiTerminalRegistry::default())
         .manage(ai_terminal::SpawnWaiters::default())
+        .manage(app_db::AppDbRegistry::default())
         .manage(mcp_server::NotificationRegistry::default())
         .manage(mcp_server::CloseWorktreeAckRegistry::default())
         .manage(mcp_server::ImportWorktreeAckRegistry::default())
@@ -2529,6 +2531,9 @@ pub fn run() {
             app_fs::app_fs_write,
             app_fs::app_fs_list,
             app_fs::app_fs_remove,
+            app_db::app_db_query,
+            app_db::app_db_execute,
+            app_db::app_db_close,
             app_instance::app_set_memory,
             app_instance::app_get_memory,
             app_instance::app_grant_respond,

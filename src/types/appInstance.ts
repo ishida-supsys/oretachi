@@ -47,6 +47,8 @@ export interface AppResolvedPermissions {
   memory?: { maxBytes: number };
   aiTerminal?: AppAiTerminalPermission;
   fs?: AppResolvedFs;
+  /** DB ファイルの置き場所のスコープ（形は fs と同じ。read のスコープの DB は読み取り専用） */
+  db?: AppResolvedFs;
 }
 
 export interface AppRequestedPermissions {
@@ -54,6 +56,7 @@ export interface AppRequestedPermissions {
   memory?: { maxBytes: number };
   aiTerminal?: AppAiTerminalPermission;
   fs?: { read: string[]; write: string[]; allowSensitivePaths: boolean };
+  db?: { read: string[]; write: string[]; allowSensitivePaths: boolean };
 }
 
 export interface AppGrant {

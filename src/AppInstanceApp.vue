@@ -18,6 +18,9 @@ import { buildVendorHead, buildReactSrcdoc } from "./utils/reactArtifactSrcdoc";
 import { loadVendors } from "./utils/reactArtifactVendors";
 import { createCspNonce } from "./utils/artifactCspViolation";
 import {
+  ARTIFACT_BRIDGE_METHOD_DB_CLOSE,
+  ARTIFACT_BRIDGE_METHOD_DB_EXECUTE,
+  ARTIFACT_BRIDGE_METHOD_DB_QUERY,
   ARTIFACT_BRIDGE_METHOD_AI_TERMINAL_PREFIX,
   ARTIFACT_BRIDGE_METHOD_FLUSHED,
   ARTIFACT_BRIDGE_METHOD_FS_LIST,
@@ -151,6 +154,35 @@ async function handleBridgeRequest(request: ArtifactBridgeRequest) {
         result = await invoke("app_fs_list", { path });
       } else {
         result = await invoke("app_fs_remove", { path });
+      }
+      reply(request, { ok: true, result });
+    } catch (e) {
+      reply(request, { ok: false, error: errorText(e) });
+    }
+    return;
+  }
+  if (
+    request.method === ARTIFACT_BRIDGE_METHOD_DB_QUERY ||
+    request.method === ARTIFACT_BRIDGE_METHOD_DB_EXECUTE ||
+    request.method === ARTIFACT_BRIDGE_METHOD_DB_CLOSE
+  ) {
+    const path = request.params.path;
+    if (typeof path !== "string" || path === "") {
+      reply(request, { ok: false, error: "db にはパス（worktree://… / artifact://…）が必要です" });
+      return;
+    }
+    try {
+      // 許可・拒否の判断は Rust（`app_db_*`）。拒否の理由はデバッグログへ残る。ここは素通しするだけ
+      let result: unknown;
+      if (request.method === ARTIFACT_BRIDGE_METHOD_DB_CLOSE) {
+        result = await invoke("app_db_close", { path });
+      } else {
+        const sql = typeof request.params.sql === "string" ? request.params.sql : "";
+        const params = Array.isArray(request.params.params) ? request.params.params : [];
+        result = await invoke(
+          request.method === ARTIFACT_BRIDGE_METHOD_DB_QUERY ? "app_db_query" : "app_db_execute",
+          { path, sql, params },
+        );
       }
       reply(request, { ok: true, result });
     } catch (e) {

@@ -539,18 +539,19 @@ fn build_resolved(
 ) -> Result<ResolvedPermissions, String> {
     let settings = app.state::<crate::settings::SettingsManager>().get();
     let mut resolved = crate::mcp_server::resolve_app_permissions(&settings, requested)?;
-    resolved.fs = build_resolved_fs(app, worktree_id, artifact_id, requested)?;
+    resolved.fs = build_resolved_scopes(app, worktree_id, artifact_id, requested.fs.as_ref())?;
+    resolved.db = build_resolved_scopes(app, worktree_id, artifact_id, requested.db.as_ref())?;
     Ok(resolved)
 }
 
-/// FS のスコープだけを解決する（絶対パスはワークツリーの移動などで変わりうるので、起動のたびに比べる）。
-fn build_resolved_fs(
+/// FS / DB のスコープだけを解決する（絶対パスはワークツリーの移動などで変わりうるので、起動のたびに比べる）。
+fn build_resolved_scopes(
     app: &AppHandle,
     worktree_id: &str,
     artifact_id: &str,
-    requested: &RequestedPermissions,
+    requested: Option<&app_manifest::RequestedFs>,
 ) -> Result<Option<app_manifest::ResolvedFs>, String> {
-    let Some(fs) = &requested.fs else { return Ok(None) };
+    let Some(fs) = requested else { return Ok(None) };
     let settings = app.state::<crate::settings::SettingsManager>().get();
     // ホーム / リポジトリ擬似ワークツリーは全ワークツリーの祖先・メインクローンになりうるので、
     // worktree:// の根にしない（None を渡して拒否させる）
@@ -610,7 +611,9 @@ async fn start_inner(
                 // worktree_base_dir の変更・リンク先の変更）再承認する。保存済みのパスでは
                 // 呼び出しのたびに拒否され、manifest を変えない限り再承認の導線が無くなる
                 || (requested.fs.is_some()
-                    && build_resolved_fs(app, worktree_id, artifact_id, &requested)? != g.resolved.fs)
+                    && build_resolved_scopes(app, worktree_id, artifact_id, requested.fs.as_ref())? != g.resolved.fs)
+                || (requested.db.is_some()
+                    && build_resolved_scopes(app, worktree_id, artifact_id, requested.db.as_ref())? != g.resolved.db)
         }
         None => true,
     };
@@ -767,6 +770,8 @@ fn release(app: &AppHandle, label: &str) -> Option<(String, String)> {
     };
     removed.map(|(inst, ids)| {
         emit_grant_cancelled(app, &ids);
+        // DB の接続も閉じる（前提 10: インスタンスの停止ですべて閉じる）。閉じは非同期
+        crate::app_db::on_instance_released(app, label);
         // インスタンスが開いた専用 AI ターミナルも、停止とともにすべて閉じる（再起動での復元はしない）。
         // ホットリロードは `release` を通らないので、リロードをまたいで維持される。
         crate::ai_terminal::close_all_for_instance(app, &(inst.worktree_id.clone(), inst.artifact_id.clone()));
@@ -827,8 +832,10 @@ pub fn on_window_destroyed(app: &AppHandle, label: &str) {
 
 /// アーティファクトの削除時（MCP `artifact delete`・UI の削除）。起動中なら止め、承認も消す。
 /// **承認を残すと、同じ id で作り直した別物が同じ権限セットで承認なしに起動してしまう。**
-pub fn on_artifact_deleted(app: &AppHandle, worktree_id: &str, artifact_id: &str) {
+pub async fn on_artifact_deleted(app: &AppHandle, worktree_id: &str, artifact_id: &str) {
     stop_instance(app, worktree_id, artifact_id, "アーティファクトが削除されました");
+    // DB の接続が閉じるのを待ってからフォルダを消す（Windows は開いたままのファイルを消せない）
+    app.state::<crate::app_db::AppDbRegistry>().drain_closes().await;
     if let Err(e) = app.state::<AppGrantStore>().remove(worktree_id, artifact_id) {
         log::warn!("[app-instance] grant の削除に失敗: {}", e);
     }
@@ -845,7 +852,7 @@ pub fn on_artifact_deleted(app: &AppHandle, worktree_id: &str, artifact_id: &str
 }
 
 /// ワークツリーのアーティファクトを丸ごと消す経路（`delete_artifacts`）。
-pub fn on_worktree_artifacts_deleted(app: &AppHandle, worktree_id: &str) {
+pub async fn on_worktree_artifacts_deleted(app: &AppHandle, worktree_id: &str) {
     let victims: Vec<String> = {
         let reg = app.state::<AppInstanceRegistry>();
         let Ok(inner) = reg.0.lock() else { return };
@@ -859,6 +866,7 @@ pub fn on_worktree_artifacts_deleted(app: &AppHandle, worktree_id: &str) {
     for art in victims {
         stop_instance(app, worktree_id, &art, "ワークツリーのアーティファクトが削除されました");
     }
+    app.state::<crate::app_db::AppDbRegistry>().drain_closes().await;
     if let Err(e) = app.state::<AppGrantStore>().remove_worktree(worktree_id) {
         log::warn!("[app-instance] grant の一括削除に失敗: {}", e);
     }
@@ -990,6 +998,8 @@ pub async fn check_permission_change(app: &AppHandle, worktree_id: &str, artifac
                     Some(Ok(())) => {}
                 }
                 add_log(&app2, &wt, &aid, "info", "再承認されました");
+                // 開いている DB は閉じる。次の呼び出しが新しい権限セットで開き直す
+                crate::app_db::on_grant_replaced(&app2, &label);
                 // aiTerminal 権限が外れたなら、開いている専用 AI ターミナルを閉じる。権限が無いと
                 // 以後は操作できず、持ち主の居ない端末が残ってしまうため（上限が下がっただけなら
                 // 既存の端末は残し、新しく開く分から効く）
@@ -1483,7 +1493,7 @@ mod tests {
     use crate::app_manifest::{MemoryPermission, RequestedPermissions};
 
     fn perms(max: u64) -> RequestedPermissions {
-        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None }
+        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None, db: None }
     }
 
     #[test]

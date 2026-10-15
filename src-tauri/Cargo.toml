@@ -74,6 +74,9 @@ rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
 subtle = "2"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+# アプリ DB（app_db.rs）の authorizer 設定用。sqlx-sqlite が既に依存している同じ版で、
+# 新しい SQLite 実装は増えない（sqlx が出している生ハンドルへ FFI で authorizer を張るだけ）
+libsqlite3-sys = { version = "0.30", default-features = false }
 sysinfo = "0.38"
 tauri-plugin-prevent-default = "4"
 tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp" }
