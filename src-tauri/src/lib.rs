@@ -2,6 +2,7 @@ mod ai_commit_message;
 mod ai_description;
 mod ai_judge;
 mod ai_provider;
+mod ai_terminal;
 mod app_db;
 mod app_fs;
 mod app_grant;
@@ -130,20 +131,49 @@ fn repo_artifacts_dir(
 
 #[tauri::command]
 async fn pty_spawn(
+    window: tauri::Window,
     app_handle: tauri::AppHandle,
     state: State<'_, PtyManager>,
     rows: u16,
     cols: u16,
     shell: Option<String>,
     cwd: Option<String>,
+    terminal_id: Option<String>,
 ) -> Result<u32, String> {
     log::debug!("[Terminal] cmd::pty_spawn rows={} cols={} shell={:?} cwd={:?}", rows, cols, shell, cwd);
+    // インスタンス専用 AI ターミナル: host が予約した terminal_id だけを、メインウィンドウからのみ受理する。
+    // 予約は一回限りで、cwd は予約時に host が解決したものを強制する（フロントの申告は使わない）。
+    let mut cwd = cwd;
+    if let Some(tid) = terminal_id.as_deref() {
+        if window.label() != "main" {
+            return Err("terminal_id を指定した pty_spawn はメインウィンドウからのみ呼べます".to_string());
+        }
+        cwd = Some(ai_terminal::take_reservation(&app_handle, tid)?);
+    }
     // ConPTY 生成 + プロセス spawn はブロッキング I/O のため spawn_blocking で実行し、
     // 同期コマンドとしてメインスレッド (WebView2 UI スレッド) を塞がないようにする。
     let manager = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || manager.spawn(app_handle, rows, cols, shell, cwd))
-        .await
-        .map_err(|e| format!("spawn_blocking join error: {}", e))?
+    let app_for_bind = app_handle.clone();
+    let reserved = terminal_id.clone();
+    let spawned = tauri::async_runtime::spawn_blocking(move || {
+        manager.spawn(app_handle, rows, cols, shell, cwd, reserved)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking join error: {}", e))?;
+    let Some(tid) = terminal_id else { return spawned };
+    // 紐付けは Rust だけで完結させる（所有の根拠にフロントの申告を使わない）
+    match spawned {
+        Ok(sid) if ai_terminal::bind(&app_for_bind, &tid, sid) => Ok(sid),
+        Ok(sid) => {
+            ai_terminal::kill_sessions(&app_for_bind, vec![sid], "ai-terminal-bind-failed");
+            ai_terminal::cancel(&app_for_bind, &tid);
+            Err("AI ターミナルの紐付けに失敗しました".to_string())
+        }
+        Err(e) => {
+            ai_terminal::cancel(&app_for_bind, &tid);
+            Err(e)
+        }
+    }
 }
 
 // pty_write は enqueue のみで非ブロッキング (実 I/O はセッション毎の writer スレッド)。
@@ -2376,6 +2406,8 @@ pub fn run() {
         .manage(artifact_lock::ArtifactOpenRegistry::new())
         .manage(app_grant::AppGrantStore::new())
         .manage(app_instance::AppInstanceRegistry::default())
+        .manage(ai_terminal::AiTerminalRegistry::default())
+        .manage(ai_terminal::SpawnWaiters::default())
         .manage(app_db::AppDbRegistry::default())
         .manage(mcp_server::NotificationRegistry::default())
         .manage(mcp_server::CloseWorktreeAckRegistry::default())
@@ -2485,6 +2517,16 @@ pub fn run() {
             app_instance::app_instance_bootstrap,
             app_instance::app_instance_report,
             app_instance::app_call_mcp_tool,
+            ai_terminal::app_ai_terminal_open,
+            ai_terminal::app_ai_terminal_write,
+            ai_terminal::app_ai_terminal_send_keys,
+            ai_terminal::app_ai_terminal_read,
+            ai_terminal::app_ai_terminal_inspect_prompt,
+            ai_terminal::app_ai_terminal_answer_prompt,
+            ai_terminal::app_ai_terminal_close,
+            ai_terminal::app_ai_terminal_list,
+            ai_terminal::ai_terminal_spawn_result,
+            ai_terminal::list_owned_ai_terminals,
             app_fs::app_fs_read,
             app_fs::app_fs_write,
             app_fs::app_fs_list,

@@ -17,6 +17,14 @@ export interface AppResolvedTarget {
   wildcard: boolean;
 }
 
+/** インスタンス専用 AI ターミナル。ユーザーと同じ権限で動くエージェントを起動できる */
+export interface AppAiTerminalPermission {
+  /** v1 は `["claude"]` のみ */
+  agents: string[];
+  /** 同時に開ける数 */
+  maxConcurrent: number;
+}
+
 /** 承認時に解決した FS のスコープ 1 件。`path` は解決済みの絶対パス（Windows では拡張長パス接頭辞付きのことがある） */
 export interface AppResolvedFsScope {
   scheme: "worktree" | "artifact";
@@ -37,6 +45,7 @@ export interface AppResolvedFs {
 export interface AppResolvedPermissions {
   mcp?: { tools: string[]; targets: AppResolvedTarget[] };
   memory?: { maxBytes: number };
+  aiTerminal?: AppAiTerminalPermission;
   fs?: AppResolvedFs;
   /** DB ファイルの置き場所のスコープ（形は fs と同じ。read のスコープの DB は読み取り専用） */
   db?: AppResolvedFs;
@@ -45,6 +54,7 @@ export interface AppResolvedPermissions {
 export interface AppRequestedPermissions {
   mcp?: { tools: string[]; targets: string[] };
   memory?: { maxBytes: number };
+  aiTerminal?: AppAiTerminalPermission;
   fs?: { read: string[]; write: string[]; allowSensitivePaths: boolean };
   db?: { read: string[]; write: string[]; allowSensitivePaths: boolean };
 }

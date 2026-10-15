@@ -46,6 +46,21 @@ describe("buildPermissionView", () => {
     expect(v.rows[0]).toMatchObject({ kind: "memory", value: "4096", severity: "normal" });
   });
 
+  it("treats the dedicated AI terminal as the strongest warning", () => {
+    const v = buildPermissionView({ aiTerminal: { agents: ["claude"], maxConcurrent: 2 } }, null, DANGEROUS);
+    expect(v.rows).toHaveLength(1);
+    expect(v.rows[0]).toMatchObject({ kind: "aiTerminal", value: "claude×2", severity: "critical" });
+    expect(v.hasCritical).toBe(true);
+  });
+
+  it("shows a change in the AI terminal limit as a removed and an added row", () => {
+    const before: AppResolvedPermissions = { aiTerminal: { agents: ["claude"], maxConcurrent: 1 } };
+    const after: AppResolvedPermissions = { aiTerminal: { agents: ["claude"], maxConcurrent: 3 } };
+    const v = buildPermissionView(after, before, DANGEROUS);
+    expect(v.rows[0].added).toBe(true);
+    expect(v.removed.map((r) => r.value)).toEqual(["claude×1"]);
+  });
+
   it("reports added and removed rows when re-approving", () => {
     const previous: AppResolvedPermissions = {
       mcp: { tools: ["notify_worktree", "oretachi_poll_inbox"], targets: [] },

@@ -22,6 +22,8 @@ import { useTrayWorktreeNav } from "./composables/useTrayWorktreeNav";
 import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
 import { initTerminalUnread, terminalUnread } from "./composables/useEventSubscriptions";
 import { collectUnreadByTab } from "./utils/terminalUnread";
+import { collectOwnedByTab } from "./utils/ownedTerminalTabs";
+import { initOwnedAiTerminals, useOwnedAiTerminals } from "./composables/useOwnedAiTerminals";
 import type { FrameNode } from "./types/frame";
 import type { TrayTerminalEntry } from "./types/terminal";
 import { useI18n } from "vue-i18n";
@@ -52,6 +54,8 @@ const terminalRefs = reactive(new Map<number, InstanceType<typeof TerminalView>>
 // バックエンドは pty の session_id で数えるので詰め替える。terminalEntries は表示中
 // ワークツリーの分だけなので、他ワークツリーの未読が混ざることはない。
 // トレイはトーストを出さない（メイン / サブウィンドウと二重になるため）。バッジのみ。
+const { ownedBySession } = useOwnedAiTerminals();
+const terminalOwnedByTab = computed(() => collectOwnedByTab(ownedBySession.value, terminalEntries));
 const terminalUnreadByTab = computed(() =>
   collectUnreadByTab(terminalUnread.value, terminalEntries),
 );
@@ -473,6 +477,8 @@ onMounted(async () => {
 
   // タブ未読バッジの同期（#130）。event-inbox-changed は全 webview に届くので中継は不要。
   unlistenUnread = await initTerminalUnread();
+  // インスタンス専用 AI ターミナル（#372）のタブの印
+  await initOwnedAiTerminals();
 
   // 表示中ワークツリーにアーティファクトが登録されたら URL 一覧を追従させる
   unlistenArtifact = await listen<{ worktreeId: string }>("artifact-changed", async (event) => {
@@ -642,6 +648,7 @@ onUnmounted(() => {
         :node="root"
         :terminal-entries="terminalEntries"
         :terminal-unread="terminalUnreadByTab"
+        :terminal-owned="terminalOwnedByTab"
         @switch-terminal="switchTerminal"
         @close-terminal="closeTerminal"
         @title-change="() => {}"

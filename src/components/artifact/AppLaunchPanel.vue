@@ -207,6 +207,10 @@ function hhmmss(ms: number): string {
                 {{ t("granted.target") }}: {{ r.label }}
                 <span v-if="r.wildcard" class="tag">{{ t("granted.wildcard") }}</span>
               </template>
+              <template v-else-if="r.kind === 'aiTerminal'">
+                {{ t("granted.aiTerminal", { spec: r.value }) }}
+                <span class="tag">{{ t("granted.aiTerminalTag") }}</span>
+              </template>
               <template v-else>{{ t("granted.memory", { bytes: r.value }) }}</template>
             </li>
             <li v-if="permissionView.rows.length === 0" class="none">{{ t("granted.none") }}</li>
@@ -468,6 +472,8 @@ function hhmmss(ms: number): string {
       "target": "Other worktrees",
       "wildcard": "includes worktrees created later",
       "memory": "Memory up to {bytes} bytes",
+      "aiTerminal": "Dedicated AI terminals ({spec})",
+      "aiTerminalTag": "same authority as you",
       "none": "No permissions",
       "ownOnly": "MCP calls reach this worktree only"
     },
@@ -498,6 +504,8 @@ function hhmmss(ms: number): string {
       "target": "他ワークツリー",
       "wildcard": "今後作られるワークツリーも含む",
       "memory": "メモリー 最大 {bytes} バイト",
+      "aiTerminal": "専用 AI ターミナル（{spec}）",
+      "aiTerminalTag": "あなたと同等の権限",
       "none": "権限なし",
       "ownOnly": "MCP 呼び出しはこのワークツリーだけに届きます"
     },

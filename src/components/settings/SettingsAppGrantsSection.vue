@@ -46,7 +46,7 @@ function summary(item: AppGrantListItem): string {
   const parts: string[] = [];
   const tools = v.rows.filter((r) => r.kind === "tool").length;
   if (tools > 0) parts.push(t("summaryTools", { count: tools }));
-  // critical は越境先のワイルドカードと FS の既定拒否パス解除の 2 種類あるので、要因ごとに出す
+  // critical は越境先のワイルドカード・FS の既定拒否パス解除・専用 AI ターミナルの 3 種類あるので、要因ごとに出す
   if (v.rows.some((r) => r.wildcard)) parts.push(t("summaryWildcard"));
   else if (v.rows.some((r) => r.kind === "target")) parts.push(t("summaryTargets"));
   const mem = v.rows.find((r) => r.kind === "memory");
@@ -55,6 +55,8 @@ function summary(item: AppGrantListItem): string {
   const fsWrite = v.rows.filter((r) => r.kind === "fs" && r.access === "write").length;
   if (fsRead + fsWrite > 0) parts.push(t("summaryFs", { read: fsRead, write: fsWrite }));
   if (v.rows.some((r) => r.kind === "fsSensitive")) parts.push(t("summaryFsSensitive"));
+  const ai = v.rows.find((r) => r.kind === "aiTerminal");
+  if (ai) parts.push(t("summaryAiTerminal", { spec: ai.value }));
   const dbRead = v.rows.filter((r) => r.kind === "db" && r.access === "read").length;
   const dbWrite = v.rows.filter((r) => r.kind === "db" && r.access === "write").length;
   if (dbRead + dbWrite > 0) parts.push(t("summaryDb", { read: dbRead, write: dbWrite }));
@@ -181,6 +183,7 @@ onBeforeUnmount(() => {
     "summaryWildcard": "wildcard worktrees",
     "summaryTargets": "other worktrees",
     "summaryMemory": "memory {bytes} B",
+    "summaryAiTerminal": "AI terminal {spec}",
     "summaryFs": "files (read {read} / write {write})",
     "summaryFsSensitive": "writes to hook/workflow files",
     "summaryDb": "databases (read-only {read} / read-write {write})",
@@ -203,6 +206,7 @@ onBeforeUnmount(() => {
     "summaryWildcard": "ワイルドカードのワークツリー",
     "summaryTargets": "他ワークツリー",
     "summaryMemory": "メモリー {bytes} B",
+    "summaryAiTerminal": "AI ターミナル {spec}",
     "summaryFs": "ファイル（読 {read} / 書 {write}）",
     "summaryFsSensitive": "フック・ワークフローのファイルへの書き込み",
     "summaryDb": "データベース（読み取り専用 {read} / 読み書き {write}）",

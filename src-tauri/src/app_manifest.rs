@@ -16,7 +16,12 @@ use std::collections::BTreeSet;
 
 /// 将来の sub-issue が受理するようになる権限キー。#370 の時点では「未対応」として manifest 不正扱い
 /// にする（黙って無視すると、申請したつもりの権限が効かないまま承認だけ通ることになる）。
-const RESERVED_PERMISSION_KEYS: &[&str] = &["network", "subWindow", "wasm", "aiTerminal"];
+const RESERVED_PERMISSION_KEYS: &[&str] = &["network", "subWindow", "wasm"];
+
+/// `aiTerminal.agents` で指定できるエージェント（v1 は Claude Code のみ）。
+pub const AI_TERMINAL_AGENTS: &[&str] = &["claude"];
+/// `aiTerminal.maxConcurrent` の上限（インスタンスごと）。
+pub const AI_TERMINAL_MAX_CONCURRENT_CAP: u32 = 4;
 
 const MAX_NAME_CHARS: usize = 100;
 const MAX_DESCRIPTION_CHARS: usize = 500;
@@ -46,6 +51,17 @@ pub struct RequestedMcp {
 #[serde(rename_all = "camelCase")]
 pub struct MemoryPermission {
     pub max_bytes: u64,
+}
+
+/// インスタンス専用 AI ターミナル。ユーザーと同じ権限で動くエージェントを起動できるので、
+/// 承認ダイアログでは最も強い警告にする。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AiTerminalPermission {
+    /// ソート・重複除去済み。`AI_TERMINAL_AGENTS` の部分集合。
+    pub agents: Vec<String>,
+    /// 同時に開ける数（1〜`AI_TERMINAL_MAX_CONCURRENT_CAP`）。
+    pub max_concurrent: u32,
 }
 
 /// manifest の `fs`。`read` / `write` は `worktree://<相対>` / `artifact://<相対>` のディレクトリ
@@ -90,6 +106,8 @@ pub struct RequestedPermissions {
     pub mcp: Option<RequestedMcp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryPermission>,
+    #[serde(default, rename = "aiTerminal", skip_serializing_if = "Option::is_none")]
+    pub ai_terminal: Option<AiTerminalPermission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fs: Option<RequestedFs>,
     /// manifest の `db`。形は `fs` と同じ（DB ファイルの置き場所のスコープ）。read のスコープの DB は
@@ -133,6 +151,8 @@ pub struct ResolvedPermissions {
     pub mcp: Option<ResolvedMcp>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<MemoryPermission>,
+    #[serde(default, rename = "aiTerminal", skip_serializing_if = "Option::is_none")]
+    pub ai_terminal: Option<AiTerminalPermission>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fs: Option<ResolvedFs>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -235,6 +255,7 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
         match key.as_str() {
             "mcp" => out.mcp = parse_mcp(val)?,
             "memory" => out.memory = parse_memory(val)?,
+            "aiTerminal" => out.ai_terminal = parse_ai_terminal(val)?,
             "fs" => out.fs = parse_scoped(val, ScopedKind::Fs)?,
             "db" => out.db = parse_scoped(val, ScopedKind::Db)?,
             k if RESERVED_PERMISSION_KEYS.contains(&k) => {
@@ -245,7 +266,7 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
             }
             other => {
                 return Err(format!(
-                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs / db だけです",
+                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs / db / aiTerminal だけです",
                     other
                 ));
             }
@@ -329,6 +350,39 @@ fn parse_memory(v: &serde_json::Value) -> Result<Option<MemoryPermission>, Strin
         ));
     }
     Ok(Some(MemoryPermission { max_bytes }))
+}
+
+fn parse_ai_terminal(v: &serde_json::Value) -> Result<Option<AiTerminalPermission>, String> {
+    let obj = expect_object(v, "app.permissions.aiTerminal")?;
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "agents" | "maxConcurrent")) {
+        // 権限モード・権限スキップ・許可ツール一覧などは v1 ではアプリから指定できない。
+        return Err(format!(
+            "app.permissions.aiTerminal の未知のキー '{}' です（agents / maxConcurrent だけ。権限モード・権限スキップ・許可ツールの指定は v1 ではできません）",
+            k
+        ));
+    }
+    let agents = string_list(obj, "agents", "app.permissions.aiTerminal.agents")?;
+    if agents.is_empty() {
+        return Err("app.permissions.aiTerminal.agents は必須です（例: [\"claude\"]）".to_string());
+    }
+    if let Some(a) = agents.iter().find(|a| !AI_TERMINAL_AGENTS.contains(&a.as_str())) {
+        return Err(format!(
+            "エージェント '{}' は指定できません。v1 で指定できるのは {} だけです",
+            a,
+            AI_TERMINAL_AGENTS.join(", ")
+        ));
+    }
+    let max_concurrent = obj
+        .get("maxConcurrent")
+        .and_then(|n| n.as_u64())
+        .ok_or_else(|| "app.permissions.aiTerminal には maxConcurrent（正の整数）が必須です".to_string())?;
+    if max_concurrent == 0 || max_concurrent > AI_TERMINAL_MAX_CONCURRENT_CAP as u64 {
+        return Err(format!(
+            "app.permissions.aiTerminal.maxConcurrent は 1〜{} の範囲で指定してください（指定: {}）",
+            AI_TERMINAL_MAX_CONCURRENT_CAP, max_concurrent
+        ));
+    }
+    Ok(Some(AiTerminalPermission { agents, max_concurrent: max_concurrent as u32 }))
 }
 
 /// アプリのメモリ（シリアライズした JSON のバイト数）が承認済みの `maxBytes` に収まるか。
@@ -557,6 +611,36 @@ mod tests {
             let e = err(json!({ "name": "x", "permissions": { *key: {} }}));
             assert!(e.contains("まだ使えません"), "{key}: {e}");
         }
+    }
+
+    #[test]
+    fn parses_ai_terminal_permission() {
+        let m = ok(json!({ "name": "x", "permissions": { "aiTerminal": { "agents": ["claude", "claude"], "maxConcurrent": 2 }}}));
+        let t = m.permissions.ai_terminal.unwrap();
+        assert_eq!(t.agents, vec!["claude"]);
+        assert_eq!(t.max_concurrent, 2);
+    }
+
+    #[test]
+    fn rejects_bad_ai_terminal_permission() {
+        let p = |v: serde_json::Value| err(json!({ "name": "x", "permissions": { "aiTerminal": v }}));
+        assert!(p(json!({ "agents": ["gemini"], "maxConcurrent": 1 })).contains("gemini"));
+        assert!(p(json!({ "maxConcurrent": 1 })).contains("agents"));
+        assert!(p(json!({ "agents": ["claude"] })).contains("maxConcurrent"));
+        assert!(p(json!({ "agents": ["claude"], "maxConcurrent": 0 })).contains("maxConcurrent"));
+        assert!(p(json!({ "agents": ["claude"], "maxConcurrent": 5 })).contains("maxConcurrent"));
+        // 権限モード・権限スキップ・許可ツールは v1 では指定できない
+        for k in ["permissionMode", "skipPermissions", "allowedTools"] {
+            let e = p(json!({ "agents": ["claude"], "maxConcurrent": 1, k: true }));
+            assert!(e.contains("未知のキー"), "{k}: {e}");
+        }
+    }
+
+    #[test]
+    fn ai_terminal_change_requires_reapproval() {
+        let a = ok(json!({ "name": "x", "permissions": { "aiTerminal": { "agents": ["claude"], "maxConcurrent": 1 }}}));
+        let b = ok(json!({ "name": "x", "permissions": { "aiTerminal": { "agents": ["claude"], "maxConcurrent": 2 }}}));
+        assert!(requested_changed(&a.permissions, &b.permissions));
     }
 
     #[test]
@@ -807,6 +891,7 @@ mod tests {
                     .collect(),
             }),
             memory: None,
+            ai_terminal: None,
             fs: None,
             db: None,
         }
@@ -843,13 +928,14 @@ mod tests {
             requested: RequestedPermissions {
                 mcp: Some(RequestedMcp { tools: vec!["notify_worktree".into()], targets: vec!["wt-b".into()] }),
                 memory: Some(MemoryPermission { max_bytes: 10 }),
+                ai_terminal: Some(AiTerminalPermission { agents: vec!["claude".into()], max_concurrent: 2 }),
                 fs: None,
                 db: None,
             },
             resolved: resolved(&["notify_worktree"], &["wt-b"]),
         };
         let s = serde_json::to_string(&g).unwrap();
-        assert!(s.contains("grantedAt") && s.contains("maxBytes"));
+        assert!(s.contains("grantedAt") && s.contains("maxBytes") && s.contains("aiTerminal"));
         let back: AppGrant = serde_json::from_str(&s).unwrap();
         assert_eq!(back, g);
     }
