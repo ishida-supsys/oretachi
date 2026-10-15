@@ -84,6 +84,9 @@ struct Instance {
 struct Waiter {
     tx: oneshot::Sender<ApprovalOutcome>,
     key: Key,
+    /// ダイアログへ送った要求そのもの。main の webview が再読込されてキューを失っても、
+    /// `list_pending_app_grants` で取り戻せるように持っておく
+    payload: Option<serde_json::Value>,
 }
 
 #[derive(Default)]
@@ -185,7 +188,7 @@ impl Inner {
             }
         }
         let (tx, rx) = oneshot::channel();
-        self.waiters.insert(request_id.clone(), Waiter { tx, key });
+        self.waiters.insert(request_id.clone(), Waiter { tx, key, payload: None });
         if let Some(inst) = self.by_label.get_mut(label) {
             inst.pending = Some(PendingApproval { request_id: request_id.clone(), requested });
         }
@@ -248,7 +251,10 @@ fn status_value(
         "running": inst.map(|i| i.state == InstanceState::Running).unwrap_or(false),
         "state": inst.map(|i| i.state),
         "visible": inst.map(|i| i.visible).unwrap_or(false),
-        "reapprovalPending": inst.map(|i| i.pending.is_some()).unwrap_or(false),
+        // 起動中の権限変更だけ。初回起動の承認待ち（Starting）は state で表す
+        "reapprovalPending": inst
+            .map(|i| i.state == InstanceState::Running && i.pending.is_some())
+            .unwrap_or(false),
         "granted": grant.is_some(),
         "grantedAt": grant.as_ref().map(|g| g.granted_at),
         "maxInstances": MAX_INSTANCES,
@@ -437,10 +443,47 @@ fn emit_grant_request(
         previous,
         dangerous_tools: app_manifest::DANGEROUS_TOOLS,
     };
+    let value = match serde_json::to_value(&payload) {
+        Ok(v) => v,
+        Err(e) => {
+            log::warn!("[app-instance] 承認要求を直列化できません: {}", e);
+            return;
+        }
+    };
+    if let Ok(mut inner) = app.state::<AppInstanceRegistry>().0.lock() {
+        if let Some(w) = inner.waiters.get_mut(request_id) {
+            w.payload = Some(value.clone());
+        }
+    }
     show_main_window(app);
-    if let Err(e) = app.emit("app-grant-request", &payload) {
+    if let Err(e) = app.emit("app-grant-request", &value) {
         log::warn!("[app-instance] app-grant-request の送出に失敗: {}", e);
     }
+}
+
+/// 応答待ちの承認要求の一覧（古い順）。main の webview が再読込・再マウントされると、イベントで
+/// 届いた要求のキューが消えて、起動が 10 分ハングする / 再承認の要求が二度と出なくなる。
+/// main はマウント時にこれを呼んでキューを復元する。
+#[tauri::command]
+pub async fn list_pending_app_grants(
+    window: tauri::Window,
+    app: AppHandle,
+) -> Result<Vec<serde_json::Value>, String> {
+    if window.label() != "main" {
+        return Err("承認要求の一覧は main ウィンドウからだけ取得できます".to_string());
+    }
+    let reg = app.state::<AppInstanceRegistry>();
+    let inner = reg.0.lock().map_err(|_| "レジストリのロックが壊れています".to_string())?;
+    let mut items: Vec<(u64, serde_json::Value)> = inner
+        .waiters
+        .iter()
+        .filter_map(|(id, w)| {
+            let n = id.strip_prefix("appgrant-")?.parse::<u64>().ok()?;
+            Some((n, w.payload.clone()?))
+        })
+        .collect();
+    items.sort_by_key(|(n, _)| *n);
+    Ok(items.into_iter().map(|(_, v)| v).collect())
 }
 
 /// ダイアログの応答（main だけが呼べる）。
@@ -560,18 +603,24 @@ async fn start_inner(
                 return Err("承認の要求が取り下げられたため、起動しませんでした".to_string());
             }
         }
-        // 保留はここで解除（承認済み）
-        if let Ok(mut inner) = app.state::<AppInstanceRegistry>().0.lock() {
-            if let Some(i) = inner.by_label.get_mut(label) {
-                i.pending = None;
-            }
-        }
         let grant = AppGrant {
             granted_at: now_ms() / 1000,
             requested,
             resolved,
         };
-        app.state::<AppGrantStore>().put(worktree_id, artifact_id, grant)?;
+        {
+            // 起動枠が残っているときだけ、**ロックを持ったまま**保存する。承認と削除が競ったとき、
+            // 削除側（`on_artifact_deleted`）が消した grant をここで書き戻して孤児にしないため
+            // （同じ id・同じ権限で作り直した別物が、承認なしで起動できてしまう）
+            let reg = app.state::<AppInstanceRegistry>();
+            let mut inner = reg.0.lock().map_err(|_| "レジストリのロックが壊れています".to_string())?;
+            let inst = inner
+                .by_label
+                .get_mut(label)
+                .ok_or_else(|| "起動が取り消されました".to_string())?;
+            inst.pending = None;
+            app.state::<AppGrantStore>().put(worktree_id, artifact_id, grant)?;
+        }
         add_log(app, worktree_id, artifact_id, "info", "権限を承認しました");
     }
 
@@ -610,6 +659,10 @@ fn create_window(app: &AppHandle, label: &str, app_name: &str) -> Result<(), Str
     let win = tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App("index.html".into()))
         .title(format!("{} — oretachi app", app_name))
         .inner_size(960.0, 720.0)
+        // 最小化させない。実機検証で、WebView2 は**最小化**したウィンドウの visibility を hidden にし、
+        // タイマーを約 10 秒に 1 回まで間引いた（hide() しただけなら visible のまま間引かれない）。
+        // 隠すのは「閉じる = hide」と起動画面の切り替えだけにして、常駐アプリのタイマーを守る
+        .minimizable(false)
         .visible(false)
         .disable_drag_drop_handler()
         .build()
@@ -829,26 +882,28 @@ pub async fn check_permission_change(app: &AppHandle, worktree_id: &str, artifac
         let outcome = rx.await.unwrap_or(ApprovalOutcome::Cancelled);
         match outcome {
             ApprovalOutcome::Approved => {
-                // 保留が自分のものかを確かめる（差し替えは Superseded で届くのでここには来ないが念のため）
-                let still_mine = {
+                // 保留が自分のものかを確かめ、**同じロックの中で**保存する（確認から保存までの間に
+                // 削除が入ると、削除側が消した grant を書き戻してしまうため）
+                let saved: Option<Result<(), String>> = {
                     let reg = app2.state::<AppInstanceRegistry>();
                     let Ok(mut inner) = reg.0.lock() else { return };
                     match inner.by_label.get_mut(&label) {
                         Some(i) if i.pending.as_ref().map(|p| p.request_id == rid).unwrap_or(false) => {
                             i.pending = None;
-                            true
+                            let grant = AppGrant { granted_at: now_ms() / 1000, requested, resolved };
+                            Some(app2.state::<AppGrantStore>().put(&wt, &aid, grant))
                         }
-                        _ => false,
+                        _ => None,
                     }
                 };
-                if !still_mine {
-                    return;
-                }
-                let grant = AppGrant { granted_at: now_ms() / 1000, requested, resolved };
-                if let Err(e) = app2.state::<AppGrantStore>().put(&wt, &aid, grant) {
-                    add_log(&app2, &wt, &aid, "error", format!("承認の保存に失敗したため停止します: {}", e));
-                    stop_instance(&app2, &wt, &aid, "承認の保存失敗");
-                    return;
+                match saved {
+                    None => return,
+                    Some(Err(e)) => {
+                        add_log(&app2, &wt, &aid, "error", format!("承認の保存に失敗したため停止します: {}", e));
+                        stop_instance(&app2, &wt, &aid, "承認の保存失敗");
+                        return;
+                    }
+                    Some(Ok(())) => {}
                 }
                 add_log(&app2, &wt, &aid, "info", "再承認されました。実行ウィンドウをリロードします");
                 reload_window(&app2, &label);

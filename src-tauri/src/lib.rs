@@ -2483,6 +2483,7 @@ pub fn run() {
             app_instance::app_instance_report,
             app_instance::app_call_mcp_tool,
             app_instance::app_grant_respond,
+            app_instance::list_pending_app_grants,
             app_instance::list_app_grants,
             app_instance::revoke_app_grant,
             start_fs_watch,

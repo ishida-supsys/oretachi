@@ -77,7 +77,25 @@ async function run(action: () => Promise<unknown>) {
   }
 }
 
-const onStart = () => run(() => props.api!.start(props.artifact.id));
+/**
+ * 起動は承認ダイアログの応答まで（最大 10 分）戻らない。`busy` に含めると、承認待ちの間
+ * 停止・承認の取り消しまで無効になって UI から取り下げられなくなるので、起動だけは別扱いにする
+ * （二重起動は status の starting / running と Rust 側の予約で止まる）。
+ */
+const startPending = ref(false);
+async function onStart() {
+  if (startPending.value || isRunning.value || isStarting.value) return;
+  startPending.value = true;
+  errorText.value = "";
+  try {
+    await props.api!.start(props.artifact.id);
+  } catch (e) {
+    errorText.value = String(e);
+  } finally {
+    startPending.value = false;
+    await refresh();
+  }
+}
 const onStop = () => run(() => props.api!.stop(props.artifact.id));
 const onToggleVisible = () => run(() => props.api!.toggleVisible(props.artifact.id));
 const onRevoke = () => run(() => props.api!.revoke(props.artifact.id));
@@ -97,6 +115,8 @@ onMounted(async () => {
   });
   const offLog = await props.api.onLog(({ artifactId, entry }) => {
     if (artifactId !== id) return;
+    // refresh() のスナップショットとイベントが重なると同じ行が 2 回入る（実機で確認）
+    if (logs.value.some((l) => l.ts === entry.ts && l.message === entry.message)) return;
     logs.value = [...logs.value, entry].slice(-500);
   });
   if (disposed) {
@@ -149,7 +169,7 @@ function hhmmss(ms: number): string {
       <div class="actions">
         <button
           class="btn primary"
-          :disabled="busy || isRunning || isStarting"
+          :disabled="busy || startPending || isRunning || isStarting"
           @click="onStart"
         >
           <span class="pi pi-play" /> {{ t("start") }}

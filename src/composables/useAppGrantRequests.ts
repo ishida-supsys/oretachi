@@ -32,6 +32,17 @@ export function useAppGrantRequests() {
       return;
     }
     unlistens.push(offRequest, offCancel);
+
+    // main の webview が再読込されると、イベントで届いた要求はキューごと消える（起動は 10 分
+    // ハングし、再承認は再送されない）。購読を張ったあとで、Rust が持つ待ちの一覧を取り戻す
+    try {
+      const pending = await invoke<AppGrantRequest[]>("list_pending_app_grants");
+      const known = new Set(queue.value.map((r) => r.requestId));
+      const missing = pending.filter((r) => !known.has(r.requestId));
+      if (missing.length > 0) queue.value = [...missing, ...queue.value];
+    } catch (e) {
+      console.warn("list_pending_app_grants failed", e);
+    }
   });
 
   onBeforeUnmount(() => {
