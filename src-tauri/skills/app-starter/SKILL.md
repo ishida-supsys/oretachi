@@ -104,9 +104,10 @@ const { instance } = await WebAssembly.instantiate(bytes, { env: { log: (n) => c
 instance.exports.add(2, 3);
 ```
 
+- `readBytes` は 1 回 8MiB まで。それを超える wasm は読めない（`artifact_file put` は 32MB まで置けるが、アプリから読めるのは 8MiB まで）。
 - 読めるのは `fs.read` で承認された範囲の wasm だけ。範囲外のパスは `fs` が拒否する（wasm 側にファイルやネットワークのホスト関数は渡らない。`imports` に渡したものだけが呼べる）。
 - **`fetch('artifact://…')` や `WebAssembly.instantiateStreaming` は使えない**（CSP で外部通信を塞いでいる）。必ず `readBytes` → `instantiate` にする。
-- wasm はアプリのコードと同じ sandbox iframe の中で動く。fuel やメモリ上限は掛からないので、無限ループはそのインスタンスの iframe を固めうる（止めるにはインスタンスを停止する）。信頼できない wasm は動かさないこと。
+- wasm はアプリのコードと同じ sandbox iframe の中で動く。fuel やメモリ上限は掛からないので、無限ループはそのインスタンスの iframe を固めうる（固まったときの回復は再読み込みやインスタンスの停止になる。実機では未検証）。信頼できない wasm は動かさないこと。
 
 ## 同梱バイナリを `artifact://` へ置く（`artifact_file`）
 
