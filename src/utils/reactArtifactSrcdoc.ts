@@ -169,6 +169,13 @@ export function buildReactSrcdoc(
      * （`ARTIFACT_BRIDGE_NONCE_GLOBAL` の説明を参照）。
      */
     nonce?: string;
+    /**
+     * 専用サブウィンドウの中で動かすときの自己情報（`{ id, params }`）。ブリッジが同期で読み、
+     * アプリは `oretachi.subWindow.info` で「開かれた側」だと分かる。省略 = 常駐ウィンドウ
+     */
+    subWindow?: { id: string; params: unknown };
+    /** 文書の背景を透明にする（透明なサブウィンドウ用）。アプリが自分で背景を塗るのは妨げない */
+    transparentBackground?: boolean;
   },
 ): string {
   const modulesJson = modules && Object.keys(modules).length > 0
@@ -186,6 +193,10 @@ export function buildReactSrcdoc(
     '<textarea id="_source" style="display:none">' + htmlEscape(content) + "</textarea>\n" +
     '<textarea id="_modules" style="display:none">' + modulesJson + "</textarea>\n" +
     '<textarea id="_memory" style="display:none">' + memoryJson + "</textarea>\n" +
+    (options?.subWindow
+      ? '<textarea id="_subwindow" style="display:none">' + htmlEscape(JSON.stringify(options.subWindow)) + "</textarea>\n"
+      : "") +
+    (options?.transparentBackground ? "<style>html,body{background:transparent}</style>\n" : "") +
     // ブリッジは読み込み時にフラグを見るので、必ずブリッジより先に立てる
     (options?.standalone
       ? openTag("window[" + JSON.stringify(ARTIFACT_STANDALONE_FLAG) + "]=true;") + "\n"

@@ -5,6 +5,7 @@ mod ai_provider;
 mod ai_terminal;
 mod app_db;
 mod app_net;
+mod app_subwindow;
 mod app_fs;
 mod app_grant;
 mod app_instance;
@@ -273,7 +274,12 @@ fn apply_acrylic_effect(app_handle: tauri::AppHandle, r: u8, g: u8, b: u8, a: u8
     let _bc = main_thread_watch::enter(main_thread_watch::Activity::ApplyAcrylic);
     #[cfg(target_os = "windows")]
     {
-        for (_, window) in app_handle.webview_windows() {
+        for (label, window) in app_handle.webview_windows() {
+            // アプリのウィンドウ（appinst-*）には掛けない。透明なサブウィンドウが、透明ではなく
+            // ぼかし（Windows 10 は ACCENT_ENABLE_BLURBEHIND）になってしまう
+            if label.starts_with(app_instance::LABEL_PREFIX) {
+                continue;
+            }
             if let Ok(hwnd) = window.hwnd() {
                 acrylic::setup(hwnd.0, r, g, b, a);
             }
@@ -2340,6 +2346,10 @@ pub fn run() {
                 tauri::plugin::Builder::<tauri::Wry>::new("acrylic-effect")
                     .on_window_ready(move |window| {
                         let _bc = main_thread_watch::enter(main_thread_watch::Activity::WindowReady);
+                        // アプリのウィンドウ（appinst-*）は対象外（透明なサブウィンドウがぼかしになるため）
+                        if window.label().starts_with(app_instance::LABEL_PREFIX) {
+                            return;
+                        }
                         if let Ok(hwnd) = window.hwnd() {
                             acrylic::setup(hwnd.0, r, g, b, a);
                         }
@@ -2414,6 +2424,7 @@ pub fn run() {
         .manage(ai_terminal::SpawnWaiters::default())
         .manage(app_db::AppDbRegistry::default())
         .manage(app_net::AppNetRegistry::default())
+        .manage(app_subwindow::AppSubWindowRegistry::default())
         .manage(mcp_server::NotificationRegistry::default())
         .manage(mcp_server::CloseWorktreeAckRegistry::default())
         .manage(mcp_server::ImportWorktreeAckRegistry::default())
@@ -2540,6 +2551,12 @@ pub fn run() {
             app_db::app_db_execute,
             app_db::app_db_close,
             app_net::app_net_fetch,
+            app_subwindow::app_subwindow_open,
+            app_subwindow::app_subwindow_close,
+            app_subwindow::app_subwindow_list,
+            app_subwindow::app_subwindow_set_position,
+            app_subwindow::app_subwindow_set_size,
+            app_subwindow::app_subwindow_start_drag,
             app_instance::app_set_memory,
             app_instance::app_get_memory,
             app_instance::app_grant_respond,

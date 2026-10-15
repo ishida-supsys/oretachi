@@ -86,6 +86,16 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
               <strong>{{ t("aiTerminalSummary", { spec: r.value }) }}</strong>
               <div class="why">{{ t("aiTerminalWarning") }}</div>
             </template>
+            <template v-else-if="r.kind === 'subWindow'">
+              <span class="kind">{{ t("kindSubWindow") }}</span>
+              <strong>{{ t("subWindowSummary", { spec: r.label }) }}</strong>
+              <div class="why neutral">{{ t("subWindowNote") }}</div>
+            </template>
+            <template v-else-if="r.kind === 'subWindowFlag'">
+              <span class="kind">{{ t("kindSubWindowFlag") }}</span>
+              <strong>{{ t("subWindowFlag_" + r.value) }}</strong>
+              <div v-if="r.severity === 'danger'" class="why">{{ t("subWindowOverlayWarning") }}</div>
+            </template>
             <template v-else-if="r.kind === 'fs'">
               <span class="kind">{{ r.access === "write" ? t("kindFsWrite") : t("kindFsRead") }}</span>
               <code class="path">{{ r.label }}</code>
@@ -140,6 +150,8 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
               <s v-else-if="r.kind === 'memory'">{{ t("memoryMax", { bytes: r.value }) }}</s>
               <s v-else-if="r.kind === 'aiTerminal'">{{ t("aiTerminalSummary", { spec: r.value }) }}</s>
               <s v-else-if="r.kind === 'network'"><code>{{ r.label }}</code></s>
+              <s v-else-if="r.kind === 'subWindow'">{{ t("subWindowSummary", { spec: r.label }) }}</s>
+              <s v-else-if="r.kind === 'subWindowFlag'">{{ t("subWindowFlag_" + r.value) }}</s>
               <s v-else-if="r.kind === 'fs' || r.kind === 'db'"><code>{{ r.kind }} {{ r.access }} {{ r.label }}</code></s>
               <s v-else><code>{{ r.value }}</code></s>
             </li>
@@ -389,6 +401,15 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
     "kindFsWrite": "Write files",
     "kindFsSensitive": "Files",
     "kindNetwork": "Network access",
+    "kindSubWindow": "Sub-windows",
+    "kindSubWindowFlag": "Sub-window appearance",
+    "subWindowSummary": "Up to {spec} (count × width x height, in pixels)",
+    "subWindowNote": "The app can open its own windows, each showing the app itself. They always show the app name in the title and in the taskbar, and close when the app stops.",
+    "subWindowFlag_transparent": "Transparent background (you can see through it)",
+    "subWindowFlag_frameless": "No title bar or border",
+    "subWindowFlag_alwaysOnTop": "Always on top of other windows",
+    "subWindowFlag_position": "Choose and move the window position",
+    "subWindowOverlayWarning": "A window like this can sit over other apps and look like part of them, and may take your clicks. Only allow it for apps you trust.",
     "networkNote": "The app can send any data to, and read any response from, URLs under this prefix (redirects are re-checked). Your own PC, private networks and oretachi itself are always refused.",
     "networkHttpWarning": "Plain HTTP (not encrypted): anyone on the network path can read or alter what the app sends and receives. The app can send any data to URLs under this prefix.",
     "kindDbRead": "Read database (read-only)",
@@ -443,6 +464,15 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
     "kindFsWrite": "ファイルの書き込み",
     "kindFsSensitive": "ファイル",
     "kindNetwork": "ネットワーク通信",
+    "kindSubWindow": "サブウィンドウ",
+    "kindSubWindowFlag": "サブウィンドウの見た目",
+    "subWindowSummary": "最大 {spec}（個数 × 幅 x 高さ、ピクセル）",
+    "subWindowNote": "アプリが専用のウィンドウを開けます（中身はアプリ自身）。タイトルとタスクバーには常にアプリ名が出て、アプリを止めると閉じます。",
+    "subWindowFlag_transparent": "背景を透明にする（透けて見える）",
+    "subWindowFlag_frameless": "タイトルバー・枠を無くす",
+    "subWindowFlag_alwaysOnTop": "他のウィンドウより常に前面に出す",
+    "subWindowFlag_position": "ウィンドウの位置を指定・移動する",
+    "subWindowOverlayWarning": "このようなウィンドウは他のアプリの上に重なり、そのアプリの一部に見せかけたり、クリックを受け取ったりできます。信頼できるアプリにだけ許可してください。",
     "networkNote": "この URL プレフィックス配下へ任意のデータを送り、応答を読めます（リダイレクト先も再検査されます）。この PC 自身・プライベートネットワーク・oretachi 自身へは常に届きません。",
     "networkHttpWarning": "平文の HTTP（暗号化されません）: 通信経路上の誰でも、アプリの送受信を読んだり改ざんしたりできます。アプリはこの URL プレフィックス配下へ任意のデータを送れます。",
     "kindDbRead": "データベースの読み取り（読み取り専用）",
