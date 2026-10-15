@@ -87,6 +87,7 @@ const hasSensitive = computed(() => view.value.rows.some((r) => r.kind === "fsSe
                 {{ r.scheme === "worktree" ? t("fsWorktree", { name: request.worktreeName }) : t("fsArtifact") }}
               </div>
               <div v-if="r.access === 'write'" class="why">{{ t("fsWriteWarning") }}</div>
+              <div v-else-if="r.scheme === 'worktree'" class="why neutral">{{ t("fsReadNote") }}</div>
             </template>
             <template v-else-if="r.kind === 'fsSensitive'">
               <span class="kind">{{ t("kindFsSensitive") }}</span>
@@ -361,8 +362,9 @@ const hasSensitive = computed(() => view.value.rows.some((r) => r.kind === "fsSe
     "fsWorktree": "Inside the worktree \"{name}\" (this app's own worktree). Everything outside this folder, including through links, is refused.",
     "fsArtifact": "This app's private storage area. It is deleted together with the artifact.",
     "fsWriteWarning": "The app can create, overwrite and delete files here.",
+    "fsReadNote": "Reading is not filtered: secrets stored inside (such as .env or .git/config) are readable too.",
     "fsSensitiveTitle": "Allowed to write to files that run commands (.git/hooks, .claude/, .github/workflows, ...)",
-    "fsSensitiveWarning": "Normally refused: .git/, .github/, .claude/, .vscode/, .idea/, .husky/, .devcontainer/, .mcp.json, .envrc, CLAUDE.md, AGENTS.md. Writing there lets the app make commands run later with your authority (git hooks, Claude Code hooks, CI, editor tasks). This is the strongest permission.",
+    "fsSensitiveWarning": "Normally refused: .git/, .github/, .claude/, .vscode/, .idea/, .husky/, .devcontainer/, .mcp.json, .envrc, CLAUDE.md, AGENTS.md and similar agent/tool config files. Writing there lets the app make commands run later with your authority (git hooks, Claude Code hooks, CI, editor tasks). This is the strongest permission.",
     "noPerms": "No permissions requested. The app cannot call any API.",
     "ownOnly": "MCP calls reach only \"{name}\" (this app's own worktree).",
     "removed": "No longer requested",
@@ -400,8 +402,9 @@ const hasSensitive = computed(() => view.value.rows.some((r) => r.kind === "fsSe
     "fsWorktree": "ワークツリー「{name}」（このアプリ自身のワークツリー）の中だけです。このフォルダの外は、リンク経由でも拒否されます。",
     "fsArtifact": "このアプリ専用の保存領域です。アーティファクトを削除すると一緒に消えます。",
     "fsWriteWarning": "アプリはここでファイルを作成・上書き・削除できます。",
+    "fsReadNote": "読み取りは絞り込まれません。範囲内にある秘密（.env や .git/config など）も読めます。",
     "fsSensitiveTitle": "コマンドが走るファイル（.git/hooks・.claude/・.github/workflows など）への書き込みを許可",
-    "fsSensitiveWarning": "通常は拒否されるパスです: .git/ / .github/ / .claude/ / .vscode/ / .idea/ / .husky/ / .devcontainer/ / .mcp.json / .envrc / CLAUDE.md / AGENTS.md。ここへ書けると、あなたの権限で後からコマンドを実行させられます（git フック・Claude Code のフック・CI・エディタのタスク）。最も強い権限です。",
+    "fsSensitiveWarning": "通常は拒否されるパスです: .git/ / .github/ / .claude/ / .vscode/ / .idea/ / .husky/ / .devcontainer/ / .mcp.json / .envrc / CLAUDE.md / AGENTS.md など、エージェントやツールの設定ファイル。ここへ書けると、あなたの権限で後からコマンドを実行させられます（git フック・Claude Code のフック・CI・エディタのタスク）。最も強い権限です。",
     "noPerms": "権限は申請されていません。アプリはどの API も呼べません。",
     "ownOnly": "MCP 呼び出しは「{name}」（このアプリ自身のワークツリー）だけに届きます。",
     "removed": "申請から外れたもの",

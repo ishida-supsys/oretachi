@@ -28,6 +28,13 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
+/// 一時ファイル名の接尾辞。同じパスへの並行書き込み（`Promise.all` や並列の `artifact_file put`）で
+/// 衝突しないよう、プロセス内連番を混ぜる。
+pub fn unique_tmp_suffix() -> String {
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    format!("oretachi-{}-{}", std::process::id(), SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
+}
+
 /// 1 回の read / write の上限。
 pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
 /// 1 回の list が返す件数の上限。
@@ -55,6 +62,16 @@ pub const SENSITIVE_NAMES: &[&str] = &[
     ".husky",
     ".devcontainer",
     ".envrc",
+    // oretachi が起動するエージェント・ツールの設定と、フック・タスクに準ずるもの
+    ".codex",
+    ".gemini",
+    ".cursor",
+    ".githooks",
+    ".gitmodules",
+    ".cargo",
+    ".npmrc",
+    ".yarnrc.yml",
+    ".pre-commit-config.yaml",
     "CLAUDE.md",
     "CLAUDE.local.md",
     "AGENTS.md",
@@ -193,10 +210,19 @@ pub fn scope_hits_sensitive(scope: &str) -> bool {
 
 // ─── 承認時の解決 ─────────────────────────────────────────────────────
 
+/// ID をディレクトリ名に使えるか。`validate_path_component`（`..` と区切り文字）に加えて、
+/// ディレクトリ名として**自分自身や別の ID と同じ場所を指してしまうもの**を拒否する:
+/// `.`（`artifact-files/<wt>/.` は `<wt>` 自身になり、他アーティファクトの領域の親になる）、
+/// 末尾のドット・空白（Windows が剥がすので `foo.` が `foo` と同じ領域になる）、予約デバイス名。
+fn validate_storage_id(id: &str) -> Result<(), String> {
+    crate::validate_path_component(id)?;
+    validate_component(id).map_err(|e| format!("ID '{}' は同梱領域の名前に使えません: {}", id, e))
+}
+
 /// `artifact://` の置き場所。`validate_path_component` で両 ID を検査する。
 pub fn artifact_files_dir(data_dir: &Path, worktree_id: &str, artifact_id: &str) -> Result<PathBuf, String> {
-    crate::validate_path_component(worktree_id)?;
-    crate::validate_path_component(artifact_id)?;
+    validate_storage_id(worktree_id)?;
+    validate_storage_id(artifact_id)?;
     Ok(data_dir.join("artifact-files").join(worktree_id).join(artifact_id))
 }
 
@@ -240,22 +266,35 @@ pub fn resolve_requested_fs(
     let scopes = entries
         .into_iter()
         .map(|(scheme, comps, write)| {
-            let mut path = match scheme {
+            let root = match scheme {
                 Scheme::Worktree => worktree_root.clone(),
                 Scheme::Artifact => artifact_root.clone(),
             }
             .expect("root is resolved for every used scheme");
+            let mut lexical = root.clone();
             for c in &comps {
-                path.push(c);
+                lexical.push(c);
             }
-            ResolvedFsScope {
+            // スコープも実パスへ解決して保存する。字句結合のままだと、ディスク上の綴り（大文字小文字）や
+            // ディレクトリ内のリンクの先と食い違い、ダイアログに出した絶対パスと実際に許される範囲がずれる
+            let path = canonicalize_allow_missing_tail(&lexical)
+                .map_err(|e| format!("{}://{} を解決できません: {}", scheme.name(), prefix_of(&comps), e))?;
+            if !path.starts_with(&root) {
+                return Err(format!(
+                    "{}://{} は {}:// の外を指しています（リンクの先がルートの外です）",
+                    scheme.name(),
+                    prefix_of(&comps),
+                    scheme.name()
+                ));
+            }
+            Ok(ResolvedFsScope {
                 scheme: scheme.name().to_string(),
                 prefix: prefix_of(&comps),
                 path: path.to_string_lossy().into_owned(),
                 write,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, String>>()?;
 
     Ok(ResolvedFs {
         worktree_root: worktree_root.map(|p| p.to_string_lossy().into_owned()),
@@ -386,7 +425,18 @@ pub fn read_file(path: &Path, enc: Encoding) -> Result<String, String> {
     if meta.len() > MAX_FILE_BYTES {
         return Err(format!("ファイルが大きすぎます（{} バイト。上限 {}）", meta.len(), MAX_FILE_BYTES));
     }
-    let bytes = std::fs::read(path).map_err(|e| format!("読み取れません: {}", e))?;
+    // 検査のあとに大きくなっても上限を超えて読まない
+    let mut bytes = Vec::new();
+    {
+        use std::io::Read;
+        let f = std::fs::File::open(path).map_err(|e| format!("読み取れません: {}", e))?;
+        f.take(MAX_FILE_BYTES + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| format!("読み取れません: {}", e))?;
+    }
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(format!("ファイルが大きすぎます（上限 {}）", MAX_FILE_BYTES));
+    }
     match enc {
         Encoding::Utf8 => String::from_utf8(bytes)
             .map_err(|_| "UTF-8 として読めません（バイナリは encoding: \"base64\" で読んでください）".to_string()),
@@ -423,7 +473,7 @@ pub fn write_file(path: &Path, data: &str, enc: Encoding, create_dirs: bool) -> 
     }
     // 途中で落ちても壊れたファイルを残さない: 同じディレクトリの一時ファイルへ書いてから置き換える
     let name = path.file_name().ok_or_else(|| "ファイル名がありません".to_string())?;
-    let tmp = parent.join(format!(".{}.oretachi-{}.tmp", name.to_string_lossy(), std::process::id()));
+    let tmp = parent.join(format!(".{}.{}.tmp", name.to_string_lossy(), unique_tmp_suffix()));
     std::fs::write(&tmp, &bytes).map_err(|e| {
         let _ = std::fs::remove_file(&tmp);
         format!("書き込めません: {}", e)
@@ -770,7 +820,8 @@ mod tests {
         names.sort();
         let mut expected = vec![
             ".claude", ".devcontainer", ".envrc", ".git", ".github", ".husky", ".idea", ".mcp.json",
-            ".vscode", "AGENTS.md", "CLAUDE.local.md", "CLAUDE.md",
+            ".vscode", "AGENTS.md", "CLAUDE.local.md", "CLAUDE.md", ".codex", ".gemini", ".cursor",
+            ".githooks", ".gitmodules", ".cargo", ".npmrc", ".yarnrc.yml", ".pre-commit-config.yaml",
         ];
         expected.sort();
         assert_eq!(names, expected);
@@ -788,6 +839,39 @@ mod tests {
         let r = requested(&["artifact://"], &[], false);
         assert!(resolve_requested_fs(&r, None, &base.join("art")).is_ok());
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn scopes_are_stored_as_real_paths() {
+        // 申請時の綴りではなく、ディスク上の綴りで保存する（ダイアログの絶対パスと実際の範囲を一致させる）
+        let base = temp_dir("realpath");
+        let wt = base.join("wt");
+        std::fs::create_dir_all(wt.join("src")).unwrap();
+        let fs = resolve_requested_fs(&requested(&["worktree://SRC/"], &[], false), Some(&wt), &base.join("art")).unwrap();
+        let real = std::fs::canonicalize(wt.join("src")).unwrap();
+        assert_eq!(Path::new(&fs.scopes[0].path), real.as_path());
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn scope_through_a_link_that_leaves_the_root_is_rejected_at_approval() {
+        let base = temp_dir("scope-link");
+        let wt = base.join("wt");
+        let outside = base.join("outside");
+        std::fs::create_dir_all(&wt).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        if !make_dir_link(&wt.join("escape"), &outside) || std::fs::canonicalize(wt.join("escape")).is_err() {
+            eprintln!("SKIP: リンクを作れない / 辿れない環境");
+            return;
+        }
+        let e = resolve_requested_fs(&requested(&["worktree://escape/"], &[], false), Some(&wt), &base.join("art")).unwrap_err();
+        assert!(e.contains("外を指しています"), "{e}");
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn tmp_suffixes_do_not_collide() {
+        assert_ne!(unique_tmp_suffix(), unique_tmp_suffix());
     }
 
     #[test]
@@ -1120,7 +1204,9 @@ mod tests {
     fn artifact_files_dir_rejects_unsafe_ids() {
         let d = Path::new("data");
         assert!(artifact_files_dir(d, "wt", "a").is_ok());
-        for bad in ["..", "a/b", "a\\b", "c:", ""] {
+        // `.` は `artifact-files/<wt>` 自身（全アーティファクトの領域の親）、`foo.` / `foo ` は Windows が剥がして
+        // `foo` と同じ領域になる
+        for bad in [".", "..", "a/b", "a\\b", "c:", "", "foo.", "foo ", "CON", "nul.txt"] {
             if bad.is_empty() {
                 continue;
             }

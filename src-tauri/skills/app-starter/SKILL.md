@@ -48,7 +48,7 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
 - `fs`: ファイルの読み書き。`read` / `write` に**ディレクトリのプレフィックス**を `worktree://<相対>` / `artifact://<相対>` で並べる（`worktree://` だけ = ワークツリー全体）。**`write` は `read` を含意しない**（書いて読み返すなら両方に書く）。生の絶対パス・`..`・`C:` や `:` を含む名前・Windows の予約名（`CON` `NUL` `COM1` …）・末尾のドット/空白は manifest ごと拒否される。承認ダイアログには**解決済みの絶対パス**と読み書きの別が出る。書き込みは「あなたと同等の権限」寄りの扱いなので、必要な範囲だけ宣言する。
   - `worktree://` はこのアプリを置いたワークツリーの中だけ。ホーム / リポジトリのタブに置いたアプリは使えない。
   - `artifact://` はこのアプリ専用の保存領域（`app_data/artifact-files/<ワークツリー>/<アプリ id>/`）。**アーティファクトを削除すると一緒に消える。転送・エクスポート・インポートでは持ち出されない**（移した先で `artifact_file put` し直す）。
-  - **既定で書き込みを拒否するパス**（`worktree://` の任意の階層。大文字小文字は無視）: `.git` / `.github` / `.claude` / `.vscode` / `.idea` / `.husky` / `.devcontainer` / `.mcp.json` / `.envrc` / `CLAUDE.md` / `CLAUDE.local.md` / `AGENTS.md`。ここへ書けると、あなたの権限で後からコマンドが走る（git フック・Claude Code のフック・CI・エディタのタスク）。読み取りは常に許可される。これらを `write` に含む manifest は、**`"allowSensitivePaths": true` を足さない限りエラー**になる。足した manifest は承認ダイアログで**最も強い警告**が出る。本当に必要でない限り足さない。
+  - **既定で書き込みを拒否するパス**（`worktree://` の任意の階層。大文字小文字は無視）: `.git` / `.github` / `.claude` / `.vscode` / `.idea` / `.husky` / `.devcontainer` / `.mcp.json` / `.envrc` / `.codex` / `.gemini` / `.cursor` / `.githooks` / `.gitmodules` / `.cargo` / `.npmrc` / `.yarnrc.yml` / `.pre-commit-config.yaml` / `CLAUDE.md` / `CLAUDE.local.md` / `AGENTS.md`。ここへ書けると、あなたの権限で後からコマンドが走る（git フック・Claude Code のフック・CI・エディタのタスク）。**読み取りは絞り込まれない**（範囲内の `.env` や `.git/config` も読める。`read` は必要な範囲だけにする）。これらを `write` に含む manifest は、**`"allowSensitivePaths": true` を足さない限りエラー**になる。足した manifest は承認ダイアログで**最も強い警告**が出る。本当に必要でない限り足さない。
   - リンク（junction・symlink）の先が範囲外なら拒否される。上限: 1 回の読み書き 8MiB、一覧 1000 件。
 
 ## ファイル API（`fs`）

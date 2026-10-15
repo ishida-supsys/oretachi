@@ -539,20 +539,30 @@ fn build_resolved(
 ) -> Result<ResolvedPermissions, String> {
     let settings = app.state::<crate::settings::SettingsManager>().get();
     let mut resolved = crate::mcp_server::resolve_app_permissions(&settings, requested)?;
-    if let Some(fs) = &requested.fs {
-        // ホーム / リポジトリ擬似ワークツリーは全ワークツリーの祖先・メインクローンになりうるので、
-        // worktree:// の根にしない（None を渡して拒否させる）
-        let worktree_path = settings
-            .worktrees
-            .iter()
-            .find(|w| w.id == worktree_id)
-            .filter(|w| !w.is_home && !w.is_repository)
-            .map(|w| std::path::PathBuf::from(&w.path));
-        let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-        let artifact_dir = crate::app_fs::artifact_files_dir(&data_dir, worktree_id, artifact_id)?;
-        resolved.fs = Some(crate::app_fs::resolve_requested_fs(fs, worktree_path.as_deref(), &artifact_dir)?);
-    }
+    resolved.fs = build_resolved_fs(app, worktree_id, artifact_id, requested)?;
     Ok(resolved)
+}
+
+/// FS のスコープだけを解決する（絶対パスはワークツリーの移動などで変わりうるので、起動のたびに比べる）。
+fn build_resolved_fs(
+    app: &AppHandle,
+    worktree_id: &str,
+    artifact_id: &str,
+    requested: &RequestedPermissions,
+) -> Result<Option<app_manifest::ResolvedFs>, String> {
+    let Some(fs) = &requested.fs else { return Ok(None) };
+    let settings = app.state::<crate::settings::SettingsManager>().get();
+    // ホーム / リポジトリ擬似ワークツリーは全ワークツリーの祖先・メインクローンになりうるので、
+    // worktree:// の根にしない（None を渡して拒否させる）
+    let worktree_path = settings
+        .worktrees
+        .iter()
+        .find(|w| w.id == worktree_id)
+        .filter(|w| !w.is_home && !w.is_repository)
+        .map(|w| std::path::PathBuf::from(&w.path));
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let artifact_dir = crate::app_fs::artifact_files_dir(&data_dir, worktree_id, artifact_id)?;
+    crate::app_fs::resolve_requested_fs(fs, worktree_path.as_deref(), &artifact_dir).map(Some)
 }
 
 #[tauri::command]
@@ -594,7 +604,14 @@ async fn start_inner(
     let saved = app.state::<AppGrantStore>().get(worktree_id, artifact_id);
 
     let needs_approval = match &saved {
-        Some(g) => app_manifest::requested_changed(&g.requested, &requested),
+        Some(g) => {
+            app_manifest::requested_changed(&g.requested, &requested)
+                // manifest が同じでも、解決済みの絶対パスが変わっていたら（ワークツリーの移動・
+                // worktree_base_dir の変更・リンク先の変更）再承認する。保存済みのパスでは
+                // 呼び出しのたびに拒否され、manifest を変えない限り再承認の導線が無くなる
+                || (requested.fs.is_some()
+                    && build_resolved_fs(app, worktree_id, artifact_id, &requested)? != g.resolved.fs)
+        }
         None => true,
     };
 

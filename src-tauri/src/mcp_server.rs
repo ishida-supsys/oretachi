@@ -2630,9 +2630,9 @@ impl NotifyService {
                     .map_err(|e| McpError::internal_error(format!("ディレクトリを作れません: {}", e), None))?;
                 // 途中で落ちても壊れたファイルを残さない（起動中のアプリが読んでいても半端な中身を見ない）
                 let tmp = parent.join(format!(
-                    ".{}.oretachi-put-{}.tmp",
+                    ".{}.{}.tmp",
                     comps.last().map(String::as_str).unwrap_or("f"),
-                    std::process::id()
+                    crate::app_fs::unique_tmp_suffix()
                 ));
                 let renamed = match tokio_fs::copy(&resolved, &tmp).await {
                     Ok(_) => tokio_fs::rename(&tmp, &dest).await,
