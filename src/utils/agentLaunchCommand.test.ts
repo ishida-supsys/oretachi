@@ -20,8 +20,9 @@ describe("buildClaudeLaunchCommand", () => {
     expect(
       buildClaudeLaunchCommand({ flags: '--model "opus"', tempPath: "/tmp/p.txt", isPowerShell: false, endOfOptions: true }),
     ).toBe('claude --model "opus" -- "$(cat "/tmp/p.txt")"; rm "/tmp/p.txt"\r');
+    // PowerShell 5.1 は引数の `"` をエスケープしないので、`\"` へ直してから渡す
     expect(buildClaudeLaunchCommand({ tempPath: "C:\\t\\p.txt", isPowerShell: true, endOfOptions: true })).toBe(
-      '$p = Get-Content "C:\\t\\p.txt" -Raw -Encoding UTF8; claude -- "$p"; Remove-Item "C:\\t\\p.txt"\r',
+      '$p = (Get-Content "C:\\t\\p.txt" -Raw -Encoding UTF8).Replace(\'"\',\'\\"\'); claude -- "$p"; Remove-Item "C:\\t\\p.txt"\r',
     );
     // プロンプトが無いときは `--` も付けない
     expect(buildClaudeLaunchCommand({ isPowerShell: false, endOfOptions: true })).toBe("claude\r");

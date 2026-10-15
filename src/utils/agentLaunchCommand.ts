@@ -37,7 +37,13 @@ export function buildClaudeLaunchCommand(opts: ClaudeLaunchOptions): string {
   const tempPath = opts.tempPath;
   if (!tempPath) return `${base}\r`;
   if (opts.isPowerShell) {
-    return `$p = Get-Content "${tempPath}" -Raw -Encoding UTF8; ${base} "$p"; Remove-Item "${tempPath}"\r`;
+    // Windows PowerShell 5.1 は、ネイティブコマンドへ渡す引数の `"` をエスケープしないので、
+    // プロンプトに `"` があると引数が分割される。信頼できないプロンプトのときは `\"` へ直しておく
+    // （`--` があるので分割されてもフラグ注入にはならないが、プロンプトの中身が欠けるのを避ける）
+    const read = opts.endOfOptions
+      ? `(Get-Content "${tempPath}" -Raw -Encoding UTF8).Replace('"','\\"')`
+      : `Get-Content "${tempPath}" -Raw -Encoding UTF8`;
+    return `$p = ${read}; ${base} "$p"; Remove-Item "${tempPath}"\r`;
   }
   return `${base} "$(cat "${tempPath}")"; rm "${tempPath}"\r`;
 }

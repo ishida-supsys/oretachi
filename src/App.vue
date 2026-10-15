@@ -1285,7 +1285,9 @@ async function handleSubAddTerminalRequest(
 
 // サブウィンドウが `sub-add-terminal-response` を処理し終えた合図（起動コマンドを書き込めたか）を待つ
 const subAddDoneWaiters = new Map<number, (r: { ok: boolean; error?: string }) => void>();
-const SUB_ADD_DONE_TIMEOUT_MS = 15000;
+// Rust の `open` の待ち（`ai_terminal::OPEN_TIMEOUT` = 8 秒）より短くする。長いと、Rust が諦めて
+// PTY を kill したあとも、ここだけが待ち続ける
+const SUB_ADD_DONE_TIMEOUT_MS = 7000;
 function waitSubAddTerminalDone(terminalId: number): Promise<{ ok: boolean; error?: string }> {
   return new Promise((resolve) => {
     const timer = setTimeout(() => {

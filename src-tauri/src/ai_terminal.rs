@@ -54,6 +54,9 @@ struct Entry {
     cwd: String,
     phase: Phase,
     created: Instant,
+    /// 閉じている最中（kill 中）。**所有の印は kill が終わるまで残す**が、枠の数え上げと `list` からは外す
+    /// （`close` の直後に `open` し直せるように。kill に数秒かかっても上限で失敗しない）。
+    closing: bool,
 }
 
 /// 端末の所有者。
@@ -103,14 +106,15 @@ impl Inner {
         now: Instant,
     ) -> Result<String, String> {
         self.prune(alive, now);
-        let mine = self.entries.values().filter(|e| &e.key == key).count();
+        // 閉じている最中の端末は枠に数えない
+        let mine = self.entries.values().filter(|e| &e.key == key && !e.closing).count();
         if mine >= max_concurrent as usize {
             return Err(format!(
                 "このアプリが同時に開ける AI ターミナルは {} 個までです（承認済みの maxConcurrent）",
                 max_concurrent
             ));
         }
-        if self.entries.len() >= GLOBAL_MAX {
+        if self.entries.values().filter(|e| !e.closing).count() >= GLOBAL_MAX {
             return Err(format!(
                 "インスタンス専用の AI ターミナルは全体で {} 個までです。不要な端末を閉じてください",
                 GLOBAL_MAX
@@ -127,9 +131,17 @@ impl Inner {
                 cwd: cwd.to_string(),
                 phase: Phase::Reserved,
                 created: now,
+                closing: false,
             },
         );
         Ok(terminal_id)
+    }
+
+    /// kill を始める端末に印を付ける（所有は残し、枠と `list` から外す）。
+    fn mark_closing(&mut self, terminal_id: &str) {
+        if let Some(e) = self.entries.get_mut(terminal_id) {
+            e.closing = true;
+        }
     }
 
     /// 予約済み・未消費の ID だけを受理して、消費済みにする。一回限り。戻り値は host が解決した cwd。
@@ -176,6 +188,7 @@ impl Inner {
     /// 自分（`key`）が開いた、紐付け済みの端末だけを解決する。他インスタンス・メインの端末は拒否。
     fn resolve_owned(&self, key: &Key, terminal_id: &str) -> Result<u32, String> {
         match self.entries.get(terminal_id) {
+            Some(e) if &e.key == key && e.closing => Err("この端末は閉じています".to_string()),
             Some(e) if &e.key == key => match e.phase {
                 Phase::Bound(sid) => Ok(sid),
                 _ => Err("この端末はまだ起動中です".to_string()),
@@ -189,7 +202,7 @@ impl Inner {
         let mut v: Vec<OwnedTerminal> = self
             .entries
             .iter()
-            .filter(|(_, e)| &e.key == key)
+            .filter(|(_, e)| &e.key == key && !e.closing)
             .filter_map(|(tid, e)| Self::owned_view(tid, e))
             .collect();
         v.sort_by_key(|t| t.session_id);
@@ -231,6 +244,7 @@ impl Inner {
             match e.phase {
                 Phase::Bound(sid) => {
                     sids.push(sid);
+                    e.closing = true;
                     true
                 }
                 _ => false,
@@ -243,7 +257,10 @@ impl Inner {
     /// 理由は `kill_targets_for_instance`）、未紐付けなら外す。
     fn discard(&mut self, terminal_id: &str) -> Option<u32> {
         match self.entries.get(terminal_id).map(|e| e.phase.clone()) {
-            Some(Phase::Bound(sid)) => Some(sid),
+            Some(Phase::Bound(sid)) => {
+                self.mark_closing(terminal_id);
+                Some(sid)
+            }
             _ => {
                 self.entries.remove(terminal_id);
                 None
@@ -732,7 +749,11 @@ pub async fn app_ai_terminal_close(window: tauri::Window, app: AppHandle, termin
     let r: Result<Value, String> = (|| {
         granted(&app, &ctx)?;
         let sid = resolve_owned(&app, &key_of(&ctx), &terminal_id)?;
-        // レジストリからは外さない。kill が終わるまで所有の印を保ち、終わったあとに掃除される
+        // レジストリからは外さない。kill が終わるまで所有の印を保ち、終わったあとに掃除される。
+        // 枠と `list` からは先に外す（`close` の直後に `open` し直せるように）
+        if let Ok(mut inner) = app.state::<AiTerminalRegistry>().0.lock() {
+            inner.mark_closing(&terminal_id);
+        }
         kill_sessions(&app, vec![sid], "app-ai-terminal-close");
         Ok(json!({ "closed": true }))
     })();
@@ -977,6 +998,23 @@ mod tests {
         inner.prune(&alive(&[6]), Instant::now());
         assert!(inner.owner_of(&a1).is_none());
         assert!(inner.owner_of(&b1).is_some());
+    }
+
+    #[test]
+    fn closing_terminals_free_their_slot_but_stay_owned() {
+        let mut inner = Inner::default();
+        let tid = reserve(&mut inner, &key("a"), 1, &alive(&[])).unwrap();
+        inner.take_reservation(&tid).unwrap();
+        inner.bind(&tid, 4);
+        assert!(reserve(&mut inner, &key("a"), 1, &alive(&[4])).is_err());
+        inner.mark_closing(&tid);
+        // kill の完了を待たずに、同じ枠で開き直せる。閉じ中の端末は list に出ない
+        assert!(inner.list_for(&key("a")).is_empty());
+        assert!(reserve(&mut inner, &key("a"), 1, &alive(&[4])).is_ok());
+        // ただし所有の印は kill が終わるまで残る（終了処理中のフックを通知に流さない）
+        assert!(inner.owner_of(&tid).is_some());
+        inner.prune(&alive(&[]), Instant::now());
+        assert!(inner.owner_of(&tid).is_none());
     }
 
     #[test]
