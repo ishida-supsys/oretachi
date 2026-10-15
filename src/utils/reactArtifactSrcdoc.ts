@@ -4,7 +4,7 @@
  */
 
 import { ARTIFACT_LINK_INTERCEPT_JS } from "./artifactFrameLink";
-import { ARTIFACT_BRIDGE_JS, ARTIFACT_STANDALONE_FLAG } from "./artifactMemory";
+import { ARTIFACT_BRIDGE_JS, ARTIFACT_BRIDGE_NONCE_GLOBAL, ARTIFACT_STANDALONE_FLAG } from "./artifactMemory";
 
 function htmlEscape(str: string): string {
   return str
@@ -161,6 +161,12 @@ export function buildReactSrcdoc(
      * （`ARTIFACT_STANDALONE_FLAG` の説明を参照）。
      */
     standalone?: boolean;
+    /**
+     * srcdoc ごとの nonce。ブリッジが全リクエストに載せ、親（常駐ウィンドウのシェル）が突き合わせる。
+     * iframe を差し替えても `contentWindow` は同一なので、前の文書の遅延メッセージを弾くために使う
+     * （`ARTIFACT_BRIDGE_NONCE_GLOBAL` の説明を参照）。
+     */
+    nonce?: string;
   },
 ): string {
   const modulesJson = modules && Object.keys(modules).length > 0
@@ -181,6 +187,9 @@ export function buildReactSrcdoc(
     // ブリッジは読み込み時にフラグを見るので、必ずブリッジより先に立てる
     (options?.standalone
       ? openTag("window[" + JSON.stringify(ARTIFACT_STANDALONE_FLAG) + "]=true;") + "\n"
+      : "") +
+    (options?.nonce !== undefined
+      ? openTag("window[" + JSON.stringify(ARTIFACT_BRIDGE_NONCE_GLOBAL) + "]=" + JSON.stringify(options.nonce) + ";") + "\n"
       : "") +
     // require('oretachi') が解決できるよう、RUNTIME_JS より先に window.__oretachi を作る
     openTag(ARTIFACT_BRIDGE_JS) + "\n" +

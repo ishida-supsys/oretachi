@@ -15,7 +15,7 @@ use serde::Serialize;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 use std::time::Duration;
-use tauri::{AppHandle, Emitter, Manager};
+use tauri::{AppHandle, Emitter, Listener, Manager};
 use tokio::sync::oneshot;
 
 pub const LABEL_PREFIX: &str = "appinst-";
@@ -79,6 +79,11 @@ struct Instance {
     state: InstanceState,
     visible: bool,
     pending: Option<PendingApproval>,
+    /// コード更新・再承認でリロードした回数と最後の時刻（UNIX ミリ秒）。起動画面に出す
+    reload_count: u64,
+    last_reload_at: Option<u64>,
+    /// 直近に測ったメモリーのバイト数（シリアライズした JSON）。未測定は `None`
+    memory_bytes: Option<u64>,
 }
 
 struct Waiter {
@@ -142,6 +147,9 @@ impl Inner {
                 state: InstanceState::Starting,
                 visible: false,
                 pending: None,
+                reload_count: 0,
+                last_reload_at: None,
+                memory_bytes: None,
             },
         );
         self.by_key.insert(key, label.clone());
@@ -245,6 +253,8 @@ fn status_value(
     let key: Key = (worktree_id.to_string(), artifact_id.to_string());
     let inst = inner.by_key.get(&key).and_then(|l| inner.by_label.get(l));
     let grant = store.get(worktree_id, artifact_id);
+    let memory_cap_of = grant.as_ref().and_then(|g| g.resolved.memory).map(|m| m.max_bytes);
+    let memory_bytes = inst.and_then(|i| i.memory_bytes);
     serde_json::json!({
         "worktreeId": worktree_id,
         "artifactId": artifact_id,
@@ -258,6 +268,13 @@ fn status_value(
         "granted": grant.is_some(),
         "grantedAt": grant.as_ref().map(|g| g.granted_at),
         "maxInstances": MAX_INSTANCES,
+        "reloadCount": inst.map(|i| i.reload_count).unwrap_or(0),
+        "lastReloadAt": inst.and_then(|i| i.last_reload_at),
+        // 承認済みの最大サイズと、直近に測った使用量。上限を下げた結果、既存データが超えている間は
+        // `memoryOverCap`（書き込みだけ拒否・読み取りは可）。データは消さない
+        "memoryMaxBytes": memory_cap_of,
+        "memoryBytes": memory_bytes,
+        "memoryOverCap": matches!((memory_bytes, memory_cap_of), (Some(b), Some(c)) if b > c),
     })
 }
 
@@ -649,6 +666,7 @@ async fn start_inner(
     }
     add_log(app, worktree_id, artifact_id, "info", format!("起動しました（{}）", label));
     emit_changed(app, worktree_id, artifact_id);
+    refresh_memory_bytes(app, worktree_id, artifact_id, true).await;
 
     // 承認待ちの間に manifest が書き換わっていた場合に備え、もう一度だけ差分を見る
     check_permission_change(app, worktree_id, artifact_id).await;
@@ -905,9 +923,10 @@ pub async fn check_permission_change(app: &AppHandle, worktree_id: &str, artifac
                     }
                     Some(Ok(())) => {}
                 }
-                add_log(&app2, &wt, &aid, "info", "再承認されました。実行ウィンドウをリロードします");
-                reload_window(&app2, &label);
-                emit_changed(&app2, &wt, &aid);
+                add_log(&app2, &wt, &aid, "info", "再承認されました");
+                // 上限が下がっていれば、ここで超過を知らせる（データは消さない）
+                refresh_memory_bytes(&app2, &wt, &aid, true).await;
+                request_reload(&app2, &label, "再承認");
             }
             ApprovalOutcome::Rejected => {
                 add_log(&app2, &wt, &aid, "warn", "再承認が拒否されました");
@@ -919,12 +938,217 @@ pub async fn check_permission_change(app: &AppHandle, worktree_id: &str, artifac
     });
 }
 
-fn reload_window(app: &AppHandle, label: &str) {
-    if let Some(w) = app.get_webview_window(label) {
-        if let Err(e) = w.eval("window.location.reload()") {
-            log::warn!("[app-instance] {} のリロードに失敗: {}", label, e);
+/// 常駐ウィンドウのシェルへ iframe のリロードを依頼する。リロードの実体（旧 iframe への flush 要求・
+/// 新しい nonce の採番・メモリーの読み直し）はシェルが行う。ウィンドウ自体は作り直さない
+/// （承認・サブウィンドウなど host 側の資源はそのまま維持される）。
+fn request_reload(app: &AppHandle, label: &str, reason: &str) {
+    let key = {
+        let reg = app.state::<AppInstanceRegistry>();
+        let Ok(mut inner) = reg.0.lock() else { return };
+        let Some(inst) = inner.by_label.get_mut(label) else { return };
+        if inst.state != InstanceState::Running {
+            return;
+        }
+        inst.reload_count += 1;
+        inst.last_reload_at = Some(now_ms());
+        (inst.worktree_id.clone(), inst.artifact_id.clone())
+    };
+    add_log(
+        app,
+        &key.0,
+        &key.1,
+        "info",
+        format!("リロードします（{}）。承認とメモリーは維持されます", reason),
+    );
+    emit_changed(app, &key.0, &key.1);
+    // 宛先はこのウィンドウだけ。他のインスタンスへ漏らさない
+    if let Err(e) = app.emit_to(label, "app-instance-reload", reason) {
+        log::warn!("[app-instance] {} へのリロード依頼に失敗: {}", label, e);
+    }
+}
+
+/// 起動中インスタンスの更新を、どの書き込み経路でも同じに扱うための直列化。
+/// 同じインスタンスに対する `check_permission_change` が並走して、再承認ダイアログを二重に出さないため
+static CHANGE_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// アーティファクトが書き換わった（`artifact-changed`）ときの、起動中インスタンスへの反映。
+///
+/// 1. 権限セットが変わっていれば再承認を求める（`check_permission_change`）。保留中は旧セットで
+///    動き続け、**リロードもしない**（新しいコードが新しい権限を前提にしているため。承認でセットを
+///    入れ替えてからリロード、拒否で停止）。
+/// 2. 権限が変わっていなければ、承認を保ったままリロードする。コード（content / modules）の更新は
+///    どの経路で誰が書いても再承認を求めない（関門が見るのは保存済みの権限セットだけ）。
+pub async fn on_artifact_changed(app: &AppHandle, worktree_id: &str, artifact_id: &str) {
+    if label_for_key(app, worktree_id, artifact_id).is_none() {
+        return;
+    }
+    let _guard = CHANGE_LOCK.lock().await;
+    check_permission_change(app, worktree_id, artifact_id).await;
+
+    let Some(label) = label_for_key(app, worktree_id, artifact_id) else { return };
+    let (running, pending) = {
+        let reg = app.state::<AppInstanceRegistry>();
+        let Ok(inner) = reg.0.lock() else { return };
+        match inner.by_label.get(&label) {
+            Some(i) => (i.state == InstanceState::Running, i.pending.is_some()),
+            None => return,
+        }
+    };
+    if !running {
+        // Starting。ウィンドウの読み込み時に最新を読むのでリロードは要らない
+        return;
+    }
+    if pending {
+        add_log(
+            app,
+            worktree_id,
+            artifact_id,
+            "info",
+            "再承認の待ち中なので、コードの更新は承認後にリロードで反映します",
+        );
+        return;
+    }
+    request_reload(app, &label, "コードの更新");
+}
+
+/// `artifact-changed` を拾って [`on_artifact_changed`] を呼ぶリスナーを張る。アプリ起動時に 1 回だけ。
+/// 削除は `on_artifact_deleted`（停止と grant の削除）が別経路で扱う。
+pub fn install_listeners(app: &AppHandle) {
+    let handle = app.clone();
+    app.listen("artifact-changed", move |event: tauri::Event| {
+        let Ok(payload) = serde_json::from_str::<serde_json::Value>(event.payload()) else { return };
+        let (Some(wt), Some(art)) = (payload["worktreeId"].as_str(), payload["artifactId"].as_str()) else {
+            return;
+        };
+        if payload["command"].as_str() == Some("delete") {
+            return;
+        }
+        if validate_ids(wt, art).is_err() {
+            return;
+        }
+        let (h, wt, art) = (handle.clone(), wt.to_string(), art.to_string());
+        tauri::async_runtime::spawn(async move { on_artifact_changed(&h, &wt, &art).await });
+    });
+}
+
+// ─── メモリー（書き込みはここと MCP の artifact_store だけ。どちらも承認済みの maxBytes を強制する） ───
+
+fn artifact_dir(app: &AppHandle, worktree_id: &str) -> Result<std::path::PathBuf, String> {
+    crate::artifacts_dir_in(&app.path().app_data_dir().map_err(|e| e.to_string())?, worktree_id)
+}
+
+/// 承認済みの `maxBytes`。**保存済みの grant だけ**を見る（manifest は見ない）。
+/// 未承認（memory を宣言していない・承認されていない）なら `Err`。
+fn granted_memory_cap(app: &AppHandle, ctx: &InstanceContext) -> Result<u64, String> {
+    let grant = app
+        .state::<AppGrantStore>()
+        .get(&ctx.worktree_id, &ctx.artifact_id)
+        .ok_or_else(|| "このアプリには承認がありません".to_string())?;
+    grant
+        .resolved
+        .memory
+        .map(|m| m.max_bytes)
+        .filter(|&b| b > 0)
+        .ok_or_else(|| {
+            "このアプリには memory 権限が承認されていません（manifest で permissions.memory.maxBytes を宣言し、承認ダイアログで許可されたアプリだけがメモリーを使えます）".to_string()
+        })
+}
+
+fn read_memory_blocking(dir: std::path::PathBuf, artifact_id: String) -> serde_json::Value {
+    crate::read_artifact_store(&dir, &artifact_id)
+        .0
+        .unwrap_or_else(|| serde_json::json!({}))
+}
+
+/// メモリーの使用量を測ってレジストリへ反映し、起動画面へ通知する。起動中でなければ何もしない。
+/// `warn_if_over` のときは、承認済みの上限を超えていればデバッグログに残す
+/// （上限を下げる再承認のあと。データは消さず、収まらない書き込みだけが拒否される）。
+pub async fn refresh_memory_bytes(app: &AppHandle, worktree_id: &str, artifact_id: &str, warn_if_over: bool) {
+    let Some(label) = label_for_key(app, worktree_id, artifact_id) else { return };
+    let Ok(dir) = artifact_dir(app, worktree_id) else { return };
+    let id = artifact_id.to_string();
+    let Ok(memory) = tokio::task::spawn_blocking(move || read_memory_blocking(dir, id)).await else {
+        return;
+    };
+    let bytes = serde_json::to_string(&memory).map(|s| s.len() as u64).unwrap_or(0);
+    {
+        let reg = app.state::<AppInstanceRegistry>();
+        let Ok(mut inner) = reg.0.lock() else { return };
+        match inner.by_label.get_mut(&label) {
+            Some(i) => i.memory_bytes = Some(bytes),
+            None => return,
         }
     }
+    if warn_if_over {
+        let cap = app
+            .state::<AppGrantStore>()
+            .get(worktree_id, artifact_id)
+            .and_then(|g| g.resolved.memory)
+            .map(|m| m.max_bytes);
+        if let Some(cap) = cap.filter(|&c| bytes > c) {
+            add_log(
+                app,
+                worktree_id,
+                artifact_id,
+                "warn",
+                format!(
+                    "保存済みのメモリー（{} バイト）が承認済みの最大サイズ（{} バイト）を超えています。データは消しません。サイズが収まるまで書き込みは拒否され、読み取りはできます",
+                    bytes, cap
+                ),
+            );
+        }
+    }
+    emit_changed(app, worktree_id, artifact_id);
+}
+
+async fn write_app_memory(
+    app: &AppHandle,
+    ctx: &InstanceContext,
+    memory: serde_json::Value,
+) -> Result<(), String> {
+    let cap = granted_memory_cap(app, ctx)?;
+    // null は「リセット」（キーごと削除）。オブジェクト以外と host の絶対上限はここで弾かれる
+    let validated = crate::validate_artifact_memory(Some(memory))?;
+    if let Some(v) = validated.as_ref() {
+        app_manifest::check_memory_size(v, cap)?;
+    }
+    let dir = artifact_dir(app, &ctx.worktree_id)?;
+    crate::write_artifact_memory(dir, &ctx.artifact_id, validated, None).await.map(|_| ())
+}
+
+/// アプリ（iframe）のメモリー保存。呼び出し元はウィンドウラベルから決める。
+/// 拒否はデバッグログへ残し、iframe にもエラーで返す。
+#[tauri::command]
+pub async fn app_set_memory(
+    window: tauri::Window,
+    app: AppHandle,
+    memory: serde_json::Value,
+) -> Result<(), String> {
+    require_instance_window(&window)?;
+    let ctx = context_for_label(&app, window.label())?;
+    match write_app_memory(&app, &ctx, memory).await {
+        Ok(()) => {
+            refresh_memory_bytes(&app, &ctx.worktree_id, &ctx.artifact_id, false).await;
+            Ok(())
+        }
+        Err(e) => {
+            add_log(&app, &ctx.worktree_id, &ctx.artifact_id, "warn", format!("メモリーの書き込みを拒否: {}", e));
+            Err(e)
+        }
+    }
+}
+
+/// 外から（MCP の `artifact_store`）書き換わったメモリーを、シェルが iframe へ押し込むために読む。
+#[tauri::command]
+pub async fn app_get_memory(window: tauri::Window, app: AppHandle) -> Result<serde_json::Value, String> {
+    require_instance_window(&window)?;
+    let ctx = context_for_label(&app, window.label())?;
+    granted_memory_cap(&app, &ctx)?;
+    let dir = artifact_dir(&app, &ctx.worktree_id)?;
+    let id = ctx.artifact_id.clone();
+    tokio::task::spawn_blocking(move || read_memory_blocking(dir, id))
+        .await
+        .map_err(|e| format!("task join error: {}", e))
 }
 
 // ─── ビューア（起動画面）向けコマンド ─────────────────────────────────
@@ -1078,7 +1302,18 @@ pub async fn app_instance_bootstrap(window: tauri::Window, app: AppHandle) -> Re
     require_instance_window(&window)?;
     let ctx = context_for_label(&app, window.label())?;
     let art = read_app_artifact(&app, &ctx.worktree_id, &ctx.artifact_id)?;
+    // memory 権限が承認されていないアプリには、保存済みのデータがあっても渡さない（空で始める）
+    let memory = if granted_memory_cap(&app, &ctx).is_ok() {
+        let dir = artifact_dir(&app, &ctx.worktree_id)?;
+        let id = ctx.artifact_id.clone();
+        tokio::task::spawn_blocking(move || read_memory_blocking(dir, id))
+            .await
+            .map_err(|e| format!("task join error: {}", e))?
+    } else {
+        serde_json::json!({})
+    };
     Ok(serde_json::json!({
+        "memory": memory,
         "worktreeId": ctx.worktree_id,
         "artifactId": ctx.artifact_id,
         "title": art.title,

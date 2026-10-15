@@ -283,6 +283,24 @@ fn parse_memory(v: &serde_json::Value) -> Result<Option<MemoryPermission>, Strin
     Ok(Some(MemoryPermission { max_bytes }))
 }
 
+/// アプリのメモリ（シリアライズした JSON のバイト数）が承認済みの `maxBytes` に収まるか。
+/// アプリ自身の書き込み（`app_set_memory`）と MCP の `artifact_store` の両方がここを通る。
+///
+/// 見るのは**書き込み後の合計サイズ**だけ。上限を下げる manifest 変更のあとで既存データが新しい
+/// 上限を超えていても、データは消さない。超過している間は、新しい上限に収まらない書き込みを
+/// 拒否するだけで（収まる書き込み＝縮める書き込みは通る）、読み取りは影響を受けない。
+/// 戻り値は書き込み後のバイト数。
+pub fn check_memory_size(memory: &serde_json::Value, max_bytes: u64) -> Result<u64, String> {
+    let size = serde_json::to_string(memory).map_err(|e| e.to_string())?.len() as u64;
+    if size > max_bytes {
+        return Err(format!(
+            "メモリーがこのアプリの承認済み最大サイズを超えています: {} バイト（maxBytes {}）",
+            size, max_bytes
+        ));
+    }
+    Ok(size)
+}
+
 /// 保存済みの `requested` と、いまの manifest の `requested` が違うか（＝再承認が要るか）。
 /// 権限が狭まる変更でも `true` を返す（単純さを優先）。名前・説明・版は比較に入らない。
 pub fn requested_changed(saved: &RequestedPermissions, current: &RequestedPermissions) -> bool {
@@ -442,6 +460,20 @@ mod tests {
         assert!(err(json!({ "name": "x", "permissions": { "memory": { "maxBytes": too_big } }})).contains("範囲"));
         let m = ok(json!({ "name": "x", "permissions": { "memory": { "maxBytes": 4096 } }}));
         assert_eq!(m.permissions.memory, Some(MemoryPermission { max_bytes: 4096 }));
+    }
+
+    #[test]
+    fn memory_size_is_checked_on_the_serialized_result() {
+        let m = json!({ "k": "あ" });
+        let size = serde_json::to_string(&m).unwrap().len() as u64;
+        // マルチバイトはバイト数で数える（文字数ではない）
+        assert!(size > 7);
+        assert_eq!(check_memory_size(&m, size), Ok(size));
+        assert!(check_memory_size(&m, size - 1).unwrap_err().contains("最大サイズ"));
+        // 上限を下げたあと、収まらないデータは書けず、縮めた書き込みは通る
+        let big = json!({ "k": "x".repeat(100) });
+        assert!(check_memory_size(&big, 50).is_err());
+        assert!(check_memory_size(&json!({ "k": "x" }), 50).is_ok());
     }
 
     #[test]
