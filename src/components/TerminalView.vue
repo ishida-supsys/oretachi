@@ -28,6 +28,8 @@ const props = withDefaults(
     shell?: string;
     autoStart?: boolean;
     cwd?: string;
+    /** host が予約した terminal_id（インスタンス専用 AI ターミナル）。起動時にだけ使う */
+    reservedTerminalId?: string;
     initialSessionId?: number;
     initialSnapshot?: string;
     restoreSnapshot?: string;
@@ -279,7 +281,8 @@ async function startPty() {
       emit("exit");
     },
     props.shell,
-    props.cwd
+    props.cwd,
+    props.reservedTerminalId
   );
 
   terminal.focus();

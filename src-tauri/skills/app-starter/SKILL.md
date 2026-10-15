@@ -15,7 +15,7 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
 - **manifest だけでは何も動かない。** AI が書いた manifest は信頼されない。ユーザーがアーティファクトウィンドウの**起動画面**で起動し、承認ダイアログで許可して初めて権限が有効になる。承認の前に、あなたが API を呼べるようにする手段は無い。
 - **宣言したものだけが使える。** manifest に無い権限（ツール・越境先・メモリー）は、承認済みでも常に拒否される。
 - **通常のビューアでは動かない。** `app` 付きのアーティファクトは起動画面を出す。実行は承認後の常駐ウィンドウの中（`sandbox` iframe）。Web ビューアでは起動できない。
-- 今の版で書ける権限は `mcp`（`tools` と `targets`）と `memory`（`maxBytes` 必須）だけ。`fs` / `db` / `network` / `subWindow` / `wasm` / `aiTerminal` は未対応で、書くとエラーになる。
+- 今の版で書ける権限は `mcp`（`tools` と `targets`）、`memory`（`maxBytes` 必須）、`aiTerminal`（`agents` と `maxConcurrent` 必須）だけ。`fs` / `db` / `network` / `subWindow` / `wasm` は未対応で、書くとエラーになる。
 - コード（content / modules）を更新しても再承認は要らず、起動中なら**承認を保ったまま iframe がリロードされる**（フルリロード。メモリー以外の JS の状態は失われる）。**権限（manifest の `permissions`）を変えたときだけ**、起動中なら直ちに再承認のダイアログが出る。承認までは旧権限のまま動き（リロードもされない）、新しい権限が要る呼び出しは拒否される。承認でリロード、拒否で停止。
 
 ## manifest
@@ -40,6 +40,27 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
 - `mcp.tools`: 呼びたいツールだけを書く。呼べるのは `artifact` ツールの説明にある一覧の部分集合。`oretachi_write_terminal` / `oretachi_send_keys` / `oretachi_answer_prompt` / `oretachi_add_task` は**ユーザーと同等の権限（任意コマンド実行）**として、承認ダイアログで強調される。本当に必要なときだけ宣言する。
 - `mcp.targets`: 他のワークツリーへ届かせたいときだけ書く（省略 = 自ワークツリーのみ）。ワークツリー名 / ID、`*`、`workgroup:<ID か名前>`、`repo:<リポジトリ名>`。**ワイルドカードは最も強い警告になる**（今後作られるワークツリーも含み、メインのクローンの端末にも届く）。名前で書いたワークツリーは承認時に ID へ固定される。越境には、これに加えて既存の購読（`oretachi_subscribe_worktree`）も必要。
 - `memory.maxBytes`: メモリーを使うなら必須（1〜1048576 バイト。書き込み後の JSON のバイト数で数える）。宣言が無い・0 以下・上限超過の manifest は拒否される。承認ダイアログに最大サイズが出る。上限を下げる変更も再承認になり、既存データが新しい上限を超えていても消えない（収まらない書き込みだけ拒否、読み取りは可）。
+
+- `aiTerminal`: アプリ専用の AI セッション端末（Claude Code）を開く権限。`{ "agents": ["claude"], "maxConcurrent": 2 }`。`agents` は v1 では `claude` だけ、`maxConcurrent` は 1〜4（同時に開ける数）。**ユーザーと同じ権限で動くエージェントを起動できる**ので、承認ダイアログで最も強い警告になる。**権限モード・権限スキップ・許可ツールの一覧はアプリから指定できない**（書くと manifest が拒否される）。
+
+## AI ターミナル API
+
+`aiTerminal` を承認されたアプリだけが、`const { aiTerminal } = require('oretachi')` で使える。**自分が `open` した端末だけ**を操作できる。メインの端末や他のアプリの端末への操作は Rust が拒否する。
+
+| 呼び出し | 内容 |
+|---|---|
+| `aiTerminal.open({ title, systemPrompt, initialPrompt, model, cwd })` | 端末を開く。`{ terminalId, sessionId }` が返る。`cwd` は `worktree://サブディレクトリ`（ワークツリー内。省略 = ルート）。未知のキー（権限モード等）は拒否 |
+| `aiTerminal.write(terminalId, text, submit?)` | 入力を送る（`oretachi_write_terminal` と同じ。`submit` 既定 true） |
+| `aiTerminal.sendKeys(terminalId, keys)` | 矢印などの制御キーを送る。**Enter / Esc は送れない**（ダイアログの確定は `answerPrompt`） |
+| `aiTerminal.read(terminalId, { maxBytes, fromCursor })` | 出力を読む（`cursor` を `fromCursor` に渡すと差分） |
+| `aiTerminal.inspectPrompt(terminalId)` / `aiTerminal.answerPrompt(terminalId, { expectFingerprint, kind, ... })` | ツール許可・プラン承認・質問のダイアログを確認して回答する。`oretachi_inspect_prompt` / `oretachi_answer_prompt` と同じ指紋検査（画面が変わっていたら何も送らず `stale`） |
+| `aiTerminal.close(terminalId)` / `aiTerminal.list()` | 閉じる / 自分が開いた端末の一覧 |
+| `aiTerminal.onEvent(fn)` | 端末の Stop / Notification / PermissionRequest を受け取る（`{ terminalId, event, kind, body }`）。解除関数が返る |
+
+- **`systemPrompt` は厳密なシステムプロンプトではない。** SessionStart フックが注入する additionalContext で、`/clear`・compact・再起動のたびに再注入される。開いた後に差し替える手段は無い。Claude Code のみ対応。
+- 専用端末の Stop や通知は、ワークツリーのバッジ・トレイ・タスクバーに積まれず、`onEvent` とデバッグログへ回る。description の更新を促す注入や inbox の要約も出ない。自動承認の対象外で、アプリの再起動では復元されない。
+- 数の上限は `maxConcurrent`（アプリごと）と全体 8 個。インスタンスを停止すると、開いた端末はすべて閉じる（コードの更新によるリロードでは維持され、新しい iframe は `list()` で取り直す）。
+- **既知の制限:** 同じ作業ディレクトリの Claude Code のセッションは `~/.claude/projects/<cwd>` の履歴を共有するので、メインのセッションの `/resume` の一覧に専用端末のセッションが並ぶ。`cwd` をワークツリー内の専用サブディレクトリにすると履歴は分かれる（フックは `terminal_id` で判定するので、サブディレクトリでも動く）。
 
 ## メモリー API
 

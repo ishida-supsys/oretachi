@@ -3,8 +3,9 @@ import type { AppResolvedPermissions } from "../types/appInstance";
 /**
  * 承認ダイアログに並べる権限の行を組み立てる純関数（描画は呼び出し側）。
  *
- * - `critical`: 最も強い警告（ワイルドカードの越境先）。今後作られるワークツリーも含み、
- *   メインのクローンの端末にも届く。
+ * - `critical`: 最も強い警告（ワイルドカードの越境先、専用 AI ターミナル）。越境先は今後作られる
+ *   ワークツリーも含み、メインのクローンの端末にも届く。専用 AI ターミナルはユーザーと同じ権限で
+ *   動くエージェントを起動できる。
  * - `danger`: ユーザーと同等の権限（任意コマンド実行）になりうるツール。
  * - `normal`: それ以外。
  *
@@ -15,8 +16,8 @@ import type { AppResolvedPermissions } from "../types/appInstance";
 export type PermissionSeverity = "normal" | "danger" | "critical";
 
 export interface PermissionRow {
-  kind: "tool" | "target" | "memory";
-  /** ツール名 / 越境先の `stored` / `maxBytes` の文字列 */
+  kind: "tool" | "target" | "memory" | "aiTerminal";
+  /** ツール名 / 越境先の `stored` / `maxBytes` の文字列 / `claude×N`（件数の変更も差分に出る） */
   value: string;
   /** 越境先のときの表示名 */
   label: string;
@@ -68,6 +69,10 @@ function rowsOf(perm: AppResolvedPermissions, dangerous: ReadonlySet<string>): P
       wildcard: false,
       added: false,
     });
+  }
+  if (perm.aiTerminal) {
+    const value = `${perm.aiTerminal.agents.join("+")}×${perm.aiTerminal.maxConcurrent}`;
+    rows.push({ kind: "aiTerminal", value, label: value, severity: "critical", wildcard: false, added: false });
   }
   return rows;
 }

@@ -46,10 +46,12 @@ function summary(item: AppGrantListItem): string {
   const parts: string[] = [];
   const tools = v.rows.filter((r) => r.kind === "tool").length;
   if (tools > 0) parts.push(t("summaryTools", { count: tools }));
-  if (v.hasCritical) parts.push(t("summaryWildcard"));
+  if (v.rows.some((r) => r.kind === "target" && r.severity === "critical")) parts.push(t("summaryWildcard"));
   else if (v.rows.some((r) => r.kind === "target")) parts.push(t("summaryTargets"));
   const mem = v.rows.find((r) => r.kind === "memory");
   if (mem) parts.push(t("summaryMemory", { bytes: mem.value }));
+  const ai = v.rows.find((r) => r.kind === "aiTerminal");
+  if (ai) parts.push(t("summaryAiTerminal", { spec: ai.value }));
   return parts.length > 0 ? parts.join(" / ") : t("summaryNone");
 }
 
@@ -172,6 +174,7 @@ onBeforeUnmount(() => {
     "summaryWildcard": "wildcard worktrees",
     "summaryTargets": "other worktrees",
     "summaryMemory": "memory {bytes} B",
+    "summaryAiTerminal": "AI terminal {spec}",
     "summaryNone": "no permissions"
   },
   "ja": {
@@ -190,6 +193,7 @@ onBeforeUnmount(() => {
     "summaryWildcard": "ワイルドカードのワークツリー",
     "summaryTargets": "他ワークツリー",
     "summaryMemory": "メモリー {bytes} B",
+    "summaryAiTerminal": "AI ターミナル {spec}",
     "summaryNone": "権限なし"
   }
 }

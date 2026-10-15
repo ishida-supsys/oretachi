@@ -11,6 +11,7 @@ import type { WebSessionInfo } from "../types/terminal";
 import { decodePtyOutput, type PtyOutputBatchPayload } from "../utils/decodePtyOutput";
 import { useWorkgroups } from "./useWorkgroups";
 import { initialTrayNotification } from "../utils/trayNotification";
+import { buildClaudeLaunchCommand, ownedAiTerminalFlags } from "../utils/agentLaunchCommand";
 
 /**
  * 本文を流してから Enter を送るまでの猶予。
@@ -475,11 +476,11 @@ export function useTaskExecution(deps: {
     let command: string;
     switch (agentKind) {
       case "claudeCode": {
-        if (isPowerShell) {
-          command = `$p = Get-Content "${tempPath}" -Raw -Encoding UTF8; ${agentCmd} "$p"; Remove-Item "${tempPath}"\r`;
-        } else {
-          command = `${agentCmd} "$(cat "${tempPath}")"; rm "${tempPath}"\r`;
-        }
+        command = buildClaudeLaunchCommand({
+          flags: remoteExec ? `--remote ${claudeMode}` : claudeMode,
+          tempPath,
+          isPowerShell,
+        });
         break;
       }
       case "geminiCli": {
@@ -541,10 +542,43 @@ export function useTaskExecution(deps: {
     }
   }
 
+  /**
+   * インスタンス専用 AI ターミナルを起動するコマンドを組む（#372）。
+   * 権限モード系のフラグは付けない（アプリから指定できない = ユーザーの既定）。
+   * プロンプトは `launchAgentInTerminal` と同じく一時ファイル経由で、クォートも同じビルダーを使う。
+   */
+  async function buildOwnedAiTerminalCommand(
+    wt: { id: string; path: string; name: string; repositoryId: string },
+    opts: { model?: string | null; initialPrompt?: string },
+  ): Promise<string> {
+    const flags = ownedAiTerminalFlags(opts.model);
+    // SessionStart 注入（インスタンス指定のプロンプト）はプラグイン設定のフックが運ぶ。
+    // タスク実行と同じく、設定が書かれる前に作られたワークツリーにも効くよう先に書く。失敗しても続行
+    const repoOfWt = settings.value.repositories.find((r) => r.id === wt.repositoryId);
+    try {
+      await invoke("write_claude_plugin_config", {
+        worktreePath: wt.path,
+        worktreeName: wt.name,
+        hooks: repoOfWt?.notificationHooks ?? [],
+      });
+    } catch (e) {
+      console.warn("[write_claude_plugin_config] failed:", e);
+    }
+    const shellLower = (resolveShell(wt.id) ?? "").toLowerCase();
+    const isPowerShell =
+      shellLower.includes("powershell") ||
+      shellLower.includes("pwsh") ||
+      (resolveShell(wt.id) === undefined && platform() === "windows");
+    const prompt = opts.initialPrompt ?? "";
+    const tempPath = prompt.trim() ? await invoke<string>("write_temp_prompt", { content: prompt }) : undefined;
+    return buildClaudeLaunchCommand({ flags, tempPath, isPowerShell });
+  }
+
   return {
     executeAddWorktree,
     executeAgentWorktree,
     launchAgentInTerminal,
+    buildOwnedAiTerminalCommand,
     resolveShell,
     buildScriptCommand,
     buildPendingCommand,

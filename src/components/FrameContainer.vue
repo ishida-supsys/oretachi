@@ -15,6 +15,8 @@ const props = defineProps<{
   terminalAiSessions?: Map<number, AiSessionInfo>;
   /** タブ → 未 ack のワークツリーイベント件数（#120 §7） */
   terminalUnread?: Map<number, number>;
+  /** タブ → 所有しているアプリ（インスタンス専用 AI ターミナル・#372） */
+  terminalOwned?: Map<number, { appName: string }>;
 }>();
 
 const emit = defineEmits<{
@@ -55,6 +57,7 @@ function onResizeEnd(event: { sizes: number[] }) {
     :terminal-web-sessions="terminalWebSessions"
     :terminal-ai-sessions="terminalAiSessions"
     :terminal-unread="terminalUnread"
+    :terminal-owned="terminalOwned"
     @switch-terminal="(leafId, terminalId) => emit('switchTerminal', leafId, terminalId)"
     @close-terminal="(leafId, terminalId) => emit('closeTerminal', leafId, terminalId)"
     @title-change="(terminalId, title) => emit('titleChange', terminalId, title)"
@@ -90,6 +93,7 @@ function onResizeEnd(event: { sizes: number[] }) {
         :terminal-web-sessions="terminalWebSessions"
         :terminal-ai-sessions="terminalAiSessions"
         :terminal-unread="terminalUnread"
+        :terminal-owned="terminalOwned"
         @switch-terminal="(leafId, terminalId) => emit('switchTerminal', leafId, terminalId)"
         @close-terminal="(leafId, terminalId) => emit('closeTerminal', leafId, terminalId)"
         @title-change="(terminalId, title) => emit('titleChange', terminalId, title)"

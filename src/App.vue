@@ -78,6 +78,8 @@ import {
 } from "./composables/useEventSubscriptions";
 import { useEventToast } from "./composables/useEventToast";
 import { collectUnreadByTab } from "./utils/terminalUnread";
+import { collectOwnedByTab } from "./utils/ownedTerminalTabs";
+import { initOwnedAiTerminals, useOwnedAiTerminals } from "./composables/useOwnedAiTerminals";
 import { mainWindowShowsDelivery } from "./utils/eventToastScope";
 import type { SpawnTerminalRequest } from "./types/event";
 import { terminalMountCount, terminalUnmountCount, terminalActiveCount } from "./components/TerminalView.vue";
@@ -240,6 +242,17 @@ const terminalUnreadByTab = computed(() => {
   return result;
 });
 
+// インスタンス専用 AI ターミナル（#372）の印。タブ（フロントの terminalId）→ 所有しているアプリ。
+// 自動承認・復元からの除外にも同じ判定（isOwnedSession）を使う。
+const { ownedBySession, isOwnedSession } = useOwnedAiTerminals();
+const terminalOwnedByTab = computed(() => {
+  const result = new Map<number, { appName: string }>();
+  for (const [, bundle] of worktreeFrameBundles) {
+    collectOwnedByTab(ownedBySession.value, bundle.terminalRefs, result);
+  }
+  return result;
+});
+
 // terminalId → worktreeId のマッピング（ターミナルがどのワークツリーに属するか）
 const terminalWorktreeMap = new Map<number, string>();
 
@@ -380,6 +393,9 @@ function registerRestoredAiSession(terminalId: number, info: import("./types/ter
 }
 // 新規追加ターミナル: autoStart を抑制して reparenting 後に手動 startPty するための ID セット
 const pendingManualStart = new Set<number>();
+// terminalId → インスタンス専用 AI ターミナル（#372）として host が予約した terminal_id と cwd。
+// TerminalView の起動時（startPty）にだけ使う。cwd は Rust が予約時の値で上書きするので参考値
+const pendingSpawnOpts = reactive(new Map<number, { terminalId: string; cwd: string }>());
 // terminalId → { sessionId, snapshot } （サブ→メイン移動時のセッション引き継ぎ用）
 const pendingSessionAttach = new Map<number, { sessionId: number; snapshot: string }>();
 
@@ -435,7 +451,14 @@ const { autoApprovalMap, aiJudgingWorktrees } = autoApproval;
 const { onToggleAutoApproval, onCancelAiJudging } = autoApproval;
 
 // タスク実行 (executeAddWorktree / executeAgentWorktree)
-const { executeAddWorktree, executeAgentWorktree, resolveShell, buildPendingCommand, waitForScriptCompletion } =
+const {
+  executeAddWorktree,
+  executeAgentWorktree,
+  resolveShell,
+  buildPendingCommand,
+  waitForScriptCompletion,
+  buildOwnedAiTerminalCommand,
+} =
   useTaskExecution({
     t,
     settings,
@@ -850,12 +873,18 @@ function addTerminalToFrameBundle(bundle: WorktreeFrameBundle, terminalId: numbe
 
 async function onAddTerminal(
   worktreeId: string,
-  options?: { background?: boolean; pendingCommand?: string },
+  options?: {
+    background?: boolean;
+    pendingCommand?: string;
+    /** インスタンス専用 AI ターミナル（#372）: host が予約した terminal_id と cwd、タブのタイトル */
+    reserved?: { terminalId: string; cwd: string; title?: string | null };
+  },
 ) {
   const background = options?.background === true;
   clearNotificationAndTray(worktreeId);
   if (isDetached(worktreeId)) {
     // detached worktree は handleSubAddTerminalRequest 経由で処理し、pendingCommand 連携は未対応。
+    // （専用 AI ターミナルは `ai-terminal-spawn` のリスナーが handleSubAddTerminalRequest を直接呼ぶ）
     await handleSubAddTerminalRequest(worktreeId);
     return;
   }
@@ -863,6 +892,9 @@ async function onAddTerminal(
   const terminal = addTerminal(worktreeId);
   pendingManualStart.add(terminal.id);
   terminalWorktreeMap.set(terminal.id, worktreeId);
+  if (options?.reserved) {
+    pendingSpawnOpts.set(terminal.id, { terminalId: options.reserved.terminalId, cwd: options.reserved.cwd });
+  }
   // ターミナル採番の直後に pendingCommand を結びつけることで、後続の onTerminalReady が
   // この terminalId に対応する command を確実に取り出す。worktree 粒度でなく terminalId 粒度。
   if (options?.pendingCommand !== undefined) {
@@ -877,6 +909,9 @@ async function onAddTerminal(
 
   const bundle = worktreeFrameBundles.get(worktreeId)!;
   bundle.terminalEntries.set(terminal.id, { id: terminal.id, title: terminal.title, sessionId: 0, snapshot: "" });
+  if (options?.reserved?.title) {
+    onTerminalTitleChange(worktreeId, terminal.id, options.reserved.title);
+  }
 
   const targetLeafId = addTerminalToFrameBundle(bundle, terminal.id, background);
   logDebug(`[Terminal] onAddTerminal leafId=${targetLeafId ?? "null"} terminalId=${terminal.id}`);
@@ -896,7 +931,12 @@ async function onAddTerminal(
     await term.handleTabActivated();
     logDebug(`[Terminal] onAddTerminal after handleTabActivated terminalId=${terminal.id}`);
     pendingManualStart.delete(terminal.id);
-    await term.startPty();
+    try {
+      await term.startPty();
+    } finally {
+      // 予約は一回限り（Rust が消費する）。起動に失敗しても使い回さない
+      pendingSpawnOpts.delete(terminal.id);
+    }
     logDebug(`[Terminal] onAddTerminal after startPty terminalId=${terminal.id}`);
     if (!background) {
       term.focus();
@@ -908,6 +948,7 @@ async function onAddTerminal(
     }, 150);
   } else {
     pendingManualStart.delete(terminal.id);
+    pendingSpawnOpts.delete(terminal.id);
     logDebug(`[Terminal] onAddTerminal term ref not found terminalId=${terminal.id}`);
   }
 }
@@ -1186,7 +1227,12 @@ async function onDuplicateWorktree(worktreeId: string) {
 // MCP のメタデータをサブへ伝搬し、title はメイン側 state にも同期する。
 async function handleSubAddTerminalRequest(
   worktreeId: string,
-  options?: { title?: string | null; pendingCommand?: string },
+  options?: {
+    title?: string | null;
+    pendingCommand?: string;
+    /** インスタンス専用 AI ターミナル（#372）: host が予約した terminal_id と cwd */
+    reserved?: { terminalId: string; cwd: string };
+  },
 ) {
   const worktree = worktrees.value.find((w) => w.id === worktreeId);
   if (!worktree) return;
@@ -1195,7 +1241,10 @@ async function handleSubAddTerminalRequest(
   terminalWorktreeMap.set(terminal.id, worktreeId);
 
   const sid = await invoke<number>("pty_spawn", {
-    rows: 24, cols: 80, shell: resolveShell(worktreeId) ?? null, cwd: worktree.path,
+    rows: 24, cols: 80, shell: resolveShell(worktreeId) ?? null,
+    // 予約 ID のときは Rust が予約時に解決した cwd へ差し替える（ここの値は使われない）
+    cwd: options?.reserved?.cwd ?? worktree.path,
+    terminalId: options?.reserved?.terminalId ?? null,
   });
 
   registerTerminalSession(worktreeId, terminal.id, sid);
@@ -1909,6 +1958,48 @@ onMounted(async () => {
     });
   });
 
+  // インスタンス専用 AI ターミナル（#372）の起動要求。アプリの `aiTerminal.open` が Rust で
+  // `terminal_id` を予約したあと、ここへ届く。タブを立てて PTY を起動すれば、`pty_spawn` が予約を
+  // 消費して session_id を Rust 側で紐付ける（所有の根拠はこの応答ではない）。
+  // **成否は必ず返す。** 返さないと `open` が待ち時間いっぱいまで固まる。
+  await listen<{
+    requestId: string;
+    worktreeId: string;
+    terminalId: string;
+    title: string;
+    cwd: string;
+    model: string | null;
+    initialPrompt: string;
+  }>("ai-terminal-spawn", async (event) => {
+    const { requestId, worktreeId, terminalId, title, cwd, model, initialPrompt } = event.payload;
+    const report = (ok: boolean, error?: string) =>
+      invoke("ai_terminal_spawn_result", { requestId, ok, error: error ?? null }).catch((e) => {
+        logDebug(`[ai-terminal] ai_terminal_spawn_result failed: ${e}`);
+      });
+    const targetWt = worktrees.value.find((w) => w.id === worktreeId);
+    if (!targetWt) {
+      await report(false, `ワークツリー '${worktreeId}' が見つかりません`);
+      return;
+    }
+    try {
+      const command = await buildOwnedAiTerminalCommand(targetWt, { model, initialPrompt });
+      const reserved = { terminalId, cwd };
+      if (isDetached(worktreeId)) {
+        // サブウィンドウへ分離済み: メインが pty_spawn して、起動コマンドは pendingCommand として
+        // サブウィンドウの「ready 後に書き込む」処理へ渡す
+        await handleSubAddTerminalRequest(worktreeId, { title, pendingCommand: command, reserved });
+      } else {
+        await onAddTerminal(worktreeId, { background: true, pendingCommand: command, reserved: { ...reserved, title } });
+      }
+      await report(true);
+    } catch (e) {
+      logDebug(`[ai-terminal] ai-terminal-spawn failed: ${e}`);
+      await report(false, String(e));
+    }
+  });
+
+  await initOwnedAiTerminals();
+
   await initEventSubscriptions();
 
   // MCP: 指定ワークツリーをフォーカスする
@@ -2389,7 +2480,10 @@ onMounted(async () => {
       if (isDetached(wt.id)) continue;
       try {
         const bundle = worktreeFrameBundles.get(wt.id);
-        const terminals: SavedTerminal[] = wt.terminals.map((t) => {
+        const terminals: SavedTerminal[] = wt.terminals
+          // インスタンス専用 AI ターミナル（#372）は再起動で復元しない
+          .filter((t) => !isOwnedSession((bundle?.terminalRefs.get(t.id) ?? getTerminalRef(t.id))?.sessionId))
+          .map((t) => {
           const termRef = bundle?.terminalRefs.get(t.id) ?? getTerminalRef(t.id);
           return {
             title: t.title,
@@ -2743,6 +2837,7 @@ onMounted(async () => {
               :terminal-web-sessions="terminalWebSessions"
               :terminal-ai-sessions="terminalAiSessions"
               :terminal-unread="terminalUnreadByTab"
+              :terminal-owned="terminalOwnedByTab"
               @switch-terminal="(leafId, tid) => onFrameSwitch(wt.id, leafId, tid)"
               @close-terminal="(leafId, tid) => onFrameClose(wt.id, leafId, tid)"
               @tab-drop="(sl, tid, tl, idx) => onFrameTabDrop(wt.id, sl, tid, tl, idx)"
@@ -2767,7 +2862,8 @@ onMounted(async () => {
               :key="terminal.id"
               :ref="(el) => { const b = worktreeFrameBundles.get(wt.id); if (b) b.frame.setTerminalRef(terminal.id, el); }"
               :auto-start="!pendingManualStart.has(terminal.id) && !pendingSessionAttach.has(terminal.id)"
-              :cwd="wt.path"
+              :cwd="pendingSpawnOpts.get(terminal.id)?.cwd ?? wt.path"
+              :reserved-terminal-id="pendingSpawnOpts.get(terminal.id)?.terminalId"
               :shell="resolveShell(wt.id)"
               :restore-snapshot="pendingSnapshots.get(terminal.id)"
               :initial-session-id="pendingSessionAttach.get(terminal.id)?.sessionId"

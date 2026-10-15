@@ -17,14 +17,24 @@ export interface AppResolvedTarget {
   wildcard: boolean;
 }
 
+/** インスタンス専用 AI ターミナル。ユーザーと同じ権限で動くエージェントを起動できる */
+export interface AppAiTerminalPermission {
+  /** v1 は `["claude"]` のみ */
+  agents: string[];
+  /** 同時に開ける数 */
+  maxConcurrent: number;
+}
+
 export interface AppResolvedPermissions {
   mcp?: { tools: string[]; targets: AppResolvedTarget[] };
   memory?: { maxBytes: number };
+  aiTerminal?: AppAiTerminalPermission;
 }
 
 export interface AppRequestedPermissions {
   mcp?: { tools: string[]; targets: string[] };
   memory?: { maxBytes: number };
+  aiTerminal?: AppAiTerminalPermission;
 }
 
 export interface AppGrant {

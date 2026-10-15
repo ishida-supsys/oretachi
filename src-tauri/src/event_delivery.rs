@@ -847,6 +847,12 @@ async fn try_rebind_once(
     if state.claimed.contains(terminal_id) {
         return (0, 0);
     }
+    // インスタンス専用 AI ターミナル（#372）は、ワークツリーの孤児購読・未読を引き取らない。
+    // 引き取ると、メインのセッションへ届くはずのメッセージが専用端末へ押し込まれる。
+    // 引き継ぎの 3 経路（`Rebind` / 生存タブの引き取り / `collect_digest`）はここを通る。
+    if crate::ai_terminal::is_owned(app, terminal_id) {
+        return (0, 0);
+    }
     // 抑止の判定にセッションが要るので先に引く。**この解決は1回だけ**にすること
     // （`SettingsManager::get()` は AppSettings 全体、`list_sessions()` は全セッションの
     // clone なので、毎ターン全 CC タブが通る経路で二重に払うと無駄が大きい）。
@@ -1714,11 +1720,14 @@ async fn handoff_unreachable_terminal(
     // 毎回同じタブへ移す。tick ごとに移送先が揺れると追跡不能になる）。
     let candidate = {
         let settings = app.state::<SettingsManager>().get();
+        // インスタンス専用 AI ターミナル（#372）へは移送しない
+        let owned = crate::ai_terminal::owned_terminal_ids(app);
         let mut sessions: Vec<crate::pty_manager::SessionInfo> = app
             .state::<crate::pty_manager::PtyManager>()
             .list_sessions()
             .into_iter()
             .filter(|s| s.exit_code.is_none() && s.is_ai_agent && s.terminal_id != terminal_id)
+            .filter(|s| !owned.contains(&s.terminal_id))
             .filter(|s| {
                 s.cwd
                     .as_deref()
@@ -1866,6 +1875,8 @@ async fn spawn_for_closed_tabs(
     let mut projected_live = sessions.iter().filter(|s| s.exit_code.is_none()).count()
         + state.inflight_spawn.len();
     let settings = app.state::<SettingsManager>().get();
+    // インスタンス専用 AI ターミナル（#372）は「そのワークツリーに AI タブがある」に数えない
+    let owned = crate::ai_terminal::owned_terminal_ids(app);
 
     for (worktree_id, by_kind) in candidates {
         if state.inflight_spawn.contains_key(&worktree_id) {
@@ -1884,6 +1895,7 @@ async fn spawn_for_closed_tabs(
         let has_agent = sessions.iter().any(|s| {
             s.exit_code.is_none()
                 && s.is_ai_agent
+                && !owned.contains(&s.terminal_id)
                 && s.cwd
                     .as_deref()
                     .and_then(|c| crate::mcp_server::resolve_worktree_by_cwd(&settings, c))

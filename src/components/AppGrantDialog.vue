@@ -22,7 +22,7 @@ const view = computed(() =>
   buildPermissionView(props.request.resolved, props.request.previous, props.request.dangerousTools),
 );
 
-/** 最も強い警告（ワイルドカードの越境先）を含むときは、確認チェックを必須にする */
+/** 最も強い警告（ワイルドカードの越境先・専用 AI ターミナル）を含むときは、確認チェックを必須にする */
 const understood = ref(false);
 watch(
   () => props.request.requestId,
@@ -78,6 +78,11 @@ const hasAnyRow = computed(() => view.value.rows.length > 0);
               <div v-if="r.wildcard" class="why">{{ t("wildcardWarning") }}</div>
               <div v-else class="why neutral">{{ t("pinnedToId") }}</div>
             </template>
+            <template v-else-if="r.kind === 'aiTerminal'">
+              <span class="kind">{{ t("kindAiTerminal") }}</span>
+              <strong>{{ t("aiTerminalSummary", { spec: r.value }) }}</strong>
+              <div class="why">{{ t("aiTerminalWarning") }}</div>
+            </template>
             <template v-else>
               <span class="kind">{{ t("kindMemory") }}</span>
               {{ t("memoryMax", { bytes: r.value }) }}
@@ -96,6 +101,7 @@ const hasAnyRow = computed(() => view.value.rows.length > 0);
             <li v-for="r in view.removed" :key="r.kind + r.value">
               <s v-if="r.kind === 'target'">{{ r.label }}</s>
               <s v-else-if="r.kind === 'memory'">{{ t("memoryMax", { bytes: r.value }) }}</s>
+              <s v-else-if="r.kind === 'aiTerminal'">{{ t("aiTerminalSummary", { spec: r.value }) }}</s>
               <s v-else><code>{{ r.value }}</code></s>
             </li>
           </ul>
@@ -331,6 +337,9 @@ const hasAnyRow = computed(() => view.value.rows.length > 0);
     "kindTool": "MCP tool",
     "kindTarget": "Reach worktree",
     "kindMemory": "Memory",
+    "kindAiTerminal": "AI terminal",
+    "aiTerminalSummary": "Open dedicated AI terminals ({spec})",
+    "aiTerminalWarning": "Starts an agent that runs with the same authority as you (it can run arbitrary commands and edit files in this worktree). The app can type into it, read its output and answer its permission dialogs. This is the strongest permission.",
     "dangerTool": "Same authority as you (can run arbitrary commands in a terminal or start agents)",
     "wildcardWarning": "Includes worktrees created in the future, and reaches terminals in the main clone as well. This is the strongest permission.",
     "pinnedToId": "Fixed to this worktree by its ID at approval time (renaming it does not change the target)",
@@ -338,7 +347,7 @@ const hasAnyRow = computed(() => view.value.rows.length > 0);
     "noPerms": "No permissions requested. The app cannot call any API.",
     "ownOnly": "MCP calls reach only \"{name}\" (this app's own worktree).",
     "removed": "No longer requested",
-    "understand": "I understand this lets the app reach worktrees I did not choose individually.",
+    "understand": "I understand the permissions marked in red give this app authority beyond what I chose individually.",
     "changeHint": "Denying stops the app.",
     "waiting": "{count} more approval request(s) are waiting.",
     "approve": "Allow and start",
@@ -361,6 +370,9 @@ const hasAnyRow = computed(() => view.value.rows.length > 0);
     "kindTool": "MCP ツール",
     "kindTarget": "届くワークツリー",
     "kindMemory": "メモリー",
+    "kindAiTerminal": "AI ターミナル",
+    "aiTerminalSummary": "専用の AI ターミナルを開く（{spec}）",
+    "aiTerminalWarning": "あなたと同じ権限で動くエージェントを起動します（このワークツリーで任意のコマンド実行やファイル編集ができます）。アプリはそのエージェントへ入力し、出力を読み、許可ダイアログに回答できます。最も強い権限です。",
     "dangerTool": "あなたと同等の権限です（端末で任意のコマンドを実行したり、エージェントを起動したりできます）",
     "wildcardWarning": "今後作られるワークツリーも含み、メインのクローンの端末にも届きます。最も強い権限です。",
     "pinnedToId": "承認時点の ID でこのワークツリーに固定されます（改名しても対象は変わりません）",
@@ -368,7 +380,7 @@ const hasAnyRow = computed(() => view.value.rows.length > 0);
     "noPerms": "権限は申請されていません。アプリはどの API も呼べません。",
     "ownOnly": "MCP 呼び出しは「{name}」（このアプリ自身のワークツリー）だけに届きます。",
     "removed": "申請から外れたもの",
-    "understand": "個別に選んでいないワークツリーにもアプリが届くことを理解しました。",
+    "understand": "赤く表示された権限が、個別に選んでいない範囲にまでアプリの権限を広げることを理解しました。",
     "changeHint": "拒否するとアプリは停止します。",
     "waiting": "ほかに {count} 件の承認要求が待っています。",
     "approve": "許可して起動",
