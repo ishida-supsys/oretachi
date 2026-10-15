@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { artifactSrcdocSourceKey, buildReactSrcdoc } from "./reactArtifactSrcdoc";
+import { artifactSrcdocSourceKey, buildReactSrcdoc, buildVendorHead } from "./reactArtifactSrcdoc";
 import { ARTIFACT_STANDALONE_FLAG } from "./artifactMemory";
 
 describe("artifactSrcdocSourceKey", () => {
@@ -53,5 +53,19 @@ describe("buildReactSrcdoc", () => {
     // ブリッジは読み込み時に一度だけフラグを見るので、順序が逆だと効かない
     expect(flagAt).toBeGreaterThan(-1);
     expect(flagAt).toBeLessThan(html.indexOf("__oretachi="));
+  });
+});
+
+describe("buildVendorHead の CSP", () => {
+  const csp = /http-equiv="Content-Security-Policy" content="([^"]*)"/.exec(buildVendorHead("", "", "", ""))?.[1] ?? "";
+
+  it("WebAssembly の instantiate に必要な 'unsafe-eval' を許可している（アプリの wasm 実行 #377）", () => {
+    // 'unsafe-eval' は Chromium では WebAssembly のコンパイルも許可する。外すと fs.readBytes → instantiate が動かない
+    expect(csp).toContain("script-src 'unsafe-inline' 'unsafe-eval'");
+  });
+
+  it("外部通信は許可しない（既定が 'none' で connect-src を足していない）", () => {
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).not.toContain("connect-src");
   });
 });
