@@ -52,6 +52,12 @@ export function subWindowCommandFor(
         command: "app_subwindow_set_size",
         args: { id: requireId(params), width: requireNumber(params, "width"), height: requireNumber(params, "height") },
       };
+    case "setAttributes": {
+      // 属性の可否（alwaysOnTop の権限・生成時にしか決まらない属性の拒否など）は Rust 側で検査する
+      const attributes = params.attributes;
+      if (!isObject(attributes)) throw new Error("attributes はオブジェクトで指定してください");
+      return { command: "app_subwindow_set_attributes", args: { id: requireId(params), attributes } };
+    }
     case "startDrag":
       return { command: "app_subwindow_start_drag", args: {} };
     default:

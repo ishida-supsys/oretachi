@@ -2556,6 +2556,7 @@ pub fn run() {
             app_subwindow::app_subwindow_list,
             app_subwindow::app_subwindow_set_position,
             app_subwindow::app_subwindow_set_size,
+            app_subwindow::app_subwindow_set_attributes,
             app_subwindow::app_subwindow_start_drag,
             app_instance::app_set_memory,
             app_instance::app_get_memory,

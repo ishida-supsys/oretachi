@@ -178,18 +178,7 @@ pub fn validate_open(perm: &SubWindowPermission, req: &OpenRequest) -> Result<Va
         (Some(x), Some(y)) => Some(validate_position(perm, x, y)?),
         _ => return Err("x と y はそろえて指定してください".to_string()),
     };
-    let title = match req.title.as_deref().map(str::trim) {
-        None | Some("") => None,
-        Some(t) => {
-            if t.chars().count() > MAX_TITLE_CHARS {
-                return Err(format!("title は {} 文字以内にしてください", MAX_TITLE_CHARS));
-            }
-            if t.chars().any(|c| c.is_control()) {
-                return Err("title に制御文字は使えません".to_string());
-            }
-            Some(t.to_string())
-        }
-    };
+    let title = validate_title(req.title.as_deref())?;
     let params = req.params.clone().unwrap_or(serde_json::Value::Null);
     let size = serde_json::to_string(&params).map_err(|e| e.to_string())?.len();
     if size > MAX_PARAMS_BYTES {
@@ -207,6 +196,81 @@ pub fn validate_open(perm: &SubWindowPermission, req: &OpenRequest) -> Result<Va
         resizable: req.resizable.unwrap_or(!frameless),
         params,
     })
+}
+
+/// `title` の検査。空（空白のみ含む）は `None`（既定のタイトルに戻す）。
+fn validate_title(raw: Option<&str>) -> Result<Option<String>, String> {
+    match raw.map(str::trim) {
+        None | Some("") => Ok(None),
+        Some(t) => {
+            if t.chars().count() > MAX_TITLE_CHARS {
+                return Err(format!("title は {} 文字以内にしてください", MAX_TITLE_CHARS));
+            }
+            if t.chars().any(|c| c.is_control()) {
+                return Err("title に制御文字は使えません".to_string());
+            }
+            Ok(Some(t.to_string()))
+        }
+    }
+}
+
+/// タイトルには必ずアプリ名を付ける（枠なしでもタスクバーで、どのアプリのウィンドウか分かる）。
+fn window_title(title: Option<&str>, app_name: &str) -> String {
+    match title {
+        Some(t) => format!("{} — {} (oretachi app)", t, app_name),
+        None => format!("{} — oretachi app", app_name),
+    }
+}
+
+/// 開いたあとに変えられる属性。`transparent` / `frameless` は生成時に決まる性質なので変更不可。
+/// `visible` / `focus` / `ignoreCursorEvents` は、ユーザーが見つけて閉じられなくなる・入力を奪えるため足さない。
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AttributeChanges {
+    pub always_on_top: Option<bool>,
+    pub resizable: Option<bool>,
+    /// `Some(None)` はタイトルを既定に戻す
+    pub title: Option<Option<String>>,
+}
+
+/// `setAttributes` の指定を、承認済みの権限セット `perm` に照らして検査する（1 つでも不可なら全体を拒否）。
+pub fn validate_attributes(perm: &SubWindowPermission, attrs: &serde_json::Value) -> Result<AttributeChanges, String> {
+    let map = attrs.as_object().ok_or_else(|| "属性はオブジェクトで指定してください".to_string())?;
+    if map.is_empty() {
+        return Err("変更する属性を 1 つ以上指定してください".to_string());
+    }
+    let mut out = AttributeChanges::default();
+    for (key, value) in map {
+        match key.as_str() {
+            "alwaysOnTop" => {
+                let on = value.as_bool().ok_or_else(|| "alwaysOnTop は true / false で指定してください".to_string())?;
+                if on && !perm.always_on_top {
+                    return Err("alwaysOnTop は承認されていません（manifest の subWindow.alwaysOnTop）".to_string());
+                }
+                out.always_on_top = Some(on);
+            }
+            "resizable" => {
+                out.resizable =
+                    Some(value.as_bool().ok_or_else(|| "resizable は true / false で指定してください".to_string())?);
+            }
+            "title" => {
+                let t = match value {
+                    serde_json::Value::Null => None,
+                    serde_json::Value::String(t) => validate_title(Some(t))?,
+                    _ => return Err("title は文字列で指定してください".to_string()),
+                };
+                out.title = Some(t);
+            }
+            "transparent" | "frameless" => {
+                return Err(format!("{} は生成時に決まる性質なので、開いたあとには変えられません", key));
+            }
+            other => {
+                // キー名は呼び出し側の自由入力なので、エラー文字列（デバッグログへ載る）が膨らまないよう切り詰める
+                let shown: String = other.chars().take(40).collect();
+                return Err(format!("変更できない属性です: {}（変更できるのは alwaysOnTop / resizable / title）", shown));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// 承認済みの権限セットに、既存のウィンドウ 1 件が収まるか（再承認で権限が狭まったときの判定）。
@@ -433,11 +497,7 @@ pub async fn app_subwindow_open(
     }
 
     let app_name = crate::app_instance::instance_app_name(&app, &ctx);
-    // タイトルには必ずアプリ名を付ける（枠なしでもタスクバーで、どのアプリのウィンドウか分かる）
-    let title = match &v.title {
-        Some(t) => format!("{} — {} (oretachi app)", t, app_name),
-        None => format!("{} — oretachi app", app_name),
-    };
+    let title = window_title(v.title.as_deref(), &app_name);
     let mut builder = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
         .title(title)
         .inner_size(v.width as f64, v.height as f64)
@@ -592,6 +652,51 @@ pub async fn app_subwindow_set_size(
     Ok(())
 }
 
+/// 開いたあとに属性（`alwaysOnTop` / `resizable` / `title`）を変える。検査は `validate_attributes` に集約し、
+/// 1 つでも不可なら何も適用しない。
+#[tauri::command]
+pub async fn app_subwindow_set_attributes(
+    window: tauri::Window,
+    app: AppHandle,
+    id: String,
+    attributes: serde_json::Value,
+) -> Result<(), String> {
+    let (ctx, perm) = caller(&window, &app, "setAttributes")?;
+    let label = match owned_label(&app, &ctx, &id) {
+        Ok(l) => l,
+        Err(e) => return denied(&app, &ctx, "setAttributes", e),
+    };
+    let changes = match validate_attributes(&perm, &attributes) {
+        Ok(c) => c,
+        Err(e) => return denied(&app, &ctx, "setAttributes", e),
+    };
+    let w = app.get_webview_window(&label).ok_or_else(|| format!("サブウィンドウ '{}' は開いていません", id))?;
+    if let Some(on) = changes.always_on_top {
+        w.set_always_on_top(on).map_err(|e| e.to_string())?;
+        // 再承認で権限が狭まったときの判定（entry_fits）が現状を見られるように記録する
+        with_inner(&app, |i| {
+            if let Some(e) = i.by_label.get_mut(&label) {
+                e.always_on_top = on;
+            }
+        });
+    }
+    if let Some(r) = changes.resizable {
+        w.set_resizable(r).map_err(|e| e.to_string())?;
+    }
+    if let Some(t) = &changes.title {
+        let app_name = crate::app_instance::instance_app_name(&app, &ctx);
+        w.set_title(&window_title(t.as_deref(), &app_name)).map_err(|e| e.to_string())?;
+    }
+    crate::app_instance::add_log(
+        &app,
+        &ctx.worktree_id,
+        &ctx.artifact_id,
+        "info",
+        format!("許可: subWindow.setAttributes {} {}", id, attributes),
+    );
+    Ok(())
+}
+
 /// 枠なしウィンドウをドラッグで動かす。**呼んだウィンドウ自身**だけを動かす（マウスが押されている
 /// ウィンドウから呼ぶ必要があるため、id は取らない）。位置の権限（`subWindow.position`）が要る。
 #[tauri::command]
@@ -686,6 +791,44 @@ mod tests {
         let big = "x".repeat(MAX_PARAMS_BYTES);
         assert!(validate_open(&p, &req(serde_json::json!({ "params": big }))).is_err());
         assert!(validate_open(&p, &req(serde_json::json!({ "params": { "a": 1 } }))).is_ok());
+    }
+
+    #[test]
+    fn attributes_respect_the_approved_grant() {
+        let j = |v: serde_json::Value| validate_attributes(&perm(), &v);
+        // 申請していない alwaysOnTop を true にはできない。false は常に通る
+        assert!(j(serde_json::json!({ "alwaysOnTop": true })).unwrap_err().contains("alwaysOnTop"));
+        assert_eq!(j(serde_json::json!({ "alwaysOnTop": false })).unwrap().always_on_top, Some(false));
+        let c = validate_attributes(&full(), &serde_json::json!({ "alwaysOnTop": true, "resizable": false })).unwrap();
+        assert_eq!((c.always_on_top, c.resizable), (Some(true), Some(false)));
+        // 生成時に決まる性質・足していない属性は拒否
+        for key in ["transparent", "frameless"] {
+            assert!(validate_attributes(&full(), &serde_json::json!({ key: false })).unwrap_err().contains("生成時"));
+        }
+        let long = "k".repeat(1000);
+        assert!(validate_attributes(&full(), &serde_json::json!({ long.clone(): 1 })).unwrap_err().len() < 300);
+        for key in ["visible", "focus", "ignoreCursorEvents", "width"] {
+            assert!(validate_attributes(&full(), &serde_json::json!({ key: true })).is_err(), "{key}");
+        }
+        // 1 つでも不可なら全体を拒否
+        assert!(j(serde_json::json!({ "resizable": true, "alwaysOnTop": true })).is_err());
+        assert!(j(serde_json::json!({})).is_err());
+        assert!(j(serde_json::json!("x")).is_err());
+        assert!(j(serde_json::json!({ "resizable": "yes" })).is_err());
+    }
+
+    #[test]
+    fn attribute_title_is_bounded_and_resettable() {
+        let j = |v: serde_json::Value| validate_attributes(&perm(), &v);
+        assert_eq!(j(serde_json::json!({ "title": " hi " })).unwrap().title, Some(Some("hi".to_string())));
+        assert_eq!(j(serde_json::json!({ "title": "" })).unwrap().title, Some(None));
+        assert_eq!(j(serde_json::json!({ "title": null })).unwrap().title, Some(None));
+        assert!(j(serde_json::json!({ "title": "a".repeat(101) })).is_err());
+        assert!(j(serde_json::json!({ "title": "a\nb" })).is_err());
+        assert!(j(serde_json::json!({ "title": 1 })).is_err());
+        // タイトルには必ずアプリ名が付く
+        assert!(window_title(Some("hi"), "App").contains("App"));
+        assert!(window_title(None, "App").contains("App"));
     }
 
     fn key() -> Key {

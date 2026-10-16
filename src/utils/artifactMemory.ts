@@ -87,7 +87,7 @@ export const ARTIFACT_BRIDGE_PUSH_SUB_WINDOW_EVENT = "subWindow.event";
 
 /**
  * 専用サブウィンドウ API の method 接頭辞。`subWindow.open` / `.close` / `.list` / `.setPosition` /
- * `.setSize` / `.startDrag`。params は Rust コマンドの引数に写す（`subWindowBridge.ts`）。
+ * `.setSize` / `.setAttributes` / `.startDrag`。params は Rust コマンドの引数に写す（`subWindowBridge.ts`）。
  * 権限（manifest の `subWindow`）・上限・見た目の検査は Rust 側（`app_subwindow`）の関門で、ここは中継だけ。
  */
 export const ARTIFACT_BRIDGE_METHOD_SUB_WINDOW_PREFIX = "subWindow.";
@@ -755,6 +755,7 @@ export const ARTIFACT_BRIDGE_JS =
   "    list:function(){return sw('list',{});}," +
   "    setPosition:function(id,x,y){return sw('setPosition',{id:id,x:x,y:y});}," +
   "    setSize:function(id,width,height){return sw('setSize',{id:id,width:width,height:height});}," +
+  "    setAttributes:function(id,attributes){return sw('setAttributes',{id:id,attributes:attributes});}," +
   // マウスが押されている間に呼ぶこと（mousedown ハンドラから）。枠なしウィンドウをドラッグで動かす
   "    startDrag:function(){return sw('startDrag',{});}," +
   "    onClosed:function(fn){" +

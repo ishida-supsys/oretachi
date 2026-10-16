@@ -163,6 +163,7 @@ artifact_file(command: "delete", id: "<アプリ id>", project_dir: <作業デ�
 | `subWindow.close(id)` | 自分が開いたウィンドウを閉じる |
 | `subWindow.list()` | 開いているウィンドウの一覧（`id`・大きさ・見た目・`params`） |
 | `subWindow.setPosition(id, x, y)` / `subWindow.setSize(id, width, height)` | 移動（`position` が要る）/ 大きさの変更（`maxWidth` / `maxHeight` の範囲内） |
+| `subWindow.setAttributes(id, { alwaysOnTop, resizable, title })` | 開いたあとの属性変更（指定したキーだけ。1 つでも権限の検査に通らなければ何も適用しない）。`alwaysOnTop: true` は申請した場合だけ（`false` はいつでも可）。`title: null` か空文字で既定のタイトルに戻る（アプリ名は常に付く）。`transparent` / `frameless` は生成時に決まる性質なので変えられない。`visible`（隠す）・`focus`・`ignoreCursorEvents`（クリック透過）は、ユーザーが見つけて閉じられなくなる・入力を奪えるため提供しない |
 | `subWindow.startDrag()` | 枠なしウィンドウをドラッグで動かす。**開かれたウィンドウの `mousedown` ハンドラの中で**呼ぶ（`position` が要る） |
 | `subWindow.onClosed(fn)` | ユーザーがウィンドウを閉じたとき `{ event: "closed", id }` を受け取る。解除関数が返る（`close()` で自分で閉じたときは来ない） |
 
