@@ -804,7 +804,7 @@ export const ARTIFACT_BRIDGE_JS =
   "  };" +
   // ── マイクの音声入力（manifest の `audio` 権限が承認されたアプリだけが使える）──
   // 取得は Rust 側。PCM はモノラル・i16 LE（Int16Array）で約 100ms ごとに届く。権限・上限・停止の関門は Rust 側
-  "  var audioDataL=[],audioEndL=[];" +
+  "  var audioDataL=[],audioEndL=[],audioMin=null;" +
   "  function pcmFromBase64(b){" +
   "    var bin=atob(b),n=bin.length>>1,out=new Int16Array(n);" +
   "    for(var i=0;i<n;i++){out[i]=(bin.charCodeAt(2*i)|(bin.charCodeAt(2*i+1)<<8))<<16>>16;}" +
@@ -812,6 +812,8 @@ export const ARTIFACT_BRIDGE_JS =
   "  }" +
   "  function emitAudioEvent(p){" +
   "    if(!p||typeof p!=='object')return;" +
+  // この文書が最後に start して得た streamId より古いストリーム（リロード前のもの）の通知は捨てる
+  "    if(audioMin!==null&&typeof p.streamId==='number'&&p.streamId<audioMin)return;" +
   "    if(p.kind==='data'){" +
   "      var pcm;try{pcm=pcmFromBase64(String(p.data||''));}catch(err){return;}" +
   "      audioDataL.slice().forEach(function(fn){try{fn(pcm,{streamId:p.streamId,seq:p.seq});}catch(err){}});" +
@@ -823,7 +825,10 @@ export const ARTIFACT_BRIDGE_JS =
   "    start:function(opts){" +
   "      var p={};" +
   "      if(opts&&opts.sampleRate!==undefined)p.sampleRate=opts.sampleRate;" +
-  "      return call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_AUDIO_PREFIX) + "+'start',p," + BRIDGE_LONG_TIMEOUT_MS + ");" +
+  "      return call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_AUDIO_PREFIX) + "+'start',p," + BRIDGE_LONG_TIMEOUT_MS + ").then(function(r){" +
+  "        if(r&&typeof r.streamId==='number')audioMin=r.streamId;" +
+  "        return r;" +
+  "      });" +
   "    }," +
   "    stop:function(){return call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_AUDIO_PREFIX) + "+'stop',{});}," +
   "    onData:function(fn){" +

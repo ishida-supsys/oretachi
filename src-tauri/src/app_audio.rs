@@ -20,7 +20,10 @@
 //!
 //! アプリの `stop`、`maxSeconds` への到達、リロード（再承認の承認後を含む）、インスタンスの停止（承認の取り消し・
 //! ウィンドウを閉じる・アーティファクトの削除を含む）、起動画面の「録音を止める」、デバイスのエラー。
-//! 止まったら必ず `{ kind: "ended", reason }` を 1 回だけ送る（インスタンスの停止を除く。送り先が無いため）。
+//! 止まったら `{ kind: "ended", reason }` を 1 回だけ送る。**インスタンスの停止とリロードでは送らない**
+//! （送り先の iframe が居なくなる・入れ替わる。新しい iframe が古いストリームの終了を自分のものと取り違えない）。
+//! リロードでは、新しい iframe が `start` し直す。`start` がアプリへ失敗を返したストリームも、何も送らない。
+//! `maxSeconds` は送ったサンプル数で数え、壁時計の期限（+2 秒）も持つ（デバイスが黙り込んでも host が強制する）。
 //! 録音中は起動画面に「● 録音中」を出し、実行ウィンドウとサブウィンドウのタイトルに `● 録音中 — ` を付ける。
 //! Web ビューア（HTTP）には出さない。
 //!
@@ -60,9 +63,9 @@ pub enum EndReason {
     UserStop,
     /// `maxSeconds` に達した
     MaxSeconds,
-    /// ホットリロード（再承認の承認後を含む）
+    /// ホットリロード（再承認の承認後を含む）。アプリへは `ended` を送らない（ログにだけ残る）
     Reload,
-    /// インスタンスの停止（承認の取り消し・ウィンドウを閉じる・削除を含む）
+    /// インスタンスの停止（承認の取り消し・ウィンドウを閉じる・削除を含む）。アプリへは `ended` を送らない
     Stopped,
     /// デバイスのエラー（抜かれた・使用中になったなど）
     Error,
@@ -85,6 +88,9 @@ impl EndReason {
 #[derive(Default)]
 struct Shared {
     stop: AtomicBool,
+    /// `start` がアプリへ失敗を返した（あるいは停止済みで返せなかった）ストリーム。アプリは streamId を知らないので、
+    /// 後から `data` / `ended` を送らない
+    silent: AtomicBool,
     reason: Mutex<Option<EndReason>>,
 }
 
@@ -100,6 +106,14 @@ impl Shared {
 
     fn stopped(&self) -> bool {
         self.stop.load(Ordering::SeqCst)
+    }
+
+    fn mark_silent(&self) {
+        self.silent.store(true, Ordering::SeqCst);
+    }
+
+    fn is_silent(&self) -> bool {
+        self.silent.load(Ordering::SeqCst)
     }
 
     fn reason(&self) -> Option<EndReason> {
@@ -438,9 +452,20 @@ fn apply_title(current: &str, recording: bool) -> String {
     }
 }
 
+/// 録音の状態に合わせて、実行ウィンドウとサブウィンドウのタイトルの印を付け外しする。
+/// サブウィンドウを開いた・タイトルを変えた直後にも呼ぶ（アプリが印を消せないように）。
+pub fn sync_titles(app: &AppHandle, instance_label: &str, key_worktree: &str, key_artifact: &str) {
+    let recording = app.state::<AppAudioRegistry>().is_recording(key_worktree, key_artifact);
+    apply_titles(app, instance_label, recording);
+}
+
 /// 録音の状態が変わったので、タイトルと起動画面の状態を更新する。
 fn refresh_recording(app: &AppHandle, instance_label: &str, key: &Key) {
-    let recording = app.state::<AppAudioRegistry>().is_recording(&key.0, &key.1);
+    sync_titles(app, instance_label, &key.0, &key.1);
+    crate::app_instance::emit_changed(app, &key.0, &key.1);
+}
+
+fn apply_titles(app: &AppHandle, instance_label: &str, recording: bool) {
     let labels = std::iter::once(instance_label.to_string())
         .chain(crate::app_subwindow::labels_for_instance(app, instance_label));
     for label in labels {
@@ -451,7 +476,6 @@ fn refresh_recording(app: &AppHandle, instance_label: &str, key: &Key) {
             let _ = w.set_title(&next);
         }
     }
-    crate::app_instance::emit_changed(app, &key.0, &key.1);
 }
 
 // ─── ストリーム ───────────────────────────────────────────────────────
@@ -478,29 +502,23 @@ fn emit_event(app: &AppHandle, label: &str, payload: serde_json::Value) {
     crate::app_subwindow::emit_to_instance(app, label, "app-audio-event", payload);
 }
 
-/// 専用スレッド。開いた結果を `open_tx` へ返し、以後は止まるまで PCM を送り続ける。
-fn capture_thread(p: StreamParams, open_tx: std::sync::mpsc::SyncSender<Result<String, String>>) {
-    let capture = match backend::open() {
-        Ok(c) => c,
-        Err(e) => {
-            let _ = open_tx.send(Err(e));
-            return;
-        }
-    };
-    let device = capture.info.device.clone();
-    let _ = open_tx.send(Ok(format!(
-        "{}（入力 {}Hz / {}ch → {}Hz モノラル）",
-        device, capture.info.rate, capture.info.channels, p.rate
-    )));
-
-    let started = Instant::now();
+/// 止めるまで PCM を送り続ける。戻り値は (終了の理由, 送った音声の秒数, デバイスのエラー)。
+/// `capture` はここで手放す（マイクの使用中表示を、後始末より先に消す）。
+fn run_loop(p: &StreamParams, capture: backend::Capture, started: Instant) -> (EndReason, f64, Option<String>) {
     let mut conv = PcmConverter::new(capture.info.rate, capture.info.channels, p.rate);
     let mut chunker = Chunker::new(p.rate, p.max_seconds);
     let mut seq: u64 = 0;
     let mut pcm: Vec<i16> = Vec::new();
     let mut chunks: Vec<Vec<i16>> = Vec::new();
+    // サンプル数で数えた上限（正確）に加えて、壁時計の期限も持つ。デバイスが黙り込んでサンプルが届かなくても、
+    // maxSeconds を host が強制できるように（余裕は処理の遅れの分）
+    let wall_limit = Duration::from_secs(p.max_seconds as u64) + Duration::from_secs(2);
 
     let send = |chunks: &mut Vec<Vec<i16>>, seq: &mut u64| {
+        if p.shared.is_silent() {
+            chunks.clear();
+            return;
+        }
         for c in chunks.drain(..) {
             *seq += 1;
             emit_event(
@@ -535,20 +553,28 @@ fn capture_thread(p: StreamParams, open_tx: std::sync::mpsc::SyncSender<Result<S
                 p.shared.request_stop(EndReason::Error);
             }
         }
+        if started.elapsed() >= wall_limit {
+            p.shared.request_stop(EndReason::MaxSeconds);
+        }
     }
 
     let reason = p.shared.reason().unwrap_or(EndReason::Error);
     // マイクを先に手放す（録音の表示が消えるのを待たせない）
     drop(capture);
-    // 端数を送る（インスタンスの停止では送り先が無いので送らない）
-    if reason != EndReason::Stopped {
+    // 端数を送る。送り先の iframe が居なくなる（インスタンスの停止・リロード）ときは送らない
+    if !matches!(reason, EndReason::Stopped | EndReason::Reload) {
         if let Some(rest) = chunker.flush() {
             chunks.push(rest);
             send(&mut chunks, &mut seq);
         }
     }
+    (reason, chunker.emitted() as f64 / p.rate.max(1) as f64, device_error)
+}
 
-    // 枠を先に空ける（アプリが ended の中で start し直せるように）。自分の枠のときだけ外す
+/// ストリームの後始末。**枠を先に空け**（アプリが `ended` の中で `start` し直せるように）、ログと表示を更新して、
+/// 最後に `ended` を送る。パニックしたときもここを通る（枠と「録音中」の表示を残さない）。
+fn finish_stream(p: &StreamParams, reason: EndReason, secs: f64, wall: f64, device_error: Option<String>) {
+    // 自分の枠のときだけ外す（古いスレッドが、新しいストリームの枠を消さない）
     let removed = p
         .app
         .state::<AppAudioRegistry>()
@@ -556,8 +582,6 @@ fn capture_thread(p: StreamParams, open_tx: std::sync::mpsc::SyncSender<Result<S
         .lock()
         .map(|mut i| i.remove_if(&p.label, p.stream_id))
         .unwrap_or(false);
-    let secs = chunker.emitted() as f64 / p.rate.max(1) as f64;
-    let wall = started.elapsed().as_secs_f64();
     let detail = match &device_error {
         Some(e) => format!("、デバイスのエラー: {}", e),
         None => String::new(),
@@ -579,13 +603,42 @@ fn capture_thread(p: StreamParams, open_tx: std::sync::mpsc::SyncSender<Result<S
     if removed {
         refresh_recording(&p.app, &p.label, &p.key);
     }
-    if reason != EndReason::Stopped {
+    // インスタンスの停止・リロードでは、送り先の iframe が入れ替わる・無くなるので送らない（新しい iframe が
+    // 古いストリームの終了を自分のものと取り違えない）。`start` が失敗を返したストリームも、アプリは知らない
+    if !matches!(reason, EndReason::Stopped | EndReason::Reload) && !p.shared.is_silent() {
         emit_event(
             &p.app,
             &p.label,
             serde_json::json!({ "kind": "ended", "streamId": p.stream_id, "reason": reason.as_str() }),
         );
     }
+}
+
+/// 専用スレッド。開いた結果を `open_tx` へ返し、以後は止まるまで PCM を送り続ける。
+fn capture_thread(p: StreamParams, open_tx: std::sync::mpsc::SyncSender<Result<String, String>>) {
+    let capture = match backend::open() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = open_tx.send(Err(e));
+            return;
+        }
+    };
+    let _ = open_tx.send(Ok(format!(
+        "{}（入力 {}Hz / {}ch → {}Hz モノラル）",
+        capture.info.device, capture.info.rate, capture.info.channels, p.rate
+    )));
+
+    let started = Instant::now();
+    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run_loop(&p, capture, started)));
+    let (reason, secs, device_error) = match outcome {
+        Ok(v) => v,
+        Err(_) => {
+            // マイクは unwind で手放される。枠と表示だけが残らないようにここで片付ける
+            p.shared.request_stop(EndReason::Error);
+            (EndReason::Error, 0.0, Some("録音スレッドが異常終了しました".to_string()))
+        }
+    };
+    finish_stream(&p, reason, secs, started.elapsed().as_secs_f64(), device_error);
 }
 
 // ─── Tauri コマンド（appinst-* ウィンドウからだけ） ─────────────────────
@@ -644,12 +697,25 @@ pub async fn app_audio_start(
         release_reservation(&app);
         return fail_open(&app, &ctx, format!("録音のスレッドを作れませんでした: {}", e));
     }
-    let opened = tauri::async_runtime::spawn_blocking(move || open_rx.recv_timeout(OPEN_TIMEOUT))
-        .await
-        .map_err(|e| e.to_string())?;
+    let opened = match tauri::async_runtime::spawn_blocking(move || open_rx.recv_timeout(OPEN_TIMEOUT)).await {
+        Ok(v) => v,
+        Err(e) => {
+            // 待ちが壊れた。スレッドは走っているかもしれないので、止めて、アプリには何も送らせない
+            shared.mark_silent();
+            shared.request_stop(EndReason::Error);
+            release_reservation(&app);
+            return fail_open(&app, &ctx, format!("マイクを開く待ちが壊れました: {}", e));
+        }
+    };
     match opened {
         Ok(Ok(desc)) => {
-            // 開く間に停止・リロードされていたら、その理由で終わらせる（スレッドが後始末をする）
+            // 開く間に停止・リロードが入っていた。アプリへは成功を返さない（返しても終了の通知が先に届いて
+            // 取り違える）。スレッドは理由どおりに後始末をするが、アプリは streamId を知らないので何も送らせない
+            if shared.stopped() {
+                shared.mark_silent();
+                release_reservation(&app);
+                return fail_open(&app, &ctx, "録音は開始の直後に停止されました（停止・リロード）".to_string());
+            }
             crate::app_instance::add_log(
                 &app,
                 &ctx.worktree_id,
@@ -665,6 +731,8 @@ pub async fn app_audio_start(
             fail_open(&app, &ctx, e)
         }
         Err(_) => {
+            // 時間切れ。アプリには失敗を返すので、遅れて開いても何も送らせず、すぐ止める
+            shared.mark_silent();
             shared.request_stop(EndReason::Error);
             release_reservation(&app);
             fail_open(&app, &ctx, "マイクを開くのに時間がかかりすぎました".to_string())

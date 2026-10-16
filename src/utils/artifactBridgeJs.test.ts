@@ -663,6 +663,27 @@ describe("ARTIFACT_BRIDGE_JS: audio（マイクの音声入力）", () => {
     expect(data).toHaveLength(0);
   });
 
+  it("start が返した streamId より古いストリーム（リロード前）の data / ended は捨てる", async () => {
+    const { bridge, posted, reply, push } = setupBridge({});
+    const a = audioOf(bridge);
+    const data: number[] = [];
+    const ended: number[] = [];
+    a.onData((_pcm, m) => data.push(m.streamId));
+    a.onEnded((i) => ended.push(i.streamId));
+    const ev = (payload: Record<string, unknown>) =>
+      push({ [ARTIFACT_BRIDGE_PUSH_MARKER]: true, event: "audio.event", payload });
+    const p = a.start();
+    reply(posted[posted.length - 1].requestId, { ok: true, result: { streamId: 10, sampleRate: 16000, maxSeconds: 60 } });
+    await p;
+    // 旧ストリーム（streamId 9）の取りこぼしと終了は届けない。自分のもの（10 以上）は届ける
+    ev({ kind: "data", streamId: 9, seq: 99, data: b64([1]) });
+    ev({ kind: "ended", streamId: 9, reason: "stop" });
+    ev({ kind: "data", streamId: 10, seq: 1, data: b64([1]) });
+    ev({ kind: "ended", streamId: 10, reason: "maxSeconds" });
+    expect(data).toEqual([10]);
+    expect(ended).toEqual([10]);
+  });
+
   it("壊れたペイロードや親以外からの通知は無視し、1 つの listener の例外が他を止めない", () => {
     const { bridge, push } = setupBridge({});
     const a = audioOf(bridge);

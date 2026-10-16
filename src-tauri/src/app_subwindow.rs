@@ -529,6 +529,8 @@ pub async fn app_subwindow_open(
         destroy(&app, &label);
         return Err("サブウィンドウは開いた直後に閉じられました（アプリの停止かユーザー操作）".to_string());
     }
+    // 録音中に開いたウィンドウにも「録音中」の印を付ける
+    crate::app_audio::sync_titles(&app, &ctx.instance_label, &ctx.worktree_id, &ctx.artifact_id);
     crate::app_instance::add_log(
         &app,
         &ctx.worktree_id,
@@ -686,6 +688,8 @@ pub async fn app_subwindow_set_attributes(
     if let Some(t) = &changes.title {
         let app_name = crate::app_instance::instance_app_name(&app, &ctx);
         w.set_title(&window_title(t.as_deref(), &app_name)).map_err(|e| e.to_string())?;
+        // アプリが録音中の印を消せないように、付け直す
+        crate::app_audio::sync_titles(&app, &ctx.instance_label, &ctx.worktree_id, &ctx.artifact_id);
     }
     crate::app_instance::add_log(
         &app,
