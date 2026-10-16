@@ -6,6 +6,26 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.36.0] - 2026-10-16
+
+### Added
+- アプリケーション形式アーティファクトを追加した。manifest による権限申請・承認、常駐ライフサイクル、MCP 関門を備える (#370)
+- アプリ API: メモリ（最大サイズ必須）とホットリロード (#371)
+- アプリ API: ファイルシステム（パス解決と artifact:// の基盤）(#373)
+- アプリ API: インスタンス専用 AI ターミナル (#372)
+- アプリ API: データベース（SQLite、authorizer・上限つき）(#374)
+- アプリ API: ネットワーク（Rust 経由のプロキシ）(#375)
+- アプリ API: WebSocket (net.ws) (#398)
+- アプリ API: wasm 実行（fs.readBytes → instantiate）(#377)
+- アプリ API: 専用サブウィンドウ（透明・枠なし）と、開いたあとの属性変更 setAttributes (#376, #394)
+- アプリ API: 音声入力（マイクの生音声の取得）(#395)
+- ホームに「アプリ一覧」ページを追加し、承認済みアプリの管理を設定画面から移した (#393)
+
+### Fixed
+- 専用 AI ターミナルの initialPrompt で \" が欠ける問題を修正した (#389)
+- アプリのメモリ API に flush の最大待ちを設け、拒否された値を巻き戻すようにした (#387)
+- 起動画面の権限表示で fs/db がメモリー表記になる不具合と、再承認ダイアログのボタン切れを修正した (#388)
+
 ## [0.35.3] - 2026-10-12
 
 ### Fixed
@@ -888,7 +908,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.35.3...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.36.0...HEAD
+[0.36.0]: https://github.com/ishida-supsys/oretachi/compare/0.35.3...0.36.0
 [0.35.3]: https://github.com/ishida-supsys/oretachi/compare/0.35.2...0.35.3
 [0.35.2]: https://github.com/ishida-supsys/oretachi/compare/0.35.1...0.35.2
 [0.35.1]: https://github.com/ishida-supsys/oretachi/compare/0.35.0...0.35.1
