@@ -2562,7 +2562,7 @@ pub fn run() {
             app_instance::app_get_memory,
             app_instance::app_grant_respond,
             app_instance::list_pending_app_grants,
-            app_instance::list_app_grants,
+            app_instance::list_app_instances,
             app_instance::revoke_app_grant,
             start_fs_watch,
             stop_fs_watch,

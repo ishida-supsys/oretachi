@@ -141,15 +141,33 @@ export interface AppGrantRequest {
   dangerousTools: string[];
 }
 
-/** 設定画面の承認一覧 */
-export interface AppGrantListItem {
+/** ホームの「アプリ一覧」の 1 行（Rust の `list_app_instances`） */
+export interface AppInstanceListItem {
   worktreeId: string;
   worktreeName: string;
   artifactId: string;
   artifactTitle: string;
-  grantedAt: number;
-  resolved: AppResolvedPermissions;
+  /** manifest の表示名。manifest を読めない・アーティファクトが無いときは空 */
+  appName: string;
+  /** アーティファクトのファイルがある（承認だけが残っている行は false） */
+  artifactExists: boolean;
+  /** manifest を解析できなかった理由。起動はできない */
+  manifestError: string | null;
+  granted: boolean;
+  grantedAt: number | null;
+  resolved: AppResolvedPermissions | null;
+  /** 起動処理中（承認ダイアログ待ち）/ 起動済み。停止中は null */
+  state: "starting" | "running" | null;
   running: boolean;
+  /** 起動中の権限変更が再承認待ち */
+  reapprovalPending: boolean;
+}
+
+/** `list_app_instances` の戻り値 */
+export interface AppInstanceList {
+  items: AppInstanceListItem[];
+  /** 承認ダイアログと同じく「ユーザーと同等の権限」として強調するツール */
+  dangerousTools: string[];
 }
 
 /** 起動画面（ビューア）が使うアプリ操作。Tauri 実装だけが提供する（Web は起動不可） */

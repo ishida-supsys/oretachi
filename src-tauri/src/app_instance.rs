@@ -580,7 +580,8 @@ pub async fn app_instance_start(
     worktree_id: String,
     artifact_id: String,
 ) -> Result<(), String> {
-    require_viewer(&window)?;
+    // ホームのアプリ一覧（main）からも起動できる。承認は start_inner の承認ダイアログを必ず通る
+    require_viewer_or_main(&window)?;
     validate_ids(&worktree_id, &artifact_id)?;
 
     let label = {
@@ -824,7 +825,7 @@ pub async fn app_instance_stop(
     worktree_id: String,
     artifact_id: String,
 ) -> Result<bool, String> {
-    require_viewer(&window)?;
+    require_viewer_or_main(&window)?;
     validate_ids(&worktree_id, &artifact_id)?;
     Ok(stop_instance(&app, &worktree_id, &artifact_id, "停止ボタン"))
 }
@@ -1350,56 +1351,141 @@ pub async fn app_instance_grant(
     Ok(app.state::<AppGrantStore>().get(&worktree_id, &artifact_id))
 }
 
+/// ホームの「アプリ一覧」の 1 行。アプリ形式のアーティファクト（承認の有無を問わない）と、
+/// アーティファクトが消えたあとも残っている承認（取り消せるように）の両方を載せる。
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct GrantListItem {
+pub struct AppInstanceListItem {
     worktree_id: String,
     worktree_name: String,
     artifact_id: String,
     artifact_title: String,
-    granted_at: u64,
-    resolved: ResolvedPermissions,
+    /// manifest の表示名。manifest を読めない・アーティファクトが無いときは空
+    app_name: String,
+    /// アーティファクトのファイルがある（承認だけが残っている行は false）
+    artifact_exists: bool,
+    /// manifest を解析できなかった理由。起動はできない
+    manifest_error: Option<String>,
+    granted: bool,
+    granted_at: Option<u64>,
+    resolved: Option<ResolvedPermissions>,
+    /// 起動処理中（承認ダイアログ待ち）か起動済みか。停止中は null
+    state: Option<InstanceState>,
     running: bool,
+    /// 起動中の権限変更が再承認待ち
+    reapproval_pending: bool,
 }
 
-/// 承認の一覧（設定画面・起動画面）。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppInstanceList {
+    items: Vec<AppInstanceListItem>,
+    /// 承認ダイアログと同じく「ユーザーと同等の権限」として強調するツール
+    dangerous_tools: &'static [&'static str],
+}
+
+/// アプリ一覧（ホーム画面）。**表示専用**で、承認や起動の権限は与えない。
 #[tauri::command]
-pub async fn list_app_grants(window: tauri::Window, app: AppHandle) -> Result<Vec<GrantListItem>, String> {
+pub async fn list_app_instances(window: tauri::Window, app: AppHandle) -> Result<AppInstanceList, String> {
     require_viewer_or_main(&window)?;
     let settings = app.state::<crate::settings::SettingsManager>().get();
     let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let running: Vec<Key> = {
+    let grants = app.state::<AppGrantStore>().list();
+    // (state, reapproval_pending) をレジストリから引く
+    let live: HashMap<Key, (InstanceState, bool)> = {
         let reg = app.state::<AppInstanceRegistry>();
         let inner = reg.0.lock().map_err(|_| "レジストリのロックが壊れています".to_string())?;
-        inner.by_key.keys().cloned().collect()
+        inner
+            .by_key
+            .iter()
+            .filter_map(|(k, label)| {
+                inner
+                    .by_label
+                    .get(label)
+                    .map(|i| (k.clone(), (i.state, i.state == InstanceState::Running && i.pending.is_some())))
+            })
+            .collect()
     };
-    Ok(app
-        .state::<AppGrantStore>()
-        .list()
-        .into_iter()
-        .map(|(wt, art, g)| {
-            let title = crate::artifacts_dir_in(&data_dir, &wt)
-                .ok()
-                .and_then(|d| crate::read_artifact_in_dir(&d, &art).ok())
-                .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
-                .and_then(|v| v.get("title").and_then(|t| t.as_str()).map(str::to_string))
-                .unwrap_or_default();
-            GrantListItem {
-                worktree_name: settings
-                    .worktrees
-                    .iter()
-                    .find(|w| w.id == wt)
-                    .map(|w| w.name.clone())
-                    .unwrap_or_else(|| wt.clone()),
-                running: running.contains(&(wt.clone(), art.clone())),
-                worktree_id: wt,
-                artifact_id: art,
+    let worktrees: Vec<(String, String)> = settings.worktrees.iter().map(|w| (w.id.clone(), w.name.clone())).collect();
+
+    let items = tokio::task::spawn_blocking(move || {
+        let name_of = |id: &str| {
+            worktrees
+                .iter()
+                .find(|(i, _)| i == id)
+                .map(|(_, n)| n.clone())
+                .unwrap_or_else(|| id.to_string())
+        };
+        let mut grant_map: HashMap<Key, AppGrant> =
+            grants.into_iter().map(|(w, a, g)| ((w, a), g)).collect();
+        let mut out: Vec<AppInstanceListItem> = Vec::new();
+        let mut push = |wt: &str,
+                        art: &str,
+                        title: String,
+                        app_name: String,
+                        artifact_exists: bool,
+                        manifest_error: Option<String>,
+                        grant: Option<AppGrant>| {
+            let key: Key = (wt.to_string(), art.to_string());
+            let st = live.get(&key).copied();
+            out.push(AppInstanceListItem {
+                worktree_id: wt.to_string(),
+                worktree_name: name_of(wt),
+                artifact_id: art.to_string(),
                 artifact_title: title,
-                granted_at: g.granted_at,
-                resolved: g.resolved,
+                app_name,
+                artifact_exists,
+                manifest_error,
+                granted: grant.is_some(),
+                granted_at: grant.as_ref().map(|g| g.granted_at),
+                resolved: grant.map(|g| g.resolved),
+                state: st.map(|s| s.0),
+                running: st.map(|s| s.0 == InstanceState::Running).unwrap_or(false),
+                reapproval_pending: st.map(|s| s.1).unwrap_or(false),
+            });
+        };
+        for (wt_id, _) in &worktrees {
+            let Ok(dir) = crate::artifacts_dir_in(&data_dir, wt_id) else { continue };
+            let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("json") {
+                    continue;
+                }
+                let Some(art_id) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else { continue };
+                if crate::validate_path_component(&art_id).is_err() {
+                    continue;
+                }
+                // 1 件が壊れていても他を出す（一覧は表示専用）
+                let Ok(raw) = std::fs::read_to_string(&path) else { continue };
+                let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else { continue };
+                if v.get("type").and_then(|t| t.as_str()) != Some(REACT_TYPE) {
+                    continue;
+                }
+                let Some(app_value) = v.get("app").filter(|a| !a.is_null()) else { continue };
+                let title = v.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
+                let grant = grant_map.remove(&(wt_id.clone(), art_id.clone()));
+                // manifest が壊れていても行は出す（原因が見え、承認が残っていれば取り消せる）
+                match app_manifest::parse_manifest(app_value) {
+                    Ok(manifest) => push(wt_id, &art_id, title, manifest.name, true, None, grant),
+                    Err(e) => push(wt_id, &art_id, title, String::new(), true, Some(e), grant),
+                }
             }
-        })
-        .collect())
+        }
+        // アーティファクトが無くなっても残っている承認は、取り消せるように載せる
+        let mut orphans: Vec<(Key, AppGrant)> = grant_map.into_iter().collect();
+        orphans.sort_by(|a, b| a.0.cmp(&b.0));
+        for ((wt, art), g) in orphans {
+            push(&wt, &art, String::new(), String::new(), false, None, Some(g));
+        }
+        out.sort_by(|a, b| {
+            (&a.worktree_name, &a.artifact_title, &a.artifact_id).cmp(&(&b.worktree_name, &b.artifact_title, &b.artifact_id))
+        });
+        out
+    })
+    .await
+    .map_err(|e| format!("task join error: {}", e))?;
+    Ok(AppInstanceList { items, dangerous_tools: app_manifest::DANGEROUS_TOOLS })
 }
 
 /// 承認を取り消す。起動中なら止める。
