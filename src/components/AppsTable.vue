@@ -22,24 +22,33 @@ const { openArtifactViewer } = useArtifactWindow();
 const items = ref<AppInstanceListItem[]>([]);
 const dangerousTools = ref<string[]>([]);
 const loading = ref(false);
-const error = ref("");
+/** 一覧の読み込みエラーと、操作のエラーは別に持つ（再読み込みで操作のエラーを消さない） */
+const loadError = ref("");
+const actionError = ref("");
 const expanded = reactive(new Set<string>());
+/** 押下中（二重起動のエラーを出さない）。キーは keyOf */
+const busy = reactive(new Set<string>());
+let loadSeq = 0;
 let unlisten: UnlistenFn | null = null;
 let disposed = false;
 
 const keyOf = (i: AppInstanceListItem) => `${i.worktreeId}/${i.artifactId}`;
 
 async function load() {
+  // app-instance-changed は連発するので、古い応答が新しい状態を上書きしないよう世代で捨てる
+  const seq = ++loadSeq;
   loading.value = true;
   try {
     const res = await invoke<AppInstanceList>("list_app_instances");
+    if (seq !== loadSeq || disposed) return;
     items.value = res.items;
     dangerousTools.value = res.dangerousTools;
-    error.value = "";
+    loadError.value = "";
   } catch (e) {
-    error.value = String(e);
+    if (seq !== loadSeq) return;
+    loadError.value = String(e);
   } finally {
-    loading.value = false;
+    if (seq === loadSeq) loading.value = false;
   }
 }
 
@@ -51,21 +60,27 @@ function toggle(item: AppInstanceListItem) {
 }
 
 async function start(item: AppInstanceListItem) {
-  // 承認は start の中で、これまでどおり承認ダイアログを通る（ここからバイパスしない）
+  const k = keyOf(item);
+  if (busy.has(k)) return;
+  busy.add(k);
+  actionError.value = "";
   try {
+    // 承認は start の中で、これまでどおり承認ダイアログを通る（ここからバイパスしない）。
+    // 承認待ちの間は invoke が返らないので、その間ボタンを押せなくする
     await invoke("app_instance_start", { worktreeId: item.worktreeId, artifactId: item.artifactId });
-    error.value = "";
   } catch (e) {
-    error.value = String(e);
+    actionError.value = String(e);
+  } finally {
+    busy.delete(k);
   }
 }
 
 async function stop(item: AppInstanceListItem) {
+  actionError.value = "";
   try {
     await invoke("app_instance_stop", { worktreeId: item.worktreeId, artifactId: item.artifactId });
-    error.value = "";
   } catch (e) {
-    error.value = String(e);
+    actionError.value = String(e);
   }
 }
 
@@ -73,7 +88,7 @@ async function openWindow(item: AppInstanceListItem) {
   try {
     await openArtifactViewer(item.worktreeId, item.artifactId);
   } catch (e) {
-    error.value = String(e);
+    actionError.value = String(e);
   }
 }
 
@@ -83,10 +98,11 @@ async function revoke(item: AppInstanceListItem) {
     { title: t("revokeTitle"), kind: "warning" },
   );
   if (!ok) return;
+  actionError.value = "";
   try {
     await invoke("revoke_app_grant", { worktreeId: item.worktreeId, artifactId: item.artifactId });
   } catch (e) {
-    error.value = String(e);
+    actionError.value = String(e);
   }
   await load();
 }
@@ -149,7 +165,8 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="apps-table-wrapper">
-    <p v-if="error" class="error">{{ error }}</p>
+    <p v-if="loadError" class="error">{{ loadError }}</p>
+    <p v-if="actionError" class="error">{{ actionError }}</p>
     <div v-if="!loading && items.length === 0" class="empty">{{ t("empty") }}</div>
     <table v-else-if="items.length > 0" class="apps-table">
       <thead>
@@ -172,7 +189,13 @@ onBeforeUnmount(() => {
             <td class="cell-name">{{ appRowName(item) }}</td>
             <td>
               <span class="badges">
-                <span v-for="b in appRowBadges(item)" :key="b" class="badge" :class="'badge-' + b">{{ t("state_" + b) }}</span>
+                <span
+                  v-for="b in appRowBadges(item)"
+                  :key="b"
+                  class="badge"
+                  :class="'badge-' + b"
+                  :title="b === 'manifestError' ? (item.manifestError ?? '') : ''"
+                >{{ t("state_" + b) }}</span>
               </span>
             </td>
             <td class="cell-sub">{{ item.worktreeName }}</td>
@@ -189,7 +212,7 @@ onBeforeUnmount(() => {
             <td class="cell-sub">{{ formatGrantedAt(item.grantedAt) }}</td>
             <td class="cell-actions">
               <button v-if="canStop(item)" class="btn" @click="stop(item)">{{ t("stop") }}</button>
-              <button v-else class="btn btn-start" :disabled="!canStart(item)" @click="start(item)">{{ t("start") }}</button>
+              <button v-else class="btn btn-start" :disabled="!canStart(item) || busy.has(keyOf(item))" @click="start(item)">{{ t("start") }}</button>
               <button class="btn btn-open" :disabled="!canOpenWindow(item)" @click="openWindow(item)">{{ t("openWindow") }}</button>
               <button class="btn btn-revoke" :disabled="!item.granted" @click="revoke(item)">{{ t("revoke") }}</button>
             </td>
@@ -305,6 +328,11 @@ onBeforeUnmount(() => {
   background: #3a3520;
   color: #f9e2af;
 }
+.badge-manifestError,
+.badge-missing {
+  background: #3a2030;
+  color: #f38ba8;
+}
 .badge-reapproval {
   background: #3a2a20;
   color: #fab387;
@@ -394,6 +422,8 @@ onBeforeUnmount(() => {
     "state_stopped": "stopped",
     "state_ungranted": "not approved",
     "state_reapproval": "re-approval pending",
+    "state_manifestError": "invalid manifest",
+    "state_missing": "artifact missing",
     "start": "Start",
     "stop": "Stop",
     "openWindow": "Open in window",
@@ -440,6 +470,8 @@ onBeforeUnmount(() => {
     "state_stopped": "停止中",
     "state_ungranted": "未承認",
     "state_reapproval": "再承認待ち",
+    "state_manifestError": "manifest 不正",
+    "state_missing": "アーティファクトなし",
     "start": "起動",
     "stop": "停止",
     "openWindow": "ウィンドウで開く",

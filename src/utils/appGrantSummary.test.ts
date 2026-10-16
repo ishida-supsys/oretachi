@@ -15,6 +15,8 @@ const item = (over: Partial<AppInstanceListItem> = {}): AppInstanceListItem => (
   artifactId: "art-1",
   artifactTitle: "Deploy Console",
   appName: "deploy",
+  artifactExists: true,
+  manifestError: null,
   granted: true,
   grantedAt: 1700000000,
   resolved: {},
@@ -83,6 +85,11 @@ describe("row state", () => {
     ]);
   });
 
+  it("tells a missing artifact apart from a broken manifest", () => {
+    expect(appRowBadges(item({ artifactExists: false, appName: "" }))).toEqual(["stopped", "missing"]);
+    expect(appRowBadges(item({ appName: "", manifestError: "bad" }))).toEqual(["stopped", "manifestError"]);
+  });
+
   it("falls back from title to app name to id", () => {
     expect(appRowName(item())).toBe("Deploy Console");
     expect(appRowName(item({ artifactTitle: "" }))).toBe("deploy");
@@ -94,7 +101,8 @@ describe("row actions", () => {
   it("allows start only when stopped and the artifact still exists", () => {
     expect(canStart(item())).toBe(true);
     expect(canStart(item({ state: "running", running: true }))).toBe(false);
-    expect(canStart(item({ appName: "" }))).toBe(false);
+    expect(canStart(item({ artifactExists: false, appName: "" }))).toBe(false);
+    expect(canStart(item({ appName: "", manifestError: "bad" }))).toBe(false);
   });
 
   it("allows stop while starting or running", () => {
@@ -105,6 +113,7 @@ describe("row actions", () => {
 
   it("allows opening the window only for existing artifacts", () => {
     expect(canOpenWindow(item())).toBe(true);
-    expect(canOpenWindow(item({ appName: "" }))).toBe(false);
+    expect(canOpenWindow(item({ artifactExists: false, appName: "" }))).toBe(false);
+    expect(canOpenWindow(item({ appName: "", manifestError: "bad" }))).toBe(true);
   });
 });

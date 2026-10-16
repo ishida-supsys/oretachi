@@ -51,26 +51,35 @@ export function summarizeGrant(resolved: AppResolvedPermissions): SummaryPart[] 
   return parts;
 }
 
-export type AppRowBadge = "running" | "starting" | "stopped" | "ungranted" | "reapproval";
+export type AppRowBadge =
+  | "running"
+  | "starting"
+  | "stopped"
+  | "ungranted"
+  | "reapproval"
+  | "manifestError"
+  | "missing";
 
 /** 状態バッジ。実行状態に、未承認・再承認待ちを足して返す */
 export function appRowBadges(item: AppInstanceListItem): AppRowBadge[] {
   const badges: AppRowBadge[] = [
     item.state === "running" ? "running" : item.state === "starting" ? "starting" : "stopped",
   ];
+  if (!item.artifactExists) badges.push("missing");
+  else if (item.manifestError) badges.push("manifestError");
   if (!item.granted) badges.push("ungranted");
   if (item.reapprovalPending) badges.push("reapproval");
   return badges;
 }
 
-/** 行の表示名。title が空（アーティファクトが消えて承認だけ残っている）なら appName、id の順 */
+/** 行の表示名。title が空なら appName、id の順 */
 export function appRowName(item: AppInstanceListItem): string {
   return item.artifactTitle || item.appName || item.artifactId;
 }
 
-/** 起動できるか。アーティファクトが消えた行（appName 空）は起動できない。承認は起動時のダイアログで行う */
+/** 起動できるか。アーティファクトが無い・manifest が不正な行は起動できない。承認は起動時のダイアログで行う */
 export function canStart(item: AppInstanceListItem): boolean {
-  return item.state === null && item.appName !== "";
+  return item.state === null && item.artifactExists && item.manifestError === null;
 }
 
 /** 停止できるか（起動処理中＝承認ダイアログ待ちも止められる） */
@@ -80,5 +89,5 @@ export function canStop(item: AppInstanceListItem): boolean {
 
 /** アーティファクトウィンドウで開けるか（アーティファクトが残っている行だけ） */
 export function canOpenWindow(item: AppInstanceListItem): boolean {
-  return item.appName !== "";
+  return item.artifactExists;
 }

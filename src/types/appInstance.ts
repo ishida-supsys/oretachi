@@ -147,8 +147,12 @@ export interface AppInstanceListItem {
   worktreeName: string;
   artifactId: string;
   artifactTitle: string;
-  /** manifest の表示名。アーティファクトが消えて承認だけ残っているときは空 */
+  /** manifest の表示名。manifest を読めない・アーティファクトが無いときは空 */
   appName: string;
+  /** アーティファクトのファイルがある（承認だけが残っている行は false） */
+  artifactExists: boolean;
+  /** manifest を解析できなかった理由。起動はできない */
+  manifestError: string | null;
   granted: boolean;
   grantedAt: number | null;
   resolved: AppResolvedPermissions | null;

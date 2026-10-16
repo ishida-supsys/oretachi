@@ -1360,8 +1360,12 @@ pub struct AppInstanceListItem {
     worktree_name: String,
     artifact_id: String,
     artifact_title: String,
-    /// manifest の表示名。アーティファクトが消えて承認だけ残っているときは空
+    /// manifest の表示名。manifest を読めない・アーティファクトが無いときは空
     app_name: String,
+    /// アーティファクトのファイルがある（承認だけが残っている行は false）
+    artifact_exists: bool,
+    /// manifest を解析できなかった理由。起動はできない
+    manifest_error: Option<String>,
     granted: bool,
     granted_at: Option<u64>,
     resolved: Option<ResolvedPermissions>,
@@ -1415,7 +1419,13 @@ pub async fn list_app_instances(window: tauri::Window, app: AppHandle) -> Result
         let mut grant_map: HashMap<Key, AppGrant> =
             grants.into_iter().map(|(w, a, g)| ((w, a), g)).collect();
         let mut out: Vec<AppInstanceListItem> = Vec::new();
-        let mut push = |wt: &str, art: &str, title: String, app_name: String, grant: Option<AppGrant>| {
+        let mut push = |wt: &str,
+                        art: &str,
+                        title: String,
+                        app_name: String,
+                        artifact_exists: bool,
+                        manifest_error: Option<String>,
+                        grant: Option<AppGrant>| {
             let key: Key = (wt.to_string(), art.to_string());
             let st = live.get(&key).copied();
             out.push(AppInstanceListItem {
@@ -1424,6 +1434,8 @@ pub async fn list_app_instances(window: tauri::Window, app: AppHandle) -> Result
                 artifact_id: art.to_string(),
                 artifact_title: title,
                 app_name,
+                artifact_exists,
+                manifest_error,
                 granted: grant.is_some(),
                 granted_at: grant.as_ref().map(|g| g.granted_at),
                 resolved: grant.map(|g| g.resolved),
@@ -1451,17 +1463,20 @@ pub async fn list_app_instances(window: tauri::Window, app: AppHandle) -> Result
                     continue;
                 }
                 let Some(app_value) = v.get("app").filter(|a| !a.is_null()) else { continue };
-                let Ok(manifest) = app_manifest::parse_manifest(app_value) else { continue };
                 let title = v.get("title").and_then(|t| t.as_str()).unwrap_or("").to_string();
                 let grant = grant_map.remove(&(wt_id.clone(), art_id.clone()));
-                push(wt_id, &art_id, title, manifest.name, grant);
+                // manifest が壊れていても行は出す（原因が見え、承認が残っていれば取り消せる）
+                match app_manifest::parse_manifest(app_value) {
+                    Ok(manifest) => push(wt_id, &art_id, title, manifest.name, true, None, grant),
+                    Err(e) => push(wt_id, &art_id, title, String::new(), true, Some(e), grant),
+                }
             }
         }
         // アーティファクトが無くなっても残っている承認は、取り消せるように載せる
         let mut orphans: Vec<(Key, AppGrant)> = grant_map.into_iter().collect();
         orphans.sort_by(|a, b| a.0.cmp(&b.0));
         for ((wt, art), g) in orphans {
-            push(&wt, &art, String::new(), String::new(), Some(g));
+            push(&wt, &art, String::new(), String::new(), false, None, Some(g));
         }
         out.sort_by(|a, b| {
             (&a.worktree_name, &a.artifact_title, &a.artifact_id).cmp(&(&b.worktree_name, &b.artifact_title, &b.artifact_id))
