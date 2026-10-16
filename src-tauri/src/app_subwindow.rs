@@ -264,7 +264,9 @@ pub fn validate_attributes(perm: &SubWindowPermission, attrs: &serde_json::Value
                 return Err(format!("{} は生成時に決まる性質なので、開いたあとには変えられません", key));
             }
             other => {
-                return Err(format!("変更できない属性です: {}（変更できるのは alwaysOnTop / resizable / title）", other))
+                // キー名は呼び出し側の自由入力なので、エラー文字列（デバッグログへ載る）が膨らまないよう切り詰める
+                let shown: String = other.chars().take(40).collect();
+                return Err(format!("変更できない属性です: {}（変更できるのは alwaysOnTop / resizable / title）", shown));
             }
         }
     }
@@ -803,6 +805,8 @@ mod tests {
         for key in ["transparent", "frameless"] {
             assert!(validate_attributes(&full(), &serde_json::json!({ key: false })).unwrap_err().contains("生成時"));
         }
+        let long = "k".repeat(1000);
+        assert!(validate_attributes(&full(), &serde_json::json!({ long.clone(): 1 })).unwrap_err().len() < 300);
         for key in ["visible", "focus", "ignoreCursorEvents", "width"] {
             assert!(validate_attributes(&full(), &serde_json::json!({ key: true })).is_err(), "{key}");
         }
