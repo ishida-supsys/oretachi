@@ -252,6 +252,7 @@ fn status_value(
     store: &AppGrantStore,
     worktree_id: &str,
     artifact_id: &str,
+    recording: bool,
 ) -> serde_json::Value {
     let key: Key = (worktree_id.to_string(), artifact_id.to_string());
     let inst = inner.by_key.get(&key).and_then(|l| inner.by_label.get(l));
@@ -278,15 +279,19 @@ fn status_value(
         "memoryMaxBytes": memory_cap_of,
         "memoryBytes": memory_bytes,
         "memoryOverCap": matches!((memory_bytes, memory_cap_of), (Some(b), Some(c)) if b > c),
+        // マイクを録音中か（起動画面の「● 録音中」と停止ボタン）。録音のレジストリ（app_audio.rs）が持つ
+        "recording": recording,
     })
 }
 
-fn emit_changed(app: &AppHandle, worktree_id: &str, artifact_id: &str) {
+pub(crate) fn emit_changed(app: &AppHandle, worktree_id: &str, artifact_id: &str) {
+    // 録音のレジストリは別のロック。インスタンスのロックを持つ前に引く（ロック順を作らない）
+    let recording = app.state::<crate::app_audio::AppAudioRegistry>().is_recording(worktree_id, artifact_id);
     let payload = {
         let reg = app.state::<AppInstanceRegistry>();
         let store = app.state::<AppGrantStore>();
         let Ok(inner) = reg.0.lock() else { return };
-        status_value(&inner, &store, worktree_id, artifact_id)
+        status_value(&inner, &store, worktree_id, artifact_id, recording)
     };
     let _ = app.emit("app-instance-changed", payload);
 }
@@ -328,7 +333,7 @@ fn require_viewer(window: &tauri::Window) -> Result<(), String> {
     }
 }
 
-fn require_viewer_or_main(window: &tauri::Window) -> Result<(), String> {
+pub(crate) fn require_viewer_or_main(window: &tauri::Window) -> Result<(), String> {
     if window.label() == "main" {
         return Ok(());
     }
@@ -782,6 +787,8 @@ fn release(app: &AppHandle, label: &str) -> Option<(String, String)> {
         crate::app_db::on_instance_released(app, label);
         // 実行中のネットワーク通信は中断し、以後は出せなくする
         crate::app_net::on_instance_released(app, label);
+        // マイクの録音も止める（停止・承認の取り消し・ウィンドウを閉じる・削除のどれでも）
+        crate::app_audio::on_instance_released(app, label);
         // インスタンスが開いたサブウィンドウもすべて閉じる（再起動での復元はしない）
         crate::app_subwindow::on_instance_released(app, label);
         // インスタンスが開いた専用 AI ターミナルも、停止とともにすべて閉じる（再起動での復元はしない）。
@@ -1069,6 +1076,9 @@ fn request_reload(app: &AppHandle, label: &str, reason: &str) {
     // 通信中のネットワークリクエストは中断する（前提 10。DB・端末・メモリは維持）。再承認の承認後も
     // ここを通る。古い iframe への応答は nonce で捨てられるので、中断は資源を空けるためのもの
     crate::app_net::on_reload(app, label);
+    // マイクの録音も止める。再承認の承認後もここを通るので、権限が変わったときは必ず止まり、
+    // 新しい iframe が新しい権限で start し直す
+    crate::app_audio::on_reload(app, label);
     // 宛先はこのインスタンスのウィンドウだけ（常駐ウィンドウと、所有するサブウィンドウ）。
     // サブウィンドウは作り直さず、中の iframe だけが再接続する（前提 10）。他のインスタンスへ漏らさない
     crate::app_subwindow::emit_to_instance(app, label, "app-instance-reload", reason);
@@ -1316,8 +1326,9 @@ pub async fn app_instance_status(
     validate_ids(&worktree_id, &artifact_id)?;
     let reg = app.state::<AppInstanceRegistry>();
     let store = app.state::<AppGrantStore>();
+    let recording = app.state::<crate::app_audio::AppAudioRegistry>().is_recording(&worktree_id, &artifact_id);
     let inner = reg.0.lock().map_err(|_| "レジストリのロックが壊れています".to_string())?;
-    Ok(status_value(&inner, &store, &worktree_id, &artifact_id))
+    Ok(status_value(&inner, &store, &worktree_id, &artifact_id, recording))
 }
 
 #[tauri::command]
@@ -1600,7 +1611,7 @@ mod tests {
     use crate::app_manifest::{MemoryPermission, RequestedPermissions};
 
     fn perms(max: u64) -> RequestedPermissions {
-        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None, db: None, network: None, sub_window: None }
+        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None, db: None, network: None, sub_window: None, audio: None }
     }
 
     #[test]

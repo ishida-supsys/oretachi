@@ -138,6 +138,8 @@ function rowValue(r: ReturnType<typeof detailRows>[number]): string {
       return t("memoryMax", { bytes: r.value });
     case "aiTerminal":
       return t("summaryAiTerminal", { spec: r.value });
+    case "audio":
+      return t("summaryAudio", { spec: r.value });
     case "subWindow":
       return t("summarySubWindow", { spec: r.label });
     case "fsSensitive":
@@ -434,6 +436,7 @@ onBeforeUnmount(() => {
     "kind_target": "Other worktree",
     "kind_memory": "Memory",
     "kind_aiTerminal": "AI terminal",
+    "kind_audio": "Microphone",
     "kind_subWindow": "Sub-window",
     "kind_subWindowFlag": "Sub-window flag",
     "kind_fsSensitive": "Sensitive files",
@@ -449,6 +452,7 @@ onBeforeUnmount(() => {
     "summaryTargets": "other worktrees",
     "summaryMemory": "memory {bytes} B",
     "summaryAiTerminal": "AI terminal {spec}",
+    "summaryAudio": "Microphone ({spec})",
     "summaryFs": "files (read {read} / write {write})",
     "summaryFsSensitive": "writes to hook/workflow files",
     "summaryDb": "databases (read-only {read} / read-write {write})",
@@ -482,6 +486,7 @@ onBeforeUnmount(() => {
     "kind_target": "他ワークツリー",
     "kind_memory": "メモリー",
     "kind_aiTerminal": "AI ターミナル",
+    "kind_audio": "マイク",
     "kind_subWindow": "サブウィンドウ",
     "kind_subWindowFlag": "サブウィンドウの属性",
     "kind_fsSensitive": "既定拒否パス",
@@ -497,6 +502,7 @@ onBeforeUnmount(() => {
     "summaryTargets": "他ワークツリー",
     "summaryMemory": "メモリー {bytes} B",
     "summaryAiTerminal": "AI ターミナル {spec}",
+    "summaryAudio": "マイク（{spec}）",
     "summaryFs": "ファイル（読 {read} / 書 {write}）",
     "summaryFsSensitive": "フック・ワークフローのファイルへの書き込み",
     "summaryDb": "データベース（読み取り専用 {read} / 読み書き {write}）",

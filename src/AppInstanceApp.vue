@@ -28,6 +28,7 @@ import {
   ARTIFACT_BRIDGE_METHOD_DB_EXECUTE,
   ARTIFACT_BRIDGE_METHOD_DB_QUERY,
   ARTIFACT_BRIDGE_METHOD_AI_TERMINAL_PREFIX,
+  ARTIFACT_BRIDGE_METHOD_AUDIO_PREFIX,
   ARTIFACT_BRIDGE_METHOD_FLUSHED,
   ARTIFACT_BRIDGE_METHOD_FS_LIST,
   ARTIFACT_BRIDGE_METHOD_FS_READ,
@@ -41,11 +42,13 @@ import {
   postArtifactBridgeMemoryChanged,
   postArtifactBridgeFlush,
   postArtifactBridgeAiTerminalEvent,
+  postArtifactBridgeAudioEvent,
   postArtifactBridgeSubWindowEvent,
   type ArtifactBridgeRequest,
 } from "./utils/artifactMemory";
 import { aiTerminalCommandFor } from "./utils/aiTerminalBridge";
 import { subWindowCommandFor } from "./utils/subWindowBridge";
+import { audioCommandFor } from "./utils/audioBridge";
 
 interface Bootstrap {
   worktreeId: string;
@@ -256,6 +259,18 @@ async function handleBridgeRequest(request: ArtifactBridgeRequest) {
     }
     return;
   }
+  // マイクの音声入力。権限・上限・レートの検査と許可・拒否のログは Rust がすべて行う（取得も Rust）
+  if (request.method.startsWith(ARTIFACT_BRIDGE_METHOD_AUDIO_PREFIX)) {
+    try {
+      const cmd = audioCommandFor(request.method, request.params);
+      if (!cmd) throw new Error(`このアプリでは使えない API です: ${request.method}`);
+      const result = await invoke<unknown>(cmd.command, cmd.args);
+      reply(request, { ok: true, result });
+    } catch (e) {
+      reply(request, { ok: false, error: errorText(e) });
+    }
+    return;
+  }
   // 専用 AI ターミナル。所有・権限・上限の検査と許可・拒否のログは Rust がすべて行う
   if (request.method.startsWith(ARTIFACT_BRIDGE_METHOD_AI_TERMINAL_PREFIX)) {
     try {
@@ -368,6 +383,12 @@ onMounted(async () => {
     unlisteners.push(
       await getCurrentWebviewWindow().listen<Record<string, unknown>>("app-ai-terminal-event", (event) => {
         if (nonce.value) postArtifactBridgeAiTerminalEvent(frame.value, event.payload, nonce.value);
+      }),
+    );
+    // マイクの PCM チャンクと終了の通知（Rust が `emit_to(label)` で、このインスタンスのウィンドウだけへ送る）
+    unlisteners.push(
+      await getCurrentWebviewWindow().listen<Record<string, unknown>>("app-audio-event", (event) => {
+        if (nonce.value) postArtifactBridgeAudioEvent(frame.value, event.payload, nonce.value);
       }),
     );
     // 自分が開いたサブウィンドウがユーザーに閉じられた通知（Rust が `emit_to(label)` で、このインスタンスの

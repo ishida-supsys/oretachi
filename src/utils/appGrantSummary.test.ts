@@ -69,6 +69,17 @@ describe("summarizeGrant", () => {
   });
 });
 
+describe("summarizeGrant: audio", () => {
+  it("marks the microphone critical and carries the resolved spec", () => {
+    const parts = summarizeGrant({ audio: { microphone: true, maxSeconds: 30, sampleRates: [16000] } });
+    expect(parts.find((p) => p.key === "summaryAudio")).toEqual({
+      key: "summaryAudio",
+      params: { spec: "30s · 16000Hz" },
+      critical: true,
+    });
+  });
+});
+
 describe("row state", () => {
   it("shows stopped + ungranted for an app that was never approved", () => {
     expect(appRowBadges(item({ granted: false, grantedAt: null, resolved: null }))).toEqual(["stopped", "ungranted"]);

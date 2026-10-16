@@ -5,7 +5,8 @@ import type { AppResolvedFs, AppResolvedPermissions } from "../types/appInstance
  *
  * - `critical`: 最も強い警告。ワイルドカードの越境先（今後作られるワークツリーも含み、メインの
  *   クローンの端末にも届く）、FS / DB の既定拒否パス解除（`.git/hooks` などへ書けるので任意コード実行になる）、
- *   専用 AI ターミナル（ユーザーと同じ権限で動くエージェントを起動できる）。
+ *   専用 AI ターミナル（ユーザーと同じ権限で動くエージェントを起動できる）、マイクの音声入力
+ *   （ユーザーの発話を聞ける）。
  * - `danger`: ユーザーと同等の権限（任意コマンド実行）になりうるツールと、ファイル・DB の書き込み。
  * - `normal`: それ以外。
  *
@@ -27,6 +28,7 @@ export const PERMISSION_ROW_KINDS = [
   "network",
   "subWindow",
   "subWindowFlag",
+  "audio",
 ] as const;
 
 export type PermissionRowKind = (typeof PERMISSION_ROW_KINDS)[number];
@@ -115,6 +117,11 @@ function rowsOf(perm: AppResolvedPermissions, dangerous: ReadonlySet<string>): P
   if (perm.aiTerminal) {
     const value = `${perm.aiTerminal.agents.join("+")}×${perm.aiTerminal.maxConcurrent}`;
     rows.push({ kind: "aiTerminal", value, label: value, severity: "critical", wildcard: false, added: false });
+  }
+  // マイクの音声入力: ユーザーの発話を聞ける権限なので最も強い警告。最大秒数とレートは解決済みの値のまま出す
+  if (perm.audio) {
+    const value = `${perm.audio.maxSeconds}s · ${perm.audio.sampleRates.join("/")}Hz`;
+    rows.push({ kind: "audio", value, label: value, severity: "critical", wildcard: false, added: false });
   }
   // ネットワーク: Rust プロキシが通す URL プレフィックス 1 件ごとに 1 行。平文 http は盗聴・改ざんを
   // 受けうるので danger（https は normal）。ループバック等は常に拒否されるので、ここでは出さない

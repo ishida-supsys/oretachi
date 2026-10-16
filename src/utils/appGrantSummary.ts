@@ -33,6 +33,8 @@ export function summarizeGrant(resolved: AppResolvedPermissions): SummaryPart[] 
   if (count("fsSensitive") > 0) parts.push({ key: "summaryFsSensitive", critical: true });
   const ai = v.rows.find((r) => r.kind === "aiTerminal");
   if (ai) parts.push({ key: "summaryAiTerminal", params: { spec: ai.value }, critical: true });
+  const audio = v.rows.find((r) => r.kind === "audio");
+  if (audio) parts.push({ key: "summaryAudio", params: { spec: audio.value }, critical: true });
   const dbRead = count("db", "read");
   const dbWrite = count("db", "write");
   if (dbRead + dbWrite > 0) parts.push({ key: "summaryDb", params: { read: dbRead, write: dbWrite }, critical: false });

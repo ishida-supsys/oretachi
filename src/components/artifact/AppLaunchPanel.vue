@@ -33,6 +33,7 @@ const appName = computed(() => manifest.value.name || props.artifact.title);
 
 const isStarting = computed(() => status.value?.state === "starting");
 const isRunning = computed(() => status.value?.running === true);
+const isRecording = computed(() => status.value?.recording === true);
 const stateLabel = computed(() => {
   if (isStarting.value) return t("state.starting");
   if (isRunning.value) return t("state.running");
@@ -99,6 +100,8 @@ async function onStart() {
 const onStop = () => run(() => props.api!.stop(props.artifact.id));
 const onToggleVisible = () => run(() => props.api!.toggleVisible(props.artifact.id));
 const onRevoke = () => run(() => props.api!.revoke(props.artifact.id));
+// 録音だけを止める（アプリは動かしたまま）。停止・承認の取り消しでも録音は止まる
+const onStopRecording = () => run(() => props.api!.stopRecording(props.artifact.id));
 
 const unlistens: Array<() => void> = [];
 let disposed = false;
@@ -150,6 +153,9 @@ function hhmmss(ms: number): string {
       <span v-if="api" class="state-chip" :class="{ running: isRunning, starting: isStarting }">
         {{ stateLabel }}
       </span>
+      <span v-if="api && isRecording" class="recording-chip" role="status">
+        <span class="rec-dot" aria-hidden="true" />{{ t("recording") }}
+      </span>
     </header>
 
     <p v-if="manifest.description" class="app-description">{{ manifest.description }}</p>
@@ -184,6 +190,9 @@ function hhmmss(ms: number): string {
         <button class="btn danger" :disabled="busy || !grant" @click="onRevoke">
           <span class="pi pi-times" /> {{ t("revoke") }}
         </button>
+        <button v-if="isRecording" class="btn danger" :disabled="busy" @click="onStopRecording">
+          <span class="pi pi-microphone" /> {{ t("stopRecording") }}
+        </button>
       </div>
 
       <p v-if="isStarting" class="info">{{ t("waitingApproval") }}</p>
@@ -210,6 +219,10 @@ function hhmmss(ms: number): string {
               <template v-else-if="r.kind === 'aiTerminal'">
                 {{ t("granted.aiTerminal", { spec: r.value }) }}
                 <span class="tag">{{ t("granted.aiTerminalTag") }}</span>
+              </template>
+              <template v-else-if="r.kind === 'audio'">
+                {{ t("granted.audio", { spec: r.value }) }}
+                <span class="tag">{{ t("granted.audioTag") }}</span>
               </template>
               <template v-else-if="r.kind === 'network'">{{ t("granted.network") }}: <code>{{ r.label }}</code></template>
               <template v-else-if="r.kind === 'subWindow'">{{ t("granted.subWindow", { spec: r.label }) }}</template>
@@ -421,6 +434,23 @@ function hhmmss(ms: number): string {
 .perm-list code {
   font-family: monospace;
 }
+.recording-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  padding: 2px 10px;
+  border-radius: 10px;
+  background: #3a1e26;
+  color: #f38ba8;
+  font-weight: 600;
+}
+.rec-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #f38ba8;
+}
 .tag {
   margin-left: 6px;
   padding: 0 6px;
@@ -483,6 +513,8 @@ function hhmmss(ms: number): string {
     "showWindow": "Show run window",
     "hideWindow": "Hide run window",
     "revoke": "Revoke approval",
+    "recording": "Recording from microphone",
+    "stopRecording": "Stop recording",
     "waitingApproval": "Waiting for you to approve the permissions in the main window…",
     "reapprovalPending": "The manifest's permissions changed and need your approval in the main window. Until then the app keeps running with the old permissions; calls that need the new ones are rejected.",
     "memoryOverCap": "The saved memory ({bytes} bytes) exceeds the approved maximum ({max} bytes). Nothing was deleted. Writes that do not fit are rejected until it fits; reads still work.",
@@ -497,6 +529,8 @@ function hhmmss(ms: number): string {
       "memory": "Memory up to {bytes} bytes",
       "aiTerminal": "Dedicated AI terminals ({spec})",
       "aiTerminalTag": "same authority as you",
+      "audio": "Microphone audio (up to {spec})",
+      "audioTag": "can hear your voice",
       "fsRead": "Read files",
       "fsWrite": "Write files",
       "fsSensitive": "Write to files that run commands (.git/hooks, .claude/, .github/workflows, ...)",
@@ -529,6 +563,8 @@ function hhmmss(ms: number): string {
     "showWindow": "実行画面を開く",
     "hideWindow": "実行画面を隠す",
     "revoke": "承認を取り消す",
+    "recording": "マイクを録音中",
+    "stopRecording": "録音を止める",
     "waitingApproval": "メインウィンドウで権限の承認を待っています…",
     "reapprovalPending": "manifest の権限が変わり、メインウィンドウでの再承認を待っています。承認までは旧権限のまま動作し、新しい権限が要る呼び出しは拒否されます。",
     "memoryOverCap": "保存済みのメモリー（{bytes} バイト）が承認済みの最大サイズ（{max} バイト）を超えています。データは消していません。収まるまで、収まらない書き込みは拒否されます（読み取りはできます）。",
@@ -543,6 +579,8 @@ function hhmmss(ms: number): string {
       "memory": "メモリー 最大 {bytes} バイト",
       "aiTerminal": "専用 AI ターミナル（{spec}）",
       "aiTerminalTag": "あなたと同等の権限",
+      "audio": "マイクの音声（{spec}）",
+      "audioTag": "声を聞ける",
       "fsRead": "ファイルの読み取り",
       "fsWrite": "ファイルの書き込み",
       "fsSensitive": "コマンドが走るファイル（.git/hooks・.claude/・.github/workflows など）への書き込み",

@@ -35,6 +35,7 @@ const hasAnyRow = computed(() => view.value.rows.length > 0);
 const hasWildcard = computed(() => view.value.rows.some((r) => r.wildcard));
 const hasSensitive = computed(() => view.value.rows.some((r) => r.kind === "fsSensitive" || r.kind === "dbSensitive"));
 const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiTerminal"));
+const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"));
 </script>
 
 <template>
@@ -86,6 +87,12 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
               <span class="kind">{{ t("kindAiTerminal") }}</span>
               <strong>{{ t("aiTerminalSummary", { spec: r.value }) }}</strong>
               <div class="why">{{ t("aiTerminalWarning") }}</div>
+            </template>
+            <template v-else-if="r.kind === 'audio'">
+              <span class="kind">{{ t("kindAudio") }}</span>
+              <strong>{{ t("audioSummary") }}</strong>
+              <span class="spec">{{ t("audioSpec", { spec: r.value }) }}</span>
+              <div class="why">{{ t("audioWarning") }}</div>
             </template>
             <template v-else-if="r.kind === 'subWindow'">
               <span class="kind">{{ t("kindSubWindow") }}</span>
@@ -150,6 +157,7 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
               <s v-if="r.kind === 'target'">{{ r.label }}</s>
               <s v-else-if="r.kind === 'memory'">{{ t("memoryMax", { bytes: r.value }) }}</s>
               <s v-else-if="r.kind === 'aiTerminal'">{{ t("aiTerminalSummary", { spec: r.value }) }}</s>
+              <s v-else-if="r.kind === 'audio'">{{ t("audioSummary") }} ({{ r.value }})</s>
               <s v-else-if="r.kind === 'network'"><code>{{ r.label }}</code></s>
               <s v-else-if="r.kind === 'subWindow'">{{ t("subWindowSummary", { spec: r.label }) }}</s>
               <s v-else-if="r.kind === 'subWindowFlag'">{{ t("subWindowFlag_" + r.value) }}</s>
@@ -168,6 +176,8 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
           <template v-if="hasSensitive">{{ t("understandSensitive") }}</template>
           <template v-if="hasAiTerminal && (hasWildcard || hasSensitive)"> </template>
           <template v-if="hasAiTerminal">{{ t("understandAiTerminal") }}</template>
+          <template v-if="hasAudio && (hasWildcard || hasSensitive || hasAiTerminal)"> </template>
+          <template v-if="hasAudio">{{ t("understandAudio") }}</template>
         </span>
       </label>
 
@@ -406,6 +416,10 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
     "kindTool": "MCP tool",
     "kindTarget": "Reach worktree",
     "kindMemory": "Memory",
+    "kindAudio": "Microphone",
+    "audioSummary": "Listen to your microphone",
+    "audioSpec": "(up to {spec})",
+    "audioWarning": "The app can hear everything the microphone picks up, including your voice and anything said near your PC, as raw audio. Recording is shown in the launch screen and in the window titles, and stops when the app stops, reloads, or you press Stop recording. The audio is not saved by oretachi.",
     "kindAiTerminal": "AI terminal",
     "aiTerminalSummary": "Open dedicated AI terminals ({spec})",
     "aiTerminalWarning": "Starts an agent that runs with the same authority as you (it can run arbitrary commands and edit files in this worktree). The app can type into it, read its output and answer its permission dialogs. This is the strongest permission.",
@@ -447,6 +461,7 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
     "understand": "I understand this lets the app reach worktrees I did not choose individually.",
     "understandSensitive": "I understand this lets the app run commands with my authority by editing hook and workflow files.",
     "understandAiTerminal": "I understand this lets the app start an agent that runs with my authority and drive it.",
+    "understandAudio": "I understand this lets the app listen to my microphone.",
     "changeHint": "Denying stops the app.",
     "waiting": "{count} more approval request(s) are waiting.",
     "approve": "Allow and start",
@@ -469,6 +484,10 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
     "kindTool": "MCP ツール",
     "kindTarget": "届くワークツリー",
     "kindMemory": "メモリー",
+    "kindAudio": "マイク",
+    "audioSummary": "マイクの音声を取得する",
+    "audioSpec": "（{spec}）",
+    "audioWarning": "あなたの声や PC の近くで話された内容を含む、マイクが拾うすべての音を、生の音声としてアプリが聞けます。録音中は起動画面とウィンドウのタイトルに表示され、アプリの停止・リロード・起動画面の「録音を止める」で止まります。oretachi は音声を保存しません。",
     "kindAiTerminal": "AI ターミナル",
     "aiTerminalSummary": "専用の AI ターミナルを開く（{spec}）",
     "aiTerminalWarning": "あなたと同じ権限で動くエージェントを起動します（このワークツリーで任意のコマンド実行やファイル編集ができます）。アプリはそのエージェントへ入力し、出力を読み、許可ダイアログに回答できます。最も強い権限です。",
@@ -510,6 +529,7 @@ const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiT
     "understand": "個別に選んでいないワークツリーにもアプリが届くことを理解しました。",
     "understandSensitive": "フックやワークフローのファイルを書き換えて、私の権限でコマンドを実行できてしまうことを理解しました。",
     "understandAiTerminal": "アプリが私の権限で動くエージェントを起動し、操作できることを理解しました。",
+    "understandAudio": "アプリが私のマイクの音声を聞けることを理解しました。",
     "changeHint": "拒否するとアプリは停止します。",
     "waiting": "ほかに {count} 件の承認要求が待っています。",
     "approve": "許可して起動",

@@ -31,6 +31,13 @@ pub const SUB_WINDOW_DIM_CAP: u32 = 1024;
 const SUB_WINDOW_DEFAULT_WIDTH: u32 = 480;
 const SUB_WINDOW_DEFAULT_HEIGHT: u32 = 640;
 
+/// `audio.sampleRates` に書けるレート（Hz）。音声認識で使う帯域に絞る。
+pub const AUDIO_SAMPLE_RATES: &[u32] = &[8000, 16000, 24000, 48000];
+/// `audio.maxSeconds` の上限と既定（1 回の録音の最大秒数）
+pub const AUDIO_MAX_SECONDS_CAP: u32 = 600;
+const AUDIO_DEFAULT_MAX_SECONDS: u32 = 60;
+const AUDIO_DEFAULT_SAMPLE_RATE: u32 = 16000;
+
 const MAX_NAME_CHARS: usize = 100;
 const MAX_DESCRIPTION_CHARS: usize = 500;
 const MAX_VERSION_CHARS: usize = 50;
@@ -104,6 +111,22 @@ pub struct SubWindowPermission {
     pub position: bool,
 }
 
+/// manifest の `audio`。マイクの生音声（PCM）の取得。**ユーザーの発話を聞ける権限**なので、
+/// 承認ダイアログでは最も強い警告にする。取得は Rust 側（`app_audio.rs`）で行い、iframe には
+/// getUserMedia を使わせない（sandbox / CSP を緩めない。前提 3）。
+///
+/// 省略した値は既定で埋めて正規化する（変化検知が既定の書き分けで揺れないように）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioPermission {
+    /// マイク入力の申請。必須で `true`（将来、出力やループバックを足しても区別できるように）
+    pub microphone: bool,
+    /// 1 回の録音の最大秒数（1〜`AUDIO_MAX_SECONDS_CAP`）。host が強制する
+    pub max_seconds: u32,
+    /// `start` で指定できるサンプルレート（Hz）。ソート・重複除去済み。`AUDIO_SAMPLE_RATES` の部分集合
+    pub sample_rates: Vec<u32>,
+}
+
 /// manifest の `fs`。`read` / `write` は `worktree://<相対>` / `artifact://<相対>` のディレクトリ
 /// プレフィックス（正規化済み・ソート・重複除去済み）。`write` は `read` を含意しない。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -160,6 +183,9 @@ pub struct RequestedPermissions {
     /// manifest の `subWindow`。専用サブウィンドウ（`app_subwindow.rs`）の上限と、申請した見た目の権限
     #[serde(default, rename = "subWindow", skip_serializing_if = "Option::is_none")]
     pub sub_window: Option<SubWindowPermission>,
+    /// manifest の `audio`。マイクの生音声の取得（`app_audio.rs`）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioPermission>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -208,6 +234,9 @@ pub struct ResolvedPermissions {
     /// 解決で変わるものがない（承認した値がそのまま関門の入力になる）
     #[serde(default, rename = "subWindow", skip_serializing_if = "Option::is_none")]
     pub sub_window: Option<SubWindowPermission>,
+    /// 解決で変わるものがない（承認した値がそのまま関門の入力になる）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audio: Option<AudioPermission>,
 }
 
 /// host 側に保存する承認。キーはアーティファクト識別子（`<worktreeId>/<artifactId>`）。
@@ -311,6 +340,7 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
             "db" => out.db = parse_scoped(val, ScopedKind::Db)?,
             "network" => out.network = parse_network(val)?,
             "subWindow" => out.sub_window = parse_sub_window(val)?,
+            "audio" => out.audio = parse_audio(val)?,
             k if RESERVED_PERMISSION_KEYS.contains(&k) => {
                 return Err(format!(
                     "権限 '{}' はこの版ではまだ使えません（対応する機能が未実装です）。manifest から外してください",
@@ -319,7 +349,7 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
             }
             other => {
                 return Err(format!(
-                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs / db / network / subWindow / aiTerminal だけです",
+                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs / db / network / subWindow / aiTerminal / audio だけです",
                     other
                 ));
             }
@@ -448,6 +478,59 @@ fn parse_sub_window(v: &serde_json::Value) -> Result<Option<SubWindowPermission>
         always_on_top: flag("alwaysOnTop")?,
         position: flag("position")?,
     }))
+}
+
+fn parse_audio(v: &serde_json::Value) -> Result<Option<AudioPermission>, String> {
+    let obj = expect_object(v, "app.permissions.audio")?;
+    const KEYS: &[&str] = &["microphone", "maxSeconds", "sampleRates"];
+    if let Some(k) = obj.keys().find(|k| !KEYS.contains(&k.as_str())) {
+        return Err(format!("app.permissions.audio の未知のキー '{}' です（{} だけ）", k, KEYS.join(" / ")));
+    }
+    // マイクの申請は明示させる（`{}` や `false` で黙って何も起きない承認にしない）
+    match obj.get("microphone") {
+        Some(serde_json::Value::Bool(true)) => {}
+        _ => return Err("app.permissions.audio.microphone に true を指定してください（マイクの音声を取得する申請）".to_string()),
+    }
+    let max_seconds = match obj.get("maxSeconds") {
+        None | Some(serde_json::Value::Null) => AUDIO_DEFAULT_MAX_SECONDS,
+        Some(n) => {
+            let n = n
+                .as_u64()
+                .ok_or_else(|| "app.permissions.audio.maxSeconds は正の整数である必要があります".to_string())?;
+            if n < 1 || n > AUDIO_MAX_SECONDS_CAP as u64 {
+                return Err(format!(
+                    "app.permissions.audio.maxSeconds は 1〜{} の範囲で指定してください（指定: {}）",
+                    AUDIO_MAX_SECONDS_CAP, n
+                ));
+            }
+            n as u32
+        }
+    };
+    let sample_rates = match obj.get("sampleRates") {
+        None | Some(serde_json::Value::Null) => vec![AUDIO_DEFAULT_SAMPLE_RATE],
+        Some(serde_json::Value::Array(items)) => {
+            let mut set = BTreeSet::new();
+            for item in items {
+                let r = item
+                    .as_u64()
+                    .ok_or_else(|| "app.permissions.audio.sampleRates の要素は整数（Hz）である必要があります".to_string())?;
+                if !AUDIO_SAMPLE_RATES.iter().any(|a| *a as u64 == r) {
+                    return Err(format!(
+                        "app.permissions.audio.sampleRates に使えないレート {} があります（使えるのは {} だけ）",
+                        r,
+                        AUDIO_SAMPLE_RATES.iter().map(|a| a.to_string()).collect::<Vec<_>>().join(" / ")
+                    ));
+                }
+                set.insert(r as u32);
+            }
+            if set.is_empty() {
+                return Err("app.permissions.audio.sampleRates は 1 つ以上指定してください".to_string());
+            }
+            set.into_iter().collect()
+        }
+        Some(_) => return Err("app.permissions.audio.sampleRates は整数の配列である必要があります".to_string()),
+    };
+    Ok(Some(AudioPermission { microphone: true, max_seconds, sample_rates }))
 }
 
 fn parse_memory(v: &serde_json::Value) -> Result<Option<MemoryPermission>, String> {
@@ -767,6 +850,55 @@ mod tests {
         let wider = ok(json!({ "name": "x", "permissions": { "subWindow": { "transparent": true, "alwaysOnTop": true }}}));
         assert_eq!(a.permissions, same.permissions);
         assert_ne!(a.permissions, wider.permissions);
+    }
+
+    #[test]
+    fn parses_audio_permission_with_defaults_and_normalizes() {
+        let m = ok(json!({ "name": "x", "permissions": { "audio": { "microphone": true }}}));
+        let a = m.permissions.audio.unwrap();
+        assert_eq!((a.microphone, a.max_seconds, a.sample_rates.clone()), (true, 60, vec![16000]));
+        // ソート・重複除去。既定を明示しても同じ集合
+        let m = ok(json!({ "name": "x", "permissions": { "audio": {
+            "microphone": true, "maxSeconds": 120, "sampleRates": [48000, 16000, 16000]
+        }}}));
+        let a = m.permissions.audio.unwrap();
+        assert_eq!((a.max_seconds, a.sample_rates), (120, vec![16000, 48000]));
+        let same = ok(json!({ "name": "y", "permissions": { "audio": { "microphone": true, "maxSeconds": 60, "sampleRates": [16000] }}}));
+        let dflt = ok(json!({ "name": "x", "permissions": { "audio": { "microphone": true }}}));
+        assert_eq!(same.permissions, dflt.permissions);
+    }
+
+    #[test]
+    fn rejects_bad_audio_permission() {
+        let p = |v: serde_json::Value| err(json!({ "name": "x", "permissions": { "audio": v }}));
+        assert!(p(json!([])).contains("JSON オブジェクト"));
+        // マイクの申請は明示が必須（空・false・文字列は拒否）
+        assert!(p(json!({})).contains("microphone"));
+        assert!(p(json!({ "microphone": false })).contains("microphone"));
+        assert!(p(json!({ "microphone": "yes" })).contains("microphone"));
+        assert!(p(json!({ "microphone": true, "loopback": true })).contains("未知のキー"));
+        assert!(p(json!({ "microphone": true, "maxSeconds": 0 })).contains("maxSeconds"));
+        assert!(p(json!({ "microphone": true, "maxSeconds": AUDIO_MAX_SECONDS_CAP + 1 })).contains("maxSeconds"));
+        assert!(p(json!({ "microphone": true, "maxSeconds": "long" })).contains("maxSeconds"));
+        assert!(p(json!({ "microphone": true, "sampleRates": [] })).contains("sampleRates"));
+        assert!(p(json!({ "microphone": true, "sampleRates": [44100] })).contains("44100"));
+        assert!(p(json!({ "microphone": true, "sampleRates": "16000" })).contains("sampleRates"));
+        assert!(p(json!({ "microphone": true, "sampleRates": ["16000"] })).contains("sampleRates"));
+    }
+
+    #[test]
+    fn audio_change_requires_reapproval_only_when_the_set_changes() {
+        let a = ok(json!({ "name": "x", "permissions": { "audio": { "microphone": true }}}));
+        let longer = ok(json!({ "name": "x", "permissions": { "audio": { "microphone": true, "maxSeconds": 61 }}}));
+        let wider = ok(json!({ "name": "x", "permissions": { "audio": { "microphone": true, "sampleRates": [16000, 48000] }}}));
+        let none = ok(json!({ "name": "x" }));
+        assert!(requested_changed(&a.permissions, &longer.permissions));
+        assert!(requested_changed(&a.permissions, &wider.permissions));
+        // 権限が狭まる変更（外す）でも再承認
+        assert!(requested_changed(&a.permissions, &none.permissions));
+        // 名前・説明の変更だけでは出ない
+        let renamed = ok(json!({ "name": "other", "description": "d", "permissions": { "audio": { "microphone": true }}}));
+        assert!(!requested_changed(&a.permissions, &renamed.permissions));
     }
 
     #[test]
@@ -1090,6 +1222,7 @@ mod tests {
             db: None,
             network: None,
             sub_window: None,
+            audio: None,
         }
     }
 
@@ -1129,6 +1262,7 @@ mod tests {
                 db: None,
                 network: None,
                 sub_window: None,
+                audio: None,
             },
             resolved: resolved(&["notify_worktree"], &["wt-b"]),
         };

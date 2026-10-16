@@ -53,6 +53,15 @@ export interface AppSubWindowPermission {
   position: boolean;
 }
 
+/** マイクの生音声の取得の申請（承認した値そのもの。解決で変わるものがない） */
+export interface AppAudioPermission {
+  microphone: true;
+  /** 1 回の録音の最大秒数。host が強制する */
+  maxSeconds: number;
+  /** `audio.start` で指定できるサンプルレート（Hz） */
+  sampleRates: number[];
+}
+
 export interface AppResolvedPermissions {
   mcp?: { tools: string[]; targets: AppResolvedTarget[] };
   memory?: { maxBytes: number };
@@ -63,6 +72,7 @@ export interface AppResolvedPermissions {
   /** Rust プロキシが通す URL プレフィックス（正規化済み） */
   network?: { allow: string[] };
   subWindow?: AppSubWindowPermission;
+  audio?: AppAudioPermission;
 }
 
 export interface AppRequestedPermissions {
@@ -73,6 +83,7 @@ export interface AppRequestedPermissions {
   db?: { read: string[]; write: string[]; allowSensitivePaths: boolean };
   network?: { allow: string[] };
   subWindow?: AppSubWindowPermission;
+  audio?: AppAudioPermission;
 }
 
 export interface AppGrant {
@@ -103,6 +114,8 @@ export interface AppInstanceStatus {
   memoryBytes: number | null;
   /** 上限を下げた結果、既存データが上限を超えている。書き込みだけ拒否され、読み取りはできる */
   memoryOverCap: boolean;
+  /** マイクを録音中か（`audio` 権限のアプリが `audio.start` している間） */
+  recording: boolean;
 }
 
 export interface AppLogEntry {
@@ -175,6 +188,8 @@ export interface AppLaunchApi {
   status(artifactId: string): Promise<AppInstanceStatus>;
   start(artifactId: string): Promise<void>;
   stop(artifactId: string): Promise<boolean>;
+  /** 録音だけを止める（アプリは動かしたまま）。録音中でなければ false */
+  stopRecording(artifactId: string): Promise<boolean>;
   toggleVisible(artifactId: string): Promise<boolean>;
   log(artifactId: string): Promise<AppLogEntry[]>;
   grant(artifactId: string): Promise<AppGrant | null>;
