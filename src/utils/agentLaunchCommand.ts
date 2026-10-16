@@ -37,13 +37,19 @@ export function buildClaudeLaunchCommand(opts: ClaudeLaunchOptions): string {
   const tempPath = opts.tempPath;
   if (!tempPath) return `${base}\r`;
   if (opts.isPowerShell) {
-    // Windows PowerShell 5.1 は、ネイティブコマンドへ渡す引数の `"` をエスケープしないので、
-    // プロンプトに `"` があると引数が分割される。信頼できないプロンプトのときは `\"` へ直しておく
-    // （`--` があるので分割されてもフラグ注入にはならないが、プロンプトの中身が欠けるのを避ける）
-    const read = opts.endOfOptions
-      ? `(Get-Content "${tempPath}" -Raw -Encoding UTF8).Replace('"','\\"')`
-      : `Get-Content "${tempPath}" -Raw -Encoding UTF8`;
-    return `$p = ${read}; ${base} "$p"; Remove-Item "${tempPath}"\r`;
+    // Windows PowerShell 5.1 は、ネイティブコマンドへ渡す引数の `"` をエスケープしない（空白を含む引数は
+    // 前後を `"` で包むだけ）ので、プロンプトに `"` があると引数が分割される。信頼できないプロンプトのときは、
+    // CommandLineToArgvW の規則どおりに直しておく（`--` があるので分割されてもフラグ注入にはならないが、
+    // プロンプトの中身が欠けるのを避ける）:
+    //  - `"` の直前の `\` の連なりは 2 倍にして、`"` を `\"` にする（`\"` が `\` に化けるのを防ぐ）
+    //  - 空白を含む引数は PowerShell が `"` で包むので、末尾の `\` の連なりを 2 倍にする
+    //    （包まれた閉じ `"` を `\"` にしない。空白が無ければ包まれないので 2 倍にしない）
+    const assign = `$p = Get-Content "${tempPath}" -Raw -Encoding UTF8`;
+    const escape = opts.endOfOptions
+      ? `; $p = [regex]::Replace($p,'(\\\\*)"','$1$1\\"')` +
+        `; if ($p -match '\\s') { $p = [regex]::Replace($p,'(\\\\+)\\z','$1$1') }`
+      : "";
+    return `${assign}${escape}; ${base} "$p"; Remove-Item "${tempPath}"\r`;
   }
   return `${base} "$(cat "${tempPath}")"; rm "${tempPath}"\r`;
 }
