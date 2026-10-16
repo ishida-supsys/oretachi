@@ -59,7 +59,7 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
   - **既定拒否パス（上の一覧）は、DB では `read` でも使えない**（DB の副産物の `-journal` が同じ場所に出るため）。含む manifest は `allowSensitivePaths: true` を足さない限りエラー。
   - 同じ DB へ複数のアプリが書くのは避ける（ロックの競合で `database is locked` になりうる）。`artifact://` に専用の DB を置くのが無難。
 
-- `network`: アプリが通信してよい URL のプレフィックス。`{ "allow": ["https://api.example.com/v1/"] }`（最大 20 件）。`http` / `https` のみで、`?` / `#` / `user:pass@` は書けない。**この配下にだけ**通信でき、承認ダイアログにはプレフィックスがそのまま出る（平文の `http` は警告つき）。**ループバック・プライベート IP・oretachi 自身のポートは常に拒否され、解除する手段は無い**（`localhost` や `192.168.x.x` を書くと manifest がエラーになる）。
+- `network`: アプリが通信してよい URL のプレフィックス。`{ "allow": ["https://api.example.com/v1/"] }`（最大 20 件）。`http` / `https` / `ws` / `wss` のみで、`?` / `#` / `user:pass@` は書けない。**この配下にだけ**通信でき、承認ダイアログにはプレフィックスがそのまま出る（平文の `http` / `ws` は警告つき）。`ws://` / `wss://` は WebSocket（`net.ws`）用で、**スキームは完全一致**する（`https://x/` の許可で `wss://x/` へは繋げず、`wss://x/` の許可で `net.fetch` もできない。両方使うなら両方書く）。**ループバック・プライベート IP・oretachi 自身のポートは常に拒否され、解除する手段は無い**（`localhost` や `192.168.x.x` を書くと manifest がエラーになる）。
 
 - `subWindow`: アプリが専用のウィンドウ（透明・枠なしも可。アシスタントキャラクターの表示など）を開く申請。省略したキーは既定で埋まる。`{ "maxCount": 1, "maxWidth": 480, "maxHeight": 640, "transparent": true, "frameless": true, "alwaysOnTop": true, "position": true }`
   - `maxCount`: 同時に開ける数（1〜4、既定 1）。`maxWidth` / `maxHeight`: 開くウィンドウの大きさの上限（64〜1024 ピクセル、既定 480 × 640）。
@@ -68,7 +68,7 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
 
 ## ネットワーク API（`net`）
 
-iframe からは直接通信できない（CSP で `connect-src 'none'`）。`require('oretachi')` の `net.fetch` が、Rust 側のプロキシ経由で通信する。
+iframe からは直接通信できない（CSP で `connect-src 'none'`）。`require('oretachi')` の `net.fetch`（HTTP）と `net.ws`（WebSocket）が、Rust 側のプロキシ経由で通信する。
 
 ```js
 import { net } from 'oretachi';
@@ -88,6 +88,31 @@ const data = JSON.parse(res.body);                  // responseType: 'base64' �
 - 上限: リクエスト本文 1MiB、レスポンス本文 8MiB、ヘッダー 32 個（値は 8KiB まで）、全体 20 秒、同時に 8 本まで。`Host` / `Content-Length` / `Transfer-Encoding` / `Connection` / `Proxy-*` などは指定できない。Cookie は保持しない。
 - 再読み込みやアプリの停止で、通信中のリクエストは中断される。
 - **応答は信頼しない入力として扱う**（HTML・JSON をそのまま実行・描画しない）。
+
+### WebSocket（`net.ws`）
+
+manifest の `network.allow` に `wss://…`（平文なら `ws://…`）のプレフィックスを書く。サーバーへ繋いで、テキストとバイナリを送受信できる。
+
+```js
+import { net } from 'oretachi';
+const ws = await net.ws.open('wss://stream.example.com/v1/listen', { protocols: ['v1'] });  // 繋がったら解決する
+ws.onMessage((data, { binary }) => {              // テキストは文字列、バイナリは Uint8Array
+  if (!binary) console.log(JSON.parse(data));
+});
+ws.onError((err) => console.warn(err.message));   // 通信の途中の失敗（直後に onClose も来る）
+ws.onClose(({ code, reason, clean }) => { /* 切れた（こちらの close() も、相手に切られたときも） */ });
+await ws.send('{"type":"hello"}');                // 文字列はテキスト。ArrayBuffer / TypedArray はバイナリ
+await ws.send(new Int16Array([1, 2, 3]));
+await ws.close(1000, 'bye');                      // code は 1000 か 3000〜4999（省略可）
+```
+
+- **戻り値**: `open` は接続が確立したあとにハンドルで解決する。拒否・上限超過・タイムアウト・ハンドシェイク失敗は reject（理由は起動画面のデバッグログにも出る）。`send` は送信キューに積めたら解決する（相手に届いた保証ではない）。
+- **許可**: `net.fetch` と同じ。`allow` に**スキーム・ホスト・ポートが完全一致し、パスが前方一致**する URL だけ。接続の前後に接続先 IP を検査し（公開の名前がループバック／プライベート IP を返したら拒否）、oretachi 自身のポートへは繋げない。システムのプロキシは使わない。**サーバーの 3xx リダイレクトは追わない**（ハンドシェイクの失敗になる）。ヘッダー（`Authorization` など）は付けられない。認証は URL のパスや、繋いだあとの最初のメッセージで行う（`?` のクエリは URL に付けても拒否されないが、ログには出ない）。
+- **イベントの取りこぼし**: リスナーを付ける前に届いたメッセージ・エラー・終了は溜めておき、最初の `onMessage` / `onError` / `onClose` の登録で流す。ただし `onMessage` を付けないまま 1000 件を超えて受けると、エラーにして閉じる。
+- **上限**: 1 メッセージ 1MiB（送信・受信とも。超えた受信は 1009 で閉じる）、1 つのアプリが同時に開けるのは 4 本、oretachi 全体で 16 本、送信キューは 32 件（満杯の間は `send` が reject される。**相手が読むのを待ってから送る**。待てずに積み続けるなら、自分で間引く）。接続の確立は 25 秒まで。`close()` のあと相手の応答は 5 秒待つ。
+- **切れるタイミング**: `close()`・相手の切断・通信エラーのほか、**リロード（コードの更新・再承認の承認後）とインスタンスの停止（停止ボタン・承認の取り消し・実行ウィンドウを閉じる・削除）でも必ず切れる**。リロード・停止では `onClose` は呼ばれない（iframe が入れ替わる・アプリが止まるため）。リロードのあとは、新しい iframe が `open` し直す。承認が縮小されたり取り消されたりした接続は、次の `send` で切られる。
+- マイクの音声（`audio.onData`）をリアルタイムに送るなら、`Int16Array` をそのまま `ws.send(pcm)` に渡せる（`send` が詰まったら間引く）。
+- Web ビューアでは使えない。**受信したデータは信頼しない入力として扱う**。
 
 ## データベース API（`db`）
 
@@ -218,7 +243,7 @@ await audio.stop();
 - **上限**: 1 つのアプリが同時に録音できるのは 1 本、全体で 2 本まで。`maxSeconds` を超える分は録音しない（`ended` で知らせる）。未宣言・承認外のレート・二重の `start`・上限超過は拒否され、デバッグログに残る。
 - **録音中の表示**: 起動画面に「● 録音中」と「録音を止める」ボタンが出て、実行ウィンドウとサブウィンドウのタイトルに `● 録音中 — ` が付く。Windows のマイク使用中の表示も出る。ユーザーはいつでも止められる。
 - 音声は oretachi がファイルに保存することは無い（メモリー上だけで流す）。保存したい場合はアプリが `fs` / `db` の権限の範囲で書くが、**音声はユーザーの発話そのものなので、必要最小限にとどめる**。
-- **外へ送る経路は今は `net.fetch` の HTTP POST だけ**（`network` の許可が要る。1 リクエスト本文 1MiB・同時 8 本の上限。順序は `seq` で自分で並べる）。WebSocket は未対応。
+- **外へ送る経路は `net.fetch` の HTTP POST か、`net.ws`（WebSocket。リアルタイムならこちら）**（どちらも `network` の許可が要る。`net.fetch` は 1 リクエスト本文 1MiB・同時 8 本の上限で、順序は `seq` で自分で並べる）。
 - Windows だけで使える（それ以外では `start` が失敗する）。Web ビューアでは起動できない。
 
 ## メモリー API
