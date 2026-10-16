@@ -2,6 +2,16 @@ mod ai_commit_message;
 mod ai_description;
 mod ai_judge;
 mod ai_provider;
+mod ai_terminal;
+mod app_db;
+mod app_net;
+mod app_ws;
+mod app_subwindow;
+mod app_audio;
+mod app_fs;
+mod app_grant;
+mod app_instance;
+mod app_manifest;
 mod archive_db;
 mod artifact_export;
 mod artifact_lock;
@@ -125,20 +135,49 @@ fn repo_artifacts_dir(
 
 #[tauri::command]
 async fn pty_spawn(
+    window: tauri::Window,
     app_handle: tauri::AppHandle,
     state: State<'_, PtyManager>,
     rows: u16,
     cols: u16,
     shell: Option<String>,
     cwd: Option<String>,
+    terminal_id: Option<String>,
 ) -> Result<u32, String> {
     log::debug!("[Terminal] cmd::pty_spawn rows={} cols={} shell={:?} cwd={:?}", rows, cols, shell, cwd);
+    // インスタンス専用 AI ターミナル: host が予約した terminal_id だけを、メインウィンドウからのみ受理する。
+    // 予約は一回限りで、cwd は予約時に host が解決したものを強制する（フロントの申告は使わない）。
+    let mut cwd = cwd;
+    if let Some(tid) = terminal_id.as_deref() {
+        if window.label() != "main" {
+            return Err("terminal_id を指定した pty_spawn はメインウィンドウからのみ呼べます".to_string());
+        }
+        cwd = Some(ai_terminal::take_reservation(&app_handle, tid)?);
+    }
     // ConPTY 生成 + プロセス spawn はブロッキング I/O のため spawn_blocking で実行し、
     // 同期コマンドとしてメインスレッド (WebView2 UI スレッド) を塞がないようにする。
     let manager = state.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || manager.spawn(app_handle, rows, cols, shell, cwd))
-        .await
-        .map_err(|e| format!("spawn_blocking join error: {}", e))?
+    let app_for_bind = app_handle.clone();
+    let reserved = terminal_id.clone();
+    let spawned = tauri::async_runtime::spawn_blocking(move || {
+        manager.spawn(app_handle, rows, cols, shell, cwd, reserved)
+    })
+    .await
+    .map_err(|e| format!("spawn_blocking join error: {}", e))?;
+    let Some(tid) = terminal_id else { return spawned };
+    // 紐付けは Rust だけで完結させる（所有の根拠にフロントの申告を使わない）
+    match spawned {
+        Ok(sid) if ai_terminal::bind(&app_for_bind, &tid, sid) => Ok(sid),
+        Ok(sid) => {
+            ai_terminal::kill_sessions(&app_for_bind, vec![sid], "ai-terminal-bind-failed");
+            ai_terminal::cancel(&app_for_bind, &tid);
+            Err("AI ターミナルの紐付けに失敗しました".to_string())
+        }
+        Err(e) => {
+            ai_terminal::cancel(&app_for_bind, &tid);
+            Err(e)
+        }
+    }
 }
 
 // pty_write は enqueue のみで非ブロッキング (実 I/O はセッション毎の writer スレッド)。
@@ -237,7 +276,12 @@ fn apply_acrylic_effect(app_handle: tauri::AppHandle, r: u8, g: u8, b: u8, a: u8
     let _bc = main_thread_watch::enter(main_thread_watch::Activity::ApplyAcrylic);
     #[cfg(target_os = "windows")]
     {
-        for (_, window) in app_handle.webview_windows() {
+        for (label, window) in app_handle.webview_windows() {
+            // アプリのウィンドウ（appinst-*）には掛けない。透明なサブウィンドウが、透明ではなく
+            // ぼかし（Windows 10 は ACCENT_ENABLE_BLURBEHIND）になってしまう
+            if label.starts_with(app_instance::LABEL_PREFIX) {
+                continue;
+            }
             if let Ok(hwnd) = window.hwnd() {
                 acrylic::setup(hwnd.0, r, g, b, a);
             }
@@ -863,6 +907,9 @@ async fn delete_artifacts(app_handle: tauri::AppHandle, worktree_id: String) -> 
     })
     .await
     .map_err(|e| format!("task join error: {}", e))??;
+    // ワークツリーごと消える経路（クローズ / アーカイブ）。起動中のアプリを止め、承認も消す。
+    // 残すと、同じ id で作り直す / インポートした別物が同じ権限セットで承認なしに起動してしまう
+    app_instance::on_worktree_artifacts_deleted(&app_handle, &worktree_id).await;
     if deleted {
         if let Some(pool) = app_handle.try_state::<report_db::ReportPool>() {
             let _ = report_db::insert(&pool.0, "artifact_change:delete", &worktree_id).await;
@@ -896,6 +943,8 @@ async fn delete_artifact(
     .map_err(|e| format!("task join error: {}", e))??;
 
     if deleted {
+        // アプリなら起動中のインスタンスを止め、承認（grant）も消す（MCP の delete と同じ）
+        app_instance::on_artifact_deleted(&app_handle, &worktree_id, &artifact_id).await;
         let _ = app_handle.emit(
             "artifact-changed",
             serde_json::json!({
@@ -1230,17 +1279,33 @@ pub(crate) async fn set_artifact_memory_in(
     // 消せないゴミになる。削除との間に TOCTOU は残るが、後始末が 1 回遅れるだけ。
     let orphan_dir = dir.clone();
     let orphan_id = artifact_id.to_string();
-    let orphaned = tokio::task::spawn_blocking(move || {
-        if orphan_dir.join(format!("{}.json", orphan_id)).exists() {
-            return false;
-        }
-        let _ = std::fs::remove_file(artifact_state_path(&orphan_dir, &orphan_id));
-        true
+    // 戻り値: (本体が無い, アプリのマーカー付き)
+    let (orphaned, is_app) = tokio::task::spawn_blocking(move || {
+        let body = std::fs::read_to_string(orphan_dir.join(format!("{}.json", orphan_id)));
+        let Ok(raw) = body else {
+            if !orphan_dir.join(format!("{}.json", orphan_id)).exists() {
+                let _ = std::fs::remove_file(artifact_state_path(&orphan_dir, &orphan_id));
+                return (true, false);
+            }
+            // 存在するのに読めない（ロック中など）。マーカーを確認できないので塞ぐ側へ倒す
+            return (false, true);
+        };
+        (false, app_manifest::raw_has_app_marker(&raw))
     })
     .await
     .map_err(|e| format!("task join error: {}", e))?;
     if orphaned {
         return Ok(None);
+    }
+    // アプリのメモリ書き込みは、ビューアの `saveMemory` / Web ビューアの `api_set_*_memory`
+    // のどちらの経路からも拒否する（ここが両者の唯一の合流点）。manifest の maxBytes を
+    // 必ず強制しないと、必須にした最大サイズが事実上の任意になるため。
+    // アプリ自身のメモリ API は #371。MCP の `artifact_store` は承認済みの maxBytes を強制して通す
+    if is_app {
+        return Err(
+            "このアーティファクトはアプリです。メモリはビューア / Web ビューアからは書き込めません（アプリのメモリ API か MCP の artifact_store を使います）"
+                .to_string(),
+        );
     }
 
     // ビューア自身の書き込みは表示中ロックの対象外（ロックが止めるのは MCP 由来だけ）。
@@ -2195,6 +2260,9 @@ fn subscribe_webview2_diagnostics(window: &tauri::WebviewWindow) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // reqwest は rustls-no-provider で使っている。暗号プロバイダは自分で入れる（updater が更新確認で
+    // 遅れて入れるのを待つと、それまで HTTPS が失敗する）。すでに入っていれば Err なので無視する
+    app_net::ensure_crypto_provider();
     // Windows: インストーラ起動由来の RedirectionGuard 緩和策 (Enforce=1) を検出したら
     // explorer.exe 経由でセルフリローンチする (Issue #70)。リローンチ時は exit(0) して戻らない。
     // この時点ではロガー未初期化のため、結果は setup() に持ち越して記録する。
@@ -2280,6 +2348,10 @@ pub fn run() {
                 tauri::plugin::Builder::<tauri::Wry>::new("acrylic-effect")
                     .on_window_ready(move |window| {
                         let _bc = main_thread_watch::enter(main_thread_watch::Activity::WindowReady);
+                        // アプリのウィンドウ（appinst-*）は対象外（透明なサブウィンドウがぼかしになるため）
+                        if window.label().starts_with(app_instance::LABEL_PREFIX) {
+                            return;
+                        }
                         if let Ok(hwnd) = window.hwnd() {
                             acrylic::setup(hwnd.0, r, g, b, a);
                         }
@@ -2310,6 +2382,10 @@ pub fn run() {
                         .difference(tauri_plugin_window_state::StateFlags::DECORATIONS),
                 )
                 .with_denylist(&["tray-popup"])
+                // アプリの常駐ウィンドウ（appinst-N）は追跡しない。ラベルは起動のたびに採番し直すので、
+                // 保存された位置・可視状態が別のアプリへ引き継がれて勝手に表示されうる。
+                // 再起動をまたいで復活しないものなので、保存する意味も無い
+                .with_filter(|label| !label.starts_with(app_instance::LABEL_PREFIX))
                 .build(),
         )
         .plugin(tauri_plugin_opener::init())
@@ -2344,6 +2420,15 @@ pub fn run() {
         .manage(mcp_server::McpPeerRegistry(std::sync::Arc::new(tokio::sync::RwLock::new(std::collections::HashMap::new()))))
         .manage(mcp_server::DetachedWorktreeRegistry::default())
         .manage(artifact_lock::ArtifactOpenRegistry::new())
+        .manage(app_grant::AppGrantStore::new())
+        .manage(app_instance::AppInstanceRegistry::default())
+        .manage(ai_terminal::AiTerminalRegistry::default())
+        .manage(ai_terminal::SpawnWaiters::default())
+        .manage(app_db::AppDbRegistry::default())
+        .manage(app_net::AppNetRegistry::default())
+        .manage(app_ws::AppWsRegistry::default())
+        .manage(app_subwindow::AppSubWindowRegistry::default())
+        .manage(app_audio::AppAudioRegistry::default())
         .manage(mcp_server::NotificationRegistry::default())
         .manage(mcp_server::CloseWorktreeAckRegistry::default())
         .manage(mcp_server::ImportWorktreeAckRegistry::default())
@@ -2443,6 +2528,53 @@ pub fn run() {
             artifact_lock_touch,
             artifact_lock_release,
             artifact_call_mcp_tool,
+            app_instance::app_instance_start,
+            app_instance::app_instance_stop,
+            app_instance::app_instance_toggle_visible,
+            app_instance::app_instance_status,
+            app_instance::app_instance_log,
+            app_instance::app_instance_grant,
+            app_instance::app_instance_bootstrap,
+            app_instance::app_instance_report,
+            app_instance::app_call_mcp_tool,
+            ai_terminal::app_ai_terminal_open,
+            ai_terminal::app_ai_terminal_write,
+            ai_terminal::app_ai_terminal_send_keys,
+            ai_terminal::app_ai_terminal_read,
+            ai_terminal::app_ai_terminal_inspect_prompt,
+            ai_terminal::app_ai_terminal_answer_prompt,
+            ai_terminal::app_ai_terminal_close,
+            ai_terminal::app_ai_terminal_list,
+            ai_terminal::ai_terminal_spawn_result,
+            ai_terminal::list_owned_ai_terminals,
+            app_fs::app_fs_read,
+            app_fs::app_fs_write,
+            app_fs::app_fs_list,
+            app_fs::app_fs_remove,
+            app_db::app_db_query,
+            app_db::app_db_execute,
+            app_db::app_db_close,
+            app_net::app_net_fetch,
+            app_ws::app_ws_open,
+            app_ws::app_ws_send,
+            app_ws::app_ws_close,
+            app_ws::app_ws_close_all,
+            app_audio::app_audio_start,
+            app_audio::app_audio_stop,
+            app_audio::app_audio_stop_for_instance,
+            app_subwindow::app_subwindow_open,
+            app_subwindow::app_subwindow_close,
+            app_subwindow::app_subwindow_list,
+            app_subwindow::app_subwindow_set_position,
+            app_subwindow::app_subwindow_set_size,
+            app_subwindow::app_subwindow_set_attributes,
+            app_subwindow::app_subwindow_start_drag,
+            app_instance::app_set_memory,
+            app_instance::app_get_memory,
+            app_instance::app_grant_respond,
+            app_instance::list_pending_app_grants,
+            app_instance::list_app_instances,
+            app_instance::revoke_app_grant,
             start_fs_watch,
             stop_fs_watch,
             settings::list_system_sounds,
@@ -2486,6 +2618,9 @@ pub fn run() {
             // 巻き込み終了させる。MCP サーバ spawn や window.show() より前に割り当てて
             // 以降生成される全子プロセスを確実に Job 配下に入れる。
             job_object::assign_current_process_to_job();
+
+            // 起動中のアプリへのコード更新の反映（権限が変われば再承認、変わらなければリロード）
+            app_instance::install_listeners(app.handle());
 
             #[cfg(target_os = "windows")]
             match &redirection_guard_outcome {
@@ -2667,6 +2802,11 @@ pub fn run() {
             }
             let settings_manager = app.state::<SettingsManager>();
             settings_manager.init(app.handle());
+            // アプリ形式アーティファクトの承認（host 側のファイル。壊れていれば承認なし = 再承認）
+            match app.path().app_data_dir() {
+                Ok(dir) => app.state::<app_grant::AppGrantStore>().init(&dir),
+                Err(e) => log::warn!("[app-grant] app_data_dir を取得できません: {}", e),
+            }
 
             // settings.debug_mode を反映: env=false かつ settings=true の場合は Debug に昇格
             {
@@ -3111,6 +3251,8 @@ pub fn run() {
                     app_handle
                         .state::<artifact_lock::ArtifactOpenRegistry>()
                         .release_window(label);
+                    // アプリの常駐ウィンドウ（appinst-*）が外から壊れたら、起動レジストリからも外す
+                    app_instance::on_window_destroyed(app_handle, label);
                     // メインウィンドウが破棄されたら、残っている付随ウィンドウ
                     // (artifact-* / codereview-* / sub-* / tray-popup) を道連れで破棄する。
                     // アーティファクトウィンドウはサブウィンドウ/トレイポップアップからも
@@ -3219,6 +3361,32 @@ mod artifact_state_tests {
             Ok(())
         }))
         .expect("update");
+    }
+
+    /// アプリ（`app` マーカー付き）のメモリは、ビューア / Web ビューアの共通の入口
+    /// （`set_artifact_memory_in`）で拒否する。通常のアーティファクトは従来どおり書ける
+    #[test]
+    fn viewer_memory_write_is_rejected_for_app_artifacts() {
+        let dir = test_dir("app-memory");
+        std::fs::write(
+            dir.join("plain.json"),
+            r#"{"id":"plain","type":"application/vnd.ant.react","title":"t","content":"const k = \"app\";","created_at":1,"updated_at":1}"#,
+        )
+        .expect("write plain");
+        std::fs::write(
+            dir.join("appy.json"),
+            r#"{"id":"appy","type":"application/vnd.ant.react","title":"t","content":"c","app":{"name":"x"},"created_at":1,"updated_at":1}"#,
+        )
+        .expect("write app");
+
+        let mem = Some(serde_json::json!({ "k": 1 }));
+        assert!(block_on(set_artifact_memory_in(dir.clone(), "plain", mem.clone())).expect("plain").is_some());
+
+        let err = block_on(set_artifact_memory_in(dir.clone(), "appy", mem.clone())).expect_err("app is rejected");
+        assert!(err.contains("アプリ"), "{}", err);
+        // リセット（null）も同じく拒否。サイドカーは作られない
+        assert!(block_on(set_artifact_memory_in(dir.clone(), "appy", None)).is_err());
+        assert!(read_state(&dir, "appy").is_none());
     }
 
     /// メモリーとピン止めは同じサイドカーの別キーなので、片方の更新で他方が消えてはいけない

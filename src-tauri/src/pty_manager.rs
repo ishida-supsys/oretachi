@@ -681,6 +681,8 @@ impl PtyManagerCore {
         cols: u16,
         shell: Option<String>,
         cwd: Option<String>,
+        // host が事前に採番した terminal_id（インスタンス専用 AI ターミナル）。None なら従来どおり自動採番。
+        reserved_terminal_id: Option<String>,
     ) -> Result<u32, String> {
         log::debug!("[Terminal] pty_manager::spawn rows={} cols={} shell={:?} cwd={:?}", rows, cols, shell, cwd);
         // 上限は spawn のたびに settings から読むので、変更は次回 spawn から再起動なしで効く。
@@ -726,7 +728,7 @@ impl PtyManagerCore {
             *id += 1;
             current
         };
-        let terminal_id = uuid::Uuid::new_v4().to_string();
+        let terminal_id = reserved_terminal_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
         let mut cmd = CommandBuilder::new(&shell_cmd);
         cmd.env("TERM", "xterm-256color");

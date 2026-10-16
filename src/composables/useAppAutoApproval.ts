@@ -18,6 +18,7 @@ import {
   trayOf,
 } from "../utils/autoApprovalNotify";
 import type TerminalView from "../components/TerminalView.vue";
+import { useOwnedAiTerminals } from "./useOwnedAiTerminals";
 
 interface UseAppAutoApprovalDeps {
   worktrees: Ref<Worktree[]>;
@@ -36,6 +37,7 @@ interface UseAppAutoApprovalDeps {
 }
 
 export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
+  const { isOwnedSession } = useOwnedAiTerminals();
   const autoApprovalMap = reactive(new Map<string, boolean>());
   const aiJudgingWorktrees = reactive(new Set<string>());
   // AI 判定中に届いた notify-worktree の預かり分（#168）。判定完了後に必ず提示する。
@@ -159,6 +161,9 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
       const terminalForApproval: TerminalForApproval[] = wt.terminals.flatMap((t) => {
         const ref = deps.getTerminalRef(t.id);
         if (!ref) return [];
+        // インスタンス専用 AI ターミナル（#372）は自動承認の対象外。ダイアログへの回答は
+        // 所有しているアプリが `answerPrompt`（指紋検査付き）で行う
+        if (isOwnedSession(ref.sessionId)) return [];
         // **承認の Enter は `writeLocked` で送る（#215）。** `oretachi_answer_prompt` が
         // 「fingerprint を照合 → 矢印で ❯ を動かす → CR で確定」を行っている区間に
         // 素の write で CR が割り込むと、移動途中の ❯ が指す選択肢（許可ダイアログなら

@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
-import { artifactSrcdocSourceKey, buildReactSrcdoc } from "./reactArtifactSrcdoc";
-import { ARTIFACT_STANDALONE_FLAG } from "./artifactMemory";
+import { artifactSrcdocSourceKey, buildReactSrcdoc, buildVendorHead } from "./reactArtifactSrcdoc";
+import { ARTIFACT_APP_FLAG, ARTIFACT_STANDALONE_FLAG } from "./artifactMemory";
 
 describe("artifactSrcdocSourceKey", () => {
   it("content が同じでもモジュールが変われば別のキーになる", () => {
@@ -45,6 +45,17 @@ describe("buildReactSrcdoc", () => {
     expect(html).not.toContain(`window["${ARTIFACT_STANDALONE_FLAG}"]=true;`);
   });
 
+  it("app ではブリッジより先にアプリフラグを立て、未指定なら立てない", () => {
+    const plain = buildReactSrcdoc("<html><head></head>", "const App = () => null;");
+    expect(plain).not.toContain(`window["${ARTIFACT_APP_FLAG}"]=true;`);
+    const html = buildReactSrcdoc("<html><head></head>", "const App = () => null;", undefined, undefined, {
+      app: true,
+    });
+    const flagAt = html.indexOf(`window["${ARTIFACT_APP_FLAG}"]=true;`);
+    expect(flagAt).toBeGreaterThan(-1);
+    expect(flagAt).toBeLessThan(html.indexOf("__oretachi="));
+  });
+
   it("standalone ではブリッジより先にフラグを立てる", () => {
     const html = buildReactSrcdoc("<html><head></head>", "const App = () => null;", undefined, undefined, {
       standalone: true,
@@ -53,5 +64,19 @@ describe("buildReactSrcdoc", () => {
     // ブリッジは読み込み時に一度だけフラグを見るので、順序が逆だと効かない
     expect(flagAt).toBeGreaterThan(-1);
     expect(flagAt).toBeLessThan(html.indexOf("__oretachi="));
+  });
+});
+
+describe("buildVendorHead の CSP", () => {
+  const csp = /http-equiv="Content-Security-Policy" content="([^"]*)"/.exec(buildVendorHead("", "", "", ""))?.[1] ?? "";
+
+  it("WebAssembly の instantiate に必要な 'unsafe-eval' を許可している（アプリの wasm 実行 #377）", () => {
+    // 'unsafe-eval' は Chromium では WebAssembly のコンパイルも許可する。外すと fs.readBytes → instantiate が動かない
+    expect(csp).toContain("script-src 'unsafe-inline' 'unsafe-eval'");
+  });
+
+  it("外部通信は許可しない（既定が 'none' で connect-src を足していない）", () => {
+    expect(csp).toContain("default-src 'none'");
+    expect(csp).not.toContain("connect-src");
   });
 });

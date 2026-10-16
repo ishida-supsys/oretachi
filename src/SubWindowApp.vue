@@ -39,6 +39,8 @@ import {
 } from "./composables/useEventSubscriptions";
 import SubscriptionFocusDialog from "./components/SubscriptionFocusDialog.vue";
 import { collectUnreadByTab } from "./utils/terminalUnread";
+import { collectOwnedByTab } from "./utils/ownedTerminalTabs";
+import { initOwnedAiTerminals, useOwnedAiTerminals } from "./composables/useOwnedAiTerminals";
 import { subWindowShowsDelivery } from "./utils/eventToastScope";
 import type { SubTerminalEntry, WebSessionInfo, AiSessionInfo } from "./types/terminal";
 import type { SavedTerminal } from "./types/worktree";
@@ -76,6 +78,9 @@ const terminalAiSessions = reactive(new Map<number, AiSessionInfo>());
 // タブ（フロントの terminalId）→ 未 ack のワークツリーイベント件数（#120 §7 / #130）。
 // バックエンドは pty の session_id で数えるので、上の pty-ai-agent-changed と同じ
 // session_id → terminalId の逆引きで詰め替える。
+// インスタンス専用 AI ターミナル（#372）の印。自動承認・復元からの除外にも同じ判定を使う
+const { ownedBySession, isOwnedSession } = useOwnedAiTerminals();
+const terminalOwnedByTab = computed(() => collectOwnedByTab(ownedBySession.value, terminalEntries));
 const terminalUnreadByTab = computed(() =>
   collectUnreadByTab(terminalUnread.value, terminalEntries),
 );
@@ -360,6 +365,9 @@ onMounted(async () => {
   // タブ未読バッジの同期（#130）。event-inbox-changed は全 webview に届くので中継は不要。
   collect(await initTerminalUnread());
 
+  // インスタンス専用 AI ターミナル（#372）の印。タブのアイコンと、自動承認・復元からの除外に使う
+  await initOwnedAiTerminals();
+
   // ヘッダの購読バッジ用に購読一覧も同期する（#137）。`initTerminalUnread` は未読件数しか
   // 読まないので、これが無いとバッジが常に 0 件（＝非表示）になる。
   collect(await initSubscriptionsScoped());
@@ -506,6 +514,8 @@ onMounted(async () => {
       mountTerminalsToHosts();
 
       const term = terminalRefs.get(terminalId);
+      // pendingCommand を書き込めたか。メイン（専用 AI ターミナルの open）が結果を待っている
+      let done: { ok: boolean; error?: string } = { ok: true };
       if (term) {
         await term.handleTabActivated();
         term.focus();
@@ -518,13 +528,18 @@ onMounted(async () => {
             const result = await Promise.race([ready.then(() => "ready" as const), timeout]);
             if (result === "ready") {
               await term.write(pendingCommand);
+            } else {
+              done = { ok: false, error: "端末の準備が間に合わず、起動コマンドを書き込めませんでした" };
             }
           } catch (e) {
             // 書き込み失敗は無視 (ターミナルがすでに閉じられている等)
-            void e;
+            done = { ok: false, error: String(e) };
           }
         }
+      } else if (pendingCommand) {
+        done = { ok: false, error: "端末の表示を用意できませんでした" };
       }
+      await emitTo("main", "sub-add-terminal-done", { terminalId, ...done });
     }
   ));
 
@@ -677,6 +692,8 @@ onMounted(async () => {
       const terminalForApproval: TerminalForApproval[] = Array.from(terminalEntries.keys()).flatMap((tid) => {
         const ref = terminalRefs.get(tid);
         if (!ref) return [];
+        // インスタンス専用 AI ターミナル（#372）は自動承認の対象外（メイン側と同じ）
+        if (isOwnedSession(ref.sessionId)) return [];
         // 承認の Enter は `writeLocked` で送る（#215）。メイン側（`useAppAutoApproval`）と
         // 同じ理由で、`oretachi_answer_prompt` の「fingerprint 照合 → 矢印 → CR」区間や
         // 配送の押し込みに素の write で CR を割り込ませると、移動途中の ❯ が指す選択肢を
@@ -712,14 +729,17 @@ onMounted(async () => {
 
   // セッション保存リクエスト
   collect(await appWindow.listen("sub-session-save-request", async () => {
-    const terminals: SavedTerminal[] = Array.from(terminalEntries.values()).map((entry) => {
-      const termRef = terminalRefs.get(entry.id);
-      return {
-        title: entry.title,
-        buffer: termRef?.serializeBuffer() ?? "",
-        aiSession: terminalAiSessions.get(entry.id),
-      };
-    }).filter((t) => t.buffer !== "");
+    const terminals: SavedTerminal[] = Array.from(terminalEntries.values())
+      // インスタンス専用 AI ターミナル（#372）は再起動で復元しない
+      .filter((entry) => !isOwnedSession(terminalRefs.get(entry.id)?.sessionId))
+      .map((entry) => {
+        const termRef = terminalRefs.get(entry.id);
+        return {
+          title: entry.title,
+          buffer: termRef?.serializeBuffer() ?? "",
+          aiSession: terminalAiSessions.get(entry.id),
+        };
+      }).filter((t) => t.buffer !== "");
     await emitTo("main", "sub-session-save-response", { worktreeId, terminals });
   }));
 
@@ -782,6 +802,7 @@ async function onCancelAiJudging() {
           :terminal-web-sessions="terminalWebSessions"
           :terminal-ai-sessions="terminalAiSessions"
           :terminal-unread="terminalUnreadByTab"
+          :terminal-owned="terminalOwnedByTab"
           @switch-terminal="switchTerminal"
           @close-terminal="closeTerminal"
           @title-change="onTerminalTitleChange"

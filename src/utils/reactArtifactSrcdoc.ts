@@ -4,7 +4,7 @@
  */
 
 import { ARTIFACT_LINK_INTERCEPT_JS } from "./artifactFrameLink";
-import { ARTIFACT_BRIDGE_JS, ARTIFACT_STANDALONE_FLAG } from "./artifactMemory";
+import { ARTIFACT_APP_FLAG, ARTIFACT_BRIDGE_JS, ARTIFACT_BRIDGE_NONCE_GLOBAL, ARTIFACT_STANDALONE_FLAG } from "./artifactMemory";
 
 function htmlEscape(str: string): string {
   return str
@@ -129,6 +129,8 @@ export function buildVendorHead(react: string, reactDom: string, babel: string, 
     '<meta name="viewport" content="width=device-width, initial-scale=1" />\n' +
     // connect-src 'none' で fetch/XHR/WebSocket による外部通信をブロック
     // unsafe-eval は Babel.transform() と new Function() に必要な設計上の要件。
+    // アプリの wasm 実行（fs.readBytes → WebAssembly.instantiate）も 'unsafe-eval' で通る（#377）。
+    // 外すと wasm が動かなくなるので、'wasm-unsafe-eval' だけへ絞る場合は wasm の回帰を確認すること。
     // sandbox="allow-scripts" のみ（allow-same-origin なし）により、
     // 親ウィンドウ・Cookie・localStorage へのアクセスは遮断されている。
     '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\' \'unsafe-eval\'; style-src \'unsafe-inline\'; img-src data: blob:;" />\n' +
@@ -161,6 +163,24 @@ export function buildReactSrcdoc(
      * （`ARTIFACT_STANDALONE_FLAG` の説明を参照）。
      */
     standalone?: boolean;
+    /**
+     * アプリ（常駐ウィンドウのシェル）の iframe として組み立てる。メモリー保存に最大待ちと、
+     * 拒否された書き込みの巻き戻しが効く（`ARTIFACT_APP_FLAG` の説明を参照）。通常のビューアは付けない
+     */
+    app?: boolean;
+    /**
+     * srcdoc ごとの nonce。ブリッジが全リクエストに載せ、親（常駐ウィンドウのシェル）が突き合わせる。
+     * iframe を差し替えても `contentWindow` は同一なので、前の文書の遅延メッセージを弾くために使う
+     * （`ARTIFACT_BRIDGE_NONCE_GLOBAL` の説明を参照）。
+     */
+    nonce?: string;
+    /**
+     * 専用サブウィンドウの中で動かすときの自己情報（`{ id, params }`）。ブリッジが同期で読み、
+     * アプリは `oretachi.subWindow.info` で「開かれた側」だと分かる。省略 = 常駐ウィンドウ
+     */
+    subWindow?: { id: string; params: unknown };
+    /** 文書の背景を透明にする（透明なサブウィンドウ用）。アプリが自分で背景を塗るのは妨げない */
+    transparentBackground?: boolean;
   },
 ): string {
   const modulesJson = modules && Object.keys(modules).length > 0
@@ -178,9 +198,19 @@ export function buildReactSrcdoc(
     '<textarea id="_source" style="display:none">' + htmlEscape(content) + "</textarea>\n" +
     '<textarea id="_modules" style="display:none">' + modulesJson + "</textarea>\n" +
     '<textarea id="_memory" style="display:none">' + memoryJson + "</textarea>\n" +
+    (options?.subWindow
+      ? '<textarea id="_subwindow" style="display:none">' + htmlEscape(JSON.stringify(options.subWindow)) + "</textarea>\n"
+      : "") +
+    (options?.transparentBackground ? "<style>html,body{background:transparent}</style>\n" : "") +
     // ブリッジは読み込み時にフラグを見るので、必ずブリッジより先に立てる
     (options?.standalone
       ? openTag("window[" + JSON.stringify(ARTIFACT_STANDALONE_FLAG) + "]=true;") + "\n"
+      : "") +
+    (options?.app
+      ? openTag("window[" + JSON.stringify(ARTIFACT_APP_FLAG) + "]=true;") + "\n"
+      : "") +
+    (options?.nonce !== undefined
+      ? openTag("window[" + JSON.stringify(ARTIFACT_BRIDGE_NONCE_GLOBAL) + "]=" + JSON.stringify(options.nonce) + ";") + "\n"
       : "") +
     // require('oretachi') が解決できるよう、RUNTIME_JS より先に window.__oretachi を作る
     openTag(ARTIFACT_BRIDGE_JS) + "\n" +

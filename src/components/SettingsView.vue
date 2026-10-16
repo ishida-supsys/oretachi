@@ -645,6 +645,8 @@ function getSoundLabel(sound: string | null | undefined): string {
     <!-- ホットキー設定 -->
     <SettingsHotkeySection />
 
+    <!-- アプリ形式アーティファクトの承認一覧・取り消しはホームタブのアプリ一覧（AppsTable.vue）へ移設 -->
+
     <!-- リポジトリ一覧はホームタブのリポジトリパネル（RepositoryPanel.vue）へ移設 -->
 
     <!-- 外観設定 -->

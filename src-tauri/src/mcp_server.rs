@@ -110,13 +110,18 @@ async fn read_artifact_source_file(
     app_handle: &AppHandle,
     file_path: &str,
 ) -> Result<String, McpError> {
+    let (roots, base_dir) = source_file_roots(app_handle);
+    read_file_within_roots(&roots, &base_dir, file_path).await
+}
+
+/// `file_path` 引数の許可ルート（設定由来の固定値）と、相対パスの基準ディレクトリ。
+/// プラグインディレクトリは dev などで未生成のことがあるので、存在しないものは呼び出し先で候補から落とされる。
+fn source_file_roots(app_handle: &AppHandle) -> (Vec<PathBuf>, String) {
     let base_dir = app_handle
         .state::<SettingsManager>()
         .get()
         .worktree_base_dir
         .clone();
-    // 許可ルート。プラグインディレクトリは dev などで未生成のことがあるので、
-    // 存在しないものは呼び出し先で候補から落とされる。
     let roots = [
         Some(PathBuf::from(&base_dir)).filter(|_| !base_dir.trim().is_empty()),
         crate::claude_plugin::marketplace_dir(app_handle).ok(),
@@ -124,7 +129,7 @@ async fn read_artifact_source_file(
     .into_iter()
     .flatten()
     .collect::<Vec<_>>();
-    read_file_within_roots(&roots, &base_dir, file_path).await
+    (roots, base_dir)
 }
 
 /// `read_artifact_source_file` の本体。許可ルートを引数で受けてテスト可能にしてある。
@@ -133,6 +138,17 @@ async fn read_file_within_roots(
     base_dir: &str,
     file_path: &str,
 ) -> Result<String, McpError> {
+    let resolved = resolve_file_within_roots(allowed_roots, base_dir, file_path).await?;
+    read_resolved_source_file(&resolved, file_path).await
+}
+
+/// `file_path` を許可ルート配下の実パス（`canonicalize` 済み）へ解決する。
+/// テキスト読み取り（`file_path` 引数）と、バイナリの同梱（`artifact_file put`）で共用する。
+async fn resolve_file_within_roots(
+    allowed_roots: &[PathBuf],
+    base_dir: &str,
+    file_path: &str,
+) -> Result<PathBuf, McpError> {
     // Windows では `is_absolute()` が false でも `Path::join` がベースを捨てる形が
     // いくつかある（ドライブ相対 `C:foo`、ルート相対 `\bar`、verbatim `\\?\C:\x`）。
     // いずれもルート判定で fail-closed になるが、「相対パスは追加先ディレクトリ基準」
@@ -201,8 +217,12 @@ async fn read_file_within_roots(
             None,
         ));
     }
+    Ok(resolved)
+}
 
-    let meta = tokio_fs::metadata(&resolved).await.map_err(|e| {
+/// 解決済みの実パスを UTF-8 テキストとして読む（上限 [`ARTIFACT_SOURCE_FILE_MAX_BYTES`]）。
+async fn read_resolved_source_file(resolved: &std::path::Path, file_path: &str) -> Result<String, McpError> {
+    let meta = tokio_fs::metadata(resolved).await.map_err(|e| {
         McpError::invalid_params(format!("file_path '{}' を読めません: {}", file_path, e), None)
     })?;
     if !meta.is_file() {
@@ -223,7 +243,7 @@ async fn read_file_within_roots(
         ));
     }
 
-    let bytes = tokio_fs::read(&resolved).await.map_err(|e| {
+    let bytes = tokio_fs::read(resolved).await.map_err(|e| {
         McpError::invalid_params(format!("file_path '{}' を読めません: {}", file_path, e), None)
     })?;
     // BOM 付き UTF-8 はエディタが勝手に付けることがある。そのまま JSX として
@@ -279,6 +299,35 @@ async fn resolve_source_content(
         SourceSpec::Inline(c) => Ok(c),
         SourceSpec::File(p) => read_artifact_source_file(app_handle, &p).await,
     }
+}
+
+/// `artifact` の `app` / `app_file_path` から manifest（生の JSON）を取り出して検証する。
+/// どちらも無ければ `Ok(None)`（= 既存の manifest を引き継ぐ / 通常のアーティファクト）。
+async fn resolve_app_manifest(
+    app_handle: &AppHandle,
+    app: Option<serde_json::Value>,
+    app_file_path: Option<String>,
+) -> Result<Option<serde_json::Value>, McpError> {
+    let value = match (app, app_file_path) {
+        (None, None) => return Ok(None),
+        (Some(_), Some(_)) => {
+            return Err(McpError::invalid_params(
+                "app と app_file_path は同時に指定できません（どちらか一方）".to_string(),
+                None,
+            ));
+        }
+        (Some(v), None) => v,
+        (None, Some(p)) => {
+            let text = read_artifact_source_file(app_handle, &p).await?;
+            serde_json::from_str(&text).map_err(|e| {
+                McpError::invalid_params(format!("app_file_path の JSON を解析できません: {}", e), None)
+            })?
+        }
+    };
+    // null は「指定なし」と同じ扱いにはしない（外す手段は無い。意図しない manifest 消去を防ぐ）
+    crate::app_manifest::parse_manifest(&value)
+        .map_err(|e| McpError::invalid_params(format!("app（manifest）が不正です: {}", e), None))?;
+    Ok(Some(value))
 }
 
 const PORT_FILE: &str = "mcp-port";
@@ -740,6 +789,10 @@ pub struct SetDescriptionPayload {
     /// ExitPlanMode フックが stdin で受け取った hook JSON 文字列（生）
     #[serde(rename = "hookJson")]
     pub hook_json: Option<String>,
+    /// 送ってきたタブの terminal_id（`ORETACHI_TERMINAL_ID`）。インスタンス専用 AI ターミナル
+    /// （#372）のプラン承認でワークツリーの description を書き換えないために使う。
+    #[serde(default, rename = "terminalId")]
+    pub terminal_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -923,6 +976,10 @@ pub struct ArtifactParams {
     pub confirm_delete: Option<String>,
     #[schemars(description = "true にすると、このアーティファクトが oretachi のビューアで開かれている間 MCP 由来の書き込み (update / rewrite / artifact_module / artifact_store command=write,delete) を拒否する。ユーザーが操作中のアーティファクトを裏から書き換えないためのフラグで、読み取りは常に許可される。create / update / rewrite のいずれでも設定でき、省略時は既存アーティファクトの設定を引き継ぐ (明示的に false を渡すと解除)。ロック中は解除もできないので、外したい場合はユーザーにウィンドウを閉じてもらう。**守られるのはビューアが「いま表示している」1件だけ**で、ウィンドウが開いたままでもユーザーが別のアーティファクトへ切り替えている間は書き込める点に注意 (裏で入力を消したくないレポートは、ユーザーがそのページに留まっている前提になる)")]
     pub locked_while_open: Option<bool>,
+    #[schemars(description = "**アプリ形式のアーティファクトにする** manifest (application/vnd.ant.react の create / rewrite のみ)。`{ \"name\": \"表示名\", \"description\": \"…\", \"version\": \"1.0.0\", \"permissions\": { \"mcp\": { \"tools\": [\"notify_worktree\"], \"targets\": [\"ワークツリー名\" | \"*\" | \"workgroup:<ID か名前>\" | \"repo:<リポジトリ名>\"] }, \"memory\": { \"maxBytes\": 65536 } } }`。permissions は**宣言したものだけ**が使える（未宣言は常に拒否）。mcp.tools は oretachi_write_terminal 等の呼べるツールの部分集合、mcp.targets は他ワークツリーへ届かせたい宛先（省略 = 自ワークツリーのみ。ワイルドカードは承認後に作られるワークツリーにも当たる）、memory は書くなら maxBytes 必須、aiTerminal は専用 AI ターミナルを開く権限（agents は [\"claude\"] のみ、maxConcurrent は 1〜4。ユーザーと同じ権限で動くエージェントを起動できるので最も強い警告になる。権限モード・権限スキップ・許可ツールの指定は v1 ではできない）。fs は `{ \"read\": [\"worktree://src/\"], \"write\": [\"artifact://\"] }`（worktree:// / artifact:// のディレクトリ接頭辞）、db は fs と同じ形で SQLite の DB ファイルの置き場所（read のスコープの DB は読み取り専用、既定拒否パスは read でも使えない）。network は `{ \"allow\": [\"https://api.example.com/v1/\"] }`（URL プレフィックスの許可リスト。アプリは net.fetch でこの配下にだけ通信できる。リダイレクト先も再検査される。ループバック・プライベート IP・oretachi 自身のポートは常に拒否で、解除する手段は無い）。audio は `{ \"microphone\": true, \"maxSeconds\": 60, \"sampleRates\": [16000] }`（マイクの生音声 PCM の取得。microphone は必須で true、maxSeconds は 1〜600、sampleRates は 8000/16000/24000/48000 の部分集合。ユーザーの発話を聞ける権限なので最も強い警告になる。取得は Rust 側で行い、文字起こしは含まない）。wasm はまだ使えない（エラー）。**この manifest だけでは何も動かない**: ユーザーがアーティファクトウィンドウの起動画面から起動し、承認ダイアログで許可して初めて権限が有効になる（AI が manifest を書いても権限は得られない）。省略時は既存の manifest を引き継ぐ。外す手段は無い（別 id で作る）。app 付きは通常のビューアでは動かず、callTool も通常のビューア / Web ビューアからは拒否される")]
+    pub app: Option<serde_json::Value>,
+    #[schemars(description = "create/rewrite時: app の代わりに、このパスの JSON ファイルを読んで manifest として登録する（スキル同梱の app.json など）。app とは排他。読める場所は file_path と同じ")]
+    pub app_file_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -940,6 +997,12 @@ struct ArtifactData {
     /// 実行時の開閉状態（`crate::artifact_lock`）との AND で初めてロックになる。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     locked_while_open: Option<bool>,
+    /// アプリ形式の manifest（`app_manifest`）。**生の JSON のまま持つ**: 未知キーで既存 JSON が
+    /// 読めなくならないよう、型付きの解釈は `app_manifest::parse_manifest` に任せる。
+    /// 関門はこの中身を信頼せず、host 側の grant だけを見る（AI が書き換えられるため）。
+    /// `None` のものは従来どおりの React アーティファクト。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    app: Option<serde_json::Value>,
     created_at: u64,
     updated_at: u64,
 }
@@ -970,6 +1033,7 @@ fn artifact_mutation_summary(command: &str, data: &ArtifactData) -> serde_json::
         "entry_lines": data.content.lines().count(),
         "modules": modules,
         "locked_while_open": data.locked_while_open,
+        "app": data.app.is_some(),
         "updated_at": data.updated_at,
         "note": "中身は返しません。確認が必要なら artifact(command: \"outline\"/\"get\") / artifact_module(command: \"get\") を使ってください",
     })
@@ -1294,6 +1358,29 @@ pub struct ArtifactStoreParams {
     pub data: Option<serde_json::Value>,
     #[schemars(description = "任意: write/delete 前に read で得た updated_at を渡すと、その間に他から書き換えられていた場合にエラーになる (楽観ロック)。省略すると後勝ちで上書きする")]
     pub expected_updated_at: Option<u64>,
+}
+
+/// `artifact_file` のパラメータ。アプリ（`app` 付きアーティファクト）の同梱領域 `artifact://` へ
+/// バイナリを届ける。`artifact_module` の `file_path` は UTF-8 テキストで 1MB までなので、wasm や
+/// 初期 DB のようなバイナリは別ツールにしている。
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ArtifactFileParams {
+    #[schemars(description = "操作の種類: \"put\"(ファイルを同梱領域へコピー) / \"list\"(同梱ファイルの一覧) / \"delete\"(同梱ファイル・ディレクトリの削除)")]
+    pub command: String,
+    #[schemars(description = "アーティファクトID（存在するもの）")]
+    pub id: String,
+    #[schemars(description = "現在の作業ディレクトリ。これを渡すのが最も確実。HOMEタブやリポジトリルートで作業している場合は repository/branch では特定できないため必須")]
+    pub project_dir: Option<String>,
+    #[schemars(description = "対象ワークツリーID（project_dir で特定できない場合に指定）")]
+    pub worktree_id: Option<String>,
+    #[schemars(description = "リポジトリ名。project_dir を渡す場合は不要。指定する場合は branch と両方セットで")]
+    pub repository: Option<String>,
+    #[schemars(description = "ブランチ名。project_dir を渡す場合は不要。指定する場合は repository と両方セットで")]
+    pub branch: Option<String>,
+    #[schemars(description = "put / delete 時必須: 同梱領域内のパス `artifact://<相対>`（例: `artifact://engine.wasm`、`artifact://data/seed.db`）。delete で `artifact://` を渡すと同梱領域を空にする。`..`・絶対パス・Windows の予約名は拒否される")]
+    pub path: Option<String>,
+    #[schemars(description = "put 時必須: コピー元ファイル。相対パスはワークツリー追加先ディレクトリ基準。読めるのは**ワークツリー追加先ディレクトリ配下**と **oretachi プラグインディレクトリ (claude-plugins) 配下**のファイルだけ（スキル同梱の templates/ など）。バイナリのままコピーされ、1 ファイル 32MB まで")]
+    pub file_path: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -1770,6 +1857,8 @@ impl NotifyService {
             limit,
             confirm_delete,
             locked_while_open,
+            app,
+            app_file_path,
         }): Parameters<ArtifactParams>,
     ) -> Result<CallToolResult, McpError> {
         let settings_manager = self.app_handle.state::<SettingsManager>();
@@ -1928,6 +2017,9 @@ impl NotifyService {
             })?;
             // サイドカーは無くても正常なので、消せなくても本体の削除は成功として扱う
             let _ = tokio_fs::remove_file(&state_path).await;
+            // アプリなら、起動中のインスタンスを止めて承認（grant）も消す。残すと、同じ id で
+            // 作り直した別物が同じ権限セットで承認なしに起動してしまう
+            crate::app_instance::on_artifact_deleted(&self.app_handle, &worktree_id, &id).await;
             log::info!("[mcp] artifact command=delete id={} worktree_id={}", id, worktree_id);
             if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
                 "worktreeId": worktree_id,
@@ -1977,6 +2069,19 @@ impl NotifyService {
             .map(|d| d.as_secs())
             .unwrap_or(0);
 
+        // アプリの manifest は create / rewrite でだけ受ける（update は本文の部分置換なので対象外）。
+        // 検証はここで済ませる: 不正な manifest を書き込んでから起動時に弾くと、壊れたマーカーが残る
+        let new_app: Option<serde_json::Value> = if matches!(command.as_str(), "create" | "rewrite") {
+            resolve_app_manifest(&self.app_handle, app, app_file_path).await?
+        } else if app.is_some() || app_file_path.is_some() {
+            return Err(McpError::invalid_params(
+                "app / app_file_path は create / rewrite でだけ指定できます".to_string(),
+                None,
+            ));
+        } else {
+            None
+        };
+
         let mut data = match command.as_str() {
             "create" => {
                 let content_type = content_type.ok_or_else(|| {
@@ -1993,7 +2098,10 @@ impl NotifyService {
                 // create は既存ファイルを読まずに丸ごと組み立てるため、永続フラグは明示的に拾う。
                 // 拾わないと「同じ ID で作り直したらロック宣言が消える」抜け道になる。
                 let inherited = existing.as_ref().and_then(|d| d.locked_while_open);
-                ArtifactData { id: id.clone(), content_type, title, content, language, modules: HashMap::new(), locked_while_open: inherited, created_at: now, updated_at: now }
+                // `app` も同じ理由で引き継ぐ。拾わないと「同じ ID で作り直したら manifest（＝関門の
+                // マーカー）が消えて、通常のビューアで動かせる」抜け道になる
+                let inherited_app = existing.as_ref().and_then(|d| d.app.clone());
+                ArtifactData { id: id.clone(), content_type, title, content, language, modules: HashMap::new(), locked_while_open: inherited, app: inherited_app, created_at: now, updated_at: now }
             }
             "update" => {
                 let old_str = old_str.ok_or_else(|| {
@@ -2038,13 +2146,28 @@ impl NotifyService {
             data.locked_while_open = if flag { Some(true) } else { None };
         }
 
+        // 明示指定は既存の manifest を置き換える（権限が変われば起動中のインスタンスは再承認になる）。
+        // 指定が無ければ、create は inherited_app、rewrite は既存のものが data に入っている
+        if let Some(a) = new_app {
+            data.app = Some(a);
+        }
+        if data.app.is_some() && data.content_type != "application/vnd.ant.react" {
+            return Err(McpError::invalid_params(
+                format!(
+                    "アプリ（app）を持てるのは application/vnd.ant.react のアーティファクトだけです（現在: {}）。別の type で作り直すには、先に delete してください",
+                    data.content_type
+                ),
+                None,
+            ));
+        }
+
         let json = serde_json::to_string_pretty(&data)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         write_artifact_atomic(&artifact_path, &json).await?;
 
         log::info!(
-            "[mcp] artifact command={} id={} worktree_id={} locked_while_open={:?}",
-            command, id, worktree_id, data.locked_while_open
+            "[mcp] artifact command={} id={} worktree_id={} locked_while_open={:?} app={}",
+            command, id, worktree_id, data.locked_while_open, data.app.is_some()
         );
         if let Err(e) = self.app_handle.emit("artifact-changed", serde_json::json!({
                 "worktreeId": worktree_id,
@@ -2058,6 +2181,9 @@ impl NotifyService {
                 let _ = crate::report_db::insert(&pool.inner().0, "artifact_change:create", &id).await;
             }
         }
+        // 起動中のアプリへの反映（権限が変われば再承認、変わらなければリロード）は、上で emit した
+        // `artifact-changed` を `app_instance::install_listeners` が拾って行う。
+        // artifact_module など、アーティファクトを書き換えるどの経路でも同じ扱いにするため
         let summary = serde_json::to_string_pretty(&artifact_mutation_summary(&command, &data))
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         Ok(CallToolResult::success(vec![Content::text(summary)]))
@@ -2346,6 +2472,31 @@ impl NotifyService {
                     &id,
                     body.locked_while_open,
                 )?;
+                // アプリのメモリは manifest が申請して承認された最大サイズ（maxBytes）を必ず強制する。
+                // ここを素通しにすると、必須にした最大サイズが事実上の任意になる。
+                // 承認が無い（memory 権限なし）なら write / delete とも拒否する
+                let app_memory_cap: Option<u64> = if body.app.is_some() {
+                    let cap = self
+                        .app_handle
+                        .state::<crate::app_grant::AppGrantStore>()
+                        .get(&worktree_id, &id)
+                        .and_then(|g| g.resolved.memory)
+                        .map(|m| m.max_bytes);
+                    match cap {
+                        Some(c) => Some(c),
+                        None => {
+                            return Err(McpError::invalid_params(
+                                format!(
+                                    "アーティファクト '{}' はアプリで、memory 権限が承認されていないため artifact_store の write / delete はできません（read は使えます）。manifest で memory.maxBytes を宣言し、ユーザーが起動時の承認ダイアログで許可する必要があります",
+                                    id
+                                ),
+                                None,
+                            ));
+                        }
+                    }
+                } else {
+                    None
+                };
                 let next = if command == "write" {
                     let data = data.ok_or_else(|| {
                         McpError::invalid_params("write には data が必須です".to_string(), None)
@@ -2353,8 +2504,13 @@ impl NotifyService {
                     // 上限とオブジェクト形の検証はビューア経由の保存と同じ関数を通す
                     // (data に JSON null を渡した場合は上の ok_or_else でエラー。
                     //  消したいときは command=delete を使う)
-                    crate::validate_artifact_memory(Some(data))
-                        .map_err(|e| McpError::invalid_params(e, None))?
+                    let validated = crate::validate_artifact_memory(Some(data))
+                        .map_err(|e| McpError::invalid_params(e, None))?;
+                    if let (Some(cap), Some(v)) = (app_memory_cap, validated.as_ref()) {
+                        crate::app_manifest::check_memory_size(v, cap)
+                            .map_err(|e| McpError::invalid_params(e, None))?;
+                    }
+                    validated
                 } else {
                     None
                 };
@@ -2366,6 +2522,11 @@ impl NotifyService {
                     "[mcp] artifact_store command={} id={} worktree_id={} updated_at={} expected_updated_at={:?}",
                     command, id, worktree_id, updated_at, expected_updated_at
                 );
+                // 起動中のアプリなら、メモリーの使用量を測り直し、iframe へ外部更新を押し込ませる
+                // （`artifact-state-changed` をシェルが拾う）
+                if app_memory_cap.is_some() {
+                    crate::app_instance::refresh_memory_bytes(&self.app_handle, &worktree_id, &id, false).await;
+                }
                 // 開いているビューアがサイドカーのキャッシュを持っているので更新を知らせる
                 if let Err(e) = self.app_handle.emit("artifact-state-changed", serde_json::json!({
                     "scope": "worktree",
@@ -2384,6 +2545,193 @@ impl NotifyService {
             }
             other => Err(McpError::invalid_params(
                 format!("不明なコマンド '{}'. read / write / delete のいずれかを指定してください", other),
+                None,
+            )),
+        }
+    }
+
+    #[tool(description = "アプリ（manifest の `app` を持つ React アーティファクト）の同梱領域 `artifact://` を操作する。アプリは承認された fs 権限の範囲でこの領域を読み書きできる。put: スキル同梱の wasm や初期 DB などのバイナリを `file_path` から `artifact://<相対>` へコピー（`artifact_module` の file_path は UTF-8 テキスト 1MB までで、バイナリは通らない）, list: 同梱ファイルの一覧, delete: 同梱ファイル・ディレクトリの削除。同梱領域はアーティファクトを削除すると一緒に消える。アーティファクトの転送・エクスポート・インポートでは持ち出されない（移した先で put し直すこと）。対象は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は project_dir が必須", annotations(read_only_hint = true))]
+    async fn artifact_file(
+        &self,
+        Parameters(ArtifactFileParams {
+            command, id,
+            project_dir, worktree_id: target_worktree_id,
+            repository, branch,
+            path, file_path,
+        }): Parameters<ArtifactFileParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let settings = self.app_handle.state::<SettingsManager>().get();
+        let wt = resolve_artifact_worktree(
+            &settings,
+            target_worktree_id.as_deref(),
+            project_dir.as_deref(),
+            repository.as_deref(),
+            branch.as_deref(),
+        )?;
+        let worktree_id = wt.id.clone();
+        validate_artifact_id(&id)?;
+
+        let data_dir = self.app_handle.path().app_data_dir()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        // 本体が無い ID の同梱領域は、どこからも消せない孤児になる
+        let artifact_path = data_dir.join("artifacts").join(&worktree_id).join(format!("{}.json", id));
+        if !artifact_path.is_file() {
+            return Err(McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None));
+        }
+        let files_dir = crate::app_fs::artifact_files_dir(&data_dir, &worktree_id, &id)
+            .map_err(|e| McpError::invalid_params(e, None))?;
+
+        // `artifact://<相対>` の相対部を成分へ（スキーム違い・絶対パス・`..` などはここで拒否）
+        let parse_target = |what: &str| -> Result<Vec<String>, McpError> {
+            let p = path.as_deref().ok_or_else(|| {
+                McpError::invalid_params(format!("{} には path（artifact://<相対>）が必須です", what), None)
+            })?;
+            match crate::app_fs::split_uri(p).map_err(|e| McpError::invalid_params(e, None))? {
+                (crate::app_fs::Scheme::Artifact, comps) => Ok(comps),
+                (crate::app_fs::Scheme::Worktree, _) => Err(McpError::invalid_params(
+                    "path は artifact://<相対> の形で指定してください（worktree:// へは書けません）".to_string(),
+                    None,
+                )),
+            }
+        };
+
+        match command.as_str() {
+            "put" => {
+                let comps = parse_target("put")?;
+                if comps.is_empty() {
+                    return Err(McpError::invalid_params("put の path にはファイル名が必要です".to_string(), None));
+                }
+                let src = file_path.as_deref().ok_or_else(|| {
+                    McpError::invalid_params("put には file_path が必須です".to_string(), None)
+                })?;
+                let (roots, base_dir) = source_file_roots(&self.app_handle);
+                let resolved = resolve_file_within_roots(&roots, &base_dir, src).await?;
+                let meta = tokio_fs::metadata(&resolved).await.map_err(|e| {
+                    McpError::invalid_params(format!("file_path '{}' を読めません: {}", src, e), None)
+                })?;
+                if !meta.is_file() {
+                    return Err(McpError::invalid_params(format!("file_path '{}' はファイルではありません", src), None));
+                }
+                if meta.len() > crate::app_fs::MAX_BUNDLE_FILE_BYTES {
+                    return Err(McpError::invalid_params(
+                        format!(
+                            "file_path '{}' は {} バイトあり、上限 {} バイトを超えています",
+                            src, meta.len(), crate::app_fs::MAX_BUNDLE_FILE_BYTES
+                        ),
+                        None,
+                    ));
+                }
+                let mut dest = files_dir.clone();
+                for c in &comps {
+                    dest.push(c);
+                }
+                if dest.is_dir() {
+                    return Err(McpError::invalid_params("path はディレクトリです（ファイルを指定してください）".to_string(), None));
+                }
+                let parent = dest.parent().map(|p| p.to_path_buf())
+                    .ok_or_else(|| McpError::internal_error("親ディレクトリがありません".to_string(), None))?;
+                tokio_fs::create_dir_all(&parent).await
+                    .map_err(|e| McpError::internal_error(format!("ディレクトリを作れません: {}", e), None))?;
+                // 途中で落ちても壊れたファイルを残さない（起動中のアプリが読んでいても半端な中身を見ない）
+                let tmp = parent.join(format!(
+                    ".{}.{}.tmp",
+                    comps.last().map(String::as_str).unwrap_or("f"),
+                    crate::app_fs::unique_tmp_suffix()
+                ));
+                let renamed = match tokio_fs::copy(&resolved, &tmp).await {
+                    Ok(_) => tokio_fs::rename(&tmp, &dest).await,
+                    Err(e) => Err(e),
+                };
+                if let Err(e) = renamed {
+                    let _ = tokio_fs::remove_file(&tmp).await;
+                    return Err(McpError::internal_error(format!("コピーに失敗: {}", e), None));
+                }
+                log::info!(
+                    "[mcp] artifact_file command=put id={} worktree_id={} path={} bytes={}",
+                    id, worktree_id, path.as_deref().unwrap_or(""), meta.len()
+                );
+                let result = serde_json::json!({ "path": path, "bytes": meta.len() });
+                Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+            }
+            "list" => {
+                let dir = files_dir.clone();
+                let files = tokio::task::spawn_blocking(move || {
+                    let mut out: Vec<serde_json::Value> = Vec::new();
+                    let mut truncated = false;
+                    let mut stack: Vec<(std::path::PathBuf, String, usize)> = vec![(dir, String::new(), 0)];
+                    'walk: while let Some((d, rel, depth)) = stack.pop() {
+                        let Ok(rd) = std::fs::read_dir(&d) else { continue };
+                        for ent in rd.flatten() {
+                            let Ok(ft) = ent.file_type() else { continue };
+                            let name = ent.file_name().to_string_lossy().into_owned();
+                            let child = format!("{}{}", rel, name);
+                            if ft.is_dir() {
+                                if depth < 16 {
+                                    stack.push((ent.path(), format!("{}/", child), depth + 1));
+                                }
+                            } else if ft.is_file() {
+                                if out.len() >= crate::app_fs::MAX_LIST_ENTRIES {
+                                    truncated = true;
+                                    break 'walk;
+                                }
+                                let size = ent.metadata().map(|m| m.len()).unwrap_or(0);
+                                out.push(serde_json::json!({ "path": format!("artifact://{}", child), "bytes": size }));
+                            }
+                        }
+                    }
+                    out.sort_by(|a, b| a["path"].as_str().cmp(&b["path"].as_str()));
+                    serde_json::json!({ "files": out, "truncated": truncated })
+                })
+                .await
+                .map_err(|e| McpError::internal_error(format!("task join error: {}", e), None))?;
+                Ok(CallToolResult::success(vec![Content::text(files.to_string())]))
+            }
+            "delete" => {
+                let comps = parse_target("delete")?;
+                let mut target = files_dir.clone();
+                for c in &comps {
+                    target.push(c);
+                }
+                let dir = files_dir.clone();
+                let removed = tokio::task::spawn_blocking(move || -> Result<bool, String> {
+                    let Ok(meta) = std::fs::symlink_metadata(&target) else { return Ok(false) };
+                    // 同梱領域の外へ出ていないことを確認してから消す（リンクを辿って外を消さない）
+                    let real = std::fs::canonicalize(&target).map_err(|e| e.to_string())?;
+                    let root = std::fs::canonicalize(&dir).map_err(|e| e.to_string())?;
+                    if !real.starts_with(&root) {
+                        return Err("path が同梱領域の外を指しています".to_string());
+                    }
+                    if meta.is_dir() {
+                        if real == root {
+                            // 領域そのものは残し、中身だけ空にする
+                            for ent in std::fs::read_dir(&real).map_err(|e| e.to_string())?.flatten() {
+                                let p = ent.path();
+                                if ent.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                                    std::fs::remove_dir_all(&p).map_err(|e| e.to_string())?;
+                                } else {
+                                    std::fs::remove_file(&p).map_err(|e| e.to_string())?;
+                                }
+                            }
+                        } else {
+                            std::fs::remove_dir_all(&real).map_err(|e| e.to_string())?;
+                        }
+                    } else {
+                        std::fs::remove_file(&real).map_err(|e| e.to_string())?;
+                    }
+                    Ok(true)
+                })
+                .await
+                .map_err(|e| McpError::internal_error(format!("task join error: {}", e), None))?
+                .map_err(|e| McpError::invalid_params(e, None))?;
+                log::info!(
+                    "[mcp] artifact_file command=delete id={} worktree_id={} path={} removed={}",
+                    id, worktree_id, path.as_deref().unwrap_or(""), removed
+                );
+                let result = serde_json::json!({ "path": path, "removed": removed });
+                Ok(CallToolResult::success(vec![Content::text(result.to_string())]))
+            }
+            other => Err(McpError::invalid_params(
+                format!("未知の command: '{}'（put / list / delete）", other),
                 None,
             )),
         }
@@ -4239,6 +4587,14 @@ impl NotifyService {
 
         let mut items: Vec<serde_json::Value> = Vec::new();
         for info in raw {
+            // インスタンス専用 AI ターミナル（#372）なら、所有しているアプリ（インスタンス）を示す
+            let owner = crate::ai_terminal::owner_of(&self.app_handle, &info.terminal_id).map(|o| {
+                serde_json::json!({
+                    "worktreeId": o.worktree_id,
+                    "artifactId": o.artifact_id,
+                    "appName": o.app_name,
+                })
+            });
             let matched_wt = info
                 .cwd
                 .as_deref()
@@ -4262,6 +4618,7 @@ impl NotifyService {
                 "status": status,
                 "exitCode": info.exit_code,
                 "lastCommandExitCode": info.last_command_exit_code,
+                "ownerInstance": owner,
             }));
         }
 
@@ -6475,6 +6832,173 @@ pub(crate) async fn call_tool_for_artifact(
     tool: &str,
     params: serde_json::Value,
 ) -> Result<String, String> {
+    // ビューア（`artifact-*`）と Web ビューアの経路。アプリ（`app` マーカー付き）は、権限が
+    // granted の起動中インスタンスからしか API を呼べないので、**ここでは既存の callTool も拒否する**。
+    // 本体が**無い**ときだけ従来どおり先へ進む。在るのに読めないとき（Windows でアトミックな
+    // 置き換えの最中に一瞬ロックされる等）は、マーカーを確認できないので塞ぐ側へ倒す
+    // （メモリー書き込み側 `set_artifact_memory_in` と同じ扱い）。
+    let dir = app_handle
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())
+        .and_then(|d| crate::artifacts_dir_in(&d, worktree_id))?;
+    let marked = match crate::read_artifact_in_dir(&dir, artifact_id) {
+        // 壊れた JSON は、`app` の文字列を含むならマーカー付きとして塞ぐ側へ倒す
+        Ok(raw) => crate::app_manifest::raw_has_app_marker(&raw),
+        Err(_) => dir.join(format!("{}.json", artifact_id)).exists(),
+    };
+    if marked {
+        return Err(
+            "このアーティファクトはアプリ、または状態を確認できないアーティファクトです。通常のビューア・Web ビューアからは MCP ツールを呼べません（アプリは起動画面から起動し、承認された実行ウィンドウの中でだけ使えます）"
+                .to_string(),
+        );
+    }
+    call_tool_scoped(app_handle, worktree_id, artifact_id, tool, params, None).await
+}
+
+/// アプリの起動中インスタンスからの呼び出し。関門は 2 段:
+/// (1) ツールが承認済みか、(2) 越境があるなら宛先が承認済みの越境先に当たるか（購読も別途必要）。
+/// **見るのは host 側の grant（`resolved`）だけ**で、アーティファクト JSON 内の manifest は見ない。
+pub(crate) async fn call_tool_for_app_instance(
+    app_handle: &AppHandle,
+    worktree_id: &str,
+    artifact_id: &str,
+    resolved: &crate::app_manifest::ResolvedPermissions,
+    tool: &str,
+    params: serde_json::Value,
+) -> Result<String, String> {
+    crate::app_manifest::authorize_app_tool(resolved, tool)?;
+    call_tool_scoped(app_handle, worktree_id, artifact_id, tool, params, Some(resolved)).await
+}
+
+/// インスタンス専用 AI ターミナルの操作（write / send_keys / read / inspect_prompt / answer_prompt）。
+///
+/// **所有の検査は呼び出し側（`ai_terminal`）が済ませている**前提で、session_id は host が
+/// レジストリから引いた値。既存の端末ツールの実装（指紋検査・書き込みロック等）をそのまま使う。
+/// `policy` は `None`: 専用端末は常に自ワークツリー内なので越境は起きず、起きても購読が無く拒否される。
+pub(crate) async fn call_owned_terminal_tool(
+    app_handle: &AppHandle,
+    worktree_id: &str,
+    artifact_id: &str,
+    tool: &str,
+    params: serde_json::Value,
+) -> Result<String, String> {
+    if !matches!(
+        tool,
+        "oretachi_write_terminal"
+            | "oretachi_send_keys"
+            | "oretachi_read_terminal"
+            | "oretachi_inspect_prompt"
+            | "oretachi_answer_prompt"
+    ) {
+        return Err(format!("ツール '{}' は専用 AI ターミナルでは使えません", tool));
+    }
+    // 宛先は session の**現在の** cwd から引かれる。専用端末の中のエージェントが他ワークツリーの
+    // ディレクトリへ `cd` していると、購読関係があるだけで越境が通ってしまい、アプリが承認された
+    // `mcp.targets` を超える。専用端末は自ワークツリーの中だけを扱うので、ここで一致を求める。
+    let session_id = params
+        .get("session_id")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok())
+        .ok_or_else(|| format!("{} には session_id (数値) が必須です", tool))?;
+    let settings = app_handle.state::<SettingsManager>().get();
+    let dest = app_handle
+        .state::<crate::pty_manager::PtyManager>()
+        .list_sessions()
+        .into_iter()
+        .find(|s| s.session_id == session_id && s.exit_code.is_none())
+        .and_then(|s| s.cwd)
+        .and_then(|c| resolve_worktree_by_cwd(&settings, &c).map(|w| w.id.clone()));
+    if dest.as_deref() != Some(worktree_id) {
+        return Err(
+            "この端末の作業ディレクトリが、アプリのワークツリーの外を指しています。操作できません".to_string(),
+        );
+    }
+    call_tool_scoped(app_handle, worktree_id, artifact_id, tool, params, None).await
+}
+
+/// 越境の 1 段目（アプリのみ）: 宛先が承認済みの `mcp.targets` に当たるか。
+/// 2 段目（既存の購読関係）は `authorize_cross_worktree_session` が見る。
+fn check_app_cross_target(
+    policy: Option<&crate::app_manifest::ResolvedPermissions>,
+    settings: &crate::settings::AppSettings,
+    dest_worktree_id: &str,
+) -> Result<(), String> {
+    match policy {
+        None => Ok(()),
+        Some(r) => crate::app_manifest::authorize_app_cross_target(
+            r,
+            &cross_worktree_dest_targets(settings, dest_worktree_id),
+        ),
+    }
+}
+
+/// manifest の `mcp.targets` を承認時の形（ID など）へ解決する。ワークツリー名は**ここで ID へ解決**して
+/// grant に保存する（同名ワークツリーや改名で別のワークツリーへずれないように）。
+/// `*` / `workgroup:` / `repo:` は動的なので、承認後に作られたワークツリーにも当たる。
+pub(crate) fn resolve_app_permissions(
+    settings: &crate::settings::AppSettings,
+    requested: &crate::app_manifest::RequestedPermissions,
+) -> Result<crate::app_manifest::ResolvedPermissions, String> {
+    use crate::app_manifest::{is_wildcard_target, ResolvedMcp, ResolvedPermissions, ResolvedTarget};
+    let mcp = match &requested.mcp {
+        None => None,
+        Some(m) => {
+            let mut targets = Vec::with_capacity(m.targets.len());
+            for raw in &m.targets {
+                let r = resolve_subscription_target(settings, raw, None).map_err(|e| {
+                    format!("越境先 '{}' を解決できません: {}", raw, e.message)
+                })?;
+                // 名前・ID の完全一致がホーム / リポジトリ擬似ワークツリーに当たる場合は拒否する。
+                // 擬似ワークツリーはワイルドカードからしか届かない（既存の購読と同じ。メインのクローンの
+                // 端末へ届くので、人が宛先単位で判断する経路を作らない）。
+                // `resolve_subscription_target` はホームは弾くがリポジトリ擬似は通すので、ここで弾く
+                if let Some(wid) = &r.worktree_id {
+                    let pseudo = settings
+                        .worktrees
+                        .iter()
+                        .find(|w| &w.id == wid)
+                        .map(|w| w.is_home || w.is_repository)
+                        .unwrap_or(false);
+                    if pseudo {
+                        return Err(format!(
+                            "越境先 '{}' はホーム / リポジトリ擬似ワークツリーです。名前指定では許可できません（ワイルドカード `*` / `workgroup:` / `repo:` からだけ届きます）",
+                            raw
+                        ));
+                    }
+                }
+                targets.push(ResolvedTarget {
+                    raw: raw.clone(),
+                    wildcard: is_wildcard_target(&r.stored),
+                    stored: r.stored,
+                    label: r.label,
+                });
+            }
+            Some(ResolvedMcp { tools: m.tools.clone(), targets })
+        }
+    };
+    Ok(ResolvedPermissions {
+        mcp,
+        memory: requested.memory,
+        ai_terminal: requested.ai_terminal.clone(),
+        fs: None,
+        db: None,
+        // URL プレフィックスは解決で変わるものがない（承認した値がそのまま関門の入力になる）
+        network: requested.network.clone(),
+        sub_window: requested.sub_window,
+        // マイクの申請も解決で変わるものがない（承認した値がそのまま関門の入力になる）
+        audio: requested.audio.clone(),
+    })
+}
+
+async fn call_tool_scoped(
+    app_handle: &AppHandle,
+    worktree_id: &str,
+    artifact_id: &str,
+    tool: &str,
+    params: serde_json::Value,
+    policy: Option<&crate::app_manifest::ResolvedPermissions>,
+) -> Result<String, String> {
     let settings = app_handle.state::<SettingsManager>().get();
     let wt = settings
         .worktrees
@@ -6526,6 +7050,7 @@ pub(crate) async fn call_tool_for_artifact(
             ));
         };
         if dest_worktree_id != worktree_id {
+            check_app_cross_target(policy, &settings, &dest_worktree_id)?;
             let grant = authorize_cross_worktree_session(
                 app_handle,
                 &settings,
@@ -6559,6 +7084,7 @@ pub(crate) async fn call_tool_for_artifact(
             .filter(|s| !s.is_empty() && *s != worktree_id)
             .map(str::to_string)
         {
+            check_app_cross_target(policy, &settings, &dest_worktree_id)?;
             let grant = authorize_cross_worktree_session(
                 app_handle,
                 &settings,
@@ -6672,7 +7198,10 @@ fn resolve_subscriber(
         // 待たないので、直後に `subscriber_terminal_id` で SELECT すると行がまだ死んだ
         // タブの ID を向いていて 0 件に見える。そういうツールは `resolve_subscriber` の
         // あとで `rebind_and_wait` を await すること（`await_rebind` ヘルパ）。
-        crate::event_delivery::request_rebind(app_handle, id.to_string());
+        // 専用 AI ターミナルは、ワークツリーの孤児購読を引き取らない（#372）
+        if !crate::ai_terminal::is_owned(app_handle, id) {
+            crate::event_delivery::request_rebind(app_handle, id.to_string());
+        }
         return sessions
             .iter()
             .find(|s| s.terminal_id == id)
@@ -6706,9 +7235,14 @@ fn resolve_subscriber(
             None,
         ));
     };
+    // インスタンス専用 AI ターミナル（#372）は候補から外す。外さないと、メインのセッションの
+    // `poll_inbox` / `ack_message` / `notify_worktree` が「AI 端末が 2 個ある」で失敗する。
+    // アプリ自身の呼び出し（terminal_id なし）も同じ経路を通る。
+    let owned = crate::ai_terminal::owned_terminal_ids(app_handle);
     let candidates: Vec<&crate::pty_manager::SessionInfo> = sessions
         .iter()
         .filter(|s| s.exit_code.is_none() && s.is_ai_agent)
+        .filter(|s| !owned.contains(&s.terminal_id))
         .filter(|s| {
             s.cwd
                 .as_deref()
@@ -7091,6 +7625,30 @@ async fn notify_handler(
     State(app_handle): State<AppHandle>,
     Json(payload): Json<NotifyPayload>,
 ) -> StatusCode {
+    // インスタンス専用 AI ターミナル（#372）のフックは、ワークツリーの通知（トレイ・タスクバーの
+    // バッジ・OS 通知・購読配送・自動承認のトリガー）に一切積まない。インスタンスのデバッグログと
+    // インスタンスへのイベントへ回す。PreToolUse / PostToolUse は量が多くログを埋めるので流さない。
+    // 作業ディレクトリがワークツリーのサブディレクトリだと projectDir が完全一致で解決できないため、
+    // ワークツリーの解決より前に terminal_id で判定する。
+    if let Some(tid) = payload.terminal_id.as_deref() {
+        if crate::ai_terminal::is_owned(&app_handle, tid) {
+            if let Some(ev) = payload.event.as_deref() {
+                let internal =
+                    should_skip_subagent_notify(payload.agent.as_deref(), payload.kind.as_deref(), payload.body.as_deref());
+                if matches!(ev, "Stop" | "Notification" | "PermissionRequest") && !internal {
+                    crate::ai_terminal::forward_event(
+                        &app_handle,
+                        tid,
+                        ev,
+                        default_kind_for_event(ev).as_str(),
+                        payload.body.as_deref(),
+                    );
+                }
+            }
+            return StatusCode::OK;
+        }
+    }
+
     let settings = app_handle.state::<SettingsManager>().get();
 
     // ワークツリー: project_dir から逆引き。見つからなければ後方互換の worktree 名で解決。
@@ -7354,6 +7912,15 @@ async fn set_description_handler(
     State(app_handle): State<AppHandle>,
     Json(payload): Json<SetDescriptionPayload>,
 ) -> StatusCode {
+    // インスタンス専用 AI ターミナル（#372）のプランは、ワークツリーの description にしない。
+    if payload
+        .terminal_id
+        .as_deref()
+        .map(|t| crate::ai_terminal::is_owned(&app_handle, t.trim()))
+        .unwrap_or(false)
+    {
+        return StatusCode::OK;
+    }
     let settings = app_handle.state::<SettingsManager>().get();
 
     // ワークツリー: project_dir から逆引き。無ければ後方互換の worktree 名。
@@ -7411,6 +7978,21 @@ async fn session_context_handler(
     State(app_handle): State<AppHandle>,
     Json(payload): Json<SessionContextPayload>,
 ) -> Json<serde_json::Value> {
+    // インスタンス専用 AI ターミナル（#372）: グループ・ホームのプロンプトの代わりにインスタンス指定の
+    // プロンプトを注入し、inbox の要約は付けない。/clear・compact・再起動のたびの SessionStart でも
+    // 毎回ここへ来るので、レジストリに登録した内容が再注入される。
+    // （terminal_id の自己注入はサイドカー側で行われる）
+    if let Some(tid) = payload.terminal_id.as_deref().map(str::trim).filter(|t| !t.is_empty()) {
+        if crate::ai_terminal::is_owned(&app_handle, tid) {
+            let prompt = crate::ai_terminal::system_prompt(&app_handle, tid).filter(|s| !s.trim().is_empty());
+            log::info!(
+                "[session-context] owned ai terminal={} prompt_len={:?}",
+                tid,
+                prompt.as_ref().map(|p| p.len())
+            );
+            return Json(serde_json::json!({ "prompt": prompt, "inbox": serde_json::Value::Null, "digestId": serde_json::Value::Null }));
+        }
+    }
     let settings = app_handle.state::<SettingsManager>().get();
     let prompt = payload
         .project_dir
@@ -7657,6 +8239,17 @@ async fn prompt_context_handler(
         }
     };
     let (inbox, digest_id) = split_digest(inbox);
+
+    // インスタンス専用 AI ターミナル（#372）: description の更新を促す注入を出さない
+    // （スロットルも消費しない）。inbox は自分の購読分だけなので、そのまま返す。
+    if payload
+        .terminal_id
+        .as_deref()
+        .map(|t| crate::ai_terminal::is_owned(&app_handle, t.trim()))
+        .unwrap_or(false)
+    {
+        return Json(serde_json::json!({ "skip": true, "inbox": inbox, "digestId": digest_id }));
+    }
 
     let settings = app_handle.state::<SettingsManager>().get();
     let Some(wt) = payload
@@ -9693,6 +10286,124 @@ mod tests {
         }
     }
 
+    fn app_req(tools: &[&str], targets: &[&str]) -> crate::app_manifest::RequestedPermissions {
+        crate::app_manifest::RequestedPermissions {
+            mcp: Some(crate::app_manifest::RequestedMcp {
+                tools: tools.iter().map(|s| s.to_string()).collect(),
+                targets: targets.iter().map(|s| s.to_string()).collect(),
+            }),
+            memory: None,
+            ai_terminal: None,
+            fs: None,
+            db: None,
+            network: None,
+            sub_window: None,
+            audio: None,
+        }
+    }
+
+    /// 名前で申請したワークツリーは承認時に ID へ解決して保存される。改名しても、保存済みの
+    /// grant は同じワークツリーを指し続ける（照合は ID なので、改名後の名前を引かない）
+    #[test]
+    fn resolve_app_permissions_stores_ids_and_survives_rename() {
+        let mut settings = target_settings();
+        let resolved = resolve_app_permissions(
+            &settings,
+            &app_req(&["oretachi_show_worktree"], &["oretachi-abcd", "*", "workgroup:リリース準備", "repo:oretachi"]),
+        )
+        .unwrap();
+        let mcp = resolved.mcp.unwrap();
+        let stored: Vec<&str> = mcp.targets.iter().map(|t| t.stored.as_str()).collect();
+        assert_eq!(stored, vec!["wt-1", "*", "workgroup:wg-2", "repo:oretachi"]);
+        assert_eq!(
+            mcp.targets.iter().map(|t| t.wildcard).collect::<Vec<_>>(),
+            vec![false, true, true, true]
+        );
+        assert_eq!(mcp.targets[0].raw, "oretachi-abcd");
+
+        // 改名・同名の別ワークツリーが現れても、保存済みの stored は ID のまま
+        settings.worktrees[0].name = "renamed".into();
+        let mut other = settings.worktrees[0].clone();
+        other.id = "wt-other".into();
+        other.name = "oretachi-abcd".into();
+        settings.worktrees.push(other);
+        let dest = cross_worktree_dest_targets(&settings, "wt-1");
+        let r = crate::app_manifest::ResolvedPermissions {
+            mcp: Some(crate::app_manifest::ResolvedMcp {
+                tools: vec!["oretachi_show_worktree".into()],
+                targets: vec![mcp.targets[0].clone()],
+            }),
+            memory: None,
+            ai_terminal: None,
+            fs: None,
+            db: None,
+            network: None,
+            sub_window: None,
+            audio: None,
+        };
+        assert!(crate::app_manifest::authorize_app_cross_target(&r, &dest).is_ok());
+        let dest_other = cross_worktree_dest_targets(&settings, "wt-other");
+        assert!(
+            crate::app_manifest::authorize_app_cross_target(&r, &dest_other).is_err(),
+            "同名の別ワークツリーへずれてはいけない"
+        );
+    }
+
+    /// 擬似ワークツリー（ホーム / リポジトリ）は名前指定では許可できない。ワイルドカードからだけ届く
+    #[test]
+    fn resolve_app_permissions_rejects_pseudo_worktrees_by_name() {
+        let settings = dest_settings();
+        for raw in ["OreTachi (repo)", "HOME"] {
+            let err = resolve_app_permissions(&settings, &app_req(&["oretachi_show_worktree"], &[raw]))
+                .expect_err(raw);
+            assert!(err.contains(raw), "{}", err);
+        }
+        // ワイルドカードは通る（メインのクローンの端末にも届くことはダイアログで警告する）
+        assert!(resolve_app_permissions(&settings, &app_req(&["oretachi_show_worktree"], &["*"])).is_ok());
+        assert!(resolve_app_permissions(&settings, &app_req(&["oretachi_show_worktree"], &["workgroup:@repository"])).is_ok());
+    }
+
+    #[test]
+    fn resolve_app_permissions_without_targets_is_own_worktree_only() {
+        let settings = target_settings();
+        let resolved = resolve_app_permissions(&settings, &app_req(&["notify_worktree"], &[])).unwrap();
+        assert!(resolved.mcp.as_ref().unwrap().targets.is_empty());
+        let dest = cross_worktree_dest_targets(&settings, "wt-1");
+        assert!(crate::app_manifest::authorize_app_cross_target(&resolved, &dest).is_err());
+        // 解決できない名前は承認の前に弾く
+        assert!(resolve_app_permissions(&settings, &app_req(&["notify_worktree"], &["no-such-worktree"])).is_err());
+    }
+
+    #[test]
+    fn resolve_app_permissions_passes_audio_through() {
+        let settings = target_settings();
+        let mut req = app_req(&["notify_worktree"], &[]);
+        assert!(resolve_app_permissions(&settings, &req).unwrap().audio.is_none());
+        let audio = crate::app_manifest::AudioPermission { microphone: true, max_seconds: 30, sample_rates: vec![16000, 48000] };
+        req.audio = Some(audio.clone());
+        assert_eq!(resolve_app_permissions(&settings, &req).unwrap().audio, Some(audio));
+    }
+
+    /// `app` は update / artifact_module の読み書き往復（ArtifactData を経由する）で落ちない。
+    /// 落ちると、マーカーを失った「関門の外のアプリ」ができてしまう
+    #[test]
+    fn artifact_data_roundtrip_keeps_app() {
+        let raw = r#"{"id":"a","type":"application/vnd.ant.react","title":"t","content":"c",
+            "app":{"name":"x","permissions":{"mcp":{"tools":["notify_worktree"]}},"futureKey":1},
+            "created_at":1,"updated_at":2}"#;
+        let data: ArtifactData = serde_json::from_str(raw).unwrap();
+        assert!(data.app.is_some());
+        let back = serde_json::to_string_pretty(&data).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&back).unwrap();
+        assert_eq!(v["app"]["futureKey"], 1, "未知キーも保持する");
+        assert!(crate::app_manifest::has_app_marker(&v));
+        // app の無い既存データは従来どおり読め、app キーを書き足さない
+        let legacy = r#"{"id":"a","type":"application/vnd.ant.react","title":"t","content":"c","created_at":1,"updated_at":2}"#;
+        let data: ArtifactData = serde_json::from_str(legacy).unwrap();
+        assert!(data.app.is_none());
+        assert!(!serde_json::to_string(&data).unwrap().contains("\"app\""));
+    }
+
     /// `@repository` の保存値がリポジトリ擬似ワークツリーのイベントに当たり、先頭グループ購読は外れる。
     /// ここがずれると「購読は成功するのに一生届かない」になる
     #[test]
@@ -10076,6 +10787,7 @@ mod tests {
             language: None,
             modules,
             locked_while_open: None,
+            app: None,
             created_at: 1,
             updated_at: 2,
         };

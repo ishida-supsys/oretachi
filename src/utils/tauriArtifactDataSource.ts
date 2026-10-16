@@ -20,6 +20,7 @@ import type {
   ArtifactViewerHost,
 } from "./artifactDataSource";
 import { mapArtifactData as mapArtifact, mapArtifactMeta as mapMeta } from "./artifactPayload";
+import type { AppGrant, AppInstanceStatus, AppLaunchApi, AppLogEntry } from "../types/appInstance";
 
 const TAURI_CAPABILITIES: ArtifactCapabilities = {
   pin: true,
@@ -29,7 +30,43 @@ const TAURI_CAPABILITIES: ArtifactCapabilities = {
   import: true,
   copyPng: true,
   transfer: true,
+  appLaunch: true,
 };
+
+/**
+ * アプリの起動・停止・状態。呼び出し元の検査（`artifact-*` ウィンドウだけ受け付ける）は Rust 側。
+ * ワークツリースコープのアーティファクトだけが対象（リポジトリ保管庫のアプリは起動できない）。
+ */
+function createAppLaunchApi(worktreeId: string): AppLaunchApi {
+  return {
+    status: (artifactId) =>
+      invoke<AppInstanceStatus>("app_instance_status", { worktreeId, artifactId }),
+    start: (artifactId) => invoke("app_instance_start", { worktreeId, artifactId }),
+    stop: (artifactId) => invoke<boolean>("app_instance_stop", { worktreeId, artifactId }),
+    stopRecording: (artifactId) =>
+      invoke<boolean>("app_audio_stop_for_instance", { worktreeId, artifactId }),
+    toggleVisible: (artifactId) =>
+      invoke<boolean>("app_instance_toggle_visible", { worktreeId, artifactId }),
+    log: (artifactId) => invoke<AppLogEntry[]>("app_instance_log", { worktreeId, artifactId }),
+    grant: (artifactId) => invoke<AppGrant | null>("app_instance_grant", { worktreeId, artifactId }),
+    revoke: (artifactId) => invoke<boolean>("revoke_app_grant", { worktreeId, artifactId }),
+    async onChanged(handler) {
+      return listen<AppInstanceStatus>("app-instance-changed", (event) => {
+        if (event.payload.worktreeId !== worktreeId) return;
+        handler(event.payload);
+      });
+    },
+    async onLog(handler) {
+      return listen<{ worktreeId: string; artifactId: string; entry: AppLogEntry }>(
+        "app-instance-log",
+        (event) => {
+          if (event.payload.worktreeId !== worktreeId) return;
+          handler({ artifactId: event.payload.artifactId, entry: event.payload.entry });
+        },
+      );
+    },
+  };
+}
 
 /**
  * ArtifactViewerApp.vue が使う Tauri 実装を組み立てる。
@@ -138,6 +175,8 @@ export function createTauriArtifactViewerContext(search: string): {
     copyToRepository(artifactId, overwrite) {
       return invoke<CopyArtifactResult>("copy_artifact_to_repository", { worktreeId, artifactId, overwrite });
     },
+
+    app: isRepositoryScope ? undefined : createAppLaunchApi(worktreeId),
 
     async onArtifactChanged(handler) {
       if (isRepositoryScope) {

@@ -53,7 +53,7 @@ portable-pty = "0.8"
 log = "0.4"
 rmcp = { version = "0.17", features = ["server", "transport-streamable-http-server"] }
 axum = "0.8"
-tokio = { version = "1", features = ["net", "sync", "time", "process", "io-util"] }
+tokio = { version = "1", features = ["net", "sync", "time", "process", "io-util", "macros", "rt"] }
 notify = "7"
 notify-debouncer-mini = "0.5"
 content_inspector = "0.2"
@@ -64,7 +64,17 @@ sha2 = "0.10"
 hmac = "0.12"
 # Web閲覧の dev モード用フォールバック(vite devUrl へのプロキシ)専用。
 # tauri-plugin-updater が既に依存しているため、追加の重複ビルドは無い。
-reqwest = { version = "0.13", default-features = false }
+reqwest = { version = "0.13", default-features = false, features = ["rustls-no-provider"] }
+# アプリ API のネットワーク（app_net.rs）の HTTPS 用。reqwest を rustls-no-provider で使うので、
+# 暗号プロバイダ（ring。tauri-plugin-updater が既に使っている）を起動時に自分で入れる
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+# app_net.rs が URL のホスト種別（url::Host）を見る。reqwest が既に依存している版
+url = "2"
+# app_net.rs の WebSocket（net.ws）。TLS と名前解決は自前（検査済みの IP へ接続するため）で、
+# tungstenite はハンドシェイクとフレーミングだけ使う（rustls 系の機能は入れない）
+tokio-tungstenite = { version = "0.28", default-features = false, features = ["handshake"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring"] }
+rustls-platform-verifier = "0.6"
 # Web閲覧の自動更新(SSE)ストリーム組み立て用（既に他クレート経由の推移依存で
 # 取得済みなので、新規ダウンロードは発生しない）
 futures-util = "0.3"
@@ -74,6 +84,9 @@ rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
 subtle = "2"
 sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+# アプリ DB（app_db.rs）の authorizer 設定用。sqlx-sqlite が既に依存している同じ版で、
+# 新しい SQLite 実装は増えない（sqlx が出している生ハンドルへ FFI で authorizer を張るだけ）
+libsqlite3-sys = { version = "0.30", default-features = false }
 sysinfo = "0.38"
 tauri-plugin-prevent-default = "4"
 tauri-plugin-mcp = { git = "https://github.com/P3GLEG/tauri-plugin-mcp" }
@@ -97,4 +110,7 @@ webview2-com = "0.38"
 windows = { version = "0.58", features = ["Win32_UI_Shell", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_Graphics_Dwm", "Win32_System_Environment", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug", "Win32_Storage_FileSystem", "Win32_System_Kernel", "Win32_System_Memory", "Win32_System_JobObjects", "Win32_Security"] }
 windows-version = "0.1"
+# アプリ API の音声入力（app_audio.rs）。マイクは Rust 側（WASAPI）で取得する（iframe の getUserMedia は使えない）。
+# Windows だけ。非 Windows は未対応のスタブ
+cpal = "0.15"
 

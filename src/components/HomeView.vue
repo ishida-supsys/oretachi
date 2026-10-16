@@ -8,6 +8,7 @@ import WorktreeCard from "./WorktreeCard.vue";
 import TaskCard from "./TaskCard.vue";
 import ArchiveTable from "./ArchiveTable.vue";
 import SubscriptionTable from "./SubscriptionTable.vue";
+import AppsTable from "./AppsTable.vue";
 import RepositoryPanel from "./RepositoryPanel.vue";
 import HomeCatTerminal from "./HomeCatTerminal.vue";
 import WorkgroupBar from "./WorkgroupBar.vue";
@@ -416,6 +417,7 @@ watch(
         <option value="task">{{ t('taskTitle') }}</option>
         <option value="archive">{{ t('archiveTitle') }}</option>
         <option value="subscription">{{ t('subscriptionTitle') }}</option>
+        <option value="apps">{{ t('appsTitle') }}</option>
       </select>
       <WorkgroupBar
         v-if="panelMode === 'worktree'"
@@ -624,6 +626,10 @@ watch(
         @ack-all="ackAll"
       />
     </template>
+
+    <!-- アプリ一覧パネル（アプリ形式アーティファクトの状態・承認の確認と取り消し・起動/停止）。
+         マウント時に読み込むので、パネルを開くたびに最新になる -->
+    <AppsTable v-else-if="panelMode === 'apps'" />
 
     <!-- アーカイブパネル -->
     <template v-else>
@@ -866,6 +872,7 @@ watch(
     "archiveEmpty": "No archives.",
     "subscriptionTitle": "Subscriptions",
     "subscriptionEmpty": "No worktree event subscriptions.",
+    "appsTitle": "Apps",
     "archiveSearchPlaceholder": "Search archives...",
     "repositoryTitle": "Repositories",
     "addRepositoryButton": "Add repository"
@@ -886,6 +893,7 @@ watch(
     "archiveEmpty": "アーカイブがありません。",
     "subscriptionTitle": "購読",
     "subscriptionEmpty": "ワークツリーイベントの購読がありません。",
+    "appsTitle": "アプリ一覧",
     "archiveSearchPlaceholder": "アーカイブを検索...",
     "repositoryTitle": "リポジトリ",
     "addRepositoryButton": "リポジトリを追加"

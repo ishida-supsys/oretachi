@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "appinst",
+  "description": "アプリ形式アーティファクトの常駐ウィンドウと専用サブウィンドウ（`appinst-<n>` / `appinst-<n>-w<k>`、シェル）専用。default.json の glob には含めない。アプリのコードはこのウィンドウの中の sandbox iframe でだけ動き、トップレベル文書にはならない。clipboard / dialog / opener / window 操作などは意図的に与えない",
+  "windows": ["appinst-*"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten"
+  ]
+}

@@ -6,9 +6,17 @@ import {
   ARTIFACT_BRIDGE_METHOD_MEMORY_SET,
   ARTIFACT_BRIDGE_PUSH_MARKER,
   ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED,
+  ARTIFACT_BRIDGE_PUSH_MEMORY_FLUSH,
+  ARTIFACT_BRIDGE_METHOD_FLUSHED,
+  ARTIFACT_BRIDGE_NONCE_GLOBAL,
+  ARTIFACT_BRIDGE_JS,
+  ARTIFACT_BRIDGE_METHOD_NET_FETCH,
+  ARTIFACT_BRIDGE_PUSH_WS_EVENT,
+  postArtifactBridgeWsEvent,
   readArtifactBridgeRequest,
   postArtifactBridgeResult,
   postArtifactBridgeMemoryChanged,
+  postArtifactBridgeFlush,
 } from "./artifactMemory";
 import { buildReactSrcdoc } from "./reactArtifactSrcdoc";
 
@@ -193,5 +201,322 @@ describe("buildReactSrcdoc のメモリー埋め込み", () => {
     expect(html.indexOf("window.__oretachi=")).toBeLessThan(
       html.indexOf("libs['oretachi']=window.__oretachi"),
     );
+  });
+});
+
+describe("srcdoc ごとの nonce", () => {
+  const win = {};
+  const frame = makeFrame(win);
+  const base = {
+    [ARTIFACT_BRIDGE_REQUEST_MARKER]: true,
+    requestId: "r1",
+    method: ARTIFACT_BRIDGE_METHOD_MEMORY_SET,
+    params: {},
+  };
+
+  it("expectedNonce を渡すと、nonce が一致しないリクエスト（前の文書の遅延メッセージ）を捨てる", () => {
+    expect(readArtifactBridgeRequest(makeEvent(win, { ...base, nonce: "new" }), frame, "new")).not.toBeNull();
+    expect(readArtifactBridgeRequest(makeEvent(win, { ...base, nonce: "old" }), frame, "new")).toBeNull();
+    expect(readArtifactBridgeRequest(makeEvent(win, base), frame, "new")).toBeNull();
+  });
+
+  it("expectedNonce を渡さない（通常のビューア）なら nonce を見ない", () => {
+    expect(readArtifactBridgeRequest(makeEvent(win, base), frame)).not.toBeNull();
+  });
+
+  it("応答・通知・flush 要求に nonce を載せる", () => {
+    const postMessage = vi.fn();
+    const f = makeFrame({ postMessage });
+    postArtifactBridgeResult(f, "r1", { ok: true }, "n1");
+    postArtifactBridgeMemoryChanged(f, { a: 1 }, "n1");
+    postArtifactBridgeFlush(f, "n1");
+    expect(postMessage.mock.calls.map((c) => c[0].nonce)).toEqual(["n1", "n1", "n1"]);
+    expect(postMessage.mock.calls[2][0].event).toBe(ARTIFACT_BRIDGE_PUSH_MEMORY_FLUSH);
+    postArtifactBridgeResult(f, "r2", { ok: true });
+    expect("nonce" in postMessage.mock.calls[3][0]).toBe(false);
+  });
+});
+
+/** ブリッジ本体を、親ウィンドウと timer を差し替えた最小のグローバルで走らせる */
+function runBridge(opts: { nonce?: string; memory?: string }) {
+  const sent: Array<Record<string, any>> = [];
+  const listeners: Array<(e: any) => void> = [];
+  const timers: Array<() => void> = [];
+  const parent = { postMessage: (m: Record<string, any>) => sent.push(m) };
+  const win: Record<string, any> = {
+    addEventListener: (_: string, fn: (e: any) => void) => listeners.push(fn),
+  };
+  if (opts.nonce !== undefined) win[ARTIFACT_BRIDGE_NONCE_GLOBAL] = opts.nonce;
+  const document = { getElementById: () => ({ value: opts.memory ?? "{}" }) };
+  const setTimeoutStub = (fn: () => void) => timers.push(fn);
+  new Function("window", "parent", "document", "setTimeout", "clearTimeout", ARTIFACT_BRIDGE_JS)(
+    win,
+    parent,
+    document,
+    setTimeoutStub,
+    () => {},
+  );
+  const deliver = (data: unknown) => listeners.forEach((fn) => fn({ source: parent, data }));
+  return { win, sent, deliver, timers, oretachi: win.__oretachi };
+}
+
+describe("ブリッジ本体: nonce と flush", () => {
+  it("nonce があるとき、リクエストに載せ、グローバルは消す", () => {
+    const b = runBridge({ nonce: "n1" });
+    expect(ARTIFACT_BRIDGE_NONCE_GLOBAL in b.win).toBe(false);
+    void b.oretachi.callTool("notify_worktree", {}).catch(() => {});
+    expect(b.sent[0].nonce).toBe("n1");
+  });
+
+  it("nonce が一致しない応答は捨てる（前の文書宛の応答が新しい待ちを解かない）", async () => {
+    const b = runBridge({ nonce: "new" });
+    const p = b.oretachi.callTool("notify_worktree", {});
+    const id = b.sent[0].requestId;
+    let settled = false;
+    void p.then(() => (settled = true), () => (settled = true));
+    b.deliver({ [ARTIFACT_BRIDGE_RESULT_MARKER]: true, requestId: id, nonce: "old", ok: true, result: "x" });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    b.deliver({ [ARTIFACT_BRIDGE_RESULT_MARKER]: true, requestId: id, nonce: "new", ok: true, result: "x" });
+    await expect(p).resolves.toBe("x");
+  });
+
+  it("flush 要求で debounce 待ちの保存を即送り、完了してから flushed を返す", async () => {
+    const b = runBridge({ nonce: "n1" });
+    const saved = b.oretachi.setMemoryKey("k", 1);
+    // debounce 中: まだ保存は飛んでいない
+    expect(b.sent.filter((m) => m.method === ARTIFACT_BRIDGE_METHOD_MEMORY_SET)).toHaveLength(0);
+    b.deliver({ [ARTIFACT_BRIDGE_PUSH_MARKER]: true, event: ARTIFACT_BRIDGE_PUSH_MEMORY_FLUSH, nonce: "n1" });
+    const set = b.sent.find((m) => m.method === ARTIFACT_BRIDGE_METHOD_MEMORY_SET)!;
+    expect(set.params.memory).toEqual({ k: 1 });
+    // 保存の応答が返るまで flushed は出ない
+    expect(b.sent.some((m) => m.method === ARTIFACT_BRIDGE_METHOD_FLUSHED)).toBe(false);
+    b.deliver({ [ARTIFACT_BRIDGE_RESULT_MARKER]: true, requestId: set.requestId, nonce: "n1", ok: true });
+    await saved;
+    const flushed = b.sent.find((m) => m.method === ARTIFACT_BRIDGE_METHOD_FLUSHED)!;
+    expect(flushed.nonce).toBe("n1");
+  });
+
+  it("保存が無いときの flush 要求は、すぐ flushed を返す", () => {
+    const b = runBridge({ nonce: "n1" });
+    b.deliver({ [ARTIFACT_BRIDGE_PUSH_MARKER]: true, event: ARTIFACT_BRIDGE_PUSH_MEMORY_FLUSH, nonce: "n1" });
+    expect(b.sent.filter((m) => m.method === ARTIFACT_BRIDGE_METHOD_FLUSHED)).toHaveLength(1);
+  });
+
+  it("nonce が一致しない flush 要求は無視する", () => {
+    const b = runBridge({ nonce: "n1" });
+    b.deliver({ [ARTIFACT_BRIDGE_PUSH_MARKER]: true, event: ARTIFACT_BRIDGE_PUSH_MEMORY_FLUSH, nonce: "other" });
+    expect(b.sent).toHaveLength(0);
+  });
+
+  it("nonce の無い文書（通常のビューア）は従来どおり nonce を見ない", () => {
+    const b = runBridge({});
+    void b.oretachi.callTool("x", {}).catch(() => {});
+    expect("nonce" in b.sent[0]).toBe(false);
+  });
+});
+
+describe("ブリッジ本体: net.fetch", () => {
+  it("引数の形を整えて net.fetch として中継する（headers はオブジェクトでも配列でもよい）", () => {
+    const b = runBridge({ nonce: "n1" });
+    void b.oretachi.net
+      .fetch("https://api.example.com/v1/x", { method: "POST", headers: { A: "1", B: 2 }, body: "hi" })
+      .catch(() => {});
+    const m = b.sent[0];
+    expect(m.method).toBe(ARTIFACT_BRIDGE_METHOD_NET_FETCH);
+    expect(m.params).toMatchObject({
+      url: "https://api.example.com/v1/x",
+      method: "POST",
+      headers: [["A", "1"], ["B", "2"]],
+      body: "hi",
+    });
+    void b.oretachi.net.fetch("https://api.example.com/", { headers: [["X", "y"]] }).catch(() => {});
+    expect(b.sent[1].params.headers).toEqual([["X", "y"]]);
+    void b.oretachi.net.fetch("https://api.example.com/").catch(() => {});
+    expect(b.sent[2].params.headers).toEqual([]);
+  });
+
+  it("URL・headers・body の型が不正なら、Rust へ送らず reject する", async () => {
+    const b = runBridge({ nonce: "n1" });
+    await expect(b.oretachi.net.fetch("")).rejects.toThrow(/URL/);
+    await expect(b.oretachi.net.fetch(123)).rejects.toThrow(/URL/);
+    await expect(b.oretachi.net.fetch("https://a.example.com/", { headers: "x" })).rejects.toThrow(/headers/);
+    await expect(b.oretachi.net.fetch("https://a.example.com/", { headers: [null] })).rejects.toThrow(/headers/);
+    await expect(b.oretachi.net.fetch("https://a.example.com/", { headers: ["ab"] })).rejects.toThrow(/headers/);
+    await expect(b.oretachi.net.fetch("https://a.example.com/", { body: { a: 1 } })).rejects.toThrow(/body/);
+    expect(b.sent).toHaveLength(0);
+  });
+
+  it("Rust の拒否は Error として reject される", async () => {
+    const b = runBridge({ nonce: "n1" });
+    const p = b.oretachi.net.fetch("https://evil.example.com/");
+    b.deliver({
+      [ARTIFACT_BRIDGE_RESULT_MARKER]: true,
+      requestId: b.sent[0].requestId,
+      nonce: "n1",
+      ok: false,
+      error: "承認された URL プレフィックスに含まれていません",
+    });
+    await expect(p).rejects.toThrow("承認された URL プレフィックス");
+  });
+});
+
+describe("ブリッジ本体: net.ws", () => {
+  const reply = (b: ReturnType<typeof runBridge>, index: number, ok = true, error?: string) =>
+    b.deliver({
+      [ARTIFACT_BRIDGE_RESULT_MARKER]: true,
+      requestId: b.sent[index].requestId,
+      nonce: "n1",
+      ok,
+      ...(ok ? { result: null } : { error }),
+    });
+  const push = (b: ReturnType<typeof runBridge>, payload: Record<string, unknown>) =>
+    b.deliver({ [ARTIFACT_BRIDGE_PUSH_MARKER]: true, event: ARTIFACT_BRIDGE_PUSH_WS_EVENT, nonce: "n1", payload });
+
+  it("open は iframe が決めた ID と URL・protocols を中継し、解決するとハンドルが返る", async () => {
+    const b = runBridge({ nonce: "n1" });
+    const p = b.oretachi.net.ws.open("wss://a.example.com/s", { protocols: ["v1"] });
+    const m = b.sent[0];
+    expect(m.method).toBe("net.ws.open");
+    expect(m.params).toMatchObject({ url: "wss://a.example.com/s", protocols: ["v1"] });
+    expect(typeof m.params.id).toBe("string");
+    expect(m.params.id.length).toBeLessThanOrEqual(64);
+    expect(m.params.id).toMatch(/^[A-Za-z0-9_-]+$/);
+    reply(b, 0);
+    const h = await p;
+    expect(h.id).toBe(m.params.id);
+    expect(h.url).toBe("wss://a.example.com/s");
+  });
+
+  it("URL・protocols の型が不正なら、Rust へ送らず reject する", async () => {
+    const b = runBridge({ nonce: "n1" });
+    await expect(b.oretachi.net.ws.open("")).rejects.toThrow(/URL/);
+    await expect(b.oretachi.net.ws.open(1)).rejects.toThrow(/URL/);
+    await expect(b.oretachi.net.ws.open("wss://a.example.com/", { protocols: "v1" })).rejects.toThrow(/protocols/);
+    expect(b.sent).toHaveLength(0);
+  });
+
+  it("Rust の拒否は reject され、ハンドルは残らない（後から届くイベントも無視）", async () => {
+    const b = runBridge({ nonce: "n1" });
+    const p = b.oretachi.net.ws.open("wss://evil.example.com/");
+    const id = b.sent[0].params.id;
+    reply(b, 0, false, "承認された URL プレフィックスに含まれていません");
+    await expect(p).rejects.toThrow("承認された URL プレフィックス");
+    // 取りこぼしに備えた閉じの依頼が出る
+    expect(b.sent[1].method).toBe("net.ws.close");
+    expect(b.sent[1].params.id).toBe(id);
+    expect(() => push(b, { kind: "message", id, binary: false, data: "late" })).not.toThrow();
+  });
+
+  it("open の応答より先に届いた受信は、onMessage の登録まで溜めて流す（テキストとバイナリ）", async () => {
+    const b = runBridge({ nonce: "n1" });
+    const p = b.oretachi.net.ws.open("wss://a.example.com/s");
+    const id = b.sent[0].params.id;
+    push(b, { kind: "message", id, binary: false, data: "first" });
+    reply(b, 0);
+    const h = await p;
+    push(b, { kind: "message", id, binary: true, data: "AQID/w==" });
+    const got: Array<[unknown, unknown]> = [];
+    h.onMessage((d: unknown, meta: unknown) => got.push([d, meta]));
+    push(b, { kind: "message", id, binary: false, data: "third" });
+    expect(got[0]).toEqual(["first", { binary: false }]);
+    expect(Array.from(got[1][0] as Uint8Array)).toEqual([1, 2, 3, 255]);
+    expect(got[1][1]).toEqual({ binary: true });
+    expect(got[2]).toEqual(["third", { binary: false }]);
+  });
+
+  it("send は文字列を text、ArrayBuffer / TypedArray を base64 の binary として中継する", async () => {
+    const b = runBridge({ nonce: "n1" });
+    const p = b.oretachi.net.ws.open("wss://a.example.com/s");
+    reply(b, 0);
+    const h = await p;
+    void h.send("hi").catch(() => {});
+    expect(b.sent[1].method).toBe("net.ws.send");
+    expect(b.sent[1].params).toMatchObject({ id: h.id, data: "hi", binary: false });
+    void h.send(new Uint8Array([1, 2, 3, 255])).catch(() => {});
+    expect(b.sent[2].params).toMatchObject({ data: "AQID/w==", binary: true });
+    void h.send(new Uint8Array([9, 1, 2, 3]).subarray(1)).catch(() => {});
+    expect(b.sent[3].params).toMatchObject({ data: "AQID", binary: true });
+    await expect(h.send({ a: 1 })).rejects.toThrow(/string/);
+    expect(b.sent).toHaveLength(4);
+  });
+
+  it("close の通知で onClose が呼ばれ、以後の send は Rust へ送らず reject する", async () => {
+    const b = runBridge({ nonce: "n1" });
+    const p = b.oretachi.net.ws.open("wss://a.example.com/s");
+    reply(b, 0);
+    const h = await p;
+    const closes: unknown[] = [];
+    const errors: string[] = [];
+    h.onClose((i: unknown) => closes.push(i));
+    h.onError((e: Error) => errors.push(e.message));
+    push(b, { kind: "error", id: h.id, message: "boom" });
+    push(b, { kind: "close", id: h.id, code: 1006, reason: "lost", clean: false });
+    expect(errors).toEqual(["boom"]);
+    expect(closes).toEqual([{ code: 1006, reason: "lost", clean: false }]);
+    await expect(h.send("x")).rejects.toThrow(/closed/);
+    expect(b.sent).toHaveLength(1);
+    // 閉じた後の close() は何もしない
+    await h.close();
+    expect(b.sent).toHaveLength(1);
+  });
+
+  it("別の接続・知らない ID の通知は届かない", async () => {
+    const b = runBridge({ nonce: "n1" });
+    const p1 = b.oretachi.net.ws.open("wss://a.example.com/1");
+    const p2 = b.oretachi.net.ws.open("wss://a.example.com/2");
+    reply(b, 0);
+    reply(b, 1);
+    const [h1, h2] = [await p1, await p2];
+    const got1: unknown[] = [];
+    const got2: unknown[] = [];
+    h1.onMessage((d: unknown) => got1.push(d));
+    h2.onMessage((d: unknown) => got2.push(d));
+    push(b, { kind: "message", id: h2.id, binary: false, data: "for-2" });
+    push(b, { kind: "message", id: "unknown", binary: false, data: "nobody" });
+    expect(got1).toEqual([]);
+    expect(got2).toEqual(["for-2"]);
+  });
+
+  it("前の文書の nonce を載せた通知は捨てる", async () => {
+    const b = runBridge({ nonce: "n1" });
+    const p = b.oretachi.net.ws.open("wss://a.example.com/s");
+    reply(b, 0);
+    const h = await p;
+    const got: unknown[] = [];
+    h.onMessage((d: unknown) => got.push(d));
+    b.deliver({
+      [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+      event: ARTIFACT_BRIDGE_PUSH_WS_EVENT,
+      nonce: "old",
+      payload: { kind: "message", id: h.id, binary: false, data: "stale" },
+    });
+    expect(got).toEqual([]);
+  });
+
+  it("リスナー無しで溜め込みすぎたらエラーにして閉じを依頼する", async () => {
+    const b = runBridge({ nonce: "n1" });
+    const p = b.oretachi.net.ws.open("wss://a.example.com/s");
+    reply(b, 0);
+    const h = await p;
+    for (let i = 0; i < 1001; i++) push(b, { kind: "message", id: h.id, binary: false, data: "x" });
+    const last = b.sent[b.sent.length - 1];
+    expect(last.method).toBe("net.ws.close");
+    const errors: string[] = [];
+    h.onError((e: Error) => errors.push(e.message));
+    expect(errors[0]).toMatch(/too many messages/);
+  });
+});
+
+describe("postArtifactBridgeWsEvent", () => {
+  it("ws イベントの通知に nonce を載せる", () => {
+    const postMessage = vi.fn();
+    postArtifactBridgeWsEvent(makeFrame({ postMessage }), { kind: "close", id: "a" }, "n1");
+    expect(postMessage.mock.calls[0][0]).toMatchObject({
+      [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+      event: ARTIFACT_BRIDGE_PUSH_WS_EVENT,
+      nonce: "n1",
+      payload: { kind: "close", id: "a" },
+    });
   });
 });
