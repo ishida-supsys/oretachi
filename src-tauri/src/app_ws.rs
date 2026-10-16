@@ -311,6 +311,8 @@ struct Conn {
     abort: AbortHandle,
     worktree_id: String,
     artifact_id: String,
+    /// 開いた側のウィンドウ（常駐かサブウィンドウ）。リロードで切るのは、そのウィンドウが開いたものだけ
+    window_label: String,
 }
 
 #[derive(Default)]
@@ -333,7 +335,7 @@ struct Slot {
 
 impl AppWsRegistry {
     /// 接続の枠を確保する（ハンドシェイクの前。中断はこの時点から効く）。
-    fn begin(&self, label: &str, id: &str, url: &str, worktree_id: &str, artifact_id: &str) -> Result<Slot, String> {
+    fn begin(&self, label: &str, id: &str, url: &str, worktree_id: &str, artifact_id: &str, window_label: &str) -> Result<Slot, String> {
         let Ok(mut inner) = self.inner.lock() else {
             return Err("WebSocket の台帳のロックが壊れています".to_string());
         };
@@ -354,7 +356,14 @@ impl AppWsRegistry {
         let (abort, abort_reg) = AbortHandle::new_pair();
         inner.conns.insert(
             key,
-            Conn { url: url.to_string(), tx, abort, worktree_id: worktree_id.to_string(), artifact_id: artifact_id.to_string() },
+            Conn {
+                url: url.to_string(),
+                tx,
+                abort,
+                worktree_id: worktree_id.to_string(),
+                artifact_id: artifact_id.to_string(),
+                window_label: window_label.to_string(),
+            },
         );
         Ok(Slot { rx, abort_reg })
     }
@@ -389,6 +398,25 @@ impl AppWsRegistry {
             inner.dead.insert(label.to_string());
         }
         let keys: Vec<(String, String)> = inner.conns.keys().filter(|(l, _)| l == label).cloned().collect();
+        let mut out = Vec::new();
+        for k in keys {
+            if let Some(c) = inner.conns.remove(&k) {
+                c.abort.abort();
+                out.push((k.1, c.worktree_id, c.artifact_id));
+            }
+        }
+        out
+    }
+
+    /// 1 つのウィンドウが開いた接続だけを切る（同じインスタンスの別ウィンドウのものは残す）。
+    fn abort_window(&self, label: &str, window_label: &str) -> Vec<(String, String, String)> {
+        let Ok(mut inner) = self.inner.lock() else { return Vec::new() };
+        let keys: Vec<(String, String)> = inner
+            .conns
+            .iter()
+            .filter(|((l, _), c)| l == label && c.window_label == window_label)
+            .map(|(k, _)| k.clone())
+            .collect();
         let mut out = Vec::new();
         for k in keys {
             if let Some(c) = inner.conns.remove(&k) {
@@ -494,7 +522,7 @@ pub async fn app_ws_open(
     let label = ctx.instance_label.clone();
     let reg = app.state::<AppWsRegistry>();
     let Slot { rx, abort_reg } = reg
-        .begin(&label, &id, parsed.as_str(), &ctx.worktree_id, &ctx.artifact_id)
+        .begin(&label, &id, parsed.as_str(), &ctx.worktree_id, &ctx.artifact_id, window.label())
         .map_err(&fail)?;
 
     let (res_tx, res_rx) = oneshot::channel::<Result<(), String>>();
@@ -564,6 +592,11 @@ pub async fn app_ws_send(
             if let Ok(ctx) = crate::app_instance::context_for_label(&app, window.label()) {
                 let closed = app.state::<AppWsRegistry>().abort_all(&ctx.instance_label, false);
                 log_closed(&app, &closed, "承認の取り消し");
+                // iframe は生きたままなので、切れたことを知らせる（リロード・停止の切断とは違い、受け手がいる）
+                let sink = app_sink(app.clone(), ctx.instance_label.clone());
+                for (id, _, _) in closed {
+                    sink(WsEvent::Close { id, code: Some(1008), reason: "承認が取り消された".to_string(), clean: false });
+                }
             }
             return Err(e);
         }
@@ -661,14 +694,15 @@ pub async fn app_ws_close(
     Ok(())
 }
 
-/// 自分のインスタンスの接続をすべて閉じる。ホスト（`AppInstanceApp.vue`）がリロードで iframe を差し替える直前に呼ぶ
-/// （Rust 側の `on_reload` は通知の時点で切るが、差し替えまでの間に旧 iframe が開いた接続を残さないため）。
+/// このウィンドウが開いた接続をすべて閉じる（同じインスタンスの別ウィンドウのものは残す）。ホスト
+/// （`AppInstanceApp.vue`）がリロードで iframe を差し替える直前に呼ぶ（Rust 側の `on_reload` は通知の時点で
+/// インスタンス全体を切るが、差し替えまでの間に旧 iframe が開いた接続を残さないため）。
 /// 承認の有無は問わない（取り消し後でも閉じられる）。
 #[tauri::command]
 pub async fn app_ws_close_all(window: tauri::Window, app: AppHandle) -> Result<u32, String> {
     crate::app_instance::require_instance_window(&window)?;
     let ctx = crate::app_instance::context_for_label(&app, window.label())?;
-    let closed = app.state::<AppWsRegistry>().abort_all(&ctx.instance_label, false);
+    let closed = app.state::<AppWsRegistry>().abort_window(&ctx.instance_label, window.label());
     log_closed(&app, &closed, "アプリの再読み込み");
     Ok(closed.len() as u32)
 }
@@ -1017,20 +1051,20 @@ mod tests {
         let reg = AppWsRegistry::default();
         let mut slots = Vec::new();
         for i in 0..MAX_PER_INSTANCE {
-            slots.push(reg.begin("appinst-a", &format!("c{}", i), "ws://x/", "w", "a").unwrap());
+            slots.push(reg.begin("appinst-a", &format!("c{}", i), "ws://x/", "w", "a", "win").unwrap());
         }
         // インスタンスごとの上限
-        assert!(reg.begin("appinst-a", "extra", "ws://x/", "w", "a").is_err());
+        assert!(reg.begin("appinst-a", "extra", "ws://x/", "w", "a", "win").is_err());
         // 同じ ID は重ねて使えない（別インスタンスなら別物）
-        assert!(reg.begin("appinst-a", "c0", "ws://x/", "w", "a").is_err());
-        let _b = reg.begin("appinst-b", "c0", "ws://x/", "w", "b").unwrap();
+        assert!(reg.begin("appinst-a", "c0", "ws://x/", "w", "a", "win").is_err());
+        let _b = reg.begin("appinst-b", "c0", "ws://x/", "w", "b", "win").unwrap();
         // 他のインスタンスの ID は引けない
         assert!(reg.get("appinst-b", "c1").is_none());
         assert!(reg.get("appinst-a", "c1").is_some());
         assert!(!reg.kill("appinst-b", "c1"));
         // 終わったぶんは空く
         reg.end("appinst-a", "c0");
-        assert!(reg.begin("appinst-a", "again", "ws://x/", "w", "a").is_ok());
+        assert!(reg.begin("appinst-a", "again", "ws://x/", "w", "a", "win").is_ok());
     }
 
     #[test]
@@ -1042,34 +1076,47 @@ mod tests {
                 if keep.len() == MAX_TOTAL {
                     break 'outer;
                 }
-                keep.push(reg.begin(&format!("appinst-{}", inst), &format!("c{}", c), "ws://x/", "w", "a").unwrap());
+                keep.push(reg.begin(&format!("appinst-{}", inst), &format!("c{}", c), "ws://x/", "w", "a", "win").unwrap());
             }
         }
-        let e = reg.begin("appinst-new", "c", "ws://x/", "w", "a").err().unwrap();
+        let e = reg.begin("appinst-new", "c", "ws://x/", "w", "a", "win").err().unwrap();
         assert!(e.contains("全体"), "{}", e);
     }
 
     #[tokio::test]
     async fn abort_all_cancels_and_stop_blocks_new_connections() {
         let reg = AppWsRegistry::default();
-        let slot = reg.begin("appinst-a", "c1", "ws://x/", "w", "a").unwrap();
+        let slot = reg.begin("appinst-a", "c1", "ws://x/", "w", "a", "win").unwrap();
         let fut = Abortable::new(std::future::pending::<()>(), slot.abort_reg);
         let closed = reg.abort_all("appinst-a", false);
         assert_eq!(closed.len(), 1);
         assert!(fut.await.is_err());
         assert_eq!(reg.count("appinst-a"), 0);
         // 再読み込み（停止ではない）は開き直せる
-        assert!(reg.begin("appinst-a", "c2", "ws://x/", "w", "a").is_ok());
+        assert!(reg.begin("appinst-a", "c2", "ws://x/", "w", "a", "win").is_ok());
         // 停止すると、以後は開けない
         reg.abort_all("appinst-a", true);
-        assert!(reg.begin("appinst-a", "c3", "ws://x/", "w", "a").is_err());
+        assert!(reg.begin("appinst-a", "c3", "ws://x/", "w", "a", "win").is_err());
+    }
+
+    #[test]
+    fn abort_window_only_closes_that_windows_connections() {
+        let reg = AppWsRegistry::default();
+        let _a = reg.begin("appinst-a", "c1", "ws://x/", "w", "a", "appinst-a").unwrap();
+        let _b = reg.begin("appinst-a", "c2", "ws://x/", "w", "a", "appinst-a-w1").unwrap();
+        let _c = reg.begin("appinst-b", "c1", "ws://x/", "w", "b", "appinst-a").unwrap();
+        let closed = reg.abort_window("appinst-a", "appinst-a");
+        assert_eq!(closed.len(), 1);
+        assert!(reg.get("appinst-a", "c1").is_none());
+        assert!(reg.get("appinst-a", "c2").is_some());
+        assert!(reg.get("appinst-b", "c1").is_some());
     }
 
     #[tokio::test]
     async fn abort_before_the_task_starts_still_cancels() {
         // ハンドシェイク中（Abortable を作る前）の中断でも、後から作った future が即座に落ちる
         let reg = AppWsRegistry::default();
-        let slot = reg.begin("appinst-a", "c1", "ws://x/", "w", "a").unwrap();
+        let slot = reg.begin("appinst-a", "c1", "ws://x/", "w", "a", "win").unwrap();
         reg.abort_all("appinst-a", false);
         assert!(Abortable::new(std::future::pending::<()>(), slot.abort_reg).await.is_err());
     }
@@ -1077,7 +1124,7 @@ mod tests {
     #[tokio::test]
     async fn send_queue_applies_backpressure() {
         let reg = AppWsRegistry::default();
-        let slot = reg.begin("appinst-a", "c1", "ws://x/", "w", "a").unwrap();
+        let slot = reg.begin("appinst-a", "c1", "ws://x/", "w", "a", "win").unwrap();
         let (_url, tx) = reg.get("appinst-a", "c1").unwrap();
         // 読み手（pump）がいないキューは、深さぶんで満杯になる
         for _ in 0..SEND_QUEUE_DEPTH {

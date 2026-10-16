@@ -362,9 +362,11 @@ async function doReload() {
     const next = await invoke<Bootstrap>("app_instance_bootstrap");
     boot.value = next;
     applyWindowBackground(next);
-    // 旧 iframe が差し替えまでの間に開いた WebSocket を残さない（リロードでは切断し、新しい iframe が張り直す）
-    await invoke("app_ws_close_all").catch(() => {});
+    // nonce を先に替える（以後、旧 iframe の open は完了時の照合で閉じられる）。そのうえで、このウィンドウの旧
+    // iframe が差し替えまでの間に開いた WebSocket を閉じる（リロードでは切断し、新しい iframe が張り直す）。
+    // 閉じるのはこのウィンドウが開いた接続だけ（サブウィンドウのシェルも同時にリロードするため）
     nonce.value = createCspNonce();
+    await invoke("app_ws_close_all").catch(() => {});
     report("info", "リロードしました");
   } catch (e) {
     // 読み直せなければ旧 iframe のまま動かし続ける（壊れた書き込みの途中を表示しない）
