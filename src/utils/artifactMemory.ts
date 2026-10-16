@@ -812,9 +812,11 @@ export const ARTIFACT_BRIDGE_JS =
   "  }" +
   "  function emitAudioEvent(p){" +
   "    if(!p||typeof p!=='object')return;" +
-  // この文書が最後に start して得た streamId より古いストリーム（リロード前のもの）の通知は捨てる
-  "    if(audioMin!==null&&typeof p.streamId==='number'&&p.streamId<audioMin)return;" +
+  // この文書が最後に start して得た streamId より古いストリームの data（止めた直後の取りこぼしなど）は捨てる。
+  // ended は捨てない（stop() の直後に start() し直したとき、旧ストリームの正当な終了が遅れて届く）。
+  // リロード・インスタンスの停止では Rust が ended を送らないので、リロード前の ended が紛れ込むことはない
   "    if(p.kind==='data'){" +
+  "      if(audioMin!==null&&typeof p.streamId==='number'&&p.streamId<audioMin)return;" +
   "      var pcm;try{pcm=pcmFromBase64(String(p.data||''));}catch(err){return;}" +
   "      audioDataL.slice().forEach(function(fn){try{fn(pcm,{streamId:p.streamId,seq:p.seq});}catch(err){}});" +
   "    }else if(p.kind==='ended'){" +

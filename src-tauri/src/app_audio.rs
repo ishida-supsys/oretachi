@@ -455,8 +455,18 @@ fn apply_title(current: &str, recording: bool) -> String {
 /// 録音の状態に合わせて、実行ウィンドウとサブウィンドウのタイトルの印を付け外しする。
 /// サブウィンドウを開いた・タイトルを変えた直後にも呼ぶ（アプリが印を消せないように）。
 pub fn sync_titles(app: &AppHandle, instance_label: &str, key_worktree: &str, key_artifact: &str) {
-    let recording = app.state::<AppAudioRegistry>().is_recording(key_worktree, key_artifact);
+    let registry = app.state::<AppAudioRegistry>();
+    let mut recording = registry.is_recording(key_worktree, key_artifact);
     apply_titles(app, instance_label, recording);
+    // 読んでから適用するまでの間に録音が終わった（始まった）と、古い値の印が残る。変わっていたら付け直す
+    for _ in 0..3 {
+        let now = registry.is_recording(key_worktree, key_artifact);
+        if now == recording {
+            break;
+        }
+        recording = now;
+        apply_titles(app, instance_label, recording);
+    }
 }
 
 /// 録音の状態が変わったので、タイトルと起動画面の状態を更新する。
