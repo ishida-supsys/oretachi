@@ -53,6 +53,25 @@ describe("buildPermissionView", () => {
     expect(v.hasCritical).toBe(true);
   });
 
+  it("treats microphone audio as the strongest warning and shows the resolved values", () => {
+    const v = buildPermissionView(
+      { audio: { microphone: true, maxSeconds: 60, sampleRates: [16000, 48000] } },
+      null,
+      DANGEROUS,
+    );
+    expect(v.rows).toHaveLength(1);
+    expect(v.rows[0]).toMatchObject({ kind: "audio", value: "60s · 16000/48000Hz", severity: "critical" });
+    expect(v.hasCritical).toBe(true);
+  });
+
+  it("shows a change in the audio limits as a removed and an added row", () => {
+    const before: AppResolvedPermissions = { audio: { microphone: true, maxSeconds: 60, sampleRates: [16000] } };
+    const after: AppResolvedPermissions = { audio: { microphone: true, maxSeconds: 120, sampleRates: [16000] } };
+    const v = buildPermissionView(after, before, DANGEROUS);
+    expect(v.rows[0].added).toBe(true);
+    expect(v.removed.map((r) => r.value)).toEqual(["60s · 16000Hz"]);
+  });
+
   it("shows a change in the AI terminal limit as a removed and an added row", () => {
     const before: AppResolvedPermissions = { aiTerminal: { agents: ["claude"], maxConcurrent: 1 } };
     const after: AppResolvedPermissions = { aiTerminal: { agents: ["claude"], maxConcurrent: 3 } };

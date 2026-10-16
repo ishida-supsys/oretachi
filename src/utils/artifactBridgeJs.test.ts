@@ -595,3 +595,112 @@ describe("ARTIFACT_BRIDGE_JS: app の最大待ちと巻き戻し", () => {
     expect(bridge.getMemory()).toEqual({ big: "x" });
   });
 });
+
+describe("ARTIFACT_BRIDGE_JS: audio（マイクの音声入力）", () => {
+  beforeEach(() => vi.useFakeTimers());
+  afterEach(() => vi.useRealTimers());
+
+  interface AudioApi {
+    start(opts?: { sampleRate?: number }): Promise<unknown>;
+    stop(): Promise<unknown>;
+    onData(fn: (pcm: Int16Array, meta: { streamId: number; seq: number }) => void): () => void;
+    onEnded(fn: (info: { streamId: number; reason: string }) => void): () => void;
+  }
+  const audioOf = (b: unknown) => (b as { audio: AudioApi }).audio;
+  /** Rust の `encode_pcm` と同じ形（i16 LE の base64） */
+  const b64 = (samples: number[]) => Buffer.from(new Int16Array(samples).buffer).toString("base64");
+
+  it("start / stop は audio.* のメソッドとして親へ中継する（レートは指定したときだけ載せる）", async () => {
+    const { bridge, posted, reply } = setupBridge({});
+    const a = audioOf(bridge);
+    const p1 = a.start();
+    expect(posted[posted.length - 1]).toMatchObject({ method: "audio.start", params: {} });
+    reply(posted[posted.length - 1].requestId, { ok: true, result: { streamId: 1, sampleRate: 16000, maxSeconds: 60 } });
+    await expect(p1).resolves.toEqual({ streamId: 1, sampleRate: 16000, maxSeconds: 60 });
+
+    void a.start({ sampleRate: 48000 });
+    expect(posted[posted.length - 1]).toMatchObject({ method: "audio.start", params: { sampleRate: 48000 } });
+
+    void a.stop();
+    expect(posted[posted.length - 1]).toMatchObject({ method: "audio.stop", params: {} });
+  });
+
+  it("拒否された start は reject される（理由は Rust が返す）", async () => {
+    const { bridge, posted, reply } = setupBridge({});
+    const p = audioOf(bridge).start({ sampleRate: 44100 });
+    reply(posted[posted.length - 1].requestId, { ok: false, error: "サンプルレート 44100 Hz は承認されていません" });
+    await expect(p).rejects.toThrow("44100");
+  });
+
+  it("PCM のチャンクを Int16Array（i16 LE）に戻して onData へ渡す", () => {
+    const { bridge, push } = setupBridge({});
+    const got: { pcm: number[]; meta: unknown }[] = [];
+    audioOf(bridge).onData((pcm, meta) => got.push({ pcm: Array.from(pcm), meta }));
+    push({
+      [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+      event: "audio.event",
+      payload: { kind: "data", streamId: 7, seq: 3, data: b64([1, -2, 32767, -32768, 0x1234]) },
+    });
+    expect(got).toEqual([{ pcm: [1, -2, 32767, -32768, 0x1234], meta: { streamId: 7, seq: 3 } }]);
+  });
+
+  it("ended を onEnded へ渡す。解除したあとは届かない", () => {
+    const { bridge, push } = setupBridge({});
+    const ended: unknown[] = [];
+    const data: unknown[] = [];
+    const a = audioOf(bridge);
+    const off = a.onEnded((i) => ended.push(i));
+    const offData = a.onData((p) => data.push(p));
+    const ev = (payload: Record<string, unknown>) =>
+      push({ [ARTIFACT_BRIDGE_PUSH_MARKER]: true, event: "audio.event", payload });
+    ev({ kind: "ended", streamId: 2, reason: "maxSeconds" });
+    expect(ended).toEqual([{ streamId: 2, reason: "maxSeconds" }]);
+    off();
+    offData();
+    ev({ kind: "ended", streamId: 3, reason: "stop" });
+    ev({ kind: "data", streamId: 3, seq: 1, data: b64([1]) });
+    expect(ended).toHaveLength(1);
+    expect(data).toHaveLength(0);
+  });
+
+  it("start が返した streamId より古いストリームの data は捨てる。ended は（stop 直後の start し直しで遅れて届くので）捨てない", async () => {
+    const { bridge, posted, reply, push } = setupBridge({});
+    const a = audioOf(bridge);
+    const data: number[] = [];
+    const ended: number[] = [];
+    a.onData((_pcm, m) => data.push(m.streamId));
+    a.onEnded((i) => ended.push(i.streamId));
+    const ev = (payload: Record<string, unknown>) =>
+      push({ [ARTIFACT_BRIDGE_PUSH_MARKER]: true, event: "audio.event", payload });
+    const p = a.start();
+    reply(posted[posted.length - 1].requestId, { ok: true, result: { streamId: 10, sampleRate: 16000, maxSeconds: 60 } });
+    await p;
+    // 旧ストリーム（streamId 9）の取りこぼしの data は届けない。自分のもの（10 以上）は届ける
+    ev({ kind: "data", streamId: 9, seq: 99, data: b64([1]) });
+    ev({ kind: "data", streamId: 10, seq: 1, data: b64([1]) });
+    // 旧ストリームの正当な終了（stop() の直後に start() し直した場合に遅れて届く）は届ける
+    ev({ kind: "ended", streamId: 9, reason: "stop" });
+    ev({ kind: "ended", streamId: 10, reason: "maxSeconds" });
+    expect(data).toEqual([10]);
+    expect(ended).toEqual([9, 10]);
+  });
+
+  it("壊れたペイロードや親以外からの通知は無視し、1 つの listener の例外が他を止めない", () => {
+    const { bridge, push } = setupBridge({});
+    const a = audioOf(bridge);
+    const seen: number[] = [];
+    a.onData(() => {
+      throw new Error("boom");
+    });
+    a.onData((pcm) => seen.push(pcm.length));
+    const ev = (payload: unknown, source?: unknown) =>
+      push({ [ARTIFACT_BRIDGE_PUSH_MARKER]: true, event: "audio.event", payload }, source);
+    ev(null);
+    ev("x");
+    ev({ kind: "data", streamId: 1, seq: 1, data: "###" }); // base64 として読めない
+    ev({ kind: "data", streamId: 1, seq: 2, data: b64([5, 6]) }, {}); // 別の送信元（親ではない）
+    expect(seen).toEqual([]);
+    ev({ kind: "data", streamId: 1, seq: 3, data: b64([5, 6]) });
+    expect(seen).toEqual([2]);
+  });
+});

@@ -15,7 +15,7 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
 - **manifest だけでは何も動かない。** AI が書いた manifest は信頼されない。ユーザーがアーティファクトウィンドウの**起動画面**で起動し、承認ダイアログで許可して初めて権限が有効になる。承認の前に、あなたが API を呼べるようにする手段は無い。
 - **宣言したものだけが使える。** manifest に無い権限（ツール・越境先・メモリー）は、承認済みでも常に拒否される。
 - **通常のビューアでは動かない。** `app` 付きのアーティファクトは起動画面を出す。実行は承認後の常駐ウィンドウの中（`sandbox` iframe）。Web ビューアでは起動できない。
-- 今の版で書ける権限は `mcp`（`tools` と `targets`）、`memory`（`maxBytes` 必須）、`fs`、`db`（下記）、`aiTerminal`（`agents` と `maxConcurrent` 必須）、`network`（`allow` に URL プレフィックス。下記）、`subWindow`（専用サブウィンドウ。下記）だけ。`wasm` は未対応で、書くとエラーになる。
+- 今の版で書ける権限は `mcp`（`tools` と `targets`）、`memory`（`maxBytes` 必須）、`fs`、`db`（下記）、`aiTerminal`（`agents` と `maxConcurrent` 必須）、`network`（`allow` に URL プレフィックス。下記）、`subWindow`（専用サブウィンドウ。下記）、`audio`（マイクの音声入力。下記）だけ。`wasm` は未対応で、書くとエラーになる。
 - コード（content / modules）を更新しても再承認は要らず、起動中なら**承認を保ったまま iframe がリロードされる**（フルリロード。メモリー以外の JS の状態は失われる）。**権限（manifest の `permissions`）を変えたときだけ**、起動中なら直ちに再承認のダイアログが出る。承認までは旧権限のまま動き（リロードもされない）、新しい権限が要る呼び出しは拒否される。承認でリロード、拒否で停止。
 
 ## manifest
@@ -51,6 +51,8 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
   - **既定で書き込みを拒否するパス**（`worktree://` の任意の階層。大文字小文字は無視）: `.git` / `.github` / `.claude` / `.vscode` / `.idea` / `.husky` / `.devcontainer` / `.mcp.json` / `.envrc` / `.codex` / `.gemini` / `.cursor` / `.githooks` / `.gitmodules` / `.cargo` / `.npmrc` / `.yarnrc.yml` / `.pre-commit-config.yaml` / `CLAUDE.md` / `CLAUDE.local.md` / `AGENTS.md`。ここへ書けると、あなたの権限で後からコマンドが走る（git フック・Claude Code のフック・CI・エディタのタスク）。**読み取りは絞り込まれない**（範囲内の `.env` や `.git/config` も読める。`read` は必要な範囲だけにする）。これらを `write` に含む manifest は、**`"allowSensitivePaths": true` を足さない限りエラー**になる。足した manifest は承認ダイアログで**最も強い警告**が出る。本当に必要でない限り足さない。
   - リンク（junction・symlink）の先が範囲外なら拒否される。上限: 1 回の読み書き 8MiB、一覧 1000 件。
 - `aiTerminal`: アプリ専用の AI セッション端末（Claude Code）を開く権限。`{ "agents": ["claude"], "maxConcurrent": 2 }`。`agents` は v1 では `claude` だけ、`maxConcurrent` は 1〜4（同時に開ける数）。**ユーザーと同じ権限で動くエージェントを起動できる**ので、承認ダイアログで最も強い警告になる。**権限モード・権限スキップ・許可ツールの一覧はアプリから指定できない**（書くと manifest が拒否される）。
+
+- `audio`: マイクの生音声（PCM）を取得する権限。`{ "microphone": true, "maxSeconds": 60, "sampleRates": [16000] }`。`microphone` は**必須で `true`**（書かない・`false` は manifest ごと拒否）。`maxSeconds` は 1 回の録音の最大秒数（1〜600、既定 60。host が強制する）、`sampleRates` は `audio.start` で指定できるレート（8000 / 16000 / 24000 / 48000 のいずれか、既定 `[16000]`）。**ユーザーの発話を聞ける権限**なので、承認ダイアログで最も強い警告になり、「理解した」のチェックが必須になる。値は承認ダイアログに解決済みのまま出る。**文字起こし（音声認識）は含まない**（アプリ側で行う）。
 
 - `db`: SQLite のデータベース。形は `fs` と同じ（`read` / `write` に `worktree://…` / `artifact://…` のディレクトリのプレフィックス、`allowSensitivePaths`）で、**DB ファイルを置ける場所**を決める。承認ダイアログには解決済みの絶対パスが出る。`fs` の申請とは独立で、`db` を申請しても `fs` の権限にはならない（逆も同じ）。
   - `write` のスコープの DB は読み書き・作成ができる。`read` のスコープの DB は**読み取り専用で開く**（新規作成も書き込みもできない。`query` で `INSERT … RETURNING` を書いても拒否される）。書いて読み返すなら `write` だけでよい（DB では `write` が読み取りを含む）。
@@ -190,6 +192,34 @@ artifact_file(command: "delete", id: "<アプリ id>", project_dir: <作業デ�
 - 数の上限は `maxConcurrent`（アプリごと）と全体 8 個。インスタンスを停止すると、開いた端末はすべて閉じる（コードの更新によるリロードでは維持され、新しい iframe は `list()` で取り直す）。
 - **既知の制限:** 同じ作業ディレクトリの Claude Code のセッションは `~/.claude/projects/<cwd>` の履歴を共有するので、メインのセッションの `/resume` の一覧に専用端末のセッションが並ぶ。`cwd` をワークツリー内の専用サブディレクトリにすると履歴は分かれる（フックの除外は `terminal_id` で判定する。サブディレクトリで起動するときは、フックを効かせるため cwd 直下にもプラグイン設定を書くので、その `.claude/` がサブディレクトリにできる）。
 - `initialPrompt` は `claude -- "<prompt>"` の位置引数として渡る（先頭が `-` でもフラグとして解釈されない）。`model` は英数字と `. _ - [ ]` だけで、先頭に `-` は使えない。
+
+## 音声入力 API（`audio`）
+
+`audio` を承認されたアプリだけが、`const { audio } = require('oretachi')` で使える。**取得は oretachi（Rust 側）が行う。** iframe の `getUserMedia` は使えない（アプリのコードは `sandbox="allow-scripts"` の iframe の中でだけ動き、そこではマイクを開けない。sandbox を緩める方式は採らない）。アプリが受け取るのは PCM だけで、文字起こしは自分で行う（wasm などで）。
+
+```js
+const { audio } = require('oretachi');
+const offData = audio.onData((pcm, { streamId, seq }) => { /* pcm は Int16Array（モノラル・約 100ms ぶん） */ });
+const offEnded = audio.onEnded(({ streamId, reason }) => { /* 止まった */ });
+const { streamId, sampleRate, maxSeconds } = await audio.start({ sampleRate: 16000 }); // 省略 = sampleRates の先頭
+// … あとで
+await audio.stop();
+```
+
+| 呼び出し | 内容 |
+|---|---|
+| `audio.start({ sampleRate? })` | 録音を始める。`{ streamId, sampleRate, maxSeconds }` が返る。既定の入力デバイスを使う（デバイスの選択は無い）。`sampleRate` は承認済みのレートだけ |
+| `audio.stop()` | 自分の録音を止める。録音中でなければ `false` |
+| `audio.onData(fn)` | PCM のチャンクを受け取る。`fn(pcm: Int16Array, { streamId, seq })`。解除関数が返る |
+| `audio.onEnded(fn)` | 録音が止まったとき `{ streamId, reason }` を 1 回だけ受け取る。解除関数が返る |
+
+- **PCM の形式**: モノラル・符号付き 16 ビット・リトルエンディアン。入力が複数チャンネルなら平均する。レートは `start` で選んだもの（マイクが違うレートなら oretachi が変換する）。約 100ms ごとに `onData` が呼ばれる。
+- **止まる条件**: `stop`（アプリが止めた）/ `userStop`（起動画面の「録音を止める」）/ `maxSeconds`（上限に達した。壁時計の期限もあり、デバイスが黙り込んでも止まる）/ `error`（デバイスのエラー）のときは、`reason` つきの `ended` が 1 回だけ届く。**リロード（コードの更新・再承認の承認後）とインスタンスの停止（停止ボタン・承認の取り消し・実行ウィンドウを閉じる・削除）でも録音は止まるが、`ended` は届かない**（iframe が入れ替わる・アプリが止まるため）。リロードのあとは、新しい iframe が `start` し直す。`start` が reject されたストリームについては、何も届かない。
+- **上限**: 1 つのアプリが同時に録音できるのは 1 本、全体で 2 本まで。`maxSeconds` を超える分は録音しない（`ended` で知らせる）。未宣言・承認外のレート・二重の `start`・上限超過は拒否され、デバッグログに残る。
+- **録音中の表示**: 起動画面に「● 録音中」と「録音を止める」ボタンが出て、実行ウィンドウとサブウィンドウのタイトルに `● 録音中 — ` が付く。Windows のマイク使用中の表示も出る。ユーザーはいつでも止められる。
+- 音声は oretachi がファイルに保存することは無い（メモリー上だけで流す）。保存したい場合はアプリが `fs` / `db` の権限の範囲で書くが、**音声はユーザーの発話そのものなので、必要最小限にとどめる**。
+- **外へ送る経路は今は `net.fetch` の HTTP POST だけ**（`network` の許可が要る。1 リクエスト本文 1MiB・同時 8 本の上限。順序は `seq` で自分で並べる）。WebSocket は未対応。
+- Windows だけで使える（それ以外では `start` が失敗する）。Web ビューアでは起動できない。
 
 ## メモリー API
 

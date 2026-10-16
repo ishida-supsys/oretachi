@@ -105,4 +105,7 @@ webview2-com = "0.38"
 windows = { version = "0.58", features = ["Win32_UI_Shell", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp"] }
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_LibraryLoader", "Win32_Graphics_Dwm", "Win32_System_Environment", "Win32_System_Threading", "Win32_System_Diagnostics_ToolHelp", "Win32_System_Diagnostics_Debug", "Win32_Storage_FileSystem", "Win32_System_Kernel", "Win32_System_Memory", "Win32_System_JobObjects", "Win32_Security"] }
 windows-version = "0.1"
+# アプリ API の音声入力（app_audio.rs）。マイクは Rust 側（WASAPI）で取得する（iframe の getUserMedia は使えない）。
+# Windows だけ。非 Windows は未対応のスタブ
+cpal = "0.15"
 

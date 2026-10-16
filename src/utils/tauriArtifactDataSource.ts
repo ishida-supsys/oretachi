@@ -43,6 +43,8 @@ function createAppLaunchApi(worktreeId: string): AppLaunchApi {
       invoke<AppInstanceStatus>("app_instance_status", { worktreeId, artifactId }),
     start: (artifactId) => invoke("app_instance_start", { worktreeId, artifactId }),
     stop: (artifactId) => invoke<boolean>("app_instance_stop", { worktreeId, artifactId }),
+    stopRecording: (artifactId) =>
+      invoke<boolean>("app_audio_stop_for_instance", { worktreeId, artifactId }),
     toggleVisible: (artifactId) =>
       invoke<boolean>("app_instance_toggle_visible", { worktreeId, artifactId }),
     log: (artifactId) => invoke<AppLogEntry[]>("app_instance_log", { worktreeId, artifactId }),

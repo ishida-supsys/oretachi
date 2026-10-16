@@ -82,6 +82,20 @@ export const ARTIFACT_BRIDGE_PUSH_AI_TERMINAL_EVENT = "aiTerminal.event";
  */
 export const ARTIFACT_BRIDGE_METHOD_AI_TERMINAL_PREFIX = "aiTerminal.";
 
+/**
+ * `ARTIFACT_BRIDGE_PUSH_MARKER` の通知種別: マイクの音声入力のイベント。`payload` は
+ * `{ kind: "data", streamId, seq, data: <base64 の PCM（モノラル・i16 LE）> }` か
+ * `{ kind: "ended", streamId, reason }`。
+ */
+export const ARTIFACT_BRIDGE_PUSH_AUDIO_EVENT = "audio.event";
+
+/**
+ * 音声入力 API の method 接頭辞。`audio.start`（`{ sampleRate? }`）/ `audio.stop`。
+ * 権限（manifest の `audio`）・上限・停止の関門は Rust 側（`app_audio`）で、ここは中継だけ。
+ * 取得は Rust 側で行う（iframe では getUserMedia を使わせない）。
+ */
+export const ARTIFACT_BRIDGE_METHOD_AUDIO_PREFIX = "audio.";
+
 /** `ARTIFACT_BRIDGE_PUSH_MARKER` の通知種別: 自分が開いたサブウィンドウがユーザーに閉じられた。`payload` は `{ event: "closed", id }` */
 export const ARTIFACT_BRIDGE_PUSH_SUB_WINDOW_EVENT = "subWindow.event";
 
@@ -289,6 +303,29 @@ export function postArtifactBridgeAiTerminalEvent(
   }
 }
 
+/** マイクの音声入力のイベント（PCM のチャンク・終了）を iframe へ知らせる。応答の無い一方向通知 */
+export function postArtifactBridgeAudioEvent(
+  frame: HTMLIFrameElement | null,
+  payload: Record<string, unknown>,
+  nonce?: string,
+): void {
+  const target = frame?.contentWindow;
+  if (!target) return;
+  try {
+    target.postMessage(
+      {
+        [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+        event: ARTIFACT_BRIDGE_PUSH_AUDIO_EVENT,
+        payload: JSON.parse(JSON.stringify(payload ?? {})),
+        ...(nonce !== undefined ? { nonce } : {}),
+      },
+      "*",
+    );
+  } catch (e) {
+    console.warn("音声のイベントを iframe へ送れませんでした", e);
+  }
+}
+
 /** サブウィンドウのイベント（閉じられた）を iframe へ知らせる。応答の無い一方向通知 */
 export function postArtifactBridgeSubWindowEvent(
   frame: HTMLIFrameElement | null,
@@ -385,6 +422,8 @@ export const ARTIFACT_BRIDGE_JS =
   "        emitAiTerminalEvent(d.payload);" +
   "      else if(d.event===" + JSON.stringify(ARTIFACT_BRIDGE_PUSH_SUB_WINDOW_EVENT) + ")" +
   "        emitSubWindowEvent(d.payload);" +
+  "      else if(d.event===" + JSON.stringify(ARTIFACT_BRIDGE_PUSH_AUDIO_EVENT) + ")" +
+  "        emitAudioEvent(d.payload);" +
   "      return;" +
   "    }" +
   "    if(d[" + JSON.stringify(ARTIFACT_BRIDGE_RESULT_MARKER) + "]!==true)return;" +
@@ -763,6 +802,46 @@ export const ARTIFACT_BRIDGE_JS =
   "      return function(){swListeners=swListeners.filter(function(f){return f!==fn;});};" +
   "    }" +
   "  };" +
+  // ── マイクの音声入力（manifest の `audio` 権限が承認されたアプリだけが使える）──
+  // 取得は Rust 側。PCM はモノラル・i16 LE（Int16Array）で約 100ms ごとに届く。権限・上限・停止の関門は Rust 側
+  "  var audioDataL=[],audioEndL=[],audioMin=null;" +
+  "  function pcmFromBase64(b){" +
+  "    var bin=atob(b),n=bin.length>>1,out=new Int16Array(n);" +
+  "    for(var i=0;i<n;i++){out[i]=(bin.charCodeAt(2*i)|(bin.charCodeAt(2*i+1)<<8))<<16>>16;}" +
+  "    return out;" +
+  "  }" +
+  "  function emitAudioEvent(p){" +
+  "    if(!p||typeof p!=='object')return;" +
+  // この文書が最後に start して得た streamId より古いストリームの data（止めた直後の取りこぼしなど）は捨てる。
+  // ended は捨てない（stop() の直後に start() し直したとき、旧ストリームの正当な終了が遅れて届く）。
+  // リロード・インスタンスの停止では Rust が ended を送らないので、リロード前の ended が紛れ込むことはない
+  "    if(p.kind==='data'){" +
+  "      if(audioMin!==null&&typeof p.streamId==='number'&&p.streamId<audioMin)return;" +
+  "      var pcm;try{pcm=pcmFromBase64(String(p.data||''));}catch(err){return;}" +
+  "      audioDataL.slice().forEach(function(fn){try{fn(pcm,{streamId:p.streamId,seq:p.seq});}catch(err){}});" +
+  "    }else if(p.kind==='ended'){" +
+  "      audioEndL.slice().forEach(function(fn){try{fn({streamId:p.streamId,reason:p.reason});}catch(err){}});" +
+  "    }" +
+  "  }" +
+  "  var audio={" +
+  "    start:function(opts){" +
+  "      var p={};" +
+  "      if(opts&&opts.sampleRate!==undefined)p.sampleRate=opts.sampleRate;" +
+  "      return call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_AUDIO_PREFIX) + "+'start',p," + BRIDGE_LONG_TIMEOUT_MS + ").then(function(r){" +
+  "        if(r&&typeof r.streamId==='number')audioMin=r.streamId;" +
+  "        return r;" +
+  "      });" +
+  "    }," +
+  "    stop:function(){return call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_AUDIO_PREFIX) + "+'stop',{});}," +
+  "    onData:function(fn){" +
+  "      audioDataL.push(fn);" +
+  "      return function(){audioDataL=audioDataL.filter(function(f){return f!==fn;});};" +
+  "    }," +
+  "    onEnded:function(fn){" +
+  "      audioEndL.push(fn);" +
+  "      return function(){audioEndL=audioEndL.filter(function(f){return f!==fn;});};" +
+  "    }" +
+  "  };" +
   "  window.__oretachi={" +
   "    getMemory:getMemory," +
   "    setMemory:setMemory," +
@@ -776,7 +855,8 @@ export const ARTIFACT_BRIDGE_JS =
   "    net:net," +
   "    call:call," +
   "    aiTerminal:aiTerminal," +
-  "    subWindow:subWindow" +
+  "    subWindow:subWindow," +
+  "    audio:audio" +
   "  };" +
   // `state` は setMemory ごとに別オブジェクトへ差し替わるので、スナップショットを
   // 掴ませないようゲッターにする（`oretachi.memory` は常に最新を指す）
