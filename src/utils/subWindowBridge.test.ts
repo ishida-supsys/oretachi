@@ -29,6 +29,10 @@ describe("subWindowCommandFor", () => {
       command: "app_subwindow_set_size",
       args: { id: "w1", width: 100, height: 200 },
     });
+    expect(subWindowCommandFor("subWindow.setAttributes", { id: "w1", attributes: { title: "x" } })).toEqual({
+      command: "app_subwindow_set_attributes",
+      args: { id: "w1", attributes: { title: "x" } },
+    });
     // startDrag は呼んだウィンドウ自身だけを動かすので、id を取らない
     expect(subWindowCommandFor("subWindow.startDrag", { id: "w9" })).toEqual({
       command: "app_subwindow_start_drag",
@@ -40,6 +44,8 @@ describe("subWindowCommandFor", () => {
     expect(() => subWindowCommandFor("subWindow.close", {})).toThrow("id");
     expect(() => subWindowCommandFor("subWindow.setPosition", { id: "w1", x: "1", y: 2 })).toThrow("x");
     expect(() => subWindowCommandFor("subWindow.setSize", { id: "w1", width: NaN, height: 2 })).toThrow("width");
+    expect(() => subWindowCommandFor("subWindow.setAttributes", { id: "w1" })).toThrow("attributes");
+    expect(() => subWindowCommandFor("subWindow.setAttributes", { id: "w1", attributes: [] })).toThrow("attributes");
     expect(() => subWindowCommandFor("subWindow.destroyEverything", {})).toThrow("無い API");
   });
 });
