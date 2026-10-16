@@ -123,14 +123,15 @@ function rowsOf(perm: AppResolvedPermissions, dangerous: ReadonlySet<string>): P
     const value = `${perm.audio.maxSeconds}s · ${perm.audio.sampleRates.join("/")}Hz`;
     rows.push({ kind: "audio", value, label: value, severity: "critical", wildcard: false, added: false });
   }
-  // ネットワーク: Rust プロキシが通す URL プレフィックス 1 件ごとに 1 行。平文 http は盗聴・改ざんを
-  // 受けうるので danger（https は normal）。ループバック等は常に拒否されるので、ここでは出さない
+  // ネットワーク: Rust プロキシが通す URL プレフィックス 1 件ごとに 1 行（ws:// / wss:// は WebSocket）。
+  // 平文の http / ws は盗聴・改ざんを受けうるので danger（https / wss は normal）。
+  // ループバック等は常に拒否されるので、ここでは出さない
   for (const prefix of perm.network?.allow ?? []) {
     rows.push({
       kind: "network",
       value: prefix,
       label: prefix,
-      severity: prefix.startsWith("http://") ? "danger" : "normal",
+      severity: prefix.startsWith("http://") || prefix.startsWith("ws://") ? "danger" : "normal",
       wildcard: false,
       added: false,
     });

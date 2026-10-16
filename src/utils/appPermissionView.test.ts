@@ -241,6 +241,17 @@ describe("buildPermissionView", () => {
   });
 
   describe("network", () => {
+    it("lists WebSocket prefixes too; wss is normal and plain ws is danger", () => {
+      const perm: AppResolvedPermissions = {
+        network: { allow: ["wss://stream.example.com/v1/", "ws://plain.example.com/"] },
+      };
+      const v = buildPermissionView(perm, null, DANGEROUS);
+      expect(v.rows.map((r) => [r.kind, r.label, r.severity])).toEqual([
+        ["network", "wss://stream.example.com/v1/", "normal"],
+        ["network", "ws://plain.example.com/", "danger"],
+      ]);
+    });
+
     it("lists one row per URL prefix; https is normal and plain http is danger", () => {
       const perm: AppResolvedPermissions = {
         network: { allow: ["https://api.example.com/v1/", "http://plain.example.com/"] },

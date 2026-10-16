@@ -18,6 +18,12 @@
 //! - メソッド・ヘッダー・本文サイズ・タイムアウト・同時実行数に上限を設ける。
 //!
 //! 拒否・失敗は、アプリのデバッグログとログファイルへ残す。
+//!
+//! # WebSocket（`app_ws.rs`）との共有
+//!
+//! `network.allow` には `ws://` / `wss://` のプレフィックスも書ける。**スキームは完全一致**で照合するので、
+//! `https://x/` の承認は `wss://x/` へ、`wss://x/` の承認は `net.fetch` へ効かない（`check_url` は
+//! http / https、`check_ws_url` は ws / wss だけを通す）。IP の検査・自ポートの拒否・ログ整形は同じものを使う。
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -35,7 +41,7 @@ use tauri::{AppHandle, Manager};
 
 pub const MAX_PREFIXES: usize = 20;
 const MAX_REDIRECTS: usize = 5;
-const MAX_URL_CHARS: usize = 4096;
+pub(crate) const MAX_URL_CHARS: usize = 4096;
 const MAX_REQUEST_HEADERS: usize = 32;
 const MAX_HEADER_VALUE_BYTES: usize = 8 * 1024;
 const MAX_RESPONSE_HEADERS: usize = 100;
@@ -43,7 +49,7 @@ const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
 const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
 /// 全体のタイムアウト。iframe ブリッジの長い待ち（30 秒）より短くしておく
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_CONCURRENT_PER_INSTANCE: usize = 8;
 const LOG_URL_CHARS: usize = 200;
 
@@ -82,8 +88,8 @@ pub fn normalize_prefix(raw: &str) -> Result<String, String> {
     }
     let url = reqwest::Url::parse(raw)
         .map_err(|e| format!("URL プレフィックス '{}' を解釈できません: {}", raw, e))?;
-    if !matches!(url.scheme(), "http" | "https") {
-        return Err(format!("URL プレフィックス '{}' は http / https だけ指定できます", raw));
+    if !matches!(url.scheme(), "http" | "https" | "ws" | "wss") {
+        return Err(format!("URL プレフィックス '{}' は http / https / ws / wss だけ指定できます", raw));
     }
     let Some(host) = url.host() else {
         return Err(format!("URL プレフィックス '{}' にホストがありません", raw));
@@ -220,7 +226,7 @@ impl Policy {
         }
     }
 
-    fn ip_blocked(&self, ip: IpAddr) -> bool {
+    pub(crate) fn ip_blocked(&self, ip: IpAddr) -> bool {
         #[cfg(test)]
         if self.allow_private {
             return false;
@@ -228,11 +234,30 @@ impl Policy {
         ip_is_forbidden(ip)
     }
 
-    /// 初回の URL と、リダイレクトの各ホップで呼ぶ。
+    /// テストだけが、ループバックの実サーバーへ繋ぐために使う
+    #[cfg(test)]
+    pub(crate) fn with_private_allowed(mut self) -> Self {
+        self.allow_private = true;
+        self
+    }
+
+    /// 初回の URL と、リダイレクトの各ホップで呼ぶ（`net.fetch`。http / https だけ）。
     pub fn check_url(&self, url: &reqwest::Url) -> Result<(), String> {
         if !matches!(url.scheme(), "http" | "https") {
             return Err(format!("http / https 以外のスキームは使えません: {}", url.scheme()));
         }
+        self.check_common(url)
+    }
+
+    /// WebSocket の接続先（`net.ws`。ws / wss だけ）。
+    pub fn check_ws_url(&self, url: &reqwest::Url) -> Result<(), String> {
+        if !matches!(url.scheme(), "ws" | "wss") {
+            return Err(format!("ws / wss 以外のスキームは使えません: {}", url.scheme()));
+        }
+        self.check_common(url)
+    }
+
+    fn check_common(&self, url: &reqwest::Url) -> Result<(), String> {
         if !url.username().is_empty() || url.password().is_some() {
             return Err("URL に認証情報（user:pass@）は含められません".to_string());
         }
@@ -627,17 +652,19 @@ impl AppNetRegistry {
 /// インスタンスの停止時（`app_instance::release`）。実行中の通信を中断し、以後は出せないようにする。
 pub fn on_instance_released(app: &AppHandle, label: &str) {
     app.state::<AppNetRegistry>().abort_all(label, true);
+    crate::app_ws::on_instance_released(app, label);
 }
 
 /// ホットリロード・権限セットの入れ替え時。実行中の通信は中断する（新しい iframe が再接続する）。
 pub fn on_reload(app: &AppHandle, label: &str) {
     app.state::<AppNetRegistry>().abort_all(label, false);
+    crate::app_ws::on_reload(app, label);
 }
 
 // ─── Tauri コマンド（appinst-* ウィンドウからだけ） ────────────────────
 
 /// oretachi 自身が listen しているポート。リクエストごとに読む（MCP は再起動でポートが変わりうる）。
-fn own_ports(app: &AppHandle) -> Vec<u16> {
+pub(crate) fn own_ports(app: &AppHandle) -> Vec<u16> {
     let mut ports = Vec::new();
     if let Some(mgr) = app.try_state::<crate::mcp_server::McpServerManager>() {
         if let Some(p) = mgr.get_status().port {
@@ -661,7 +688,7 @@ fn own_ports(app: &AppHandle) -> Vec<u16> {
     ports
 }
 
-fn caller_net(
+pub(crate) fn caller_net(
     window: &tauri::Window,
     app: &AppHandle,
 ) -> Result<(crate::app_instance::InstanceContext, Vec<String>), String> {
@@ -680,7 +707,7 @@ fn caller_net(
 
 /// ログ・エラー文に出す URL。クエリと fragment は落とす（API キーなどの秘密が載りうる）。
 /// 長さも切る（リダイレクトの Location は任意長にできる）。
-fn loggable_url(url: &str) -> String {
+pub(crate) fn loggable_url(url: &str) -> String {
     let shown = match reqwest::Url::parse(url) {
         Ok(mut u) => {
             u.set_query(None);

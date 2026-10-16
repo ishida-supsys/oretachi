@@ -146,6 +146,22 @@ export const ARTIFACT_BRIDGE_METHOD_DB_CLOSE = "db.close";
  */
 export const ARTIFACT_BRIDGE_METHOD_NET_FETCH = "net.fetch";
 
+/**
+ * アプリの WebSocket API の method 接頭辞。`net.ws.open`（`{ id, url, protocols? }`）/ `.send`（`{ id, data, binary }`）
+ * / `.close`（`{ id, code?, reason? }`）。`id` は iframe が決める接続 ID（受信イベントがハンドルの登録より先に
+ * 届いても取りこぼさないため）。接続先の許可（manifest の `network.allow` の `ws://` / `wss://` プレフィックス）・
+ * IP の検査・上限・切断は Rust 側（`app_ws`）の関門で、ここは中継だけ。
+ * 通常のビューア（Web ビューアを含む）は処理しないので「使えない API」として失敗する。
+ */
+export const ARTIFACT_BRIDGE_METHOD_NET_WS_PREFIX = "net.ws.";
+
+/**
+ * `ARTIFACT_BRIDGE_PUSH_MARKER` の通知種別: WebSocket のイベント。`payload` は
+ * `{ kind: "message", id, binary, data（binary なら base64） }` /
+ * `{ kind: "error", id, message }` / `{ kind: "close", id, code, reason, clean }`。
+ */
+export const ARTIFACT_BRIDGE_PUSH_WS_EVENT = "net.ws.event";
+
 /** 応答が返らないまま Promise が残り続けないようにするタイムアウト（iframe 側） */
 const BRIDGE_TIMEOUT_MS = 10000;
 /**
@@ -303,6 +319,29 @@ export function postArtifactBridgeAiTerminalEvent(
   }
 }
 
+/** WebSocket のイベント（受信・エラー・終了）を iframe へ知らせる。応答の無い一方向通知 */
+export function postArtifactBridgeWsEvent(
+  frame: HTMLIFrameElement | null,
+  payload: Record<string, unknown>,
+  nonce?: string,
+): void {
+  const target = frame?.contentWindow;
+  if (!target) return;
+  try {
+    target.postMessage(
+      {
+        [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+        event: ARTIFACT_BRIDGE_PUSH_WS_EVENT,
+        payload: JSON.parse(JSON.stringify(payload ?? {})),
+        ...(nonce !== undefined ? { nonce } : {}),
+      },
+      "*",
+    );
+  } catch (e) {
+    console.warn("WebSocket のイベントを iframe へ送れませんでした", e);
+  }
+}
+
 /** マイクの音声入力のイベント（PCM のチャンク・終了）を iframe へ知らせる。応答の無い一方向通知 */
 export function postArtifactBridgeAudioEvent(
   frame: HTMLIFrameElement | null,
@@ -424,6 +463,8 @@ export const ARTIFACT_BRIDGE_JS =
   "        emitSubWindowEvent(d.payload);" +
   "      else if(d.event===" + JSON.stringify(ARTIFACT_BRIDGE_PUSH_AUDIO_EVENT) + ")" +
   "        emitAudioEvent(d.payload);" +
+  "      else if(d.event===" + JSON.stringify(ARTIFACT_BRIDGE_PUSH_WS_EVENT) + ")" +
+  "        emitWsEvent(d.payload);" +
   "      return;" +
   "    }" +
   "    if(d[" + JSON.stringify(ARTIFACT_BRIDGE_RESULT_MARKER) + "]!==true)return;" +
@@ -726,7 +767,110 @@ export const ARTIFACT_BRIDGE_JS =
   "    if(typeof h==='object')return Object.keys(h).map(function(k){return [k,String(h[k])];});" +
   "    return null;" +
   "  }" +
+  // ── WebSocket（`net.ws`。同じ `network` 権限の `ws://` / `wss://` プレフィックスが承認されたアプリだけ）──
+  // 接続 ID はここで決める（Rust は受信を open の応答より先に push しうるので、ハンドルを先に登録しておく）。
+  // リスナーが付く前に届いたものは溜めておき、最初のリスナー登録で流す。許可・上限・切断の関門は Rust 側
+  "  var WS_QUEUE_MAX=1000,wsSeq=0,wsHandles={};" +
+  "  function wsBytesToB64(u8){" +
+  "    var s='',n=8192;" +
+  "    for(var i=0;i<u8.length;i+=n)s+=String.fromCharCode.apply(null,u8.subarray(i,i+n));" +
+  "    return btoa(s);" +
+  "  }" +
+  "  function wsB64ToBytes(b){" +
+  "    var bin=atob(b),out=new Uint8Array(bin.length);" +
+  "    for(var i=0;i<bin.length;i++)out[i]=bin.charCodeAt(i);" +
+  "    return out;" +
+  "  }" +
+  "  function wsRun(list,args){" +
+  "    list.slice().forEach(function(fn){try{fn.apply(null,args);}catch(err){}});" +
+  "  }" +
+  "  function wsMakeHandle(id,url){" +
+  "    var st={m:[],c:[],e:[],qm:[],qc:[],qe:[],closed:false,over:false};" +
+  "    function unsub(list,fn){return function(){var i=list.indexOf(fn);if(i>=0)list.splice(i,1);};}" +
+  "    function sub(list,queue,fn){" +
+  "      if(typeof fn!=='function')throw new Error('net.ws: the listener must be a function');" +
+  "      list.push(fn);" +
+  "      var q=queue.splice(0,queue.length);" +
+  "      q.forEach(function(a){try{fn.apply(null,a);}catch(err){}});" +
+  "      return unsub(list,fn);" +
+  "    }" +
+  "    var h={" +
+  "      id:id,url:url," +
+  "      send:function(data){" +
+  "        if(st.closed)return Promise.reject(new Error('net.ws: the connection is closed'));" +
+  "        var binary=false,s;" +
+  "        if(typeof data==='string')s=data;" +
+  "        else if(data instanceof ArrayBuffer){binary=true;s=wsBytesToB64(new Uint8Array(data));}" +
+  "        else if(ArrayBuffer.isView(data)){binary=true;s=wsBytesToB64(new Uint8Array(data.buffer,data.byteOffset,data.byteLength));}" +
+  "        else return Promise.reject(new Error('net.ws send expects a string, an ArrayBuffer or a typed array'));" +
+  "        return call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_NET_WS_PREFIX) + "+'send',{id:id,data:s,binary:binary});" +
+  "      }," +
+  "      close:function(code,reason){" +
+  "        if(st.closed)return Promise.resolve();" +
+  "        var p={id:id};" +
+  "        if(code!==undefined&&code!==null)p.code=code;" +
+  "        if(reason!==undefined&&reason!==null)p.reason=String(reason);" +
+  "        return call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_NET_WS_PREFIX) + "+'close',p);" +
+  "      }," +
+  // onMessage(fn): fn(data, { binary })。テキストは文字列、バイナリは Uint8Array
+  "      onMessage:function(fn){return sub(st.m,st.qm,fn);}," +
+  "      onClose:function(fn){return sub(st.c,st.qc,fn);}," +
+  "      onError:function(fn){return sub(st.e,st.qe,fn);}" +
+  "    };" +
+  "    wsHandles[id]={st:st,h:h};" +
+  "    return h;" +
+  "  }" +
+  "  function emitWsEvent(p){" +
+  "    if(!p||typeof p!=='object'||typeof p.id!=='string')return;" +
+  "    var e=wsHandles[p.id];" +
+  // 知らない ID（リロード前の接続・他のウィンドウの接続）の通知は捨てる
+  "    if(!e)return;" +
+  "    var st=e.st;" +
+  "    if(p.kind==='message'){" +
+  "      var data;" +
+  "      try{data=p.binary?wsB64ToBytes(String(p.data||'')):String(p.data==null?'':p.data);}catch(err){return;}" +
+  "      var meta={binary:!!p.binary};" +
+  "      if(st.m.length){wsRun(st.m,[data,meta]);return;}" +
+  // リスナー無しで溜め続けない: 上限を超えたらエラーにして閉じる
+  "      if(st.qm.length<WS_QUEUE_MAX){st.qm.push([data,meta]);return;}" +
+  "      if(!st.over){" +
+  "        st.over=true;" +
+  "        var oe=new Error('net.ws: too many messages arrived before onMessage was registered');" +
+  "        if(st.e.length)wsRun(st.e,[oe]);else st.qe.push([oe]);" +
+  "        e.h.close(1000,'receive buffer overflow').catch(function(){});" +
+  "      }" +
+  "    }else if(p.kind==='error'){" +
+  "      var er=new Error(String(p.message||'net.ws error'));" +
+  "      if(st.e.length)wsRun(st.e,[er]);else if(st.qe.length<WS_QUEUE_MAX)st.qe.push([er]);" +
+  "    }else if(p.kind==='close'){" +
+  "      st.closed=true;" +
+  "      delete wsHandles[p.id];" +
+  "      var info={code:p.code==null?null:p.code,reason:String(p.reason||''),clean:!!p.clean};" +
+  "      if(st.c.length)wsRun(st.c,[info]);else st.qc.push([info]);" +
+  "    }" +
+  "  }" +
   "  var net={" +
+  "    ws:{" +
+  "      open:function(url,opts){" +
+  "        if(typeof url!=='string'||url==='')" +
+  "          return Promise.reject(new Error('net.ws.open expects an absolute ws:// or wss:// URL string'));" +
+  "        opts=opts||{};" +
+  "        var protocols=opts.protocols==null?[]:opts.protocols;" +
+  "        if(!Array.isArray(protocols))return Promise.reject(new Error('net.ws.open protocols must be an array of strings'));" +
+  "        wsSeq++;" +
+  "        var id='w'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,10)+'-'+wsSeq;" +
+  "        var h=wsMakeHandle(id,url);" +
+  "        return call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_NET_WS_PREFIX) + "+'open',{id:id,url:url,protocols:protocols.map(String)}," + BRIDGE_LONG_TIMEOUT_MS + ").then(" +
+  "          function(){return h;}," +
+  // 失敗（拒否・タイムアウト）。応答が返らなかっただけで Rust 側が開いている場合に備え、閉じも依頼しておく
+  "          function(err){" +
+  "            delete wsHandles[id];" +
+  "            call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_NET_WS_PREFIX) + "+'close',{id:id}).catch(function(){});" +
+  "            throw err;" +
+  "          }" +
+  "        );" +
+  "      }" +
+  "    }," +
   "    fetch:function(url,init){" +
   "      if(typeof url!=='string'||url==='')" +
   "        return Promise.reject(new Error('net.fetch expects an absolute URL string'));" +

@@ -5,6 +5,7 @@ mod ai_provider;
 mod ai_terminal;
 mod app_db;
 mod app_net;
+mod app_ws;
 mod app_subwindow;
 mod app_audio;
 mod app_fs;
@@ -2425,6 +2426,7 @@ pub fn run() {
         .manage(ai_terminal::SpawnWaiters::default())
         .manage(app_db::AppDbRegistry::default())
         .manage(app_net::AppNetRegistry::default())
+        .manage(app_ws::AppWsRegistry::default())
         .manage(app_subwindow::AppSubWindowRegistry::default())
         .manage(app_audio::AppAudioRegistry::default())
         .manage(mcp_server::NotificationRegistry::default())
@@ -2553,6 +2555,10 @@ pub fn run() {
             app_db::app_db_execute,
             app_db::app_db_close,
             app_net::app_net_fetch,
+            app_ws::app_ws_open,
+            app_ws::app_ws_send,
+            app_ws::app_ws_close,
+            app_ws::app_ws_close_all,
             app_audio::app_audio_start,
             app_audio::app_audio_stop,
             app_audio::app_audio_stop_for_instance,

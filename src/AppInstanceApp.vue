@@ -36,6 +36,7 @@ import {
   ARTIFACT_BRIDGE_METHOD_FS_WRITE,
   ARTIFACT_BRIDGE_METHOD_MCP_CALL,
   ARTIFACT_BRIDGE_METHOD_MEMORY_SET,
+  ARTIFACT_BRIDGE_METHOD_NET_WS_PREFIX,
   ARTIFACT_BRIDGE_METHOD_SUB_WINDOW_PREFIX,
   readArtifactBridgeRequest,
   postArtifactBridgeResult,
@@ -44,11 +45,13 @@ import {
   postArtifactBridgeAiTerminalEvent,
   postArtifactBridgeAudioEvent,
   postArtifactBridgeSubWindowEvent,
+  postArtifactBridgeWsEvent,
   type ArtifactBridgeRequest,
 } from "./utils/artifactMemory";
 import { aiTerminalCommandFor } from "./utils/aiTerminalBridge";
 import { subWindowCommandFor } from "./utils/subWindowBridge";
 import { audioCommandFor } from "./utils/audioBridge";
+import { wsCommandFor } from "./utils/wsBridge";
 
 interface Bootstrap {
   worktreeId: string;
@@ -247,6 +250,24 @@ async function handleBridgeRequest(request: ArtifactBridgeRequest) {
     }
     return;
   }
+  // WebSocket。接続先の許可・IP の検査・上限・切断と許可・拒否のログは Rust（`app_ws`）がすべて行う
+  if (request.method.startsWith(ARTIFACT_BRIDGE_METHOD_NET_WS_PREFIX)) {
+    try {
+      const cmd = wsCommandFor(request.method, request.params);
+      if (!cmd) throw new Error(`このアプリでは使えない API です: ${request.method}`);
+      const issuedNonce = nonce.value;
+      const result = await invoke<unknown>(cmd.command, cmd.args);
+      if (cmd.command === "app_ws_open" && nonce.value !== issuedNonce) {
+        // 開いている間にリロードされた（要求元の iframe はもういない）。受け手のいない接続を残さない
+        await invoke("app_ws_close", { id: cmd.args.id, code: null, reason: null }).catch(() => {});
+        throw new Error("アプリが再読み込みされたため、接続を閉じました");
+      }
+      reply(request, { ok: true, result });
+    } catch (e) {
+      reply(request, { ok: false, error: errorText(e) });
+    }
+    return;
+  }
   // 専用サブウィンドウ。権限・上限・見た目の検査と許可・拒否のログは Rust がすべて行う
   if (request.method.startsWith(ARTIFACT_BRIDGE_METHOD_SUB_WINDOW_PREFIX)) {
     try {
@@ -341,7 +362,11 @@ async function doReload() {
     const next = await invoke<Bootstrap>("app_instance_bootstrap");
     boot.value = next;
     applyWindowBackground(next);
+    // nonce を先に替える（以後、旧 iframe の open は完了時の照合で閉じられる）。そのうえで、このウィンドウの旧
+    // iframe が差し替えまでの間に開いた WebSocket を閉じる（リロードでは切断し、新しい iframe が張り直す）。
+    // 閉じるのはこのウィンドウが開いた接続だけ（サブウィンドウのシェルも同時にリロードするため）
     nonce.value = createCspNonce();
+    await invoke("app_ws_close_all").catch(() => {});
     report("info", "リロードしました");
   } catch (e) {
     // 読み直せなければ旧 iframe のまま動かし続ける（壊れた書き込みの途中を表示しない）
@@ -389,6 +414,13 @@ onMounted(async () => {
     unlisteners.push(
       await getCurrentWebviewWindow().listen<Record<string, unknown>>("app-audio-event", (event) => {
         if (nonce.value) postArtifactBridgeAudioEvent(frame.value, event.payload, nonce.value);
+      }),
+    );
+    // WebSocket の受信・エラー・終了（Rust が `emit_to(label)` で、このインスタンスのウィンドウだけへ送る。
+    // 受け手は接続 ID で選ばれるので、サブウィンドウの iframe に届いても他人の接続には触れない）
+    unlisteners.push(
+      await getCurrentWebviewWindow().listen<Record<string, unknown>>("app-ws-event", (event) => {
+        if (nonce.value) postArtifactBridgeWsEvent(frame.value, event.payload, nonce.value);
       }),
     );
     // 自分が開いたサブウィンドウがユーザーに閉じられた通知（Rust が `emit_to(label)` で、このインスタンスの
