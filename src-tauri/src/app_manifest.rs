@@ -86,6 +86,25 @@ pub struct NetworkPermission {
     pub allow: Vec<String>,
 }
 
+/// manifest の `media`。`<video>` / `<audio>` の `src` に直接渡せるローカルファイルと URL の申請。
+/// fs / network の権限とは独立（承認ダイアログでは「メディア再生」として示す）。
+/// `read` は fs と同じ `worktree://` / `artifact://` のディレクトリプレフィックス（読み取り専用）、
+/// `allow` は network と同じ http(s) の URL プレフィックス。どちらも正規化済み・ソート・重複除去済み。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestedMedia {
+    pub read: Vec<String>,
+    pub allow: Vec<String>,
+}
+
+/// 承認時に解決した `media`。`fs` は `read` を `app_fs::resolve_requested_fs` で解決したもの
+/// （`read` が空なら無し）。`allow` は解決で変わらない。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedMedia {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fs: Option<ResolvedFs>,
+    pub allow: Vec<String>,
+}
+
 /// manifest の `subWindow`。インスタンスが専用サブウィンドウ（`appinst-<n>-w<k>`）を開くための申請。
 ///
 /// 数・大きさの上限と、見た目・位置の権限（透明・枠なし・常に前面・位置の指定）を**個別に**申請させる。
@@ -186,6 +205,9 @@ pub struct RequestedPermissions {
     /// manifest の `audio`。マイクの生音声の取得（`app_audio.rs`）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<AudioPermission>,
+    /// manifest の `media`。動画・音声の再生（`app_media.rs` の appmedia プロトコル）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<RequestedMedia>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,6 +259,9 @@ pub struct ResolvedPermissions {
     /// 解決で変わるものがない（承認した値がそのまま関門の入力になる）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audio: Option<AudioPermission>,
+    /// `read` はパスを解決した形（`fs` と同様）。`allow` はそのまま
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media: Option<ResolvedMedia>,
 }
 
 /// host 側に保存する承認。キーはアーティファクト識別子（`<worktreeId>/<artifactId>`）。
@@ -341,6 +366,7 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
             "network" => out.network = parse_network(val)?,
             "subWindow" => out.sub_window = parse_sub_window(val)?,
             "audio" => out.audio = parse_audio(val)?,
+            "media" => out.media = parse_media(val)?,
             k if RESERVED_PERMISSION_KEYS.contains(&k) => {
                 return Err(format!(
                     "権限 '{}' はこの版ではまだ使えません（対応する機能が未実装です）。manifest から外してください",
@@ -349,7 +375,7 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
             }
             other => {
                 return Err(format!(
-                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs / db / network / subWindow / aiTerminal / audio だけです",
+                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs / db / network / subWindow / aiTerminal / audio / media だけです",
                     other
                 ));
             }
@@ -433,6 +459,37 @@ fn parse_network(v: &serde_json::Value) -> Result<Option<NetworkPermission>, Str
         return Ok(None);
     }
     Ok(Some(NetworkPermission { allow: set.into_iter().collect() }))
+}
+
+fn parse_media(v: &serde_json::Value) -> Result<Option<RequestedMedia>, String> {
+    let what = "app.permissions.media";
+    let obj = expect_object(v, what)?;
+    if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "read" | "allow")) {
+        // 書き込み・既定拒否パスの解除・ループバック等の許可は media にはない
+        return Err(format!("{} の未知のキー '{}' です（read / allow だけ）", what, k));
+    }
+    let mut read = BTreeSet::new();
+    for item in &string_list(obj, "read", "app.permissions.media.read")? {
+        read.insert(crate::app_fs::normalize_scope(item)?);
+    }
+    if read.len() > MAX_FS_SCOPES {
+        return Err(format!("{}.read は {} 件までです", what, MAX_FS_SCOPES));
+    }
+    let mut allow = BTreeSet::new();
+    for item in &string_list(obj, "allow", "app.permissions.media.allow")? {
+        let prefix = crate::app_net::normalize_prefix(item)?;
+        if !(prefix.starts_with("http://") || prefix.starts_with("https://")) {
+            return Err(format!("{}.allow は http(s) の URL だけです: {}", what, item));
+        }
+        allow.insert(prefix);
+    }
+    if allow.len() > crate::app_net::MAX_PREFIXES {
+        return Err(format!("{}.allow は {} 件までです", what, crate::app_net::MAX_PREFIXES));
+    }
+    if read.is_empty() && allow.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(RequestedMedia { read: read.into_iter().collect(), allow: allow.into_iter().collect() }))
 }
 
 fn parse_sub_window(v: &serde_json::Value) -> Result<Option<SubWindowPermission>, String> {
@@ -940,6 +997,59 @@ mod tests {
     }
 
     #[test]
+    fn parses_and_normalizes_media_permission() {
+        let m = ok(json!({ "name": "x", "permissions": { "media": {
+            "read": ["worktree://videos/", "worktree://videos/", "artifact://clips"],
+            "allow": ["https://cdn.example.com/v", "https://cdn.example.com/v"]
+        }}}));
+        let media = m.permissions.media.unwrap();
+        assert_eq!(media.read, vec!["artifact://clips/", "worktree://videos/"]);
+        assert_eq!(media.allow, vec!["https://cdn.example.com/v"]);
+        // どちらかだけでもよい
+        assert!(ok(json!({ "name": "x", "permissions": { "media": { "allow": ["https://a.example.com/"] }}})).permissions.media.is_some());
+        assert!(ok(json!({ "name": "x", "permissions": { "media": { "read": ["worktree://v/"] }}})).permissions.media.is_some());
+        // 空は権限なし
+        assert!(ok(json!({ "name": "x", "permissions": { "media": { "read": [], "allow": [] }}})).permissions.media.is_none());
+    }
+
+    #[test]
+    fn rejects_bad_media_permission() {
+        let p = |v: serde_json::Value| err(json!({ "name": "x", "permissions": { "media": v }}));
+        // 書き込み・既定拒否パスの解除は無い（未知キー）
+        assert!(p(json!({ "read": ["worktree://v/"], "write": ["worktree://v/"] })).contains("未知のキー"));
+        assert!(p(json!({ "read": ["worktree://v/"], "allowSensitivePaths": true })).contains("未知のキー"));
+        assert!(p(json!({ "allow": "https://a.example.com/" })).contains("配列"));
+        // http(s) だけ（ws は通信路が違う）
+        assert!(p(json!({ "allow": ["wss://a.example.com/"] })).contains("http(s)"));
+        assert!(p(json!({ "allow": ["ftp://a.example.com/"] })).contains("http"));
+        assert!(p(json!({ "allow": ["http://127.0.0.1:8080/"] })).contains("ループバック"));
+        assert!(p(json!({ "allow": ["https://u:p@a.example.com/"] })).contains("認証情報"));
+        assert!(p(json!({ "read": ["../x/"] })).len() > 0);
+        let many: Vec<String> = (0..=crate::app_net::MAX_PREFIXES).map(|i| format!("https://h{}.example.com/", i)).collect();
+        assert!(p(json!({ "allow": many })).contains("件まで"));
+        let scopes: Vec<String> = (0..=MAX_FS_SCOPES).map(|i| format!("worktree://d{}/", i)).collect();
+        assert!(p(json!({ "read": scopes })).contains("件まで"));
+    }
+
+    #[test]
+    fn media_change_requires_reapproval() {
+        let a = ok(json!({ "name": "x", "permissions": { "media": { "allow": ["https://a.example.com/"] }}}));
+        let b = ok(json!({ "name": "x", "permissions": { "media": { "allow": ["https://a.example.com/"], "read": ["worktree://v/"] }}}));
+        let c = ok(json!({ "name": "renamed", "permissions": { "media": { "allow": ["https://a.example.com/"] }}}));
+        assert!(requested_changed(&a.permissions, &b.permissions));
+        assert!(requested_changed(&b.permissions, &a.permissions));
+        assert!(!requested_changed(&a.permissions, &c.permissions));
+    }
+
+    #[test]
+    fn legacy_grant_without_media_deserializes_as_no_media() {
+        // #402 より前に保存された grant（media キー無し）は、media 権限なしとして読める
+        let raw = r#"{"grantedAt":1,"requested":{"memory":{"maxBytes":10}},"resolved":{"memory":{"maxBytes":10}}}"#;
+        let g: AppGrant = serde_json::from_str(raw).unwrap();
+        assert!(g.resolved.media.is_none() && g.requested.media.is_none());
+    }
+
+    #[test]
     fn parses_ai_terminal_permission() {
         let m = ok(json!({ "name": "x", "permissions": { "aiTerminal": { "agents": ["claude", "claude"], "maxConcurrent": 2 }}}));
         let t = m.permissions.ai_terminal.unwrap();
@@ -1223,6 +1333,7 @@ mod tests {
             network: None,
             sub_window: None,
             audio: None,
+            media: None,
         }
     }
 
@@ -1263,6 +1374,7 @@ mod tests {
                 network: None,
                 sub_window: None,
                 audio: None,
+                media: Some(RequestedMedia { read: vec!["worktree://videos/".into()], allow: vec!["https://cdn.example.com/".into()] }),
             },
             resolved: resolved(&["notify_worktree"], &["wt-b"]),
         };

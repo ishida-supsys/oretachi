@@ -41,6 +41,11 @@ export function summarizeGrant(resolved: AppResolvedPermissions): SummaryPart[] 
   if (count("dbSensitive") > 0) parts.push({ key: "summaryDbSensitive", critical: true });
   const net = count("network");
   if (net > 0) parts.push({ key: "summaryNetwork", params: { count: net }, critical: false });
+  const mediaLocal = count("mediaRead");
+  const mediaNet = count("mediaNet");
+  if (mediaLocal + mediaNet > 0) {
+    parts.push({ key: "summaryMedia", params: { local: mediaLocal, net: mediaNet }, critical: false });
+  }
   const sw = v.rows.find((r) => r.kind === "subWindow");
   if (sw) {
     const overlay = v.rows.some((r) => r.kind === "subWindowFlag" && r.severity === "danger");

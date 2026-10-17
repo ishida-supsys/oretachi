@@ -4,6 +4,7 @@ mod ai_judge;
 mod ai_provider;
 mod ai_terminal;
 mod app_db;
+mod app_media;
 mod app_net;
 mod app_ws;
 mod app_subwindow;
@@ -2413,6 +2414,7 @@ pub fn run() {
     }
 
     let app = builder
+        .register_asynchronous_uri_scheme_protocol("appmedia", app_media::handle)
         .manage(PtyManager::new())
         .manage(WorktreeRemoveManager::new())
         .manage(SettingsManager::new())
@@ -2426,6 +2428,7 @@ pub fn run() {
         .manage(ai_terminal::SpawnWaiters::default())
         .manage(app_db::AppDbRegistry::default())
         .manage(app_net::AppNetRegistry::default())
+        .manage(app_media::AppMediaRegistry::default())
         .manage(app_ws::AppWsRegistry::default())
         .manage(app_subwindow::AppSubWindowRegistry::default())
         .manage(app_audio::AppAudioRegistry::default())

@@ -62,6 +62,16 @@ export interface AppAudioPermission {
   sampleRates: number[];
 }
 
+/**
+ * 動画・音声の再生（`<video>` / `<audio>` の src に直接使える）。fs / network の権限とは独立。
+ * `fs` は `read` のスコープを解決した形（読み取り専用。無ければローカルファイルは不可）、
+ * `allow` は http(s) の URL プレフィックス（正規化済み）。
+ */
+export interface AppResolvedMedia {
+  fs?: AppResolvedFs;
+  allow: string[];
+}
+
 export interface AppResolvedPermissions {
   mcp?: { tools: string[]; targets: AppResolvedTarget[] };
   memory?: { maxBytes: number };
@@ -73,6 +83,7 @@ export interface AppResolvedPermissions {
   network?: { allow: string[] };
   subWindow?: AppSubWindowPermission;
   audio?: AppAudioPermission;
+  media?: AppResolvedMedia;
 }
 
 export interface AppRequestedPermissions {
@@ -84,6 +95,7 @@ export interface AppRequestedPermissions {
   network?: { allow: string[] };
   subWindow?: AppSubWindowPermission;
   audio?: AppAudioPermission;
+  media?: { read: string[]; allow: string[] };
 }
 
 export interface AppGrant {

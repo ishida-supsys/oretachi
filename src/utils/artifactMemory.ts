@@ -425,6 +425,14 @@ export const ARTIFACT_STANDALONE_FLAG = "__oretachiStandalone";
 export const ARTIFACT_APP_FLAG = "__oretachiApp";
 
 /**
+ * メディア（`appmedia` プロトコル）のオリジンを iframe へ渡すグローバル名（任意。#402）。
+ * `reactArtifactSrcdoc.ts` が、アプリの iframe にだけブリッジより前に立てる（値は CSP の `media-src` に
+ * 入れるものと同じ。シェルが 1 か所で算出する）。ブリッジは読み込み時に 1 回だけ読んでグローバルを消す。
+ * 無い（通常のビューア・エクスポートした単体 HTML）と `oretachi.media.url` は例外を投げる。
+ */
+export const ARTIFACT_MEDIA_ORIGIN_GLOBAL = "__oretachiMediaOrigin";
+
+/**
  * iframe 内に注入するブリッジ本体。`window.__oretachi` を定義し、
  * `reactArtifactSrcdoc.ts` の makeRequire が `require('oretachi')` として返す。
  *
@@ -440,6 +448,8 @@ export const ARTIFACT_BRIDGE_JS =
   "  var NONCE=window[" + JSON.stringify(ARTIFACT_BRIDGE_NONCE_GLOBAL) + "];" +
   "  try{delete window[" + JSON.stringify(ARTIFACT_BRIDGE_NONCE_GLOBAL) + "];}catch(err){}" +
   "  var hasNonce=typeof NONCE==='string';" +
+  "  var MEDIA_ORIGIN=window[" + JSON.stringify(ARTIFACT_MEDIA_ORIGIN_GLOBAL) + "];" +
+  "  try{delete window[" + JSON.stringify(ARTIFACT_MEDIA_ORIGIN_GLOBAL) + "];}catch(err){}" +
   // ── リクエスト/レスポンスの土台（メモリー以外の method も後からここに乗る）──
   "  var pending={};" +
   "  var seq=0;" +
@@ -986,6 +996,18 @@ export const ARTIFACT_BRIDGE_JS =
   "      return function(){audioEndL=audioEndL.filter(function(f){return f!==fn;});};" +
   "    }" +
   "  };" +
+  // `<video>` / `<audio>` の src に入れる URL を組み立てるだけ。許可するかどうかは要求ごとに Rust が判断する
+  "  var media={" +
+  "    url:function(src){" +
+  "      if(typeof src!=='string'||!src)throw new TypeError('oretachi.media.url: src must be a non-empty string');" +
+  "      if(typeof MEDIA_ORIGIN!=='string')throw new Error('oretachi.media is only available in app windows');" +
+  "      var route;" +
+  "      if(/^(worktree|artifact):\\/\\//.test(src))route='/fs';" +
+  "      else if(/^https?:\\/\\//i.test(src))route='/net';" +
+  "      else throw new Error('oretachi.media.url: unsupported src (worktree://, artifact://, http(s):// only): '+src);" +
+  "      return MEDIA_ORIGIN+route+'?u='+encodeURIComponent(src);" +
+  "    }" +
+  "  };" +
   "  window.__oretachi={" +
   "    getMemory:getMemory," +
   "    setMemory:setMemory," +
@@ -1000,7 +1022,8 @@ export const ARTIFACT_BRIDGE_JS =
   "    call:call," +
   "    aiTerminal:aiTerminal," +
   "    subWindow:subWindow," +
-  "    audio:audio" +
+  "    audio:audio," +
+  "    media:media" +
   "  };" +
   // `state` は setMemory ごとに別オブジェクトへ差し替わるので、スナップショットを
   // 掴ませないようゲッターにする（`oretachi.memory` は常に最新を指す）
