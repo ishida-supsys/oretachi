@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.36.1] - 2026-10-18
+
+### Added
+- アプリ API: メディア再生（media 権限・appmedia プロトコル）(#402)
+
 ## [0.36.0] - 2026-10-16
 
 ### Added
@@ -908,7 +913,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.36.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.36.1...HEAD
+[0.36.1]: https://github.com/ishida-supsys/oretachi/compare/0.36.0...0.36.1
 [0.36.0]: https://github.com/ishida-supsys/oretachi/compare/0.35.3...0.36.0
 [0.35.3]: https://github.com/ishida-supsys/oretachi/compare/0.35.2...0.35.3
 [0.35.2]: https://github.com/ishida-supsys/oretachi/compare/0.35.1...0.35.2
