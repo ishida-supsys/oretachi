@@ -17,6 +17,7 @@ import {
   ARTIFACT_BRIDGE_PUSH_MEMORY_CHANGED,
   ARTIFACT_STANDALONE_FLAG,
   ARTIFACT_APP_FLAG,
+  ARTIFACT_MEDIA_ORIGIN_GLOBAL,
 } from "./artifactMemory";
 
 interface PostedRequest {
@@ -38,7 +39,7 @@ interface Bridge {
 
 function setupBridge(
   initialMemory: Record<string, unknown>,
-  options?: { standalone?: boolean; app?: boolean },
+  options?: { standalone?: boolean; app?: boolean; mediaOrigin?: string },
 ) {
   const posted: PostedRequest[] = [];
   let onMessage: ((event: { data: unknown }) => void) | null = null;
@@ -46,6 +47,7 @@ function setupBridge(
   const fakeWindow: Record<string, unknown> = {
     [ARTIFACT_STANDALONE_FLAG]: options?.standalone === true,
     [ARTIFACT_APP_FLAG]: options?.app === true,
+    ...(options?.mediaOrigin !== undefined ? { [ARTIFACT_MEDIA_ORIGIN_GLOBAL]: options.mediaOrigin } : {}),
     addEventListener(type: string, fn: (event: { data: unknown }) => void) {
       if (type === "message") onMessage = fn;
     },
@@ -593,6 +595,47 @@ describe("ARTIFACT_BRIDGE_JS: app の最大待ちと巻き戻し", () => {
     reply(posted[0].requestId, rejectedByHost);
     await r;
     expect(bridge.getMemory()).toEqual({ big: "x" });
+  });
+});
+
+describe("ARTIFACT_BRIDGE_JS: media（動画・音声の URL）", () => {
+  const ORIGIN = "http://appmedia.localhost";
+  const mediaOf = (b: unknown) => (b as { media: { url(src: unknown): string } }).media;
+
+  it("worktree:// と artifact:// は /fs、http(s):// は /net へ、src をエンコードして載せる", () => {
+    const m = mediaOf(setupBridge({}, { app: true, mediaOrigin: ORIGIN }).bridge);
+    expect(m.url("worktree://videos/a b.mp4")).toBe(`${ORIGIN}/fs?u=${encodeURIComponent("worktree://videos/a b.mp4")}`);
+    expect(m.url("artifact://clip.webm")).toBe(`${ORIGIN}/fs?u=${encodeURIComponent("artifact://clip.webm")}`);
+    expect(m.url("https://cdn.example.com/v.mp4?x=1&y=2")).toBe(
+      `${ORIGIN}/net?u=${encodeURIComponent("https://cdn.example.com/v.mp4?x=1&y=2")}`,
+    );
+    expect(m.url("HTTP://cdn.example.com/a.mp3")).toBe(`${ORIGIN}/net?u=${encodeURIComponent("HTTP://cdn.example.com/a.mp3")}`);
+  });
+
+  it("対応しないスキーム・空・文字列以外は例外（許可の判断は Rust だが、組み立てられないものは弾く）", () => {
+    const m = mediaOf(setupBridge({}, { app: true, mediaOrigin: ORIGIN }).bridge);
+    for (const bad of ["file:///C:/a.mp4", "ftp://x/a.mp4", "data:video/mp4;base64,AA", "blob:x", "a.mp4", "", 1, null]) {
+      expect(() => m.url(bad)).toThrow();
+    }
+  });
+
+  it("オリジンが渡されていない（通常のビューア・単体 HTML）と例外を投げる", () => {
+    const m = mediaOf(setupBridge({}).bridge);
+    expect(() => m.url("worktree://a.mp4")).toThrow("app windows");
+  });
+
+  it("オリジンのグローバルは読み込み時に 1 回だけ読んで消す", () => {
+    const fakeWindow: Record<string, unknown> = {
+      [ARTIFACT_MEDIA_ORIGIN_GLOBAL]: ORIGIN,
+      addEventListener() {},
+    };
+    // eslint-disable-next-line no-new-func
+    new Function("window", "document", "parent", ARTIFACT_BRIDGE_JS)(
+      fakeWindow,
+      { getElementById: () => null },
+      { postMessage() {} },
+    );
+    expect(ARTIFACT_MEDIA_ORIGIN_GLOBAL in fakeWindow).toBe(false);
   });
 });
 

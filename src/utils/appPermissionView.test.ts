@@ -274,6 +274,63 @@ describe("buildPermissionView", () => {
     });
   });
 
+  describe("media", () => {
+    const scope = (prefix: string, scheme: "worktree" | "artifact" = "worktree") => ({
+      scheme,
+      prefix,
+      path: `C:\\wt\\${prefix}`,
+      write: false,
+    });
+    const mediaFs = (...scopes: ReturnType<typeof scope>[]) => ({ scopes, allowSensitivePaths: false });
+
+    it("lists local scopes (always read) and URL prefixes as separate rows, apart from fs / network", () => {
+      const perm: AppResolvedPermissions = {
+        media: {
+          fs: mediaFs(scope("videos/"), scope("clips/", "artifact")),
+          allow: ["https://cdn.example.com/", "http://plain.example.com/"],
+        },
+      };
+      const v = buildPermissionView(perm, null, DANGEROUS);
+      expect(v.rows.map((r) => [r.kind, r.label, r.severity, r.access ?? null, r.scheme ?? null])).toEqual([
+        ["mediaRead", "C:\\wt\\videos/", "normal", "read", "worktree"],
+        ["mediaRead", "C:\\wt\\clips/", "normal", "read", "artifact"],
+        ["mediaNet", "https://cdn.example.com/", "normal", null, null],
+        ["mediaNet", "http://plain.example.com/", "danger", null, null],
+      ]);
+      // fs / network の行にはならない（権限として独立している）
+      expect(v.rows.some((r) => r.kind === "fs" || r.kind === "network")).toBe(false);
+      expect(v.hasDanger).toBe(true);
+      expect(v.hasCritical).toBe(false);
+    });
+
+    it("media without local scopes or URLs adds no rows", () => {
+      expect(buildPermissionView({ media: { allow: [] } }, null, DANGEROUS).rows).toEqual([]);
+    });
+
+    it("shows added rows and removed rows on re-approval, URL and local separately", () => {
+      const before: AppResolvedPermissions = {
+        media: { fs: mediaFs(scope("videos/")), allow: ["https://a.example.com/"] },
+      };
+      const after: AppResolvedPermissions = {
+        media: { fs: mediaFs(scope("videos/"), scope("music/")), allow: ["https://b.example.com/"] },
+      };
+      const v = buildPermissionView(after, before, DANGEROUS);
+      expect(v.rows.filter((r) => r.added).map((r) => [r.kind, r.label])).toEqual([
+        ["mediaRead", "C:\\wt\\music/"],
+        ["mediaNet", "https://b.example.com/"],
+      ]);
+      expect(v.removed.map((r) => [r.kind, r.label])).toEqual([["mediaNet", "https://a.example.com/"]]);
+    });
+
+    it("a path that resolves elsewhere is a removed + added pair (re-approval shows the move)", () => {
+      const before: AppResolvedPermissions = { media: { fs: mediaFs(scope("videos/")), allow: [] } };
+      const moved = { ...scope("videos/"), path: "D:\\moved\\videos/" };
+      const v = buildPermissionView({ media: { fs: mediaFs(moved), allow: [] } }, before, DANGEROUS);
+      expect(v.rows.map((r) => [r.kind, r.label, r.added])).toEqual([["mediaRead", "D:\\moved\\videos/", true]]);
+      expect(v.removed.map((r) => r.label)).toEqual(["C:\\wt\\videos/"]);
+    });
+  });
+
   describe("subWindow", () => {
     const sw = { maxCount: 2, maxWidth: 300, maxHeight: 400, transparent: false, frameless: false, alwaysOnTop: false, position: false };
 

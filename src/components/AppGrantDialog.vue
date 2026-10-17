@@ -124,6 +124,20 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
               <div v-if="r.severity === 'danger'" class="why">{{ t("networkHttpWarning") }}</div>
               <div v-else class="why neutral">{{ t("networkNote") }}</div>
             </template>
+            <template v-else-if="r.kind === 'mediaRead'">
+              <span class="kind">{{ t("kindMedia") }}</span>
+              <code class="path">{{ r.label }}</code>
+              <div class="why neutral">
+                {{ r.scheme === "worktree" ? t("fsWorktree", { name: request.worktreeName }) : t("fsArtifact") }}
+              </div>
+              <div class="why neutral">{{ t("mediaReadNote") }}</div>
+            </template>
+            <template v-else-if="r.kind === 'mediaNet'">
+              <span class="kind">{{ t("kindMedia") }}</span>
+              <code class="path">{{ r.label }}</code>
+              <div v-if="r.severity === 'danger'" class="why">{{ t("mediaHttpWarning") }}</div>
+              <div v-else class="why neutral">{{ t("mediaNetNote") }}</div>
+            </template>
             <template v-else-if="r.kind === 'db'">
               <span class="kind">{{ r.access === "write" ? t("kindDbWrite") : t("kindDbRead") }}</span>
               <code class="path">{{ r.label }}</code>
@@ -158,7 +172,7 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
               <s v-else-if="r.kind === 'memory'">{{ t("memoryMax", { bytes: r.value }) }}</s>
               <s v-else-if="r.kind === 'aiTerminal'">{{ t("aiTerminalSummary", { spec: r.value }) }}</s>
               <s v-else-if="r.kind === 'audio'">{{ t("audioSummary") }} ({{ r.value }})</s>
-              <s v-else-if="r.kind === 'network'"><code>{{ r.label }}</code></s>
+              <s v-else-if="r.kind === 'network' || r.kind === 'mediaNet' || r.kind === 'mediaRead'"><code>{{ r.label }}</code></s>
               <s v-else-if="r.kind === 'subWindow'">{{ t("subWindowSummary", { spec: r.label }) }}</s>
               <s v-else-if="r.kind === 'subWindowFlag'">{{ t("subWindowFlag_" + r.value) }}</s>
               <s v-else-if="r.kind === 'fs' || r.kind === 'db'"><code>{{ r.kind }} {{ r.access }} {{ r.label }}</code></s>
@@ -427,6 +441,10 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
     "kindFsWrite": "Write files",
     "kindFsSensitive": "Files",
     "kindNetwork": "Network access",
+    "kindMedia": "Media playback",
+    "mediaReadNote": "The app can play videos and audio files in this folder (mp4, webm, mp3, ogg, wav, flac and similar) in its own window. Other kinds of files are refused, and the app cannot read the file contents itself.",
+    "mediaNetNote": "The app can play videos and audio from URLs under this prefix. oretachi fetches them for the app (redirects are re-checked); your own PC, private networks and oretachi itself are always refused.",
+    "mediaHttpWarning": "Plain HTTP (not encrypted): anyone on the network path can see or replace what the app plays. The app can play videos and audio from URLs under this prefix.",
     "kindSubWindow": "Sub-windows",
     "kindSubWindowFlag": "Sub-window appearance",
     "subWindowSummary": "Up to {spec} (count × width x height, in pixels)",
@@ -495,6 +513,10 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
     "kindFsWrite": "ファイルの書き込み",
     "kindFsSensitive": "ファイル",
     "kindNetwork": "ネットワーク通信",
+    "kindMedia": "メディア再生",
+    "mediaReadNote": "このフォルダにある動画・音声ファイル（mp4・webm・mp3・ogg・wav・flac など）を、アプリが自分のウィンドウで再生できます。それ以外の種類のファイルは拒否され、アプリがファイルの中身を直接読むことはできません。",
+    "mediaNetNote": "この URL プレフィックス配下の動画・音声を、アプリが再生できます。取得は oretachi が代行します（リダイレクト先も再検査されます）。この PC 自身・プライベートネットワーク・oretachi 自身へは常に届きません。",
+    "mediaHttpWarning": "平文の HTTP（暗号化されません）: 通信経路上の誰でも、アプリが再生する内容を見たり差し替えたりできます。アプリはこの URL プレフィックス配下の動画・音声を再生できます。",
     "kindSubWindow": "サブウィンドウ",
     "kindSubWindowFlag": "サブウィンドウの見た目",
     "subWindowSummary": "最大 {spec}（個数 × 幅 x 高さ、ピクセル）",

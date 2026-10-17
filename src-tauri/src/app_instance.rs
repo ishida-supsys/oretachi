@@ -553,7 +553,22 @@ fn build_resolved(
     let mut resolved = crate::mcp_server::resolve_app_permissions(&settings, requested)?;
     resolved.fs = build_resolved_scopes(app, worktree_id, artifact_id, requested.fs.as_ref())?;
     resolved.db = build_resolved_scopes(app, worktree_id, artifact_id, requested.db.as_ref())?;
+    if let Some(media) = resolved.media.as_mut() {
+        media.fs = build_resolved_media_fs(app, worktree_id, artifact_id, requested.media.as_ref())?;
+    }
     Ok(resolved)
+}
+
+/// `media.read` のスコープを解決する。fs と同じ解決（読み取り専用・既定拒否パスは解かない）を通す。
+fn build_resolved_media_fs(
+    app: &AppHandle,
+    worktree_id: &str,
+    artifact_id: &str,
+    requested: Option<&app_manifest::RequestedMedia>,
+) -> Result<Option<app_manifest::ResolvedFs>, String> {
+    let Some(media) = requested.filter(|m| !m.read.is_empty()) else { return Ok(None) };
+    let as_fs = app_manifest::RequestedFs { read: media.read.clone(), write: Vec::new(), allow_sensitive_paths: false };
+    build_resolved_scopes(app, worktree_id, artifact_id, Some(&as_fs))
 }
 
 /// FS / DB のスコープだけを解決する（絶対パスはワークツリーの移動などで変わりうるので、起動のたびに比べる）。
@@ -627,6 +642,9 @@ async fn start_inner(
                     && build_resolved_scopes(app, worktree_id, artifact_id, requested.fs.as_ref())? != g.resolved.fs)
                 || (requested.db.is_some()
                     && build_resolved_scopes(app, worktree_id, artifact_id, requested.db.as_ref())? != g.resolved.db)
+                || (requested.media.as_ref().is_some_and(|m| !m.read.is_empty())
+                    && build_resolved_media_fs(app, worktree_id, artifact_id, requested.media.as_ref())?
+                        != g.resolved.media.as_ref().and_then(|m| m.fs.clone()))
         }
         None => true,
     };
@@ -789,6 +807,8 @@ fn release(app: &AppHandle, label: &str) -> Option<(String, String)> {
         crate::app_net::on_instance_released(app, label);
         // マイクの録音も止める（停止・承認の取り消し・ウィンドウを閉じる・削除のどれでも）
         crate::app_audio::on_instance_released(app, label);
+        // 実行中のメディア要求（動画・音声の Range 取得）も中断する
+        crate::app_media::on_instance_released(app, label);
         // インスタンスが開いたサブウィンドウもすべて閉じる（再起動での復元はしない）
         crate::app_subwindow::on_instance_released(app, label);
         // インスタンスが開いた専用 AI ターミナルも、停止とともにすべて閉じる（再起動での復元はしない）。
@@ -1079,6 +1099,7 @@ fn request_reload(app: &AppHandle, label: &str, reason: &str) {
     // マイクの録音も止める。再承認の承認後もここを通るので、権限が変わったときは必ず止まり、
     // 新しい iframe が新しい権限で start し直す
     crate::app_audio::on_reload(app, label);
+    crate::app_media::on_reload(app, label);
     // 宛先はこのインスタンスのウィンドウだけ（常駐ウィンドウと、所有するサブウィンドウ）。
     // サブウィンドウは作り直さず、中の iframe だけが再接続する（前提 10）。他のインスタンスへ漏らさない
     crate::app_subwindow::emit_to_instance(app, label, "app-instance-reload", reason);
@@ -1611,7 +1632,7 @@ mod tests {
     use crate::app_manifest::{MemoryPermission, RequestedPermissions};
 
     fn perms(max: u64) -> RequestedPermissions {
-        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None, db: None, network: None, sub_window: None, audio: None }
+        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None, db: None, network: None, sub_window: None, audio: None, media: None }
     }
 
     #[test]

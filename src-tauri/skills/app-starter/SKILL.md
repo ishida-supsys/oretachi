@@ -15,7 +15,7 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
 - **manifest だけでは何も動かない。** AI が書いた manifest は信頼されない。ユーザーがアーティファクトウィンドウの**起動画面**で起動し、承認ダイアログで許可して初めて権限が有効になる。承認の前に、あなたが API を呼べるようにする手段は無い。
 - **宣言したものだけが使える。** manifest に無い権限（ツール・越境先・メモリー）は、承認済みでも常に拒否される。
 - **通常のビューアでは動かない。** `app` 付きのアーティファクトは起動画面を出す。実行は承認後の常駐ウィンドウの中（`sandbox` iframe）。Web ビューアでは起動できない。
-- 今の版で書ける権限は `mcp`（`tools` と `targets`）、`memory`（`maxBytes` 必須）、`fs`、`db`（下記）、`aiTerminal`（`agents` と `maxConcurrent` 必須）、`network`（`allow` に URL プレフィックス。下記）、`subWindow`（専用サブウィンドウ。下記）、`audio`（マイクの音声入力。下記）だけ。`wasm` は未対応で、書くとエラーになる。
+- 今の版で書ける権限は `mcp`（`tools` と `targets`）、`memory`（`maxBytes` 必須）、`fs`、`db`（下記）、`aiTerminal`（`agents` と `maxConcurrent` 必須）、`network`（`allow` に URL プレフィックス。下記）、`subWindow`（専用サブウィンドウ。下記）、`audio`（マイクの音声入力。下記）、`media`（動画・音声の再生。下記）だけ。`wasm` は未対応で、書くとエラーになる。
 - コード（content / modules）を更新しても再承認は要らず、起動中なら**承認を保ったまま iframe がリロードされる**（フルリロード。メモリー以外の JS の状態は失われる）。**権限（manifest の `permissions`）を変えたときだけ**、起動中なら直ちに再承認のダイアログが出る。承認までは旧権限のまま動き（リロードもされない）、新しい権限が要る呼び出しは拒否される。承認でリロード、拒否で停止。
 
 ## manifest
@@ -60,6 +60,8 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
   - 同じ DB へ複数のアプリが書くのは避ける（ロックの競合で `database is locked` になりうる）。`artifact://` に専用の DB を置くのが無難。
 
 - `network`: アプリが通信してよい URL のプレフィックス。`{ "allow": ["https://api.example.com/v1/"] }`（最大 20 件）。`http` / `https` / `ws` / `wss` のみで、`?` / `#` / `user:pass@` は書けない。**この配下にだけ**通信でき、承認ダイアログにはプレフィックスがそのまま出る（平文の `http` / `ws` は警告つき）。`ws://` / `wss://` は WebSocket（`net.ws`）用で、**スキームは完全一致**する（`https://x/` の許可で `wss://x/` へは繋げず、`wss://x/` の許可で `net.fetch` もできない。両方使うなら両方書く）。**ループバック・プライベート IP・oretachi 自身のポートは常に拒否され、解除する手段は無い**（`localhost` や `192.168.x.x` を書くと manifest がエラーになる）。
+
+- `media`: `<video>` / `<audio>` の `src` に直接使えるローカルファイルと URL の申請。`{ "read": ["worktree://videos/"], "allow": ["https://cdn.example.com/"] }`。**`fs` / `network` の権限とは独立**で、承認ダイアログには「メディア再生」として出る（`media` を申請しても `fs.read` や `net.fetch` は使えない）。`read` は `fs` と同じ `worktree://…` / `artifact://…` のディレクトリのプレフィックスで**読み取り専用**（`write` と `allowSensitivePaths` は書くと manifest ごと拒否される）、`allow` は `network` と同じ URL プレフィックスだが **`http` / `https` だけ**（`ws` / `wss` は拒否）。どちらも最大 20 件で、片方だけでもよい。承認ダイアログには解決済みの絶対パスと URL プレフィックスが出る（平文の `http` は警告つき）。ループバック・プライベート IP・oretachi 自身のポートは `network` と同じく常に拒否される。
 
 - `subWindow`: アプリが専用のウィンドウ（透明・枠なしも可。アシスタントキャラクターの表示など）を開く申請。省略したキーは既定で埋まる。`{ "maxCount": 1, "maxWidth": 480, "maxHeight": 640, "transparent": true, "frameless": true, "alwaysOnTop": true, "position": true }`
   - `maxCount`: 同時に開ける数（1〜4、既定 1）。`maxWidth` / `maxHeight`: 開くウィンドウの大きさの上限（64〜1024 ピクセル、既定 480 × 640）。
@@ -245,6 +247,27 @@ await audio.stop();
 - 音声は oretachi がファイルに保存することは無い（メモリー上だけで流す）。保存したい場合はアプリが `fs` / `db` の権限の範囲で書くが、**音声はユーザーの発話そのものなので、必要最小限にとどめる**。
 - **外へ送る経路は `net.fetch` の HTTP POST か、`net.ws`（WebSocket。リアルタイムならこちら）**（どちらも `network` の許可が要る。`net.fetch` は 1 リクエスト本文 1MiB・同時 8 本の上限で、順序は `seq` で自分で並べる）。
 - Windows だけで使える（それ以外では `start` が失敗する）。Web ビューアでは起動できない。
+
+## メディア再生 API（`media`）
+
+`media` を承認されたアプリだけが、`<video>` / `<audio>` の `src` にローカルファイルと URL を**パス指定で直接**使える。iframe の CSP は `media-src` を持たないので、そのままでは何も再生できない。`require('oretachi')` の `media.url(src)` が返す URL（アプリの実行ウィンドウだけが見える専用のオリジン）を `src` に入れる。`fs.readBytes` は 8MiB 上限で、blob はファイル全体をメモリに載せるため、動画にはこちらを使う。
+
+```jsx
+import { media } from 'oretachi';
+// ローカル（media.read のスコープ内。worktree:// / artifact://）
+<video controls src={media.url('worktree://videos/demo.mp4')} />
+// URL（media.allow のプレフィックス内。http / https）
+<audio controls src={media.url('https://cdn.example.com/bgm/loop.mp3')} />
+```
+
+- `media.url(src)` は URL の**文字列を組み立てるだけ**で、許可するかどうかは `<video>` が要求するたびに oretachi（Rust 側）が判断する。`worktree://` / `artifact://` 以外・`http(s)://` 以外は例外になる。通常のビューア（アプリの実行ウィンドウ以外）では `media.url` が例外を投げ、要求も拒否される。
+- **シークが効く。** oretachi は `Range` 要求に 1 回 2MiB までのチャンクで答える（常に 206）ので、8MiB を超える動画も再生・シークできる。
+- **配信されるのはメディアだけ。** ローカルは拡張子が `mp4` / `m4v` / `webm` / `ogv` / `mov` / `mp3` / `m4a` / `aac` / `ogg` / `oga` / `opus` / `wav` / `flac` のファイルだけ（それ以外の拡張子は 403）。URL は応答の `Content-Type` が `video/*` / `audio/*` か、URL の拡張子が上の表にあるものだけ。**アプリがファイルの中身を `fetch` などで読むことはできない**（読むなら `fs`）。
+- **拒否される（403。デバッグログに残る）**: スコープ外のパス・`..`・リンクの先が範囲外・未承認の URL・プライベート IP へ解決される名前・別オリジンへのリダイレクト・`media` を宣言していないアプリ・アプリ以外のウィンドウからの要求。リダイレクトは同じオリジン（と http → https の格上げ）だけ追い、Cookie は送らない。
+- URL の配信元が `Range` に対応していない（200 で全体を返す）場合は、先頭から 8MiB を超える位置は再生・シークできない（502）。長い動画には Range 対応の配信元を使う。
+- 1 つのアプリが同時に出せるメディア要求は 24 本まで（`net.fetch` の枠とは別）。超えた分は 503 になる。アプリの停止・リロードでは進行中の要求が中断される。
+- 応答は `Cache-Control: no-store`。承認を取り消す・`media` を変えて再承認すると、次の要求から新しい権限になる。
+- Content-Type を持たない URL（`/stream?id=1` など）は、拡張子も無ければ再生できない。
 
 ## メモリー API
 

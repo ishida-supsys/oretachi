@@ -466,41 +466,7 @@ pub async fn perform(
         other => return Err(format!("responseType '{}' は使えません（text / base64）", other)),
     };
 
-    let denied: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
-    let redirect_policy = {
-        let policy = policy.clone();
-        let denied = denied.clone();
-        let origin = parsed.clone();
-        reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS {
-                return attempt.error(format!("リダイレクトが {} 回を超えました", MAX_REDIRECTS));
-            }
-            // 別オリジンへのリダイレクトは、承認済みのプレフィックスであっても追わない。reqwest が
-            // 落とすのは Authorization / Cookie 等だけで、アプリが付けた x-api-key などの
-            // ヘッダーや本文（307/308）が別のホストへ渡ってしまうため
-            let result = policy.check_url(attempt.url()).and_then(|()| check_redirect_origin(&origin, attempt.url()));
-            match result {
-                Ok(()) => attempt.follow(),
-                Err(e) => {
-                    let msg = format!("リダイレクト先 {} は許可されていません: {}", loggable_url(attempt.url().as_str()), e);
-                    if let Ok(mut d) = denied.lock() {
-                        d.get_or_insert_with(|| msg.clone());
-                    }
-                    attempt.error(msg)
-                }
-            }
-        })
-    };
-    ensure_crypto_provider();
-    let client = reqwest::Client::builder()
-        .no_proxy()
-        .dns_resolver(GuardedResolver { policy: policy.clone(), lookup, denied: denied.clone() })
-        .redirect(redirect_policy)
-        .connect_timeout(CONNECT_TIMEOUT)
-        .timeout(TOTAL_TIMEOUT)
-        .user_agent(concat!("oretachi-app/", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| format!("HTTP クライアントを作れませんでした: {}", e))?;
+    let (client, denied) = build_guarded_client(policy, lookup, &parsed)?;
 
     let mut req = client.request(method, parsed).headers(headers);
     if let Some(b) = body {
@@ -555,6 +521,52 @@ pub async fn perform(
     })
 }
 
+/// 検査つきの HTTP クライアント（net.fetch と media の両方が使う）。システムプロキシは使わず、
+/// 名前解決は `GuardedResolver`、リダイレクトは各ホップで `check_url` と `check_redirect_origin` を通す。
+/// 返す `denied` には、拒否の理由が入る（reqwest のエラーは原因が深く埋もれるため）。
+pub(crate) fn build_guarded_client(
+    policy: Arc<Policy>,
+    lookup: Arc<dyn Lookup>,
+    origin: &reqwest::Url,
+) -> Result<(reqwest::Client, Arc<Mutex<Option<String>>>), String> {
+    let denied: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+    let redirect_policy = {
+        let policy = policy.clone();
+        let denied = denied.clone();
+        let origin = origin.clone();
+        reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= MAX_REDIRECTS {
+                return attempt.error(format!("リダイレクトが {} 回を超えました", MAX_REDIRECTS));
+            }
+            // 別オリジンへのリダイレクトは、承認済みのプレフィックスであっても追わない。reqwest が
+            // 落とすのは Authorization / Cookie 等だけで、アプリが付けた x-api-key などの
+            // ヘッダーや本文（307/308）が別のホストへ渡ってしまうため
+            let result = policy.check_url(attempt.url()).and_then(|()| check_redirect_origin(&origin, attempt.url()));
+            match result {
+                Ok(()) => attempt.follow(),
+                Err(e) => {
+                    let msg = format!("リダイレクト先 {} は許可されていません: {}", loggable_url(attempt.url().as_str()), e);
+                    if let Ok(mut d) = denied.lock() {
+                        d.get_or_insert_with(|| msg.clone());
+                    }
+                    attempt.error(msg)
+                }
+            }
+        })
+    };
+    ensure_crypto_provider();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .dns_resolver(GuardedResolver { policy, lookup, denied: denied.clone() })
+        .redirect(redirect_policy)
+        .connect_timeout(CONNECT_TIMEOUT)
+        .timeout(TOTAL_TIMEOUT)
+        .user_agent(concat!("oretachi-app/", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| format!("HTTP クライアントを作れませんでした: {}", e))?;
+    Ok((client, denied))
+}
+
 /// リダイレクト先が元のリクエストと同じオリジンか（http → https への格上げだけは、同じホストなら許す）。
 fn check_redirect_origin(origin: &reqwest::Url, next: &reqwest::Url) -> Result<(), String> {
     let same_origin = origin.scheme() == next.scheme()
@@ -577,7 +589,7 @@ pub fn ensure_crypto_provider() {
     }
 }
 
-fn describe_error(e: &reqwest::Error) -> String {
+pub(crate) fn describe_error(e: &reqwest::Error) -> String {
     if e.is_timeout() {
         return format!("タイムアウトしました（{} 秒）", TOTAL_TIMEOUT.as_secs());
     }
@@ -609,14 +621,19 @@ pub struct AppNetRegistry {
 
 impl AppNetRegistry {
     fn begin(&self, label: &str) -> Result<(u64, AbortRegistration), String> {
+        self.begin_with_limit(label, MAX_CONCURRENT_PER_INSTANCE)
+    }
+
+    /// 同時実行の上限を呼び出し側が決める版（`app_media` は net.fetch と枠を分けるために別の台帳を持つ）。
+    pub(crate) fn begin_with_limit(&self, label: &str, limit: usize) -> Result<(u64, AbortRegistration), String> {
         let Ok(mut inner) = self.inner.lock() else {
             return Err("通信の台帳のロックが壊れています".to_string());
         };
         if inner.dead.contains(label) {
             return Err("アプリが停止しました".to_string());
         }
-        if inner.flights.get(label).map(|m| m.len()).unwrap_or(0) >= MAX_CONCURRENT_PER_INSTANCE {
-            return Err(format!("同時に出せる通信は {} 本までです", MAX_CONCURRENT_PER_INSTANCE));
+        if inner.flights.get(label).map(|m| m.len()).unwrap_or(0) >= limit {
+            return Err(format!("同時に出せる通信は {} 本までです", limit));
         }
         let id = inner.next_id;
         inner.next_id += 1;
@@ -625,7 +642,7 @@ impl AppNetRegistry {
         Ok((id, reg))
     }
 
-    fn end(&self, label: &str, id: u64) {
+    pub(crate) fn end(&self, label: &str, id: u64) {
         if let Ok(mut inner) = self.inner.lock() {
             if let Some(m) = inner.flights.get_mut(label) {
                 m.remove(&id);
@@ -636,7 +653,7 @@ impl AppNetRegistry {
         }
     }
 
-    fn abort_all(&self, label: &str, stopped: bool) {
+    pub(crate) fn abort_all(&self, label: &str, stopped: bool) {
         let Ok(mut inner) = self.inner.lock() else { return };
         if stopped {
             inner.dead.insert(label.to_string());

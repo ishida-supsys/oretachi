@@ -4,7 +4,13 @@
  */
 
 import { ARTIFACT_LINK_INTERCEPT_JS } from "./artifactFrameLink";
-import { ARTIFACT_APP_FLAG, ARTIFACT_BRIDGE_JS, ARTIFACT_BRIDGE_NONCE_GLOBAL, ARTIFACT_STANDALONE_FLAG } from "./artifactMemory";
+import {
+  ARTIFACT_APP_FLAG,
+  ARTIFACT_BRIDGE_JS,
+  ARTIFACT_BRIDGE_NONCE_GLOBAL,
+  ARTIFACT_MEDIA_ORIGIN_GLOBAL,
+  ARTIFACT_STANDALONE_FLAG,
+} from "./artifactMemory";
 
 function htmlEscape(str: string): string {
   return str
@@ -122,7 +128,15 @@ const RUNTIME_JS =
  * ベンダースクリプト（React/ReactDOM/Babel/Tailwind）から静的な <head> 部分を構築する。
  * content が変わっても再計算不要なため、呼び出し側でキャッシュすること。
  */
-export function buildVendorHead(react: string, reactDom: string, babel: string, tailwind: string): string {
+export function buildVendorHead(
+  react: string,
+  reactDom: string,
+  babel: string,
+  tailwind: string,
+  options: { mediaOrigin?: string } = {},
+): string {
+  // アプリ（media 権限）だけが appmedia オリジンの <video>/<audio> を使える。通常ビューは付けない（#402）
+  const mediaSrc = options.mediaOrigin ? ` media-src ${options.mediaOrigin};` : "";
   return (
     "<!DOCTYPE html>\n<html>\n<head>\n" +
     '<meta charset="utf-8" />\n' +
@@ -133,7 +147,7 @@ export function buildVendorHead(react: string, reactDom: string, babel: string, 
     // 外すと wasm が動かなくなるので、'wasm-unsafe-eval' だけへ絞る場合は wasm の回帰を確認すること。
     // sandbox="allow-scripts" のみ（allow-same-origin なし）により、
     // 親ウィンドウ・Cookie・localStorage へのアクセスは遮断されている。
-    '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\' \'unsafe-eval\'; style-src \'unsafe-inline\'; img-src data: blob:;" />\n' +
+    '<meta http-equiv="Content-Security-Policy" content="default-src \'none\'; script-src \'unsafe-inline\' \'unsafe-eval\'; style-src \'unsafe-inline\'; img-src data: blob:;' + mediaSrc + '" />\n' +
     "<style>" + STYLES + "</style>\n" +
     // @tailwindcss/browser の初期化エントリポイント
     '<style type="text/tailwindcss">@import "tailwindcss";</style>\n' +
@@ -181,6 +195,11 @@ export function buildReactSrcdoc(
     subWindow?: { id: string; params: unknown };
     /** 文書の背景を透明にする（透明なサブウィンドウ用）。アプリが自分で背景を塗るのは妨げない */
     transparentBackground?: boolean;
+    /**
+     * メディア（`appmedia` プロトコル）のオリジン。`buildVendorHead` の `mediaOrigin`（CSP の `media-src`）
+     * と同じ値を渡す。`oretachi.media.url` が URL の組み立てに使う。省略 = `media.url` は例外を投げる
+     */
+    mediaOrigin?: string;
   },
 ): string {
   const modulesJson = modules && Object.keys(modules).length > 0
@@ -208,6 +227,9 @@ export function buildReactSrcdoc(
       : "") +
     (options?.app
       ? openTag("window[" + JSON.stringify(ARTIFACT_APP_FLAG) + "]=true;") + "\n"
+      : "") +
+    (options?.mediaOrigin
+      ? openTag("window[" + JSON.stringify(ARTIFACT_MEDIA_ORIGIN_GLOBAL) + "]=" + JSON.stringify(options.mediaOrigin) + ";") + "\n"
       : "") +
     (options?.nonce !== undefined
       ? openTag("window[" + JSON.stringify(ARTIFACT_BRIDGE_NONCE_GLOBAL) + "]=" + JSON.stringify(options.nonce) + ";") + "\n"

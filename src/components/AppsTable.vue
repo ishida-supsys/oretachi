@@ -133,6 +133,8 @@ function rowValue(r: ReturnType<typeof detailRows>[number]): string {
     case "fs":
     case "db":
     case "network":
+    case "mediaRead":
+    case "mediaNet":
       return r.label;
     case "memory":
       return t("memoryMax", { bytes: r.value });
@@ -442,6 +444,8 @@ onBeforeUnmount(() => {
     "kind_fsSensitive": "Sensitive files",
     "kind_dbSensitive": "Sensitive databases",
     "kind_network": "Network",
+    "kind_mediaRead": "Media (local files)",
+    "kind_mediaNet": "Media (URLs)",
     "kindFsRead": "Files (read)",
     "kindFsWrite": "Files (write)",
     "kindDbRead": "Database (read-only)",
@@ -458,6 +462,7 @@ onBeforeUnmount(() => {
     "summaryDb": "databases (read-only {read} / read-write {write})",
     "summaryDbSensitive": "databases in hook/workflow locations",
     "summaryNetwork": "network ({count} URL prefixes)",
+    "summaryMedia": "media playback (local {local} / URL {net})",
     "summarySubWindow": "sub-windows ({spec})",
     "summarySubWindowOverlay": "sub-windows that can overlay other windows ({spec})",
     "summaryNone": "no permissions"
@@ -492,6 +497,8 @@ onBeforeUnmount(() => {
     "kind_fsSensitive": "既定拒否パス",
     "kind_dbSensitive": "既定拒否パスの DB",
     "kind_network": "ネットワーク",
+    "kind_mediaRead": "メディア再生（ローカルファイル）",
+    "kind_mediaNet": "メディア再生（URL）",
     "kindFsRead": "ファイル（読み取り）",
     "kindFsWrite": "ファイル（書き込み）",
     "kindDbRead": "データベース（読み取り専用）",
@@ -508,6 +515,7 @@ onBeforeUnmount(() => {
     "summaryDb": "データベース（読み取り専用 {read} / 読み書き {write}）",
     "summaryDbSensitive": "フック・ワークフローの場所のデータベース",
     "summaryNetwork": "ネットワーク（URL プレフィックス {count} 件）",
+    "summaryMedia": "メディア再生（ローカル {local} / URL {net}）",
     "summarySubWindow": "サブウィンドウ（{spec}）",
     "summarySubWindowOverlay": "他のウィンドウに重なれるサブウィンドウ（{spec}）",
     "summaryNone": "権限なし"

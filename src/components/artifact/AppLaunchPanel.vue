@@ -225,6 +225,8 @@ function hhmmss(ms: number): string {
                 <span class="tag">{{ t("granted.audioTag") }}</span>
               </template>
               <template v-else-if="r.kind === 'network'">{{ t("granted.network") }}: <code>{{ r.label }}</code></template>
+              <template v-else-if="r.kind === 'mediaRead'">{{ t("granted.mediaRead") }}: <code>{{ r.label }}</code></template>
+              <template v-else-if="r.kind === 'mediaNet'">{{ t("granted.mediaNet") }}: <code>{{ r.label }}</code></template>
               <template v-else-if="r.kind === 'subWindow'">{{ t("granted.subWindow", { spec: r.label }) }}</template>
               <template v-else-if="r.kind === 'subWindowFlag'">
                 {{ t("granted.subWindowFlag_" + r.value) }}
@@ -539,6 +541,8 @@ function hhmmss(ms: number): string {
       "dbSensitive": "Databases in files that run commands (.git/, .claude/, .github/workflows, ...)",
       "sensitiveTag": "default-denied paths allowed",
       "network": "Network",
+      "mediaRead": "Media playback (local files)",
+      "mediaNet": "Media playback (URL)",
       "subWindow": "Sub-windows (up to {spec})",
       "subWindowFlag_transparent": "Sub-window: transparent",
       "subWindowFlag_frameless": "Sub-window: no title bar",
@@ -589,6 +593,8 @@ function hhmmss(ms: number): string {
       "dbSensitive": "コマンドが走るファイル（.git/・.claude/・.github/workflows など）の場所へのデータベース配置",
       "sensitiveTag": "既定拒否パスを許可",
       "network": "ネットワーク",
+      "mediaRead": "メディア再生（ローカルファイル）",
+      "mediaNet": "メディア再生（URL）",
       "subWindow": "サブウィンドウ（最大 {spec}）",
       "subWindowFlag_transparent": "サブウィンドウ: 透明",
       "subWindowFlag_frameless": "サブウィンドウ: 枠なし",

@@ -29,6 +29,8 @@ export const PERMISSION_ROW_KINDS = [
   "subWindow",
   "subWindowFlag",
   "audio",
+  "mediaRead",
+  "mediaNet",
 ] as const;
 
 export type PermissionRowKind = (typeof PERMISSION_ROW_KINDS)[number];
@@ -40,6 +42,8 @@ export function isKnownRowKind(kind: string): kind is PermissionRowKind {
 
 export interface PermissionRow {
   /**
+   * `mediaRead`: メディア再生のローカルのスコープ 1 件（`fs` と同じ形で、常に read）。
+   * `mediaNet`: メディア再生の URL プレフィックス 1 件。
    * `fs` / `db`: FS・DB のスコープ 1 件（`access` と、解決済みの絶対パス `label`。DB の read は読み取り専用）。
    * `fsSensitive` / `dbSensitive`: 既定拒否パスの解除
    */
@@ -132,6 +136,30 @@ function rowsOf(perm: AppResolvedPermissions, dangerous: ReadonlySet<string>): P
       value: prefix,
       label: prefix,
       severity: prefix.startsWith("http://") || prefix.startsWith("ws://") ? "danger" : "normal",
+      wildcard: false,
+      added: false,
+    });
+  }
+  // メディア再生（#402）: ローカルのスコープ（読み取り専用）と URL プレフィックスを別の行にする。
+  // どちらも「見る・聞く」だけだが、平文の http は盗聴・改ざんを受けうるので danger（network と同じ）
+  for (const s of perm.media?.fs?.scopes ?? []) {
+    rows.push({
+      kind: "mediaRead",
+      value: `read:${s.scheme}:${s.path}`,
+      label: displayFsPath(s.path),
+      access: "read",
+      scheme: s.scheme,
+      severity: "normal",
+      wildcard: false,
+      added: false,
+    });
+  }
+  for (const prefix of perm.media?.allow ?? []) {
+    rows.push({
+      kind: "mediaNet",
+      value: prefix,
+      label: prefix,
+      severity: prefix.startsWith("http://") ? "danger" : "normal",
       wildcard: false,
       added: false,
     });

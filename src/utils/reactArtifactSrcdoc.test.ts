@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { artifactSrcdocSourceKey, buildReactSrcdoc, buildVendorHead } from "./reactArtifactSrcdoc";
-import { ARTIFACT_APP_FLAG, ARTIFACT_STANDALONE_FLAG } from "./artifactMemory";
+import { ARTIFACT_APP_FLAG, ARTIFACT_MEDIA_ORIGIN_GLOBAL, ARTIFACT_STANDALONE_FLAG } from "./artifactMemory";
 
 describe("artifactSrcdocSourceKey", () => {
   it("content が同じでもモジュールが変われば別のキーになる", () => {
@@ -78,5 +78,35 @@ describe("buildVendorHead の CSP", () => {
   it("外部通信は許可しない（既定が 'none' で connect-src を足していない）", () => {
     expect(csp).toContain("default-src 'none'");
     expect(csp).not.toContain("connect-src");
+  });
+
+  it("既定では media-src を足さない（通常のビューアは <video> / <audio> を使えない）", () => {
+    expect(csp).not.toContain("media-src");
+  });
+
+  it("mediaOrigin を渡したときだけ、そのオリジンの media-src を足す（アプリ #402）", () => {
+    const withMedia =
+      /http-equiv="Content-Security-Policy" content="([^"]*)"/.exec(
+        buildVendorHead("", "", "", "", { mediaOrigin: "http://appmedia.localhost" }),
+      )?.[1] ?? "";
+    expect(withMedia).toContain("media-src http://appmedia.localhost;");
+    // 他は広げない
+    expect(withMedia).toContain("default-src 'none'");
+    expect(withMedia).not.toContain("connect-src");
+    expect(withMedia).not.toContain("frame-src");
+  });
+});
+
+describe("buildReactSrcdoc の mediaOrigin", () => {
+  it("指定したときだけ、ブリッジより先にオリジンのグローバルを立てる", () => {
+    const plain = buildReactSrcdoc("<html><head></head>", "const App = () => null;");
+    expect(plain).not.toContain(`window["${ARTIFACT_MEDIA_ORIGIN_GLOBAL}"]=`);
+    const html = buildReactSrcdoc("<html><head></head>", "const App = () => null;", undefined, undefined, {
+      mediaOrigin: "http://appmedia.localhost",
+    });
+    const at = html.indexOf(`window["${ARTIFACT_MEDIA_ORIGIN_GLOBAL}"]="http://appmedia.localhost";`);
+    expect(at).toBeGreaterThan(-1);
+    // ブリッジは読み込み時に 1 回だけ読むので、順序が逆だと効かない
+    expect(at).toBeLessThan(html.indexOf("__oretachi="));
   });
 });

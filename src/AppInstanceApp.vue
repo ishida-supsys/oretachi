@@ -16,7 +16,7 @@
  * （Rust 側。インスタンスは止まらない）。API の関門は常駐ウィンドウと同じ（唯一の関門は Rust）。
  */
 import { ref, computed, onMounted, onBeforeUnmount } from "vue";
-import { invoke } from "@tauri-apps/api/core";
+import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { buildVendorHead, buildReactSrcdoc } from "./utils/reactArtifactSrcdoc";
@@ -80,6 +80,12 @@ const loadError = ref("");
  * `contentWindow` は同一なので、前の文書の遅延メッセージはこの nonce の不一致で捨てる。
  */
 const nonce = ref("");
+/**
+ * メディア（`appmedia` プロトコル）のオリジン。Windows は `http://appmedia.localhost`、他の OS は
+ * `appmedia://localhost`。プラットフォーム差はここで 1 回だけ吸収し、CSP の `media-src` と
+ * `oretachi.media.url` の両方へ同じ値を渡す。
+ */
+const mediaOrigin = convertFileSrc("", "appmedia").replace(/\/+$/, "");
 
 function report(level: "info" | "warn" | "error", message: string) {
   void invoke("app_instance_report", { level, message }).catch(() => {});
@@ -92,6 +98,7 @@ const srcdoc = computed(() =>
     ? buildReactSrcdoc(vendorHead.value, boot.value.content, boot.value.modules, boot.value.memory, {
         nonce: nonce.value,
         app: true,
+        mediaOrigin,
         ...(boot.value.subWindow
           ? {
               subWindow: { id: boot.value.subWindow.id, params: boot.value.subWindow.params },
@@ -446,7 +453,7 @@ onMounted(async () => {
     ]);
     boot.value = b;
     applyWindowBackground(b);
-    vendorHead.value = buildVendorHead(vendors.react, vendors.reactDom, vendors.babel, vendors.tailwind);
+    vendorHead.value = buildVendorHead(vendors.react, vendors.reactDom, vendors.babel, vendors.tailwind, { mediaOrigin });
     nonce.value = createCspNonce();
   } catch (e) {
     loadError.value = errorText(e);
