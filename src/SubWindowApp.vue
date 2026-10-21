@@ -776,11 +776,11 @@ async function onCancelAiJudging() {
     class="h-screen flex flex-col text-[#cdd6f4] select-none"
     style="background-color: var(--bg-base)"
   >
-    <!-- アウトラインエフェクト。非フォーカス時は回転を止める(styles.css の .gaming-border-frame 参照) -->
+    <!-- アウトラインエフェクト。非フォーカス時は回転を 10fps に落とす(styles.css の .gaming-border-frame 参照) -->
     <div
       v-if="settings.appearance?.enableGamingBorder"
       class="gaming-border-frame"
-      :class="[`gaming-theme-${settings.appearance?.gamingBorderTheme ?? 'gaming'}`, { 'is-paused': !isWindowFocused }]"
+      :class="[`gaming-theme-${settings.appearance?.gamingBorderTheme ?? 'gaming'}`, { 'is-unfocused': !isWindowFocused }]"
       aria-hidden="true"
     >
       <div class="gaming-border-spin" />

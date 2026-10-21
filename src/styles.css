@@ -90,7 +90,7 @@ body {
    WebView2 の renderer / gpu-process と DWM(アクリル blur の再計算)を常時占有していた
    (端末 24 本で無操作でも CPU 1 コア + GPU 35% を食い、PC 全体が止まる引き金になった)。
    transform アニメはコンポジタだけで完結して再ラスタが起きない。steps() で 30fps に落とし、
-   非フォーカス時(.is-paused)は止める。 */
+   非フォーカス時(.is-unfocused)はさらに 10fps に落とす(止めはしない)。 */
 @keyframes gaming-border-spin {
   from { transform: rotate(0deg) scale(var(--gaming-border-scale)); }
   to   { transform: rotate(360deg) scale(var(--gaming-border-scale)); }
@@ -144,8 +144,9 @@ body {
   will-change: transform;
 }
 
-.gaming-border-frame.is-paused .gaming-border-spin {
-  animation-play-state: paused;
+.gaming-border-frame.is-unfocused .gaming-border-spin {
+  /* 3s/30 steps = 10fps */
+  animation-timing-function: steps(30, end);
 }
 
 @media (prefers-reduced-motion: reduce) {
