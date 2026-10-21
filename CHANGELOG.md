@@ -6,6 +6,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.36.2] - 2026-10-21
+
+### Changed
+- PC 全体を巻き込むハングの負荷源を減らした（ボーダー描画・サムネイル・タスクバーバッジ）(#404)
+
+### Fixed
+- アウトラインエフェクトを非フォーカス時も止めず 10fps で回すようにした (#404)
+
 ## [0.36.1] - 2026-10-18
 
 ### Added
@@ -913,7 +921,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.36.1...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.36.2...HEAD
+[0.36.2]: https://github.com/ishida-supsys/oretachi/compare/0.36.1...0.36.2
 [0.36.1]: https://github.com/ishida-supsys/oretachi/compare/0.36.0...0.36.1
 [0.36.0]: https://github.com/ishida-supsys/oretachi/compare/0.35.3...0.36.0
 [0.35.3]: https://github.com/ishida-supsys/oretachi/compare/0.35.2...0.35.3
