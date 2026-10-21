@@ -305,9 +305,11 @@ pub fn add_log(app: &AppHandle, worktree_id: &str, artifact_id: &str, level: &st
         let Ok(mut inner) = reg.0.lock() else { return };
         inner.push_log(&key, level, message.clone())
     };
+    // アプリの info/warn はポーリング系のアプリだと毎秒複数件出る(2026-10-21 は 30 分で 1 万行)。
+    // アプリ自身のログビューアに残るので、本体ログへの写しは error 以外 trace に留める。
     match level {
         "error" => log::warn!("[app-instance] {}/{}: {}", worktree_id, artifact_id, message),
-        _ => log::debug!("[app-instance] {}/{}: {}", worktree_id, artifact_id, message),
+        _ => log::trace!("[app-instance] {}/{}: {}", worktree_id, artifact_id, message),
     }
     let _ = app.emit(
         "app-instance-log",

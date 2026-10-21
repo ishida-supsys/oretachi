@@ -667,7 +667,9 @@ fn log_outcome<T>(
             } else {
                 ""
             };
-            log::debug!("[app-fs] 拒否 {} {}/{} {} — {}", op, ctx.worktree_id, ctx.artifact_id, path, e);
+            // アプリがポーリングで無いファイルを読み続けると 1 回ごとに出るので trace に留める
+            // (アプリ側のログには下の add_log で残る)
+            log::trace!("[app-fs] 拒否 {} {}/{} {} — {}", op, ctx.worktree_id, ctx.artifact_id, path, e);
             crate::app_instance::add_log(
                 app,
                 &ctx.worktree_id,
