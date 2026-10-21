@@ -37,8 +37,11 @@ mod settings;
 mod system_metrics;
 mod task_db;
 mod task_executor;
+#[cfg(target_os = "windows")]
+mod taskbar_overlay;
 mod terminal_session;
 mod web_viewer;
+mod webview_proc_stats;
 
 #[cfg(target_os = "windows")]
 mod acrylic;
@@ -637,6 +640,7 @@ fn set_taskbar_badge(_app: tauri::AppHandle, _rgba: Option<Vec<u8>>, _size: u32)
 #[cfg(target_os = "windows")]
 #[tauri::command]
 fn set_taskbar_badge(app: tauri::AppHandle, rgba: Option<Vec<u8>>, size: u32) -> Result<(), String> {
+    let _bc = main_thread_watch::enter(main_thread_watch::Activity::SetTaskbarBadge);
     let Some(window) = app.get_webview_window("main") else {
         return Ok(());
     };
@@ -645,11 +649,15 @@ fn set_taskbar_badge(app: tauri::AppHandle, rgba: Option<Vec<u8>>, size: u32) ->
             if rgba.len() as u64 != (size as u64) * (size as u64) * 4 {
                 return Err(format!("invalid badge size: {} bytes for {}x{}", rgba.len(), size, size));
             }
-            Some(tauri::image::Image::new_owned(rgba, size, size))
+            Some(taskbar_overlay::OverlayIcon { rgba, size })
         }
         None => None,
     };
-    window.set_overlay_icon(icon).map_err(|e| e.to_string())
+    // Tauri の set_overlay_icon は UI スレッドで explorer に同期メッセージを送るため使わない
+    // (explorer が詰まると UI スレッドごと止まる)。専用スレッドから設定する。
+    let hwnd = window.hwnd().map_err(|e| e.to_string())?;
+    taskbar_overlay::set_overlay(hwnd.0 as isize, icon);
+    Ok(())
 }
 
 #[tauri::command]
@@ -2844,6 +2852,8 @@ pub fn run() {
             pty_manager.start_polling(app.handle().clone());
             // PTY 出力 emit を 16ms 周期でコアレッシング（WebView2 IPC 飽和によるハング対策）
             pty_manager.start_output_flush(app.handle().clone());
+            // WebView2 子プロセス(browser/renderer/gpu)の CPU を 30 秒ごとに記録（ハング前兆の追跡用）
+            webview_proc_stats::start();
 
             // Webview ハング診断: heartbeat ループ（30秒間隔で ping → pong のラウンドトリップ計測）
             {

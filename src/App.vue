@@ -64,6 +64,8 @@ import { logDebug } from "./utils/log";
 import { badgeLabel, renderBadgeRgba } from "./utils/taskbarBadge";
 
 const TASKBAR_BADGE_SIZE = 32;
+// サムネイル生成ループが 1 秒に描く端末の上限(詳細はループのコメント)
+const THUMBNAIL_MAX_PER_TICK = 4;
 import { cssPxToLogical } from "./utils/uiScale";
 import { isHomeWorktree } from "./utils/homeWorktree";
 import { buildResumeCommand } from "./utils/resumeCommand";
@@ -2456,21 +2458,36 @@ onMounted(async () => {
     }
   }
 
-  // ローカルターミナル用サムネイル生成ループ（pty出力があった場合のみ更新）
+  // ローカルターミナル用サムネイル生成ループ（pty出力があった場合のみ更新）。
+  // サムネイルを見るのはホーム画面のカードだけなので、ホーム以外を表示中・ウィンドウ非表示中は
+  // 描かない(dirty は残るので戻ったときに更新される)。AI エージェントのスピナーで全端末が
+  // 毎秒 dirty になるため、1 回の tick で描く枚数も THUMBNAIL_MAX_PER_TICK に抑え、
+  // 先頭の端末だけが更新され続けないようカーソルを回す。
+  let thumbnailCursor = 0;
   setInterval(() => {
+    if (viewMode.value !== "home" || document.visibilityState !== "visible") return;
+    const candidates: Array<{ id: number; sid: number; ref: InstanceType<typeof TerminalView> }> = [];
     for (const [wid, bundle] of worktreeFrameBundles) {
       if (isDetached(wid)) continue;
       for (const [id, ref] of bundle.terminalRefs) {
         const sid = ref.sessionId;
         if (sid == null || !isDirty(sid)) continue;
-        const terminal = ref.getTerminal();
-        if (terminal) {
-          const url = renderToDataUrl(terminal);
-          if (url && url !== thumbnailUrls.get(id)) thumbnailUrls.set(id, url);
-          clearDirty(sid);
-        }
+        candidates.push({ id, sid, ref });
       }
     }
+    if (candidates.length === 0) return;
+    const start = thumbnailCursor % candidates.length;
+    const count = Math.min(THUMBNAIL_MAX_PER_TICK, candidates.length);
+    for (let i = 0; i < count; i++) {
+      const { id, sid, ref } = candidates[(start + i) % candidates.length];
+      const terminal = ref.getTerminal();
+      if (terminal) {
+        const url = renderToDataUrl(terminal);
+        if (url && url !== thumbnailUrls.get(id)) thumbnailUrls.set(id, url);
+        clearDirty(sid);
+      }
+    }
+    thumbnailCursor = start + count;
   }, 1000);
 
   // ウィンドウ状態・ターミナルセッションの永続化。
@@ -2638,8 +2655,16 @@ onMounted(async () => {
   <div
     class="h-screen flex flex-col text-[#cdd6f4] select-none"
     style="background-color: var(--bg-base)"
-    :class="[{ 'gaming-border': settings.appearance?.enableGamingBorder }, settings.appearance?.enableGamingBorder ? `gaming-theme-${settings.appearance?.gamingBorderTheme ?? 'gaming'}` : '']"
   >
+    <!-- アウトラインエフェクト。非フォーカス時は回転を 10fps に落とす(styles.css の .gaming-border-frame 参照) -->
+    <div
+      v-if="settings.appearance?.enableGamingBorder"
+      class="gaming-border-frame"
+      :class="[`gaming-theme-${settings.appearance?.gamingBorderTheme ?? 'gaming'}`, { 'is-unfocused': !isWindowFocused }]"
+      aria-hidden="true"
+    >
+      <div class="gaming-border-spin" />
+    </div>
     <!-- タブバー -->
     <div
       class="flex items-center border-b shrink-0 min-h-0 transition-colors duration-200"

@@ -47,6 +47,8 @@ import type { SavedTerminal } from "./types/worktree";
 import type { FrameNode } from "./types/frame";
 import { useI18n } from "vue-i18n";
 import { useWorktreeTaskMap } from "./composables/useWorktreeTaskMap";
+// サムネイル送信ループが 1 秒に描く端末の上限(詳細はループのコメント)
+const THUMBNAIL_MAX_PER_TICK = 4;
 
 const { t } = useI18n();
 const { getTooltipText: getWorktreeTaskTooltip } = useWorktreeTaskMap();
@@ -590,23 +592,35 @@ onMounted(async () => {
     await appWindow.destroy();
   });
 
-  // サムネイル送信ループ（pty出力があった場合のみ送信）
+  // サムネイル送信ループ（pty出力があった場合のみ送信）。
+  // ウィンドウ非表示中は描かず、1 tick で描く枚数を THUMBNAIL_MAX_PER_TICK に抑える
+  // (App.vue のループと同じ理由。カーソルで端末を順に回す)。
   const lastThumbnailUrls = new Map<number, string>();
+  let thumbnailCursor = 0;
   thumbnailInterval = setInterval(() => {
+    if (document.visibilityState !== "visible") return;
+    const candidates: number[] = [];
     for (const [id] of terminalEntries) {
+      const sid = terminalRefs.get(id)?.sessionId;
+      if (sid != null && isDirty(sid)) candidates.push(id);
+    }
+    if (candidates.length === 0) return;
+    const start = thumbnailCursor % candidates.length;
+    const count = Math.min(THUMBNAIL_MAX_PER_TICK, candidates.length);
+    for (let i = 0; i < count; i++) {
+      const id = candidates[(start + i) % candidates.length];
       const ref = terminalRefs.get(id);
       const sid = ref?.sessionId;
-      if (sid == null || !isDirty(sid)) continue;
       const terminal = ref?.getTerminal();
-      if (terminal) {
-        const url = renderToDataUrl(terminal);
-        if (url && url !== lastThumbnailUrls.get(id)) {
-          lastThumbnailUrls.set(id, url);
-          emitTo("main", "sub-thumbnail-update", { terminalId: id, imageUrl: url });
-        }
-        clearDirty(sid);
+      if (sid == null || !terminal) continue;
+      const url = renderToDataUrl(terminal);
+      if (url && url !== lastThumbnailUrls.get(id)) {
+        lastThumbnailUrls.set(id, url);
+        emitTo("main", "sub-thumbnail-update", { terminalId: id, imageUrl: url });
       }
+      clearDirty(sid);
     }
+    thumbnailCursor = start + count;
   }, 1000);
 
   // メインウィンドウからのレイアウト情報取得要求
@@ -761,8 +775,16 @@ async function onCancelAiJudging() {
   <div
     class="h-screen flex flex-col text-[#cdd6f4] select-none"
     style="background-color: var(--bg-base)"
-    :class="[{ 'gaming-border': settings.appearance?.enableGamingBorder }, settings.appearance?.enableGamingBorder ? `gaming-theme-${settings.appearance?.gamingBorderTheme ?? 'gaming'}` : '']"
   >
+    <!-- アウトラインエフェクト。非フォーカス時は回転を 10fps に落とす(styles.css の .gaming-border-frame 参照) -->
+    <div
+      v-if="settings.appearance?.enableGamingBorder"
+      class="gaming-border-frame"
+      :class="[`gaming-theme-${settings.appearance?.gamingBorderTheme ?? 'gaming'}`, { 'is-unfocused': !isWindowFocused }]"
+      aria-hidden="true"
+    >
+      <div class="gaming-border-spin" />
+    </div>
     <!-- 初期化中 -->
     <div v-if="!initialized" class="flex items-center justify-center h-full text-[#6c7086] text-sm">
       {{ t('connecting') }}
