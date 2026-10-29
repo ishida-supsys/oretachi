@@ -507,8 +507,9 @@ pub async fn app_subwindow_open(
         .inner_size(v.width as f64, v.height as f64)
         .minimizable(true)
         .resizable(v.resizable)
-        // 上限なしで、ユーザーが大きさを変えられるときだけ最大化を許す（上限つきは最大化で上限と食い違うので出さない）
-        .maximizable(v.resizable && perm.max_width.is_none() && perm.max_height.is_none())
+        // 上限なしのときだけ最大化を許す（上限つきは最大化で上限と食い違うので出さない）。resizable は見ない:
+        // 後から setAttributes で変わっても追従でき、固定サイズの間は OS 側が最大化を出さない
+        .maximizable(perm.max_width.is_none() && perm.max_height.is_none())
         .decorations(!v.frameless)
         .transparent(v.transparent)
         .always_on_top(v.always_on_top)
