@@ -6,6 +6,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.36.3] - 2026-10-30
+
+### Added
+- アプリ実行画面でリンクを開けるようにし、サブウィンドウのサイズ上限撤廃・最大化・最小化を可能にした (#408)
+
+### Fixed
+- 最大化可否を resizable から切り離し、selfDeclared:false のテストを追加した (#408)
+
 ## [0.36.2] - 2026-10-21
 
 ### Changed
@@ -921,7 +929,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.36.2...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.36.3...HEAD
+[0.36.3]: https://github.com/ishida-supsys/oretachi/compare/0.36.2...0.36.3
 [0.36.2]: https://github.com/ishida-supsys/oretachi/compare/0.36.1...0.36.2
 [0.36.1]: https://github.com/ishida-supsys/oretachi/compare/0.36.0...0.36.1
 [0.36.0]: https://github.com/ishida-supsys/oretachi/compare/0.35.3...0.36.0
