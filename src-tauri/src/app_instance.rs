@@ -751,10 +751,10 @@ fn create_window(app: &AppHandle, label: &str, app_name: &str) -> Result<(), Str
     let win = tauri::WebviewWindowBuilder::new(app, label, tauri::WebviewUrl::App("index.html".into()))
         .title(format!("{} — oretachi app", app_name))
         .inner_size(960.0, 720.0)
-        // 最小化させない。実機検証で、WebView2 は**最小化**したウィンドウの visibility を hidden にし、
-        // タイマーを約 10 秒に 1 回まで間引いた（hide() しただけなら visible のまま間引かれない）。
-        // 隠すのは「閉じる = hide」と起動画面の切り替えだけにして、常駐アプリのタイマーを守る
-        .minimizable(false)
+        // 最小化できる。ただし WebView2 は**最小化**したウィンドウの visibility を hidden にし、タイマーを
+        // 約 10 秒に 1 回まで間引く（実機検証済み。hide() しただけなら visible のまま間引かれない）。
+        // Tauri の `background_throttling` は Windows 非対応。調査結果は issue #408 に記録
+        .minimizable(true)
         .visible(false)
         .disable_drag_drop_handler()
         .build()
@@ -1628,10 +1628,56 @@ pub async fn app_instance_report(
     Ok(())
 }
 
+/// 外部ブラウザで開く URL の長さの上限（フロントのポップアップと同値）。
+const MAX_EXTERNAL_URL_CHARS: usize = 4096;
+
+/// 実行ウィンドウのリンクを既定のブラウザで開いてよい URL か。`http(s)` でホストがあるものだけ。
+fn validate_external_url(raw: &str) -> Result<String, String> {
+    let raw = raw.trim();
+    if raw.is_empty() || raw.chars().count() > MAX_EXTERNAL_URL_CHARS {
+        return Err("URL の長さが範囲外です".to_string());
+    }
+    let url = url::Url::parse(raw).map_err(|_| "URL を解釈できません".to_string())?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err("http(s) の URL だけ開けます".to_string());
+    }
+    Ok(url.into())
+}
+
+/// 実行ウィンドウ（シェル）のリンクのポップアップから、URL を既定のブラウザで開く。
+/// opener の capability をウィンドウへ与えない代わりに、ここで `http(s)` だけを通す。
+/// 呼べるのはシェルの JS だけ（アプリは sandbox iframe の中で、`invoke` を持たない）。
+#[tauri::command]
+pub async fn app_open_external_url(window: tauri::Window, app: AppHandle, url: String) -> Result<(), String> {
+    require_instance_window(&window)?;
+    let ctx = context_for_label(&app, window.label())?;
+    let url = match validate_external_url(&url) {
+        Ok(u) => u,
+        Err(e) => {
+            add_log(&app, &ctx.worktree_id, &ctx.artifact_id, "warn", format!("拒否: 外部リンク — {}", e));
+            return Err(e);
+        }
+    };
+    // ログへ載せる URL は切り詰める（長大な URL でログを膨らませない）
+    let shown: String = url.chars().take(200).collect();
+    add_log(&app, &ctx.worktree_id, &ctx.artifact_id, "info", format!("外部リンクを開きます: {}", shown));
+    tauri_plugin_opener::open_url(url, None::<&str>).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app_manifest::{MemoryPermission, RequestedPermissions};
+
+    #[test]
+    fn external_url_allows_only_http_and_https_with_a_host() {
+        assert_eq!(validate_external_url(" https://example.com/a?b=1 ").unwrap(), "https://example.com/a?b=1");
+        assert!(validate_external_url("http://localhost:8080/").is_ok());
+        for bad in ["", "file:///C:/Windows/System32/calc.exe", "javascript:alert(1)", "ms-msdt:/id", "//example.com", "example.com", "https://", "mailto:a@b.c", "artifact:foo"] {
+            assert!(validate_external_url(bad).is_err(), "{bad}");
+        }
+        assert!(validate_external_url(&format!("https://example.com/{}", "a".repeat(MAX_EXTERNAL_URL_CHARS))).is_err());
+    }
 
     fn perms(max: u64) -> RequestedPermissions {
         RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None, db: None, network: None, sub_window: None, audio: None, media: None }

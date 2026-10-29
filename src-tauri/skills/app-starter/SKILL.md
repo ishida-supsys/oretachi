@@ -63,9 +63,10 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
 
 - `media`: `<video>` / `<audio>` の `src` に直接使えるローカルファイルと URL の申請。`{ "read": ["worktree://videos/"], "allow": ["https://cdn.example.com/"] }`。**`fs` / `network` の権限とは独立**で、承認ダイアログには「メディア再生」として出る（`media` を申請しても `fs.read` や `net.fetch` は使えない）。`read` は `fs` と同じ `worktree://…` / `artifact://…` のディレクトリのプレフィックスで**読み取り専用**（`write` と `allowSensitivePaths` は書くと manifest ごと拒否される）、`allow` は `network` と同じ URL プレフィックスだが **`http` / `https` だけ**（`ws` / `wss` は拒否）。どちらも最大 20 件で、片方だけでもよい。承認ダイアログには解決済みの絶対パスと URL プレフィックスが出る（平文の `http` は警告つき）。ループバック・プライベート IP・oretachi 自身のポートは `network` と同じく常に拒否される。
 
-- `subWindow`: アプリが専用のウィンドウ（透明・枠なしも可。アシスタントキャラクターの表示など）を開く申請。省略したキーは既定で埋まる。`{ "maxCount": 1, "maxWidth": 480, "maxHeight": 640, "transparent": true, "frameless": true, "alwaysOnTop": true, "position": true }`
-  - `maxCount`: 同時に開ける数（1〜4、既定 1）。`maxWidth` / `maxHeight`: 開くウィンドウの大きさの上限（64〜1024 ピクセル、既定 480 × 640）。
+- `subWindow`: アプリが専用のウィンドウ（透明・枠なしも可。アシスタントキャラクターの表示など）を開く申請。省略したキーは既定で埋まる。`{ "maxCount": 1, "maxWidth": 800, "maxHeight": 600, "transparent": true, "frameless": true, "alwaysOnTop": true, "position": true }`
+  - `maxCount`: 同時に開ける数（1〜4、既定 1）。`maxWidth` / `maxHeight`: 開くウィンドウの大きさの上限（64 ピクセル以上）。**任意で、省略すると上限なし**（ユーザーは自由にリサイズでき、最大化もできる）。書くと、アプリからの `open` / `setSize` もユーザーの手動リサイズもその値までになり、最大化はできなくなる。大きさを省略して開くときの既定は 480 × 640。
   - `transparent` / `frameless` / `alwaysOnTop` / `position`: 透明な背景・枠（タイトルバー）なし・常に前面・位置の指定と移動。**申請したものだけ**使える（既定は全部 false）。透明・枠なし・常に前面は他のウィンドウに重なれるので、承認ダイアログで強調される。**本当に要るものだけ**書く。
+  - 実行画面・サブウィンドウは最小化できる。ただし最小化中は WebView2 がタイマーを間引く（`setInterval` が約 10 秒に 1 回まで落ちることがある）ので、最小化中も動かし続けたい処理は時計（`setInterval`）に頼らず、再表示で現在時刻から再計算する作りにする。
   - 開いたウィンドウのタイトルとタスクバーには必ずアプリ名が付き、タスクバーには常に出る（ユーザーが見つけて閉じられるように）。
 
 ## ネットワーク API（`net`）
@@ -188,10 +189,10 @@ artifact_file(command: "delete", id: "<アプリ id>", project_dir: <作業デ�
 
 | 呼び出し | 内容 |
 |---|---|
-| `subWindow.open({ width, height, x, y, title, transparent, frameless, alwaysOnTop, resizable, params })` | ウィンドウを開く。`{ id }` が返る。省略した大きさは `maxWidth` × `maxHeight`。`x` と `y` はそろえて指定（`position` が要る。省略 = 画面中央）。`transparent` / `frameless` / `alwaysOnTop` は申請した場合だけ true にできる。`params`（JSON、16KB まで）は開かれた側が `subWindow.info.params` で読む |
+| `subWindow.open({ width, height, x, y, title, transparent, frameless, alwaysOnTop, resizable, params })` | ウィンドウを開く。`{ id }` が返る。省略した大きさは `maxWidth` × `maxHeight`（上限を書いていない軸は 480 / 640）。`x` と `y` はそろえて指定（`position` が要る。省略 = 画面中央）。`transparent` / `frameless` / `alwaysOnTop` は申請した場合だけ true にできる。`params`（JSON、16KB まで）は開かれた側が `subWindow.info.params` で読む |
 | `subWindow.close(id)` | 自分が開いたウィンドウを閉じる |
 | `subWindow.list()` | 開いているウィンドウの一覧（`id`・大きさ・見た目・`params`） |
-| `subWindow.setPosition(id, x, y)` / `subWindow.setSize(id, width, height)` | 移動（`position` が要る）/ 大きさの変更（`maxWidth` / `maxHeight` の範囲内） |
+| `subWindow.setPosition(id, x, y)` / `subWindow.setSize(id, width, height)` | 移動（`position` が要る）/ 大きさの変更（`maxWidth` / `maxHeight` を書いていれば、その範囲内） |
 | `subWindow.setAttributes(id, { alwaysOnTop, resizable, title })` | 開いたあとの属性変更（指定したキーだけ。1 つでも権限の検査に通らなければ何も適用しない）。`alwaysOnTop: true` は申請した場合だけ（`false` はいつでも可）。`title: null` か空文字で既定のタイトルに戻る（アプリ名は常に付く）。`transparent` / `frameless` は生成時に決まる性質なので変えられない。`visible`（隠す）・`focus`・`ignoreCursorEvents`（クリック透過）は、ユーザーが見つけて閉じられなくなる・入力を奪えるため提供しない |
 | `subWindow.startDrag()` | 枠なしウィンドウをドラッグで動かす。**開かれたウィンドウの `mousedown` ハンドラの中で**呼ぶ（`position` が要る） |
 | `subWindow.onClosed(fn)` | ユーザーがウィンドウを閉じたとき `{ event: "closed", id }` を受け取る。解除関数が返る（`close()` で自分で閉じたときは来ない） |

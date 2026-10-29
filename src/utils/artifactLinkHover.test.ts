@@ -36,6 +36,19 @@ describe("applyFrameLinkHover", () => {
     ]);
   });
 
+  it("options で selfDeclared を切れる（実行画面は確認なしで開く）が、座標の丸めは変わらない", () => {
+    const { popup, calls } = fakePopup();
+    applyFrameLinkHover(
+      { href: "https://example.com", rect: { left: 700, top: 20, width: 500, height: 16 } },
+      fakeFrame(40, 200),
+      popup,
+      { selfDeclared: false },
+    );
+    expect(calls).toEqual([
+      { kind: "show", href: "https://example.com", rect: { left: 740, top: 220, width: 100, height: 16 }, selfDeclared: false },
+    ]);
+  });
+
   it("href が null なら猶予付きで閉じる（即閉じない）", () => {
     const { popup, calls } = fakePopup();
     applyFrameLinkHover({ href: null, rect: null }, fakeFrame(0, 0), popup);

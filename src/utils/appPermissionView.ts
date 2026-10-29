@@ -168,10 +168,12 @@ function rowsOf(perm: AppResolvedPermissions, dangerous: ReadonlySet<string>): P
   // 透明・枠なし・常に前面は、他のウィンドウの上に重なって操作を横取りできるので danger。位置の指定は normal
   if (perm.subWindow) {
     const sw = perm.subWindow;
+    // 大きさの上限を省略した軸は「上限なし」= ∞
+    const size = `${sw.maxCount}×${sw.maxWidth ?? "∞"}x${sw.maxHeight ?? "∞"}`;
     rows.push({
       kind: "subWindow",
-      value: `${sw.maxCount}×${sw.maxWidth}x${sw.maxHeight}`,
-      label: `${sw.maxCount}×${sw.maxWidth}x${sw.maxHeight}`,
+      value: size,
+      label: size,
       severity: "normal",
       wildcard: false,
       added: false,

@@ -10,11 +10,11 @@
 //!   位置の指定は、承認済みの権限セット（grant の `resolved`）だけを見て判定する。アーティファクト JSON は見ない。
 //! - インスタンスの停止・アーティファクトの削除ではすべて閉じる。ホットリロードでは維持し、
 //!   新しい iframe が再接続する（前提 10）。再起動では復元しない（レジストリは in-memory のみ）。
-//! - 透明な領域もクリックを受けうるので、大きさの上限は小さめ（`SUB_WINDOW_DIM_CAP`）。タスクバーには
+//! - 大きさの上限は manifest の `maxWidth` / `maxHeight`（任意。省略 = 上限なしで、ユーザーは最大化もできる）。タスクバーには
 //!   常に出す（枠なしでも、ユーザーが見つけて閉じられるように）。タイトルには必ずアプリ名を付ける。
 
 use crate::app_grant::AppGrantStore;
-use crate::app_manifest::{SubWindowPermission, SUB_WINDOW_DIM_MIN};
+use crate::app_manifest::{SubWindowPermission, SUB_WINDOW_DEFAULT_HEIGHT, SUB_WINDOW_DEFAULT_WIDTH, SUB_WINDOW_DIM_MIN};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -27,6 +27,9 @@ const MAX_PARAMS_BYTES: usize = 16 * 1024;
 const MAX_TITLE_CHARS: usize = 100;
 /// 位置の絶対値の上限（論理ピクセル。マルチモニターの負の座標を許しつつ、桁外れの値は弾く）。
 const MAX_COORD: f64 = 20000.0;
+/// 上限なし（manifest で `maxWidth` / `maxHeight` を省略）のときの、桁外れの値を弾くための技術的な天井（論理ピクセル）。
+/// 承認の上限ではない
+const SANE_DIM_CEILING: u32 = 20000;
 
 type Key = (String, String);
 
@@ -125,7 +128,8 @@ pub struct Validated {
     pub params: serde_json::Value,
 }
 
-fn dimension(name: &str, v: f64, max: u32) -> Result<u32, String> {
+fn dimension(name: &str, v: f64, limit: Option<u32>) -> Result<u32, String> {
+    let max = limit.unwrap_or(SANE_DIM_CEILING);
     if !v.is_finite() {
         return Err(format!("{} は有限の数値で指定してください", name));
     }
@@ -159,8 +163,8 @@ fn validate_position(perm: &SubWindowPermission, x: f64, y: f64) -> Result<(f64,
 pub fn validate_open(perm: &SubWindowPermission, req: &OpenRequest) -> Result<Validated, String> {
     let (width, height) = validate_size(
         perm,
-        req.width.unwrap_or(perm.max_width as f64),
-        req.height.unwrap_or(perm.max_height as f64),
+        req.width.unwrap_or(perm.max_width.unwrap_or(SUB_WINDOW_DEFAULT_WIDTH) as f64),
+        req.height.unwrap_or(perm.max_height.unwrap_or(SUB_WINDOW_DEFAULT_HEIGHT) as f64),
     )?;
     let want = |name: &str, requested: Option<bool>, granted: bool| -> Result<bool, String> {
         match requested {
@@ -278,8 +282,8 @@ fn entry_fits(perm: &SubWindowPermission, e: &SubEntry) -> bool {
     (!e.transparent || perm.transparent)
         && (!e.frameless || perm.frameless)
         && (!e.always_on_top || perm.always_on_top)
-        && e.width <= perm.max_width
-        && e.height <= perm.max_height
+        && perm.max_width.map_or(true, |m| e.width <= m)
+        && perm.max_height.map_or(true, |m| e.height <= m)
 }
 
 /// 権限が狭まったときに閉じるべきウィンドウ（ラベル）。収まらないものと、数の超過分（新しいものから）。
@@ -501,11 +505,11 @@ pub async fn app_subwindow_open(
     let mut builder = tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::App("index.html".into()))
         .title(title)
         .inner_size(v.width as f64, v.height as f64)
-        // 最小化させない（WebView2 が最小化でタイマーを間引くため。常駐ウィンドウと同じ理由）
-        .minimizable(false)
+        .minimizable(true)
         .resizable(v.resizable)
-        // ユーザーのリサイズでも、承認済みの大きさの上限を超えさせない
-        .max_inner_size(perm.max_width as f64, perm.max_height as f64)
+        // 上限なしのときだけ最大化を許す（上限つきは最大化で上限と食い違うので出さない）。resizable は見ない:
+        // 後から setAttributes で変わっても追従でき、固定サイズの間は OS 側が最大化を出さない
+        .maximizable(perm.max_width.is_none() && perm.max_height.is_none())
         .decorations(!v.frameless)
         .transparent(v.transparent)
         .always_on_top(v.always_on_top)
@@ -513,6 +517,13 @@ pub async fn app_subwindow_open(
     if v.transparent {
         // 透明なウィンドウに OS の影を付けると、枠の無い四角が残る
         builder = builder.shadow(false);
+    }
+    // ユーザーのリサイズでも、承認済みの大きさの上限を超えさせない（片方だけ上限があるときはもう片方は天井まで）
+    if perm.max_width.is_some() || perm.max_height.is_some() {
+        builder = builder.max_inner_size(
+            perm.max_width.unwrap_or(SANE_DIM_CEILING) as f64,
+            perm.max_height.unwrap_or(SANE_DIM_CEILING) as f64,
+        );
     }
     builder = match v.position {
         Some((x, y)) => builder.position(x, y),
@@ -722,8 +733,8 @@ mod tests {
     fn perm() -> SubWindowPermission {
         SubWindowPermission {
             max_count: 2,
-            max_width: 300,
-            max_height: 400,
+            max_width: Some(300),
+            max_height: Some(400),
             transparent: false,
             frameless: false,
             always_on_top: false,
@@ -758,6 +769,22 @@ mod tests {
         assert_eq!(validate_size(&p, 100.4, 200.6).unwrap(), (100, 201));
         assert!(validate_size(&p, f64::NAN, 200.0).is_err());
         assert!(validate_size(&p, f64::INFINITY, 200.0).is_err());
+    }
+
+    #[test]
+    fn omitted_limits_mean_no_limit_but_keep_the_default_open_size() {
+        let p = SubWindowPermission { max_width: None, max_height: None, ..perm() };
+        // 省略した大きさは従来の既定（480×640）で開く
+        let v = validate_open(&p, &OpenRequest::default()).unwrap();
+        assert_eq!((v.width, v.height), (480, 640));
+        // 承認の上限は無いので大きな値も通るが、桁外れの値は技術的な天井で弾く
+        assert!(validate_open(&p, &req(serde_json::json!({ "width": 4000, "height": 3000 }))).is_ok());
+        assert!(validate_size(&p, (SANE_DIM_CEILING + 1) as f64, 200.0).is_err());
+        assert!(validate_size(&p, 200.0, SUB_WINDOW_DIM_MIN as f64 - 1.0).is_err());
+        // 片方だけ上限があるときは、その軸だけ縛る
+        let w_only = SubWindowPermission { max_width: Some(300), max_height: None, ..perm() };
+        assert!(validate_size(&w_only, 301.0, 200.0).is_err());
+        assert!(validate_size(&w_only, 300.0, 5000.0).is_ok());
     }
 
     #[test]
@@ -898,7 +925,7 @@ mod tests {
         // 権限そのものが無くなった → すべて
         assert_eq!(labels_to_close(None, &es).len(), 3);
         // 大きさの上限が下がった
-        let small = SubWindowPermission { max_width: 100, max_count: 4, ..full() };
+        let small = SubWindowPermission { max_width: Some(100), max_count: 4, ..full() };
         assert_eq!(labels_to_close(Some(&small), &es).len(), 3);
     }
 
