@@ -2547,6 +2547,7 @@ pub fn run() {
             app_instance::app_instance_grant,
             app_instance::app_instance_bootstrap,
             app_instance::app_instance_report,
+            app_instance::app_open_external_url,
             app_instance::app_call_mcp_tool,
             ai_terminal::app_ai_terminal_open,
             ai_terminal::app_ai_terminal_write,

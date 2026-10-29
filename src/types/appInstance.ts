@@ -45,8 +45,9 @@ export interface AppResolvedFs {
 /** 専用サブウィンドウの申請（承認した値そのもの。解決で変わるものがない） */
 export interface AppSubWindowPermission {
   maxCount: number;
-  maxWidth: number;
-  maxHeight: number;
+  /** 省略 = 上限なし */
+  maxWidth?: number;
+  maxHeight?: number;
   transparent: boolean;
   frameless: boolean;
   alwaysOnTop: boolean;

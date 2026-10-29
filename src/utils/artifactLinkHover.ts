@@ -32,6 +32,11 @@ export function applyFrameLinkHover(
   hover: ArtifactLinkHover,
   frame: HTMLIFrameElement | null,
   popup: ArtifactLinkHoverPopupApi | null,
+  /**
+   * 既定は自己申告扱い（開く前に確認を挟む）。アプリの実行画面は承認済みのアプリで、確認なしに開く
+   * 仕様なので false を渡す（座標を iframe の矩形内へ丸める処理は変わらない）
+   */
+  options: { selfDeclared?: boolean } = {},
 ): void {
   if (!popup) return;
   // href が null なら「リンクから離れた」。iframe を跨いでマウスが動く間に閉じないよう
@@ -59,7 +64,7 @@ export function applyFrameLinkHover(
       height: clamp(hover.rect.height, 0, frameRect.height - top),
     },
     // href も座標もアーティファクトの自己申告。ポップアップ側は開く前に確認を挟む
-    { selfDeclared: true },
+    { selfDeclared: options.selfDeclared ?? true },
   );
 }
 

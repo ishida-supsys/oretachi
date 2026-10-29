@@ -15,7 +15,7 @@
  * `oretachi.subWindow.info`（`{ id, params }`）を渡す。サブウィンドウはユーザーが閉じれば実際に閉じる
  * （Rust 側。インスタンスは止まらない）。API の関門は常駐ウィンドウと同じ（唯一の関門は Rust）。
  */
-import { ref, computed, onMounted, onBeforeUnmount } from "vue";
+import { ref, computed, provide, onMounted, onBeforeUnmount } from "vue";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { getCurrentWebviewWindow } from "@tauri-apps/api/webviewWindow";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -51,6 +51,10 @@ import {
 import { aiTerminalCommandFor } from "./utils/aiTerminalBridge";
 import { subWindowCommandFor } from "./utils/subWindowBridge";
 import { audioCommandFor } from "./utils/audioBridge";
+import ArtifactLinkHoverPopup from "./components/artifact/ArtifactLinkHoverPopup.vue";
+import { readArtifactLinkHoverMessage } from "./utils/artifactFrameLink";
+import { applyFrameLinkHover } from "./utils/artifactLinkHover";
+import { ARTIFACT_VIEWER_HOST_KEY, type ArtifactViewerHost } from "./utils/artifactDataSource";
 import { wsCommandFor } from "./utils/wsBridge";
 
 interface Bootstrap {
@@ -72,6 +76,7 @@ const RELOAD_DEBOUNCE_MS = 300;
 const FLUSH_TIMEOUT_MS = 2000;
 
 const frame = ref<HTMLIFrameElement | null>(null);
+const linkPopup = ref<InstanceType<typeof ArtifactLinkHoverPopup> | null>(null);
 const boot = ref<Bootstrap | null>(null);
 const vendorHead = ref("");
 const loadError = ref("");
@@ -118,6 +123,25 @@ function applyWindowBackground(b: Bootstrap) {
   document.documentElement.classList.toggle("transparent-mode", transparent);
   document.body.style.background = bg;
 }
+
+/**
+ * リンクのポップアップが使うホスト操作。このウィンドウは opener / dialog / clipboard の capability を持たない
+ * ので、外部リンクは Rust の `app_open_external_url`（http(s) だけ通す）で開く。ポップアップが確認を出すのは
+ * 「表示が打ち切られた長い URL」のときだけ（実行画面ではアプリ由来の確認は出さない）で、webview 標準の confirm で足りる。
+ * ポップアップが使わない操作（ビューア用）は何もしない。
+ */
+const linkHost: ArtifactViewerHost = {
+  confirm: async (message) => window.confirm(message),
+  showError: async () => {},
+  pickSavePath: async () => null,
+  pickZipToOpen: async () => null,
+  writeImage: async () => {},
+  setWindowTitle: async () => {},
+  openExternalUrl: (url) => invoke<void>("app_open_external_url", { url }),
+  openScopeViewer: async () => {},
+  onNavigate: async () => () => {},
+};
+provide(ARTIFACT_VIEWER_HOST_KEY, linkHost);
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -319,7 +343,15 @@ async function handleBridgeRequest(request: ArtifactBridgeRequest) {
 function onMessage(event: MessageEvent) {
   if (!nonce.value) return;
   const request = readArtifactBridgeRequest(event, frame.value, nonce.value);
-  if (request) void handleBridgeRequest(request);
+  if (request) {
+    void handleBridgeRequest(request);
+    return;
+  }
+  // リンクのホバー通知。nonce は無いので、送信元が現在の iframe の contentWindow であることだけで受ける
+  // （リロード直後に旧文書の遅延通知が届きうる分は、リロード時の hideNow で落とす）。
+  // 実行画面は確認ダイアログなしで開く仕様なので selfDeclared は付けない
+  const hover = readArtifactLinkHoverMessage(event, frame.value);
+  if (hover && !reloading) applyFrameLinkHover(hover, frame.value, linkPopup.value, { selfDeclared: false });
 }
 
 /** 旧 iframe の debounce 待ち・送信中の保存を送り切らせ、完了（かタイムアウト）まで待つ */
@@ -369,10 +401,13 @@ async function doReload() {
     const next = await invoke<Bootstrap>("app_instance_bootstrap");
     boot.value = next;
     applyWindowBackground(next);
+    // 旧文書の hover で出ているポップアップを残さない（新文書の iframe が来るまで hover の座標は当てにならない）
+    linkPopup.value?.hideNow();
     // nonce を先に替える（以後、旧 iframe の open は完了時の照合で閉じられる）。そのうえで、このウィンドウの旧
     // iframe が差し替えまでの間に開いた WebSocket を閉じる（リロードでは切断し、新しい iframe が張り直す）。
     // 閉じるのはこのウィンドウが開いた接続だけ（サブウィンドウのシェルも同時にリロードするため）
     nonce.value = createCspNonce();
+    linkPopup.value?.hideNow();
     await invoke("app_ws_close_all").catch(() => {});
     report("info", "リロードしました");
   } catch (e) {
@@ -480,6 +515,7 @@ onBeforeUnmount(() => {
       :class="{ transparent: boot?.subWindow?.transparent }"
     />
     <div v-else class="shell-loading">…</div>
+    <ArtifactLinkHoverPopup ref="linkPopup" />
   </div>
 </template>
 

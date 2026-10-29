@@ -341,6 +341,11 @@ describe("buildPermissionView", () => {
       expect(v.hasDanger).toBe(false);
     });
 
+    it("shows an omitted size limit as unlimited", () => {
+      const v = buildPermissionView({ subWindow: { ...sw, maxWidth: undefined, maxHeight: undefined } }, null, DANGEROUS);
+      expect(v.rows[0]).toMatchObject({ kind: "subWindow", value: "2×∞x∞" });
+    });
+
     it("marks transparent / frameless / always-on-top as danger and position as normal", () => {
       const v = buildPermissionView(
         { subWindow: { ...sw, transparent: true, frameless: true, alwaysOnTop: true, position: true } },

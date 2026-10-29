@@ -25,7 +25,10 @@ const mode = params.get("mode");
 async function mountAppInstance() {
   document.addEventListener("contextmenu", (e) => e.preventDefault());
   const { default: AppInstanceApp } = await import("./AppInstanceApp.vue");
-  createApp(AppInstanceApp).mount("#app");
+  // リンクのホバーポップアップ（ArtifactLinkHoverPopup）が vue-i18n を使う。このウィンドウは設定を
+  // 読まない（専用 capability）ので、言語は webview の言語から決める
+  setLocale(navigator.language.toLowerCase().startsWith("ja") ? "ja" : "en");
+  createApp(AppInstanceApp).use(i18n).mount("#app");
 }
 
 async function mountApp() {

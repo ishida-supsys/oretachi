@@ -25,11 +25,11 @@ pub const AI_TERMINAL_MAX_CONCURRENT_CAP: u32 = 4;
 
 /// `subWindow.maxCount` の上限（インスタンスごと）。
 pub const SUB_WINDOW_MAX_COUNT_CAP: u32 = 4;
-/// `subWindow.maxWidth` / `maxHeight` の下限と上限。透明な領域もクリックを受けるので上限は小さめにする
+/// `subWindow.maxWidth` / `maxHeight` の下限（書いた場合のみ）。上限は設けない（省略 = 上限なし）
 pub const SUB_WINDOW_DIM_MIN: u32 = 64;
-pub const SUB_WINDOW_DIM_CAP: u32 = 1024;
-const SUB_WINDOW_DEFAULT_WIDTH: u32 = 480;
-const SUB_WINDOW_DEFAULT_HEIGHT: u32 = 640;
+/// 大きさを省略して開くときの既定（`maxWidth` / `maxHeight` が省略されているとき）
+pub const SUB_WINDOW_DEFAULT_WIDTH: u32 = 480;
+pub const SUB_WINDOW_DEFAULT_HEIGHT: u32 = 640;
 
 /// `audio.sampleRates` に書けるレート（Hz）。音声認識で使う帯域に絞る。
 pub const AUDIO_SAMPLE_RATES: &[u32] = &[8000, 16000, 24000, 48000];
@@ -116,9 +116,12 @@ pub struct ResolvedMedia {
 pub struct SubWindowPermission {
     /// 同時に開ける数（1〜`SUB_WINDOW_MAX_COUNT_CAP`）
     pub max_count: u32,
-    /// 開くウィンドウの幅・高さの上限（論理ピクセル。`SUB_WINDOW_DIM_MIN`〜`SUB_WINDOW_DIM_CAP`）
-    pub max_width: u32,
-    pub max_height: u32,
+    /// 開くウィンドウの幅・高さの上限（論理ピクセル。`SUB_WINDOW_DIM_MIN` 以上）。**省略 = 上限なし**
+    /// （ユーザーの手動リサイズ・最大化も縛らない）。以前の grant は必ず値を持つのでそのまま読める
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_width: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_height: Option<u32>,
     #[serde(default)]
     pub transparent: bool,
     #[serde(default)]
@@ -502,20 +505,22 @@ fn parse_sub_window(v: &serde_json::Value) -> Result<Option<SubWindowPermission>
             KEYS.join(" / ")
         ));
     }
-    let uint = |key: &str, default: u32, min: u32, max: u32| -> Result<u32, String> {
+    // 省略 / null は None（maxWidth / maxHeight では「上限なし」）。書いたときだけ範囲を検査する
+    let uint = |key: &str, min: u32, max: u32| -> Result<Option<u32>, String> {
         match obj.get(key) {
-            None | Some(serde_json::Value::Null) => Ok(default),
+            None | Some(serde_json::Value::Null) => Ok(None),
             Some(n) => {
                 let n = n
                     .as_u64()
                     .ok_or_else(|| format!("app.permissions.subWindow.{} は正の整数である必要があります", key))?;
                 if n < min as u64 || n > max as u64 {
+                    let range = if max == u32::MAX { format!("{} 以上", min) } else { format!("{}〜{}", min, max) };
                     return Err(format!(
-                        "app.permissions.subWindow.{} は {}〜{} の範囲で指定してください（指定: {}）",
-                        key, min, max, n
+                        "app.permissions.subWindow.{} は {} の範囲で指定してください（指定: {}）",
+                        key, range, n
                     ));
                 }
-                Ok(n as u32)
+                Ok(Some(n as u32))
             }
         }
     };
@@ -527,9 +532,9 @@ fn parse_sub_window(v: &serde_json::Value) -> Result<Option<SubWindowPermission>
         }
     };
     Ok(Some(SubWindowPermission {
-        max_count: uint("maxCount", 1, 1, SUB_WINDOW_MAX_COUNT_CAP)?,
-        max_width: uint("maxWidth", SUB_WINDOW_DEFAULT_WIDTH, SUB_WINDOW_DIM_MIN, SUB_WINDOW_DIM_CAP)?,
-        max_height: uint("maxHeight", SUB_WINDOW_DEFAULT_HEIGHT, SUB_WINDOW_DIM_MIN, SUB_WINDOW_DIM_CAP)?,
+        max_count: uint("maxCount", 1, SUB_WINDOW_MAX_COUNT_CAP)?.unwrap_or(1),
+        max_width: uint("maxWidth", SUB_WINDOW_DIM_MIN, u32::MAX)?,
+        max_height: uint("maxHeight", SUB_WINDOW_DIM_MIN, u32::MAX)?,
         transparent: flag("transparent")?,
         frameless: flag("frameless")?,
         always_on_top: flag("alwaysOnTop")?,
@@ -875,14 +880,15 @@ mod tests {
     fn parses_sub_window_permission_with_defaults() {
         let m = ok(json!({ "name": "x", "permissions": { "subWindow": {} }}));
         let s = m.permissions.sub_window.unwrap();
-        assert_eq!((s.max_count, s.max_width, s.max_height), (1, 480, 640));
+        // 省略は「上限なし」（480×640 は開くときの既定の大きさであって上限ではない）
+        assert_eq!((s.max_count, s.max_width, s.max_height), (1, None, None));
         assert!(!s.transparent && !s.frameless && !s.always_on_top && !s.position);
         let m = ok(json!({ "name": "x", "permissions": { "subWindow": {
             "maxCount": 2, "maxWidth": 300, "maxHeight": 400,
             "transparent": true, "frameless": true, "alwaysOnTop": true, "position": true
         }}}));
         let s = m.permissions.sub_window.unwrap();
-        assert_eq!((s.max_count, s.max_width, s.max_height), (2, 300, 400));
+        assert_eq!((s.max_count, s.max_width, s.max_height), (2, Some(300), Some(400)));
         assert!(s.transparent && s.frameless && s.always_on_top && s.position);
     }
 
@@ -893,7 +899,8 @@ mod tests {
         assert!(p(json!({ "skipTaskbar": true })).contains("未知のキー"));
         assert!(p(json!({ "maxCount": 0 })).contains("maxCount"));
         assert!(p(json!({ "maxCount": SUB_WINDOW_MAX_COUNT_CAP + 1 })).contains("maxCount"));
-        assert!(p(json!({ "maxWidth": SUB_WINDOW_DIM_CAP + 1 })).contains("maxWidth"));
+        // 上限は無い（大きな値は通る）。下限だけ検査する
+        assert!(p(json!({ "maxWidth": 0 })).contains("maxWidth"));
         assert!(p(json!({ "maxHeight": SUB_WINDOW_DIM_MIN - 1 })).contains("maxHeight"));
         assert!(p(json!({ "maxWidth": "big" })).contains("maxWidth"));
         assert!(p(json!({ "transparent": "yes" })).contains("transparent"));
@@ -903,7 +910,13 @@ mod tests {
     fn sub_window_change_requires_reapproval_only_when_the_set_changes() {
         let a = ok(json!({ "name": "x", "permissions": { "subWindow": { "transparent": true }}}));
         // 既定を明示しても同じ集合
-        let same = ok(json!({ "name": "y", "permissions": { "subWindow": { "transparent": true, "maxCount": 1, "maxWidth": 480 }}}));
+        let same = ok(json!({ "name": "y", "permissions": { "subWindow": { "transparent": true, "maxCount": 1 }}}));
+        // 上限の有無は権限の違い（省略 = 上限なし。書けば上限つきなので集合が変わる）
+        let capped = ok(json!({ "name": "x", "permissions": { "subWindow": { "transparent": true, "maxWidth": 480 }}}));
+        assert_ne!(a.permissions, capped.permissions);
+        // 巨大な値も書ける（上限は撤廃）
+        let huge = ok(json!({ "name": "x", "permissions": { "subWindow": { "maxWidth": 100000 }}}));
+        assert_eq!(huge.permissions.sub_window.unwrap().max_width, Some(100000));
         let wider = ok(json!({ "name": "x", "permissions": { "subWindow": { "transparent": true, "alwaysOnTop": true }}}));
         assert_eq!(a.permissions, same.permissions);
         assert_ne!(a.permissions, wider.permissions);
