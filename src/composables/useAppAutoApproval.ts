@@ -74,11 +74,19 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
    * `judgedAt` は判定を**始めた**時刻。バックエンドはこれ以前に届いたイベントだけを確定させる。
    * 開始前のイベントの承認待ちは判定が画面で見ているが、判定中以降に届いたイベントは
    * 判定の対象外（預かりは未承認扱い、フロントへ伝わらなかったものは期限で配送に戻る）。
+   * `promptApproved` は判定ループが実際にダイアログを承認したか（預かりの有無を問わない素の結果）。
+   * `approved` は預かりがあると false になるので別に渡す。バックエンドが「直近の自動承認時刻」として
+   * 記録し、notification-auto-dismiss が承認後に届いた重複通知の判定に使う（#411）。
    * **通知の提示を待たせないよう、呼び出し側は await しない。**
    */
-  async function resolveSubscriptionHold(worktreeId: string, approved: boolean, judgedAt: number = Date.now()) {
+  async function resolveSubscriptionHold(
+    worktreeId: string,
+    approved: boolean,
+    judgedAt: number = Date.now(),
+    promptApproved?: boolean,
+  ) {
     try {
-      await invoke("resolve_auto_approval_hold", { worktreeId, approved, judgedAt });
+      await invoke("resolve_auto_approval_hold", { worktreeId, approved, judgedAt, promptApproved });
     } catch (e) {
       logDebug(`[AutoApproval] resolve_auto_approval_hold failed: ${e}`);
     }
@@ -191,7 +199,7 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
     }
     // 判定中に預かったイベントは判定していない（下の通知でも未承認扱い）。承認で確定させると
     // 「トーストは出たが購読者には届かない」になるので、預かりがあれば人に委ねた側へ倒す。
-    void resolveSubscriptionHold(wt.id, loopResult.approved && !pending, judgedAt);
+    void resolveSubscriptionHold(wt.id, loopResult.approved && !pending, judgedAt, loopResult.approved);
     const focused = deps.isWorktreeFocused(wt.id);
     let count = 0;
     if (shouldNotifyAfterJudge({ approved: loopResult.approved, focused, tray })) {
@@ -277,7 +285,7 @@ export function useAppAutoApproval(deps: UseAppAutoApprovalDeps) {
           deps.lastJudgedCommandMap.set(wid, command);
         }
         // 預かり分があれば、判定していないイベントを含むので承認では確定させない（local 経路と同じ）
-        void resolveSubscriptionHold(wid, approved && pendingTray === undefined, judgedAt);
+        void resolveSubscriptionHold(wid, approved && pendingTray === undefined, judgedAt, approved);
         const focused = deps.isWorktreeFocused(wid);
         let count = 0;
         if (shouldNotifyAfterJudge({ approved, focused, tray })) count++;

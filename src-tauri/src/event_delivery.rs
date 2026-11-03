@@ -137,6 +137,32 @@ fn last_auto_approval_resolution(source_worktree_id: &str) -> Option<(bool, i64)
         .and_then(|g| g.as_ref().and_then(|m| m.get(source_worktree_id).copied()))
 }
 
+/// 発信元ワークツリーごとの、自動承認が**実際にダイアログを承認した**直近時刻（ms）（#411）。
+///
+/// `LAST_RESOLUTION` の `approved` は「購読イベントを承認済みで確定してよいか」で、判定中に
+/// 別のイベントを預かっていると false になる。こちらは預かりの有無に関わらず、承認が
+/// 起きたことだけを残す。`oretachi_list_worktree_notifications` が返し、
+/// notification-auto-dismiss スキルが「承認後に届いた重複通知」の判定に使う。
+/// ワークツリー数ぶんの小さな Map なので期限は持たず、上書きだけする。再起動で消える。
+static LAST_AUTO_APPROVED: std::sync::Mutex<Option<HashMap<String, i64>>> =
+    std::sync::Mutex::new(None);
+
+/// 自動承認がダイアログを承認したことを記録する。
+pub fn record_auto_approved(worktree_id: &str, at_ms: i64) {
+    if let Ok(mut g) = LAST_AUTO_APPROVED.lock() {
+        g.get_or_insert_with(HashMap::new)
+            .insert(worktree_id.to_string(), at_ms);
+    }
+}
+
+/// 直近に自動承認がダイアログを承認した時刻。記録が無ければ `None`。
+pub fn last_auto_approved_at(worktree_id: &str) -> Option<i64> {
+    LAST_AUTO_APPROVED
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().and_then(|m| m.get(worktree_id).copied()))
+}
+
 /// 積むイベントを保留するか、判定済みの結果を即適用するかを決める（純粋関数）。
 ///
 /// - 発信元が自動承認 OFF、または判定を伴わない種別 → 保留しない
@@ -2259,12 +2285,18 @@ pub async fn resolve_auto_approval_hold(
     worktree_id: String,
     approved: bool,
     judged_at: Option<i64>,
+    // 判定ループが実際にダイアログを承認したか（預かりの有無を問わない素の結果・#411）。
+    // 省略（古いフロント・判定していない経路）は記録しない。
+    prompt_approved: Option<bool>,
 ) -> Result<u64, String> {
     // 判定を始めた時刻はフロントが握っている。開始以降に届いたイベントを「承認済み」として
     // 巻き込まないため（`resolve_held_from_source` の doc 参照）。未来の値は信用せず現在時刻で頭打ちにする。
     let now = event_db::now_ms();
     let at = judged_at.map_or(now, |t| t.min(now));
     record_auto_approval_resolution(&worktree_id, approved, at);
+    if prompt_approved == Some(true) {
+        record_auto_approved(&worktree_id, now);
+    }
     let pool = pool_of(&app_handle)?;
     let resolved =
         event_db::resolve_held_from_source(&pool, &worktree_id, approved, at, now).await?;
@@ -2642,6 +2674,17 @@ mod tests {
             fanout_hold_for(&settings, "wt-resolution-test", event_db::KIND_APPROVAL, t),
             event_db::FanoutHold::Acked
         );
+    }
+
+    #[test]
+    fn test_last_auto_approved_is_recorded_and_overwritten() {
+        assert_eq!(last_auto_approved_at("wt-auto-approved-test"), None);
+        record_auto_approved("wt-auto-approved-test", 100);
+        assert_eq!(last_auto_approved_at("wt-auto-approved-test"), Some(100));
+        record_auto_approved("wt-auto-approved-test", 250);
+        assert_eq!(last_auto_approved_at("wt-auto-approved-test"), Some(250));
+        // 他のワークツリーには影響しない
+        assert_eq!(last_auto_approved_at("wt-auto-approved-other"), None);
     }
 
     // ─── ターン境界配送（#124） ──────────────────────────────────────────────

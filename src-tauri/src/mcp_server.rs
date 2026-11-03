@@ -3353,7 +3353,7 @@ impl NotifyService {
         )]))
     }
 
-    #[tool(description = "未確認通知が溜まっているワークツリーだけを、通知が最初に積まれた古い順に返す（トレイポップアップの巡回もこの順。ただし同一ミリ秒に積まれた通知どうしの前後は両者で一致しない）。通知が無いワークツリーは含まない。同じ情報は oretachi_get_worktree_status にも載っているが、あちらは全ワークツリーを返すので、通知を順に捌くループから繰り返し呼ぶならこちらを使う。各エントリは worktreeId / worktreeName / count / kind / firstNotifiedAt（epoch ミリ秒）。捌き終わったものは oretachi_clear_worktree_notification でリセットする", annotations(read_only_hint = true))]
+    #[tool(description = "未確認通知が溜まっているワークツリーだけを、通知が最初に積まれた古い順に返す（トレイポップアップの巡回もこの順。ただし同一ミリ秒に積まれた通知どうしの前後は両者で一致しない）。通知が無いワークツリーは含まない。同じ情報は oretachi_get_worktree_status にも載っているが、あちらは全ワークツリーを返すので、通知を順に捌くループから繰り返し呼ぶならこちらを使う。各エントリは worktreeId / worktreeName / count / kind / firstNotifiedAt（epoch ミリ秒）/ lastAutoApprovedAt（oretachi の自動承認が実際にダイアログを承認した直近の時刻。epoch ミリ秒、記録が無ければ null。アプリ再起動で消える）。捌き終わったものは oretachi_clear_worktree_notification でリセットする", annotations(read_only_hint = true))]
     fn oretachi_list_worktree_notifications(
         &self,
         Parameters(_params): Parameters<ListWorktreeNotificationsParams>,
@@ -3386,6 +3386,7 @@ impl NotifyService {
                     "count": n.count,
                     "kind": n.kind,
                     "firstNotifiedAt": n.first_notified_at,
+                    "lastAutoApprovedAt": crate::event_delivery::last_auto_approved_at(id),
                 })
             })
             .collect();
