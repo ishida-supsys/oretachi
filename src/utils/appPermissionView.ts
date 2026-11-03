@@ -1,4 +1,4 @@
-import type { AppResolvedFs, AppResolvedPermissions } from "../types/appInstance";
+import type { AppResolvedFs, AppResolvedPermissions, AppSchedulerAction } from "../types/appInstance";
 
 /**
  * 承認ダイアログに並べる権限の行を組み立てる純関数（描画は呼び出し側）。
@@ -64,6 +64,12 @@ export interface PermissionRow {
   cron?: string;
   action?: "tool" | "aiTerminal";
   detail?: string;
+  /**
+   * `scheduler` 行: 実行内容の**全文**（ツールは名前と params の整形 JSON、AI ターミナルは initialPrompt /
+   * systemPrompt / model / cwd。切り詰めない）。承認ダイアログはこれを出す。無人で動くので、承認する人が
+   * 何が実行されるかをすべて見られなければならない（`detail` は一覧用の 1 行表示）
+   */
+  fullText?: string;
   /** 再承認で、直前の権限に無かった行 */
   added: boolean;
 }
@@ -182,6 +188,7 @@ function rowsOf(perm: AppResolvedPermissions, dangerous: ReadonlySet<string>): P
       cron: job.cron,
       action: a.type,
       detail: isAi ? truncate(a.initialPrompt, 200) : a.tool,
+      fullText: schedulerFullText(a),
       severity: isAi || dangerous.has(a.tool) ? "critical" : "normal",
       wildcard: false,
       added: false,
@@ -214,6 +221,17 @@ function rowsOf(perm: AppResolvedPermissions, dangerous: ReadonlySet<string>): P
   if (perm.fs) rows.push(...scopeRows(perm.fs, "fs", "fsSensitive"));
   if (perm.db) rows.push(...scopeRows(perm.db, "db", "dbSensitive"));
   return rows;
+}
+
+function schedulerFullText(a: AppSchedulerAction): string {
+  if (a.type === "tool") return `${a.tool}\n${JSON.stringify(a.params, null, 2)}`;
+  const parts: string[] = [];
+  if (a.title) parts.push(`title: ${a.title}`);
+  if (a.model) parts.push(`model: ${a.model}`);
+  if (a.cwd) parts.push(`cwd: ${a.cwd}`);
+  if (a.systemPrompt) parts.push(`systemPrompt:\n${a.systemPrompt}`);
+  parts.push(`initialPrompt:\n${a.initialPrompt}`);
+  return parts.join("\n\n");
 }
 
 function truncate(s: string, max: number): string {

@@ -10312,6 +10312,25 @@ mod tests {
         }
     }
 
+    /// scheduler は解決で変わるものがなく、承認した値がそのまま grant の resolved に入る
+    /// （落ちるとジョブが黙って動かなくなる。構造体の組み立てはコンパイラが欠落を拾えない形もある）
+    #[test]
+    fn resolve_app_permissions_carries_scheduler_through() {
+        use crate::app_manifest::{SchedulerAction, SchedulerJob, SchedulerPermission};
+        let settings = target_settings();
+        let sch = SchedulerPermission {
+            jobs: vec![SchedulerJob {
+                id: "j".into(),
+                cron: "0 9 * * *".into(),
+                action: SchedulerAction::Tool { tool: "notify_worktree".into(), params: serde_json::json!({ "kind": "general" }) },
+            }],
+        };
+        let mut req = app_req(&["notify_worktree"], &[]);
+        req.scheduler = Some(sch.clone());
+        assert_eq!(resolve_app_permissions(&settings, &req).unwrap().scheduler, Some(sch));
+        assert_eq!(resolve_app_permissions(&settings, &app_req(&["notify_worktree"], &[])).unwrap().scheduler, None);
+    }
+
     /// 名前で申請したワークツリーは承認時に ID へ解決して保存される。改名しても、保存済みの
     /// grant は同じワークツリーを指し続ける（照合は ID なので、改名後の名前を引かない）
     #[test]
