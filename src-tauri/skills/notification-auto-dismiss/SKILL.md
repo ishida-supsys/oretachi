@@ -1,12 +1,14 @@
 ---
 name: notification-auto-dismiss
-description: 購読しているワークツリーから届いた Stop 通知のうち、バックグラウンド処理（shell / subagent / monitor など）の完了待ちで止まっているだけのもの、および自動承認で承認されてターンが自動続行されたものを自動で見分け、1 行報告してトレイ通知を外す。人の入力が要る通知はトレイに残す。ユーザーが「バックグラウンド待ちの通知は自動で消して」「完了待ちだけの通知を片付けて」等と言ったときに使う。notification-report と同じタブでは併用しない。
-allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__plugin_oretachi_oretachi__oretachi_subscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_poll_inbox, mcp__plugin_oretachi_oretachi__oretachi_ack_message, mcp__plugin_oretachi_oretachi__oretachi_list_worktree_notifications, mcp__plugin_oretachi_oretachi__oretachi_clear_worktree_notification, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status
+description: 購読しているワークツリーから届いた Stop 通知のうち、バックグラウンド処理（shell / subagent / monitor など）の完了待ちで止まっているだけのもの、および自動承認が承認したあとに残った approval 通知を自動で見分け、1 行報告してトレイ通知を外す。人の入力が要る通知はトレイに残す。ユーザーが「バックグラウンド待ちの通知は自動で消して」「完了待ちだけの通知を片付けて」等と言ったときに使う。notification-report と同じタブでは併用しない。
+allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_list_subscriptions, mcp__plugin_oretachi_oretachi__oretachi_subscribe_worktree, mcp__plugin_oretachi_oretachi__oretachi_poll_inbox, mcp__plugin_oretachi_oretachi__oretachi_ack_message, mcp__plugin_oretachi_oretachi__oretachi_list_worktree_notifications, mcp__plugin_oretachi_oretachi__oretachi_clear_worktree_notification, mcp__plugin_oretachi_oretachi__oretachi_get_worktree_status, mcp__plugin_oretachi_oretachi__oretachi_list_terminals, mcp__plugin_oretachi_oretachi__oretachi_inspect_prompt
 ---
 
 # notification-auto-dismiss スキル
 
-購読対象のワークツリーから届く `Stop` 通知のうち、**バックグラウンド処理の完了待ちで止まっているだけ**のもの、または**自動承認で承認されてターンが自動続行された**ものを判定し、報告を 1 行出してからトレイ通知を外す。人の入力が要る通知はトレイに残す。
+購読対象のワークツリーから届く `Stop` 通知のうち、**バックグラウンド処理の完了待ちで止まっているだけ**のものを判定し、報告を 1 行出してからトレイ通知を外す。人の入力が要る通知はトレイに残す。
+
+対象は2種類ある。**Stop 通知**（Step 1〜4）と、**自動承認が承認したあとに残った approval バッジ**（Step 5）。後者は `oretachi_poll_inbox` を使わず、トレイのバッジ（`oretachi_list_worktree_notifications`）から直接判定する。
 
 ## 前提
 
@@ -55,27 +57,15 @@ Stop 1 件ごとに判定する。次を**すべて**満たすものだけを「
 
 本文に `_truncated: true` があるときは、`last_assistant_message` が先頭と末尾だけに中略されている（`…（中略）…`）。残った先頭・末尾から判断し、**読み切れず判断がつかなければ「入力要」**にする。人への質問は末尾に来やすいので、末尾は特に丁寧に読む。
 
-### 自動承認で続行したターン
-
-上の条件とは別に、次を**すべて**満たす Stop も「自動承認で続行」として外す対象にする。バックグラウンド処理を持たなくてもよい。
-
-1. 発信元ワークツリーの自動承認が ON。`oretachi_get_worktree_status(query: <sourceWorktreeId か名前>)` の `autoApproval` が `true` のときだけ満たす（`null` / `false` は「無効」扱い）。
-2. `last_assistant_message` が**承認依頼・「〜してよいか」の確認だけ**で、人への質問・選択肢の提示・作業完了の報告と次の指示待ちを含まない。自動承認が代わりに答えられるのは、はい／いいえで済む確認だけだから。
-3. 本文が JSON として読め、切り詰め（`_truncated: true`）で判断が割れていない。
-
-**自動承認が ON でも、承認依頼以外は外さない。** 自動承認は人への質問や選択肢には答えられないので、そうした Stop は入力要のまま残す。
-
 ### 判断例
 
 | `last_assistant_message` | 判定 |
 |---|---|
-| 自動承認 ON のワークツリーで「この方針で進めてよいですか？」（承認依頼のみ） | **自動承認で続行**（外す） |
-| 自動承認 OFF（または未設定）のワークツリーで「この方針で進めてよいですか？」 | **入力要** |
-| 自動承認 ON のワークツリーで「A と B どちらにしますか？」 | **入力要**（選択肢は自動承認が答えられない） |
 | 「ビルドの完了を待ちます」「結果が来たら続けます」 | バックグラウンド待ち |
 | 「サブエージェントのレビューが終わるまで待機します」 | バックグラウンド待ち |
 | 「待っている間に A と B どちらにするか決めてください」 | **入力要**（選択を求めている） |
 | 「実装が完了しました。次は何をしますか？」 | **入力要**（完了報告と次の指示待ち） |
+| 「この方針で進めてよいですか？」 | **入力要**（承認依頼） |
 | 「テストが失敗しました。どう直しますか？」 | **入力要** |
 | 判断に迷う・文面が途切れて読めない | **入力要** |
 
@@ -83,9 +73,9 @@ Stop 1 件ごとに判定する。次を**すべて**満たすものだけを「
 
 ワークツリー（`sourceWorktreeId`）ごとに、次の手順で処理する。
 
-1. **母集合に含まれるそのワークツリーの Stop が全件**「バックグラウンド待ち」または「自動承認で続行」のときだけ進む。1 件でも入力要が混ざるなら、そのワークツリーはクリアしない。
+1. **母集合に含まれるそのワークツリーの Stop が全件**バックグラウンド待ちのときだけ進む。1 件でも入力要が混ざるなら、そのワークツリーはクリアしない。
 2. `oretachi_list_worktree_notifications` で、そのワークツリーの `count` と `kind` を見る。
-3. `count` がそのワークツリーの外す件数（バックグラウンド待ち + 自動承認で続行）と一致し、かつ `kind == "completed"` のときだけ、`expected_count` / `expected_kind` を付けて `oretachi_clear_worktree_notification` を呼ぶ。
+3. `count` がそのワークツリーのバックグラウンド待ちの件数と一致し、かつ `kind == "completed"` のときだけ、`expected_count` / `expected_kind` を付けて `oretachi_clear_worktree_notification` を呼ぶ。
 
    ```
    oretachi_clear_worktree_notification(
@@ -102,8 +92,23 @@ Stop 1 件ごとに判定する。次を**すべて**満たすものだけを「
 
 - 母集合は**全件 ack** する（`oretachi_ack_message`）。入力要と判定したものはトレイに残っているので、人はそちらで気づける。
 - 端末への出力は **1 件 1 行**にする。
-  - 外した通知（バックグラウンド待ち）: `<worktreeName>: <background_tasks の description を要約> の完了待ちのため通知を外しました`
-  - 外した通知（自動承認で続行）: `<worktreeName>: 自動承認で続行したターン（<確認内容を要約>）のため通知を外しました`
+  - 外した通知: `<worktreeName>: <background_tasks の description を要約> の完了待ちのため通知を外しました`
   - 残した通知: `<worktreeName>: 入力要（<理由>）のため残しました`
   - 条件付きクリアが `skipped` だったとき: `<worktreeName>: 判定中に別の通知が積まれたため残しました`
 - 母集合が 0 件なら「新着の Stop 通知はありません」と 1 行だけ出す。
+
+## Step 5: 自動承認が承認したあとに残った approval バッジ
+
+oretachi の自動承認は、許可ダイアログを承認しても、同じダイアログに由来する後続のフック（約 6 秒遅れの Notification など）を「未承認」として数え、トレイに approval バッジを残すことがある。承認後は Claude Code が動いているので人の入力は要らない。Step 1〜4 とは独立に、**購読範囲のワークツリー**へ次を適用する。
+
+1. `oretachi_list_worktree_notifications` を呼び、`kind == "approval"` で `lastAutoApprovedAt` が null でない item だけを候補にする。`lastAutoApprovedAt` は自動承認が実際にダイアログを承認した直近時刻で、アプリ再起動で消える。null なら人の入力待ちかもしれないので候補にしない。
+2. 候補ごとに、次を**すべて**満たすものだけを「承認後の残留」とする。1 つでも欠けるか迷ったら残す。
+   - `oretachi_get_worktree_status` の `autoApproval` が `true`。
+   - `lastAutoApprovedAt - 1000 <= firstNotifiedAt <= lastAutoApprovedAt + 30000`（ミリ秒）。バッジが承認の直後に積まれたことの確認。承認より前から残っているバッジは別の入力待ちかもしれない。
+   - そのワークツリーの全ターミナル（`oretachi_list_terminals` の `worktreeId` が一致するもの）について `oretachi_inspect_prompt` の `shape` が `"text"`。`permission` / `plan` / `askUserQuestion` / `yesno` / `numbered` が 1 つでもあれば、いま人の回答待ちのダイアログが出ているので残す。`unknown` / `pager` も判断できないので残す。
+3. Step 3 と同じく、`expected_count`（item の `count`）と `expected_kind: "approval"` を付けて `oretachi_clear_worktree_notification` を呼ぶ。`skipped: true` ならクリアせず残す。
+4. **Step 3 でそのワークツリーを残すと決めた（Stop の入力要が混ざる）場合は、Step 5 でもクリアしない。** `count` が Stop と approval の合算で `kind` は最後に来た方になるので、条件が一致しても片方が人の入力待ちである可能性が残る。
+
+プラン承認（ExitPlanMode）と AskUserQuestion は自動承認の対象外で、ダイアログは出たままなので、2 のダイアログ判定で必ず残る。
+
+報告は 1 件 1 行: `<worktreeName>: 自動承認済み（承認後に届いた重複通知）のため通知を外しました`。母集合の概念が無いので ack は不要。Step 4 の「新着の Stop 通知はありません」は Step 5 の結果と関係なく、Stop が 0 件のときだけ出す。

@@ -12,6 +12,10 @@ vi.mock("@tauri-apps/api/event", () => ({
   emitTo: (...args: unknown[]) => emitToMock(...(args as [])),
 }));
 vi.mock("../utils/log", () => ({ logDebug: vi.fn() }));
+const invokeMock = vi.fn(async (..._args: unknown[]) => 0);
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: (...args: unknown[]) => invokeMock(...args),
+}));
 
 const runApprovalLoopMock = vi.fn();
 vi.mock("../utils/autoApproval", () => ({
@@ -264,6 +268,45 @@ describe("useAppAutoApproval: AI 判定中に届いた通知（#168）", () => {
     h.addNotification.mockClear();
     await h.notify({ tray: true });
     expect(h.addNotification).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("useAppAutoApproval: 自動承認の記録（#411）", () => {
+  function resolveCalls() {
+    return invokeMock.mock.calls
+      .filter((c) => c[0] === "resolve_auto_approval_hold")
+      .map((c) => c[1] as { approved: boolean; promptApproved?: boolean });
+  }
+
+  it("預かりがあっても、承認した事実は promptApproved で渡す", async () => {
+    const h = await setup();
+    const first = deferApprovalLoop();
+    const judging = h.notify({ tray: true });
+    await h.notify({ tray: true }); // 判定中に届いた2件目（預かり）
+    first.resolve(true);
+    await judging;
+
+    const calls = resolveCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].approved).toBe(false); // 預かりがあるので保留確定は人に委ねる
+    expect(calls[0].promptApproved).toBe(true);
+  });
+
+  it("承認されなかったときは promptApproved が false", async () => {
+    const h = await setup();
+    await h.notify({ tray: true });
+    const calls = resolveCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].promptApproved).toBe(false);
+  });
+
+  it("サブウィンドウの承認結果も promptApproved で渡す", async () => {
+    const h = await setup();
+    await h.subResult({ approved: true, tray: true, pendingTray: true });
+    const calls = resolveCalls();
+    expect(calls).toHaveLength(1);
+    expect(calls[0].approved).toBe(false);
+    expect(calls[0].promptApproved).toBe(true);
   });
 });
 
