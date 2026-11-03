@@ -14,6 +14,9 @@ import ArtifactReactView from "./components/artifact/ArtifactReactView.vue";
 import AppLaunchPanel from "./components/artifact/AppLaunchPanel.vue";
 import ArtifactTableView from "./components/artifact/ArtifactTableView.vue";
 import ArtifactUrlView from "./components/artifact/ArtifactUrlView.vue";
+import ArtifactCommentLayer from "./components/artifact/ArtifactCommentLayer.vue";
+import { visibleComments, unresolvedCount } from "./utils/commentAnchor";
+import type { CommentAnchor } from "./types/artifactComment";
 import { isTableContentType } from "./utils/csvArtifact";
 import { buildExportViewHtml, exportFileName, hasStandaloneView } from "./utils/artifactExport";
 import { svgToPngBytes } from "./utils/svgToPng";
@@ -81,6 +84,7 @@ const markdownSourceMode = ref(false);
 let unlisten: (() => void) | null = null;
 let unlistenNavigate: (() => void) | null = null;
 let unlistenState: (() => void) | null = null;
+let unlistenComments: (() => void) | null = null;
 
 const typeIcons: Record<string, string> = {
   "application/vnd.ant.code": "pi-code",
@@ -177,6 +181,83 @@ async function saveArtifactMemory(
  * 消しただけでは表示中のフォームが変わらない。キーを進めて作り直させる。
  */
 const reactViewSeq = ref(0);
+
+// ─── コメント ─────────────────────────────────────────────────────────────────
+//
+// コメントは状態サイドカーの `comments` に入っており、`states` にそのまま載ってくる。
+// 変更通知はメモリーの `artifact-state-changed` とは別イベント（そちらは iframe へメモリーを
+// 押し込むので、コメントが付くたびにフォーム入力を巻き戻してしまう）。
+
+/** コメントモード（位置をクリック / ドラッグで選んでコメントを付ける） */
+const commentMode = ref(false);
+
+/** アプリ形式はこのウィンドウ（起動画面）へコメントを付けない（付け先はアプリ自身のウィンドウ） */
+const canComment = computed(
+  () =>
+    !!props.dataSource.capabilities.comment &&
+    !!props.dataSource.comments &&
+    !!selectedArtifact.value &&
+    !selectedArtifact.value.app,
+);
+
+const selectedComments = computed(() =>
+  selectedId.value ? visibleComments(states.value[selectedId.value]?.comments) : [],
+);
+const selectedUnresolvedCount = computed(() =>
+  selectedId.value ? unresolvedCount(states.value[selectedId.value]?.comments) : 0,
+);
+
+function onCommentError(e: unknown) {
+  console.error("artifact comment failed", e);
+  toast.add({ severity: "error", summary: t("comment.failed"), detail: String(e), life: 6000 });
+}
+
+async function runComment(fn: () => Promise<unknown>) {
+  try {
+    await fn();
+    // 変更通知でも取り直すが、通知の到着を待たずに表示へ反映する
+    await loadStates();
+  } catch (e) {
+    onCommentError(e);
+  }
+}
+
+function toggleCommentMode() {
+  commentMode.value = !commentMode.value;
+}
+
+function onCommentSubmit(anchor: CommentAnchor, body: string) {
+  const id = selectedId.value;
+  if (!id) return;
+  void runComment(() => props.dataSource.comments!.add(id, body, anchor));
+}
+
+function onCommentReply(commentId: string, body: string) {
+  const id = selectedId.value;
+  if (!id) return;
+  void runComment(() => props.dataSource.comments!.reply(id, commentId, body));
+}
+
+function onCommentResolve(commentId: string) {
+  const id = selectedId.value;
+  if (!id) return;
+  void runComment(() => props.dataSource.comments!.setResolved(id, commentId, true));
+}
+
+function onCommentRemove(commentId: string) {
+  const id = selectedId.value;
+  if (!id) return;
+  void runComment(() => props.dataSource.comments!.remove(id, commentId));
+}
+
+async function resolveAllComments() {
+  const id = selectedId.value;
+  if (!id) return;
+  await runComment(async () => {
+    const n = await props.dataSource.comments!.resolveAll(id);
+    toast.add({ severity: "success", summary: t("comment.resolvedAll", { count: n }), life: 3000 });
+  });
+}
 
 /** 外からのストア更新を iframe へ押し込むために使う（`pushMemory`） */
 const reactViewRef = ref<InstanceType<typeof ArtifactReactView> | null>(null);
@@ -702,6 +783,8 @@ watch(selectedId, (id) => {
   markdownSourceMode.value = false;
   if (id) void touchLock();
   else void releaseLock();
+  // コメントモードもアーティファクトごとの一時的な状態
+  commentMode.value = false;
 });
 
 onMounted(async () => {
@@ -752,6 +835,9 @@ onMounted(async () => {
   // 表示中の iframe にも押し込む。押し込まないと iframe は古いスナップショットを持ち続け、
   // 次の 1 入力で自分の状態を丸ごと書き戻して MCP 側の書き込みを消してしまう
   // （MCP 側は成功を返しているので、消えたことに誰も気づけない）
+  // コメントの変更（MCP からの追加・返信を含む）。メモリーの押し込みは行わない
+  unlistenComments = (await props.dataSource.comments?.onChanged(() => void loadStates())) ?? null;
+
   unlistenState = await props.dataSource.onStateChanged(async ({ artifactId }) => {
     // loadStates() の await を挟むので、短時間に複数回届くとハンドラの完了順が
     // 入れ替わり、古いスナップショットを iframe へ押し込みうる。世代で捨てる
@@ -768,6 +854,7 @@ onUnmounted(() => {
   unlisten?.();
   unlistenNavigate?.();
   unlistenState?.();
+  unlistenComments?.();
   if (lockTimer !== null) clearInterval(lockTimer);
   void releaseLock();
 });
@@ -937,6 +1024,25 @@ onUnmounted(() => {
               <i class="pi pi-eraser" />
               <span>{{ t("memory.resetLabel") }}</span>
             </button>
+            <button
+              v-if="isRepositoryScope && canComment"
+              class="btn-header"
+              :class="{ 'btn-active': commentMode }"
+              :title="t('comment.modeTooltip')"
+              @click="toggleCommentMode"
+            >
+              <i class="pi pi-comment" />
+              <span>{{ commentMode ? t("comment.modeOff") : t("comment.modeOn") }}</span>
+            </button>
+            <button
+              v-if="isRepositoryScope && canComment"
+              class="btn-header"
+              :disabled="selectedUnresolvedCount === 0"
+              @click="resolveAllComments"
+            >
+              <i class="pi pi-check-circle" />
+              <span>{{ t("comment.resolveAll") }}</span>
+            </button>
             <!-- リポジトリスコープにはメニューが無いので、エクスポートもヘッダーへ直接出す
                  （保管庫のアーティファクトこそ社外への共有・報告の対象になる） -->
             <button
@@ -1009,6 +1115,24 @@ onUnmounted(() => {
             >
               <span class="pi pi-image" />
               {{ t("copyPng.label") }}
+            </button>
+            <button
+              v-if="canComment"
+              class="popup-item"
+              :title="t('comment.modeTooltip')"
+              @click="withMenuHidden(toggleCommentMode)"
+            >
+              <span class="pi pi-comment" />
+              {{ commentMode ? t("comment.modeOff") : t("comment.modeOn") }}
+            </button>
+            <button
+              v-if="canComment"
+              class="popup-item"
+              :disabled="selectedUnresolvedCount === 0"
+              @click="withMenuHidden(resolveAllComments)"
+            >
+              <span class="pi pi-check-circle" />
+              {{ t("comment.resolveAll") }}
             </button>
             <div class="popup-divider" />
             <button
@@ -1107,6 +1231,17 @@ onUnmounted(() => {
             v-else
             :content="selectedArtifact.content"
             :language="selectedArtifact.language"
+          />
+          <ArtifactCommentLayer
+            v-if="canComment"
+            :key="`comments:${selectedArtifact.id}`"
+            :comments="selectedComments"
+            :active="commentMode"
+            @submit="onCommentSubmit"
+            @reply="onCommentReply"
+            @resolve="onCommentResolve"
+            @remove="onCommentRemove"
+            @exit="commentMode = false"
           />
         </div>
       </template>
@@ -1464,6 +1599,11 @@ onUnmounted(() => {
   background: var(--p-content-hover-background);
 }
 
+.btn-active {
+  background: var(--p-primary-color);
+  color: var(--p-primary-contrast-color);
+}
+
 .popup-item:disabled {
   opacity: 0.45;
   cursor: not-allowed;
@@ -1514,6 +1654,7 @@ onUnmounted(() => {
 }
 
 .content-body {
+  position: relative;
   flex: 1;
   overflow: hidden;
   display: flex;
@@ -1639,6 +1780,14 @@ onUnmounted(() => {
       "label": "locked while open",
       "tooltip": "While this window is open, the AI cannot overwrite this artifact via MCP. Close the window to allow writes."
     },
+    "comment": {
+      "modeOn": "Add comments",
+      "modeOff": "Stop commenting",
+      "modeTooltip": "Click a spot or drag an area to leave a comment for the AI",
+      "resolveAll": "Resolve all comments",
+      "resolvedAll": "Resolved {count} comment(s)",
+      "failed": "Comment operation failed"
+    },
     "memory": {
       "resetLabel": "Reset memory",
       "resetTooltip": "Clear the saved form state of this React artifact",
@@ -1724,6 +1873,14 @@ onUnmounted(() => {
     "locked": {
       "label": "表示中ロック",
       "tooltip": "このウィンドウを開いている間、AI は MCP からこのアーティファクトを書き換えられません。書き込ませるにはウィンドウを閉じてください。"
+    },
+    "comment": {
+      "modeOn": "コメントを付ける",
+      "modeOff": "コメントモードを終了",
+      "modeTooltip": "位置をクリック、または範囲をドラッグして、AI への修正指示をコメントとして付けます",
+      "resolveAll": "すべてのコメントを解決済みにする",
+      "resolvedAll": "{count} 件のコメントを解決済みにしました",
+      "failed": "コメントの操作に失敗しました"
     },
     "memory": {
       "resetLabel": "メモリーをリセット",

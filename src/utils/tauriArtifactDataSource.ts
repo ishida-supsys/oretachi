@@ -14,12 +14,14 @@ import type {
 } from "../types/artifact";
 import type {
   ArtifactCapabilities,
+  ArtifactCommentApi,
   ArtifactDataSource,
   ArtifactScopeKind,
   ArtifactScopeRef,
   ArtifactViewerHost,
 } from "./artifactDataSource";
 import { mapArtifactData as mapArtifact, mapArtifactMeta as mapMeta } from "./artifactPayload";
+import type { ArtifactCommentsChangedEvent } from "../types/artifactComment";
 import type { AppGrant, AppInstanceStatus, AppLaunchApi, AppLogEntry } from "../types/appInstance";
 
 const TAURI_CAPABILITIES: ArtifactCapabilities = {
@@ -31,6 +33,7 @@ const TAURI_CAPABILITIES: ArtifactCapabilities = {
   copyPng: true,
   transfer: true,
   appLaunch: true,
+  comment: true,
 };
 
 /**
@@ -64,6 +67,28 @@ function createAppLaunchApi(worktreeId: string): AppLaunchApi {
           handler({ artifactId: event.payload.artifactId, entry: event.payload.entry });
         },
       );
+    },
+  };
+}
+
+/** コメント操作。スコープの解決と書き手の固定（user）は Rust 側 */
+function createCommentApi(scope: ArtifactScopeKind, scopeId: string): ArtifactCommentApi {
+  return {
+    add: (artifactId, body, anchor) =>
+      invoke<string>("add_artifact_comment", { scope, scopeId, artifactId, body, anchor }),
+    reply: (artifactId, commentId, body) =>
+      invoke<string>("reply_artifact_comment", { scope, scopeId, artifactId, commentId, body }),
+    setResolved: (artifactId, commentId, resolved) =>
+      invoke("set_artifact_comment_resolved", { scope, scopeId, artifactId, commentId, resolved }),
+    resolveAll: (artifactId) =>
+      invoke<number>("resolve_all_artifact_comments", { scope, scopeId, artifactId }),
+    remove: (artifactId, commentId) =>
+      invoke("delete_artifact_comment", { scope, scopeId, artifactId, commentId }),
+    async onChanged(handler) {
+      return listen<ArtifactCommentsChangedEvent>("artifact-comments-changed", (event) => {
+        if (event.payload.scope !== scope || event.payload.scopeId !== scopeId) return;
+        handler({ artifactId: event.payload.artifactId });
+      });
     },
   };
 }
@@ -177,6 +202,8 @@ export function createTauriArtifactViewerContext(search: string): {
     },
 
     app: isRepositoryScope ? undefined : createAppLaunchApi(worktreeId),
+
+    comments: createCommentApi(kind, scopeId),
 
     async onArtifactChanged(handler) {
       if (isRepositoryScope) {

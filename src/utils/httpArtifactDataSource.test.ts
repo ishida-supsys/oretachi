@@ -105,6 +105,7 @@ describe("httpArtifactDataSource", () => {
         transfer: false,
         // アプリ形式アーティファクトは Web ビューアでは起動不可（特権 API を HTTP に出さない）
         appLaunch: false,
+        comment: false,
       });
       expect(ctx!.dataSource.app).toBeUndefined();
     });
