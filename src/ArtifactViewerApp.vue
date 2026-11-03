@@ -16,6 +16,7 @@ import ArtifactTableView from "./components/artifact/ArtifactTableView.vue";
 import ArtifactUrlView from "./components/artifact/ArtifactUrlView.vue";
 import ArtifactCommentLayer from "./components/artifact/ArtifactCommentLayer.vue";
 import { visibleComments, unresolvedCount } from "./utils/commentAnchor";
+import { createFrameCommentAdapter } from "./utils/artifactFrameComment";
 import type { CommentAnchor } from "./types/artifactComment";
 import { isTableContentType } from "./utils/csvArtifact";
 import { buildExportViewHtml, exportFileName, hasStandaloneView } from "./utils/artifactExport";
@@ -190,6 +191,25 @@ const reactViewSeq = ref(0);
 
 /** コメントモード（位置をクリック / ドラッグで選んでコメントを付ける） */
 const commentMode = ref(false);
+
+const htmlViewRef = ref<InstanceType<typeof ArtifactHtmlView> | null>(null);
+const contentBodyRef = ref<HTMLElement | null>(null);
+
+/**
+ * コメント位置の拾い上げ・解決の方式。html / react は sandbox iframe の中なので、iframe に注入した
+ * プローブへ問い合わせる。それ以外は同一文書の DOM（コメント層の既定）。
+ */
+const commentAdapter = computed(() => {
+  const a = selectedArtifact.value;
+  if (!a || a.app) return undefined;
+  if (a.content_type === "text/html") {
+    return createFrameCommentAdapter(() => htmlViewRef.value?.getFrame() ?? null, () => contentBodyRef.value);
+  }
+  if (a.content_type === "application/vnd.ant.react") {
+    return createFrameCommentAdapter(() => reactViewRef.value?.getFrame() ?? null, () => contentBodyRef.value);
+  }
+  return undefined;
+});
 
 /** アプリ形式はこのウィンドウ（起動画面）へコメントを付けない（付け先はアプリ自身のウィンドウ） */
 const canComment = computed(
@@ -1167,7 +1187,7 @@ onUnmounted(() => {
           </div>
         </Popover>
 
-        <div class="content-body">
+        <div ref="contentBodyRef" class="content-body">
           <ArtifactCodeView
             v-if="selectedArtifact.content_type === 'application/vnd.ant.code'"
             :content="selectedArtifact.content"
@@ -1185,6 +1205,7 @@ onUnmounted(() => {
           />
           <ArtifactHtmlView
             v-else-if="selectedArtifact.content_type === 'text/html'"
+            ref="htmlViewRef"
             :content="selectedArtifact.content"
             @navigate="onNavigate"
           />
@@ -1237,6 +1258,7 @@ onUnmounted(() => {
             :key="`comments:${selectedArtifact.id}`"
             :comments="selectedComments"
             :active="commentMode"
+            :adapter="commentAdapter"
             @submit="onCommentSubmit"
             @reply="onCommentReply"
             @resolve="onCommentResolve"

@@ -29,7 +29,7 @@ const truncated = ref(false);
 const detailsOpen = ref(false);
 
 // nonce を含むので content ごとに1度だけ組む
-const frameDoc = computed(() => buildHtmlSrcdoc(props.content));
+const frameDoc = computed(() => buildHtmlSrcdoc(props.content, { comment: true }));
 
 // srcdoc が変われば iframe は読み込み直しになるので、前の文書の違反は捨てる。
 // 差し替え直前に仕掛けられた遅延メッセージは nonce 不一致で弾かれる
@@ -69,6 +69,13 @@ function describe(v: ArtifactCspViolation): string {
 function onHover(hover: ArtifactLinkHover) {
   applyFrameLinkHover(hover, frame.value, linkPopup.value);
 }
+
+/** コメント層が iframe 内の座標を問い合わせるために使う */
+function getFrame(): HTMLIFrameElement | null {
+  return frame.value;
+}
+
+defineExpose({ getFrame });
 
 onMounted(() => window.addEventListener("message", onMessage));
 onBeforeUnmount(() => window.removeEventListener("message", onMessage));
