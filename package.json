@@ -4,10 +4,11 @@
   "version": "0.36.3",
   "type": "module",
   "scripts": {
-    "prepare": "node scripts/copy-vendor.mjs && node scripts/build-sidecar.mjs",
+    "prepare": "node scripts/copy-vendor.mjs && node scripts/build-sidecar.mjs && node scripts/fetch-conpty.mjs",
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
     "build:sidecar": "node scripts/build-sidecar.mjs",
+    "fetch:conpty": "node scripts/fetch-conpty.mjs",
     "type-check": "vue-tsc --noEmit",
     "preview": "vite preview",
     "tauri": "tauri",
