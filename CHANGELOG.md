@@ -6,6 +6,24 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.37.0] - 2026-11-04
+
+### Added
+- 新しい ConPTY (conpty.dll / OpenConsole.exe) を同梱して全角文字の欠落を防ぐようにした (#423)
+- 日本語入力で文字が欠ける症状の切り分け用診断機能を追加した (#421)
+- artifact ビューア・html/react の sandbox iframe・アプリのメイン/サブウィンドウにコメントを付けられるようにした。保存層と MCP ツール `artifact_comment` を追加した (#414)
+- アプリ型アーティファクトにスケジューラーを追加した (#413)
+- notification-auto-dismiss が、自動承認で続行したターンの通知と残った approval バッジも外すようにした (#411)
+
+### Fixed
+- artifact のコメントのピン位置・ページ切り替え・パン対応、iframe への位置問い合わせが DataCloneError で落ちる問題、位置なしコメントの表示を直した (#414)
+- artifact のリンクポップアップの URL が省略されても押下できるようにした (#415)
+- スケジューラーの承認ダイアログに実行内容の全文を出し、前回開いた AI ターミナルが残る間は aiTerminal ジョブを飛ばすようにした (#413)
+- サブウィンドウの DB 接続を常駐ウィンドウと分離し、dead ラベルの蓄積を畳んだ (#412)
+
+### Changed
+- 廃止した URL ツールチップの CSS と古いコメントを整理した (#415)
+
 ## [0.36.3] - 2026-10-30
 
 ### Added
@@ -929,7 +947,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.36.3...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.37.0...HEAD
+[0.37.0]: https://github.com/ishida-supsys/oretachi/compare/0.36.3...0.37.0
 [0.36.3]: https://github.com/ishida-supsys/oretachi/compare/0.36.2...0.36.3
 [0.36.2]: https://github.com/ishida-supsys/oretachi/compare/0.36.1...0.36.2
 [0.36.1]: https://github.com/ishida-supsys/oretachi/compare/0.36.0...0.36.1
