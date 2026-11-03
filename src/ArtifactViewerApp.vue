@@ -86,6 +86,7 @@ let unlisten: (() => void) | null = null;
 let unlistenNavigate: (() => void) | null = null;
 let unlistenState: (() => void) | null = null;
 let unlistenComments: (() => void) | null = null;
+let unlistenAppMode: (() => void) | null = null;
 
 const typeIcons: Record<string, string> = {
   "application/vnd.ant.code": "pi-code",
@@ -220,6 +221,27 @@ const canComment = computed(
     !selectedArtifact.value.app,
 );
 
+/** アプリ形式: コメントはこのウィンドウではなく、起動中のアプリのウィンドウへ付ける（モードだけここで切り替える） */
+const canCommentApp = computed(
+  () =>
+    !!props.dataSource.capabilities.comment &&
+    !!props.dataSource.comments &&
+    !!props.dataSource.app &&
+    !!selectedArtifact.value?.app,
+);
+
+/** メニュー・ヘッダーの項目を出すか（通常のアーティファクトとアプリのどちらでも） */
+const showCommentActions = computed(() => canComment.value || canCommentApp.value);
+
+/** アプリのコメントモードを ON にしているアーティファクトの ID（離れるとき・閉じるときに OFF へ戻す） */
+let appCommentModeFor: string | null = null;
+
+function releaseAppCommentMode() {
+  const id = appCommentModeFor;
+  appCommentModeFor = null;
+  if (id) void props.dataSource.app?.setCommentMode(id, false).catch(() => {});
+}
+
 const selectedComments = computed(() =>
   selectedId.value ? visibleComments(states.value[selectedId.value]?.comments) : [],
 );
@@ -242,8 +264,24 @@ async function runComment(fn: () => Promise<unknown>) {
   }
 }
 
-function toggleCommentMode() {
-  commentMode.value = !commentMode.value;
+async function toggleCommentMode() {
+  const next = !commentMode.value;
+  if (canCommentApp.value) {
+    const id = selectedId.value;
+    if (!id) return;
+    try {
+      await props.dataSource.app!.setCommentMode(id, next);
+    } catch (e) {
+      // 起動していないアプリには付ける先がない
+      onCommentError(e);
+      return;
+    }
+    appCommentModeFor = next ? id : null;
+    if (next) {
+      toast.add({ severity: "info", summary: t("comment.appModeOn"), life: 5000 });
+    }
+  }
+  commentMode.value = next;
 }
 
 function onCommentSubmit(anchor: CommentAnchor, body: string) {
@@ -803,7 +841,8 @@ watch(selectedId, (id) => {
   markdownSourceMode.value = false;
   if (id) void touchLock();
   else void releaseLock();
-  // コメントモードもアーティファクトごとの一時的な状態
+  // コメントモードもアーティファクトごとの一時的な状態（アプリのウィンドウ側のモードも戻す）
+  releaseAppCommentMode();
   commentMode.value = false;
 });
 
@@ -857,6 +896,12 @@ onMounted(async () => {
   // （MCP 側は成功を返しているので、消えたことに誰も気づけない）
   // コメントの変更（MCP からの追加・返信を含む）。メモリーの押し込みは行わない
   unlistenComments = (await props.dataSource.comments?.onChanged(() => void loadStates())) ?? null;
+  // アプリのウィンドウ側でコメントモードを抜けた（終了ボタン / Esc）
+  unlistenAppMode =
+    (await props.dataSource.app?.onCommentModeExit(() => {
+      appCommentModeFor = null;
+      commentMode.value = false;
+    })) ?? null;
 
   unlistenState = await props.dataSource.onStateChanged(async ({ artifactId }) => {
     // loadStates() の await を挟むので、短時間に複数回届くとハンドラの完了順が
@@ -875,6 +920,8 @@ onUnmounted(() => {
   unlistenNavigate?.();
   unlistenState?.();
   unlistenComments?.();
+  unlistenAppMode?.();
+  releaseAppCommentMode();
   if (lockTimer !== null) clearInterval(lockTimer);
   void releaseLock();
 });
@@ -1045,7 +1092,7 @@ onUnmounted(() => {
               <span>{{ t("memory.resetLabel") }}</span>
             </button>
             <button
-              v-if="isRepositoryScope && canComment"
+              v-if="isRepositoryScope && showCommentActions"
               class="btn-header"
               :class="{ 'btn-active': commentMode }"
               :title="t('comment.modeTooltip')"
@@ -1055,7 +1102,7 @@ onUnmounted(() => {
               <span>{{ commentMode ? t("comment.modeOff") : t("comment.modeOn") }}</span>
             </button>
             <button
-              v-if="isRepositoryScope && canComment"
+              v-if="isRepositoryScope && showCommentActions"
               class="btn-header"
               :disabled="selectedUnresolvedCount === 0"
               @click="resolveAllComments"
@@ -1137,7 +1184,7 @@ onUnmounted(() => {
               {{ t("copyPng.label") }}
             </button>
             <button
-              v-if="canComment"
+              v-if="showCommentActions"
               class="popup-item"
               :title="t('comment.modeTooltip')"
               @click="withMenuHidden(toggleCommentMode)"
@@ -1146,7 +1193,7 @@ onUnmounted(() => {
               {{ commentMode ? t("comment.modeOff") : t("comment.modeOn") }}
             </button>
             <button
-              v-if="canComment"
+              v-if="showCommentActions"
               class="popup-item"
               :disabled="selectedUnresolvedCount === 0"
               @click="withMenuHidden(resolveAllComments)"
@@ -1806,6 +1853,7 @@ onUnmounted(() => {
       "modeOn": "Add comments",
       "modeOff": "Stop commenting",
       "modeTooltip": "Click a spot or drag an area to leave a comment for the AI",
+      "appModeOn": "Comment mode is on in the app windows. Click or drag there to comment (Esc / Done to finish)",
       "resolveAll": "Resolve all comments",
       "resolvedAll": "Resolved {count} comment(s)",
       "failed": "Comment operation failed"
@@ -1900,6 +1948,7 @@ onUnmounted(() => {
       "modeOn": "コメントを付ける",
       "modeOff": "コメントモードを終了",
       "modeTooltip": "位置をクリック、または範囲をドラッグして、AI への修正指示をコメントとして付けます",
+      "appModeOn": "アプリのウィンドウがコメントモードになりました。そちらで位置をクリック / 範囲をドラッグしてコメントを付けてください（Esc か「終了」で終わります）",
       "resolveAll": "すべてのコメントを解決済みにする",
       "resolvedAll": "{count} 件のコメントを解決済みにしました",
       "failed": "コメントの操作に失敗しました"

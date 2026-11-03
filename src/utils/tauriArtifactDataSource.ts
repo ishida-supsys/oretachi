@@ -53,6 +53,17 @@ function createAppLaunchApi(worktreeId: string): AppLaunchApi {
     log: (artifactId) => invoke<AppLogEntry[]>("app_instance_log", { worktreeId, artifactId }),
     grant: (artifactId) => invoke<AppGrant | null>("app_instance_grant", { worktreeId, artifactId }),
     revoke: (artifactId) => invoke<boolean>("revoke_app_grant", { worktreeId, artifactId }),
+    setCommentMode: (artifactId, enabled) =>
+      invoke("app_comment_mode_set", { worktreeId, artifactId, enabled }),
+    async onCommentModeExit(handler) {
+      return listen<{ worktreeId: string; artifactId: string; enabled: boolean }>(
+        "app-comment-mode-changed",
+        (event) => {
+          if (event.payload.worktreeId !== worktreeId || event.payload.enabled) return;
+          handler({ artifactId: event.payload.artifactId });
+        },
+      );
+    },
     async onChanged(handler) {
       return listen<AppInstanceStatus>("app-instance-changed", (event) => {
         if (event.payload.worktreeId !== worktreeId) return;

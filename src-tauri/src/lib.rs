@@ -92,7 +92,7 @@ pub(crate) fn artifacts_dir_in(
     Ok(data_dir.join("artifacts").join(worktree_id))
 }
 
-fn artifacts_dir(
+pub(crate) fn artifacts_dir(
     app_handle: &tauri::AppHandle,
     worktree_id: &str,
 ) -> Result<std::path::PathBuf, String> {
@@ -2591,6 +2591,14 @@ pub fn run() {
             app_subwindow::app_subwindow_start_drag,
             app_instance::app_set_memory,
             app_instance::app_get_memory,
+            artifact_comments::app_comment_mode_set,
+            artifact_comments::app_comment_mode_get,
+            artifact_comments::app_comment_mode_exit,
+            artifact_comments::app_comments_list,
+            artifact_comments::app_comment_add,
+            artifact_comments::app_comment_reply,
+            artifact_comments::app_comment_resolve,
+            artifact_comments::app_comment_remove,
             app_instance::app_grant_respond,
             app_instance::list_pending_app_grants,
             app_instance::list_app_instances,

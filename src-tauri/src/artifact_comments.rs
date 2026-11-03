@@ -388,6 +388,154 @@ pub async fn delete_artifact_comment(
     Ok(())
 }
 
+// ─── アプリ（appinst-*）のウィンドウへのコメント ────────────────────────────
+//
+// アプリのコードは sandbox iframe の中でだけ動く。コメントの UI（ピン・入力欄・ポップアップ）は
+// すべてシェル（`appinst-*` のトップレベル文書）が持ち、iframe は座標問い合わせに答えるだけ。
+// そのためシェルから呼ぶコマンドは「呼び出し元ウィンドウのラベルから引いたインスタンス」の
+// アーティファクトだけを対象にし、引数でアーティファクトを選ばせない。
+// コメントモードの切り替えはビューア（`artifact-*`）だけが行える（アプリ自身が操作できない）。
+
+/// コメントモード中のインスタンス（worktree_id, artifact_id）。インスタンスの停止で外す
+static APP_COMMENT_MODE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<(String, String)>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// インスタンスの解放時に呼ぶ（再起動したアプリがコメントモードのまま始まらないように）
+pub(crate) fn clear_app_mode(worktree_id: &str, artifact_id: &str) {
+    if let Ok(mut set) = APP_COMMENT_MODE.lock() {
+        set.remove(&(worktree_id.to_string(), artifact_id.to_string()));
+    }
+}
+
+fn app_mode_get(worktree_id: &str, artifact_id: &str) -> bool {
+    APP_COMMENT_MODE
+        .lock()
+        .map(|set| set.contains(&(worktree_id.to_string(), artifact_id.to_string())))
+        .unwrap_or(false)
+}
+
+/// ビューアから、アプリのウィンドウ（常駐 + サブ）のコメントモードを切り替える。
+/// 起動していないアプリには付ける先が無いのでエラー。
+#[tauri::command]
+pub async fn app_comment_mode_set(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    worktree_id: String,
+    artifact_id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    crate::app_instance::require_viewer(&window)?;
+    crate::validate_path_component(&worktree_id)?;
+    crate::validate_path_component(&artifact_id)?;
+    let label = crate::app_instance::label_for_key(&app, &worktree_id, &artifact_id)
+        .ok_or_else(|| "このアプリは起動していません".to_string())?;
+    if let Ok(mut set) = APP_COMMENT_MODE.lock() {
+        let key = (worktree_id, artifact_id);
+        if enabled {
+            set.insert(key);
+        } else {
+            set.remove(&key);
+        }
+    }
+    crate::app_subwindow::emit_to_instance(&app, &label, "app-comment-mode", enabled);
+    Ok(())
+}
+
+/// シェルが起動時・サブウィンドウ生成時にモードを読む（開いた後に ON にされた場合はイベントで届く）
+#[tauri::command]
+pub async fn app_comment_mode_get(window: tauri::Window, app: tauri::AppHandle) -> Result<bool, String> {
+    crate::app_instance::require_instance_window(&window)?;
+    let ctx = crate::app_instance::context_for_label(&app, window.label())?;
+    Ok(app_mode_get(&ctx.worktree_id, &ctx.artifact_id))
+}
+
+/// シェル側の「終了」ボタン / Esc で、アプリのウィンドウのコメントモードを抜ける。
+/// 全ウィンドウへ伝え、ビューアのトグル表示も合わせるため全体イベントを飛ばす
+#[tauri::command]
+pub async fn app_comment_mode_exit(window: tauri::Window, app: tauri::AppHandle) -> Result<(), String> {
+    crate::app_instance::require_instance_window(&window)?;
+    let ctx = crate::app_instance::context_for_label(&app, window.label())?;
+    clear_app_mode(&ctx.worktree_id, &ctx.artifact_id);
+    crate::app_subwindow::emit_to_instance(&app, &ctx.instance_label, "app-comment-mode", false);
+    let _ = app.emit(
+        "app-comment-mode-changed",
+        json!({ "worktreeId": ctx.worktree_id, "artifactId": ctx.artifact_id, "enabled": false }),
+    );
+    Ok(())
+}
+
+fn app_target(
+    window: &tauri::Window,
+    app: &tauri::AppHandle,
+) -> Result<(String, String, std::path::PathBuf), String> {
+    crate::app_instance::require_instance_window(window)?;
+    let ctx = crate::app_instance::context_for_label(app, window.label())?;
+    let dir = crate::artifacts_dir(app, &ctx.worktree_id)?;
+    Ok((ctx.worktree_id, ctx.artifact_id, dir))
+}
+
+/// このアプリのアーティファクトの未解決コメント
+#[tauri::command]
+pub async fn app_comments_list(window: tauri::Window, app: tauri::AppHandle) -> Result<Vec<Value>, String> {
+    let (_, artifact_id, dir) = app_target(&window, &app)?;
+    tokio::task::spawn_blocking(move || {
+        let obj = read_state_object(&dir, &artifact_id);
+        list_comments(&obj, false)
+    })
+    .await
+    .map_err(|e| format!("task join error: {}", e))
+}
+
+#[tauri::command]
+pub async fn app_comment_add(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    body: String,
+    anchor: Value,
+) -> Result<String, String> {
+    let (wt, artifact_id, dir) = app_target(&window, &app)?;
+    let id = apply(dir, &artifact_id, Op::Add { author: AUTHOR_USER.into(), body, anchor }).await?;
+    emit_changed(&app, "worktree", &wt, &artifact_id);
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn app_comment_reply(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    comment_id: String,
+    body: String,
+) -> Result<String, String> {
+    let (wt, artifact_id, dir) = app_target(&window, &app)?;
+    let id = apply(dir, &artifact_id, Op::Reply { comment_id, author: AUTHOR_USER.into(), body }).await?;
+    emit_changed(&app, "worktree", &wt, &artifact_id);
+    Ok(id)
+}
+
+#[tauri::command]
+pub async fn app_comment_resolve(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    comment_id: String,
+) -> Result<(), String> {
+    let (wt, artifact_id, dir) = app_target(&window, &app)?;
+    apply(dir, &artifact_id, Op::SetResolved { comment_id, resolved: true }).await?;
+    emit_changed(&app, "worktree", &wt, &artifact_id);
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn app_comment_remove(
+    window: tauri::Window,
+    app: tauri::AppHandle,
+    comment_id: String,
+) -> Result<(), String> {
+    let (wt, artifact_id, dir) = app_target(&window, &app)?;
+    apply(dir, &artifact_id, Op::Delete { comment_id }).await?;
+    emit_changed(&app, "worktree", &wt, &artifact_id);
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
