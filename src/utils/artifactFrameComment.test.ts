@@ -33,11 +33,13 @@ describe("ARTIFACT_COMMENT_PROBE_JS", () => {
       body: root,
       documentElement: { scrollWidth: 1000, scrollHeight: 2000 },
       addEventListener: () => {},
+      removeEventListener: () => {},
       elementsFromPoint: () => [],
     };
     const win = {
       innerWidth: 800,
       innerHeight: 600,
+      removeEventListener: () => {},
       scrollX: 0,
       scrollY: 0,
       addEventListener: (type: string, fn: (e: unknown) => void) => {
@@ -51,7 +53,7 @@ describe("ARTIFACT_COMMENT_PROBE_JS", () => {
       "MutationObserver",
       "requestAnimationFrame",
       ARTIFACT_COMMENT_PROBE_JS,
-    )(doc, win, parent, class { observe() {} }, () => 0);
+    )(doc, win, parent, class { observe() {} disconnect() {} }, () => 0);
 
     // 他の送信元や無関係なメッセージは無視する
     listeners.message[0]({ source: {}, data: { [ARTIFACT_COMMENT_PROBE_MARKER]: true, id: 1, op: "locate", items: [] } });

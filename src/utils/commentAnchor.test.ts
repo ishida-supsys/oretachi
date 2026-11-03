@@ -5,6 +5,7 @@ import {
   clamp01,
   EXCERPT_MAX_CHARS,
   fromFraction,
+  hasAnchorPosition,
   isDrag,
   makeExcerpt,
   placePopup,
@@ -55,6 +56,15 @@ describe("commentAnchor", () => {
     expect(visibleComments(list).map((c) => c.id)).toEqual(["a", "b"]);
     expect(unresolvedCount(list)).toBe(2);
     expect(visibleComments(undefined)).toEqual([]);
+  });
+
+  it("hasAnchorPosition は AI が付けた位置なしのコメントを見分ける", () => {
+    expect(hasAnchorPosition(undefined)).toBe(false);
+    expect(hasAnchorPosition({})).toBe(false);
+    expect(hasAnchorPosition({ excerpt: "見出し" })).toBe(false);
+    expect(hasAnchorPosition({ x: 0.5 })).toBe(false);
+    expect(hasAnchorPosition({ x: 0.5, y: 0.2 })).toBe(true);
+    expect(hasAnchorPosition({ selector: ":scope > p" })).toBe(true);
   });
 
   it("placePopup はルートからはみ出さない", () => {

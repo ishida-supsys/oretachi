@@ -61,6 +61,17 @@ export function makeExcerpt(text: string | null | undefined): string {
   return `${flat.slice(0, EXCERPT_MAX_CHARS)}…`;
 }
 
+/**
+ * アンカーが位置の手がかり（セレクタ、または割合の座標）を持つか。
+ * AI が付けるコメントは `{ excerpt }` だけ・anchor 無しのこともあり、それは位置を持たない。
+ * 位置を持たないものはピンにできないので、層の端に並べて出す（見えなくならないように）。
+ */
+export function hasAnchorPosition(anchor: CommentAnchor | undefined): boolean {
+  if (!anchor) return false;
+  if (typeof anchor.selector === "string" && anchor.selector.length > 0) return true;
+  return typeof anchor.x === "number" && typeof anchor.y === "number";
+}
+
 /** 表示用の並び（付けた順）と未解決だけの絞り込み */
 export function visibleComments(list: ArtifactComment[] | undefined): ArtifactComment[] {
   return (list ?? [])

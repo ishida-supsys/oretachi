@@ -87,6 +87,7 @@ let unlistenNavigate: (() => void) | null = null;
 let unlistenState: (() => void) | null = null;
 let unlistenComments: (() => void) | null = null;
 let unlistenAppMode: (() => void) | null = null;
+let unlistenAppStatus: (() => void) | null = null;
 
 const typeIcons: Record<string, string> = {
   "application/vnd.ant.code": "pi-code",
@@ -212,9 +213,14 @@ const commentAdapter = computed(() => {
   return undefined;
 });
 
-/** アプリ形式はこのウィンドウ（起動画面）へコメントを付けない（付け先はアプリ自身のウィンドウ） */
+/**
+ * アプリ形式はこのウィンドウ（起動画面）へコメントを付けない（付け先はアプリ自身のウィンドウ）。
+ * リポジトリ保管庫のアーティファクトにも付けない（MCP の artifact_comment は
+ * ワークツリーのアーティファクトしか引けず、AI がコメントを読めないため）。
+ */
 const canComment = computed(
   () =>
+    !isRepositoryScope &&
     !!props.dataSource.capabilities.comment &&
     !!props.dataSource.comments &&
     !!selectedArtifact.value &&
@@ -902,6 +908,14 @@ onMounted(async () => {
       appCommentModeFor = null;
       commentMode.value = false;
     })) ?? null;
+  // アプリが止まるとウィンドウごと消え、Rust 側のモードも外れる。トグル表示も合わせる
+  unlistenAppStatus =
+    (await props.dataSource.app?.onChanged((status) => {
+      if (!status.running && status.artifactId === appCommentModeFor) {
+        appCommentModeFor = null;
+        commentMode.value = false;
+      }
+    })) ?? null;
 
   unlistenState = await props.dataSource.onStateChanged(async ({ artifactId }) => {
     // loadStates() の await を挟むので、短時間に複数回届くとハンドラの完了順が
@@ -921,6 +935,7 @@ onUnmounted(() => {
   unlistenState?.();
   unlistenComments?.();
   unlistenAppMode?.();
+  unlistenAppStatus?.();
   releaseAppCommentMode();
   if (lockTimer !== null) clearInterval(lockTimer);
   void releaseLock();
@@ -1090,25 +1105,6 @@ onUnmounted(() => {
             >
               <i class="pi pi-eraser" />
               <span>{{ t("memory.resetLabel") }}</span>
-            </button>
-            <button
-              v-if="isRepositoryScope && showCommentActions"
-              class="btn-header"
-              :class="{ 'btn-active': commentMode }"
-              :title="t('comment.modeTooltip')"
-              @click="toggleCommentMode"
-            >
-              <i class="pi pi-comment" />
-              <span>{{ commentMode ? t("comment.modeOff") : t("comment.modeOn") }}</span>
-            </button>
-            <button
-              v-if="isRepositoryScope && showCommentActions"
-              class="btn-header"
-              :disabled="selectedUnresolvedCount === 0"
-              @click="resolveAllComments"
-            >
-              <i class="pi pi-check-circle" />
-              <span>{{ t("comment.resolveAll") }}</span>
             </button>
             <!-- リポジトリスコープにはメニューが無いので、エクスポートもヘッダーへ直接出す
                  （保管庫のアーティファクトこそ社外への共有・報告の対象になる） -->
@@ -1666,11 +1662,6 @@ onUnmounted(() => {
 
 .popup-item:hover:not(:disabled) {
   background: var(--p-content-hover-background);
-}
-
-.btn-active {
-  background: var(--p-primary-color);
-  color: var(--p-primary-contrast-color);
 }
 
 .popup-item:disabled {

@@ -238,6 +238,22 @@ pub(crate) fn read_state_object(dir: &std::path::Path, artifact_id: &str) -> Map
         .unwrap_or_default()
 }
 
+/// エクスポート用: サイドカーの JSON から `comments` を除く。残りが空なら None（state.json を作らない）。
+/// 解析できない場合は元のまま返す（従来どおり。壊れたサイドカーを黙って消さない）
+pub(crate) fn state_without_comments(raw: &str) -> Option<String> {
+    match serde_json::from_str::<Value>(raw) {
+        Ok(Value::Object(mut map)) => {
+            map.remove(COMMENTS_KEY);
+            if map.is_empty() {
+                None
+            } else {
+                serde_json::to_string(&Value::Object(map)).ok()
+            }
+        }
+        _ => Some(raw.to_string()),
+    }
+}
+
 /// 変更を開いているビューア・アプリウィンドウへ知らせる
 pub(crate) fn emit_changed(
     app_handle: &tauri::AppHandle,
@@ -618,6 +634,18 @@ mod tests {
             }
         }
         assert!(failed, "合計サイズの上限で止まること");
+    }
+
+    #[test]
+    fn export_state_drops_comments_only() {
+        let raw = r#"{"pinned":true,"comments":[{"id":"a"}]}"#;
+        let out = state_without_comments(raw).expect("pinned が残る");
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v, json!({ "pinned": true }));
+        // コメントしか無いサイドカーは state.json ごと作らない
+        assert_eq!(state_without_comments(r#"{"comments":[{"id":"a"}]}"#), None);
+        // 壊れたサイドカーは元のまま
+        assert_eq!(state_without_comments("not json").as_deref(), Some("not json"));
     }
 
     #[test]

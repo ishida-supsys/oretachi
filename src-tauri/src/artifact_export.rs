@@ -243,7 +243,10 @@ pub async fn export_artifact(
             }
         }
         if let Ok(state) = std::fs::read_to_string(&state_path) {
-            put(&mut zip, "state.json", &state)?;
+            // コメント（人と AI のやり取り）は成果物ではないので持ち出さない。インポートも復元しない
+            if let Some(state) = crate::artifact_comments::state_without_comments(&state) {
+                put(&mut zip, "state.json", &state)?;
+            }
         }
         put(&mut zip, "README.txt", &readme_text(title, content_type, view_html.is_some()))?;
 

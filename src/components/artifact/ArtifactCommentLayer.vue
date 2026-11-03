@@ -4,6 +4,7 @@ import { useI18n } from "vue-i18n";
 import type { ArtifactComment, CommentAnchor } from "../../types/artifactComment";
 import {
   boxFromPoints,
+  hasAnchorPosition,
   isDrag,
   placePopup,
   type CommentAdapter,
@@ -77,14 +78,32 @@ const pins = computed(() =>
 
 let unsubscribe: (() => void) | null = null;
 
+function unbindAdapter() {
+  unsubscribe?.();
+  unsubscribe = null;
+  refreshSeq++;
+  positions.value = {};
+}
+
 function bindAdapter() {
   unsubscribe?.();
   unsubscribe = currentAdapter()?.subscribe(() => void refresh()) ?? null;
   void refresh();
 }
 
+/**
+ * 位置の監視（スクロール・リサイズ・DOM の変化）は、コメントがあるかコメントモード中の間だけ動かす。
+ * コメントの無いアーティファクトに常時の監視コストを掛けない（アニメーションするアプリでは特に）。
+ */
+const needsAdapter = computed(() => props.active || props.comments.length > 0);
+
+watch(needsAdapter, (need) => {
+  if (need) bindAdapter();
+  else unbindAdapter();
+});
+
 onMounted(() => {
-  bindAdapter();
+  if (needsAdapter.value) bindAdapter();
 });
 onBeforeUnmount(() => {
   unsubscribe?.();
@@ -94,7 +113,9 @@ onBeforeUnmount(() => {
 watch(() => props.comments, () => void refresh(), { deep: true });
 watch(
   () => props.adapter,
-  () => bindAdapter(),
+  () => {
+    if (needsAdapter.value) bindAdapter();
+  },
 );
 
 // ─── コメントモード（クリック / ドラッグ） ─────────────────────────────────
@@ -197,17 +218,48 @@ watch(
 const openId = ref<string | null>(null);
 const replyBody = ref("");
 
-const openPin = computed(() => pins.value.find((p) => p.comment.id === openId.value) ?? null);
+/**
+ * 位置の手がかりを持たないコメント（AI が `{ excerpt }` だけ・anchor 無しで付けたもの）。
+ * ピンにできないので、層の右上に縦に並べて出す（見えなくならないように）。
+ */
+const STACK_TOP = 40;
+const STACK_STEP = 34;
+const STACK_RIGHT = 8;
+const PIN_RADIUS = 13;
+const stackItems = computed(() =>
+  props.comments
+    .map((c, i) => ({ comment: c, index: i + 1 }))
+    .filter((it) => !hasAnchorPosition(it.comment.anchor))
+    .map((it, slot) => ({ ...it, slot })),
+);
+
+/** ポップアップを開いているコメント（ピンまたは右上の並び）と、その基準位置 */
+const openEntry = computed(() => {
+  const id = openId.value;
+  if (!id) return null;
+  const pin = pins.value.find((p) => p.comment.id === id);
+  if (pin) return { comment: pin.comment, orphan: pin.pos.orphan, at: pin.pos };
+  const stacked = stackItems.value.find((s) => s.comment.id === id);
+  if (stacked && layerEl.value) {
+    const width = layerEl.value.getBoundingClientRect().width;
+    return {
+      comment: stacked.comment,
+      orphan: false,
+      at: { x: width - STACK_RIGHT - PIN_RADIUS, y: STACK_TOP + PIN_RADIUS + stacked.slot * STACK_STEP },
+    };
+  }
+  return null;
+});
 const openPopupAt = computed(() => {
-  const pin = openPin.value;
-  if (!pin || !layerEl.value) return null;
+  const entry = openEntry.value;
+  if (!entry || !layerEl.value) return null;
   const rect = layerEl.value.getBoundingClientRect();
-  return placePopup(pin.pos, POPUP_SIZE, { width: rect.width, height: rect.height });
+  return placePopup(entry.at, POPUP_SIZE, { width: rect.width, height: rect.height });
 });
 
-// 解決・削除・書き換えでピンが消えたらポップアップも閉じる
-watch(openPin, (pin) => {
-  if (!pin) openId.value = null;
+// 解決・削除・書き換えでコメントが消えたらポップアップも閉じる
+watch(openEntry, (entry) => {
+  if (!entry) openId.value = null;
 });
 
 function togglePin(id: string) {
@@ -284,6 +336,20 @@ function onTextareaKeydown(e: KeyboardEvent, submit: () => void) {
       <span class="cl-pin-index">{{ pin.index }}</span>
     </button>
 
+    <button
+      v-for="item in stackItems"
+      :key="item.comment.id"
+      type="button"
+      class="cl-pin cl-stacked"
+      :class="{ open: item.comment.id === openId }"
+      :style="{ top: `${STACK_TOP + PIN_RADIUS + item.slot * STACK_STEP}px`, right: `${STACK_RIGHT}px` }"
+      :title="item.comment.body"
+      @click.stop="togglePin(item.comment.id)"
+    >
+      <i class="pi pi-comment" />
+      <span class="cl-pin-index">{{ item.index }}</span>
+    </button>
+
     <div
       v-if="draft"
       class="cl-popup"
@@ -307,18 +373,18 @@ function onTextareaKeydown(e: KeyboardEvent, submit: () => void) {
     </div>
 
     <div
-      v-if="openPin && openPopupAt"
+      v-if="openEntry && openPopupAt"
       class="cl-popup"
       :style="{ left: `${openPopupAt.x}px`, top: `${openPopupAt.y}px`, width: `${POPUP_SIZE.width}px` }"
     >
-      <div v-if="openPin.pos.orphan" class="cl-orphan">{{ t("orphan") }}</div>
-      <div v-if="openPin.comment.anchor.excerpt" class="cl-excerpt">{{ openPin.comment.anchor.excerpt }}</div>
+      <div v-if="openEntry.orphan" class="cl-orphan">{{ t("orphan") }}</div>
+      <div v-if="openEntry.comment.anchor?.excerpt" class="cl-excerpt">{{ openEntry.comment.anchor.excerpt }}</div>
       <div class="cl-thread">
         <div class="cl-msg">
-          <div class="cl-msg-head">{{ authorLabel(openPin.comment.author) }}</div>
-          <div class="cl-msg-body">{{ openPin.comment.body }}</div>
+          <div class="cl-msg-head">{{ authorLabel(openEntry.comment.author) }}</div>
+          <div class="cl-msg-body">{{ openEntry.comment.body }}</div>
         </div>
-        <div v-for="r in openPin.comment.replies" :key="r.id" class="cl-msg reply">
+        <div v-for="r in openEntry.comment.replies" :key="r.id" class="cl-msg reply">
           <div class="cl-msg-head">{{ authorLabel(r.author) }}</div>
           <div class="cl-msg-body">{{ r.body }}</div>
         </div>
@@ -433,6 +499,11 @@ function onTextareaKeydown(e: KeyboardEvent, submit: () => void) {
   font-size: 10px;
   line-height: 15px;
   text-align: center;
+}
+
+.cl-pin.cl-stacked {
+  transform: translateY(-50%);
+  left: auto;
 }
 
 .cl-pin.orphan {

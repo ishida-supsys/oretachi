@@ -91,9 +91,11 @@ export function createDomCommentAdapter(
       ro.observe(root);
       const mo = new MutationObserver((records) => {
         // コメント層自身の描画（ピン・ポップアップ）の変化では再計算しない（自分で自分を起こさない）
-        if (records.every((r) => r.target instanceof Element && isLayer(r.target))) return;
-        if (records.every((r) => r.target.parentElement && isLayer(r.target.parentElement))) return;
-        schedule();
+        const own = records.every((r) => {
+          const el = r.target instanceof Element ? r.target : r.target.parentElement;
+          return !!el && isLayer(el);
+        });
+        if (!own) schedule();
       });
       mo.observe(root, { subtree: true, childList: true, attributes: true, characterData: true });
       window.addEventListener("resize", schedule);

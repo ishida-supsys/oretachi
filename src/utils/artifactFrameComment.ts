@@ -131,27 +131,47 @@ export const ARTIFACT_COMMENT_PROBE_JS =
   "    if(!d||typeof d!=='object'||d[REQ]!==true)return;" +
   "    var out={id:d.id};" +
   "    try{" +
-  "      if(d.op==='pick'){out.anchor=pick(d);}" +
+  "      if(d.op==='pick'){arm();out.anchor=pick(d);}" +
+  "      else if(d.op==='disarm'){disarm();return;}" +
   "      else if(d.op==='locate'){" +
   "        out.positions={};" +
   "        var items=Array.isArray(d.items)?d.items:[],i;" +
+  "        if(items.length>0)arm();else disarm();" +
   "        for(i=0;i<items.length;i++){if(items[i]&&typeof items[i].id==='string')out.positions[items[i].id]=locateOne(items[i].anchor);}" +
   "      }" +
   "    }catch(err){}" +
   "    var msg={};msg[RES]=true;msg.id=out.id;msg.anchor=out.anchor;msg.positions=out.positions;" +
   "    post(msg);" +
   "  });" +
-  // 位置が動きうる変化は rAF でまとめて 1 回だけ親へ知らせる
-  "  var raf=0;" +
-  "  function changed(){" +
-  "    if(raf)return;" +
-  "    raf=requestAnimationFrame(function(){raf=0;var m={};m[CHG]=true;post(m);});" +
+  // 位置が動きうる変化の監視は、親が位置を問い合わせている間（コメントがある・コメントモード中）だけ動かす。
+  // 常時監視すると、アニメーションするアプリが毎フレーム親へ通知し続けてしまう。
+  // 通知も間引く（スクロール・リサイズは素早く、DOM の変化は粗く）
+  "  var armed=false,mo=null,timer=0;" +
+  "  function changed(ms){" +
+  "    if(timer)return;" +
+  "    timer=setTimeout(function(){timer=0;var m={};m[CHG]=true;post(m);},ms);" +
   "  }" +
-  "  document.addEventListener('scroll',changed,true);" +
-  "  window.addEventListener('resize',changed);" +
-  "  window.addEventListener('load',changed);" +
-  "  try{new MutationObserver(changed).observe(document.documentElement," +
-  "    {subtree:true,childList:true,attributes:true,characterData:true});}catch(err){}" +
+  "  function onScroll(){changed(32);}" +
+  "  function onMutate(){changed(250);}" +
+  "  function arm(){" +
+  "    if(armed)return;" +
+  "    armed=true;" +
+  "    document.addEventListener('scroll',onScroll,true);" +
+  "    window.addEventListener('resize',onScroll);" +
+  "    try{mo=new MutationObserver(onMutate);mo.observe(document.documentElement," +
+  "      {subtree:true,childList:true,attributes:true,characterData:true});}catch(err){mo=null;}" +
+  "  }" +
+  "  function disarm(){" +
+  "    if(!armed)return;" +
+  "    armed=false;" +
+  "    document.removeEventListener('scroll',onScroll,true);" +
+  "    window.removeEventListener('resize',onScroll);" +
+  "    if(mo){mo.disconnect();mo=null;}" +
+  "  }" +
+  "  window.addEventListener('load',function(){if(armed)onScroll();});" +
+  // 文書が作り直された（リロード・再マウント）ことを親へ知らせ、位置を問い合わせ直してもらう。
+  // 新しい文書のプローブは未監視なので、この問い合わせが監視を再開させる
+  "  changed(0);" +
   "})();";
 
 // ─── 親側: 返事の検査 ──────────────────────────────────────────────────────
@@ -331,6 +351,8 @@ export function createFrameCommentAdapter(
       return () => {
         window.removeEventListener("message", listener);
         ro.disconnect();
+        // iframe 内の監視を止める（コメントが無くなった / コメントモードを抜けた）
+        getFrame()?.contentWindow?.postMessage({ [ARTIFACT_COMMENT_PROBE_MARKER]: true, id: 0, op: "disarm" }, "*");
         for (const done of pending.values()) done({});
         pending.clear();
       };
