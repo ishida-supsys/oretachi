@@ -133,7 +133,7 @@ function applyWindowBackground(b: Bootstrap) {
 /**
  * リンクのポップアップが使うホスト操作。このウィンドウは opener / dialog / clipboard の capability を持たない
  * ので、外部リンクは Rust の `app_open_external_url`（http(s) だけ通す）で開く。ポップアップが確認を出すのは
- * 「表示が打ち切られた長い URL」のときだけ（実行画面ではアプリ由来の確認は出さない）で、webview 標準の confirm で足りる。
+ * `selfDeclared`（iframe の自己申告）のときだけで、実行画面はそれを付けないため通常は出ない。出る場合も webview 標準の confirm で足りる。
  * ポップアップが使わない操作（ビューア用）は何もしない。
  */
 const linkHost: ArtifactViewerHost = {
