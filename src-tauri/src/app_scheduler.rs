@@ -12,9 +12,17 @@
 //!   スケジューラーが他の権限の迂回路にはならない。
 //! - インスタンスごとに 1 タスク。停止（`release`）で止まり、再起動をまたいで復活しない。
 //!   ホットリロードは `release` を通らないので、リロードをまたいで動き続ける。
-//! - 時刻はローカル時刻の壁時計で評価する。長い sleep 1 回に頼らず、毎分の境目で現在時刻を引き直す
-//!   （PC のスリープ・夏時間でずれない）。取りこぼした回は追いかけない（窓は直近 [`CATCH_UP_WINDOW_MINUTES`] 分）。
+//! - 時刻はローカル時刻の壁時計（`naive_local`）で評価する。長い sleep 1 回に頼らず、毎分の境目で現在時刻を
+//!   引き直すので、PC のスリープ復帰でずれない。取りこぼした回は追いかけない（窓は直近
+//!   [`CATCH_UP_WINDOW_MINUTES`] 分）。
+//! - **夏時間は考慮しない**（壁時計の分をそのまま照合する）。秋の巻き戻しでは、繰り返される時間帯の日次ジョブが
+//!   2 回走りうる。春の飛び越しでは、飛ばされた時間帯の日次ジョブはその日走らない。毎分・毎時のジョブには
+//!   影響しない。Vixie cron のように重複・補完はしない。
 //! - 同じジョブは同時に 1 回だけ。前回の実行が終わっていなければ、その回は飛ばしてログに残す。
+//! - aiTerminal ジョブは、**そのジョブが前回開いた端末がまだ残っている間は次回を飛ばす**（端末は自動では
+//!   閉じないので、周期が短いとアプリの `maxConcurrent` と全体上限を使い切って、他アプリの端末も開けなくなる）。
+//!   端末が閉じられた（`aiTerminal.close`・ユーザーが閉じた・エージェントの終了）次の回から再開する。
+//!   飛ばし始めと再開のときだけログに 1 行ずつ残す（毎分は出さない）。
 
 use chrono::{Duration as ChronoDuration, Local, NaiveDateTime, Timelike};
 use std::collections::{HashMap, HashSet};
@@ -181,6 +189,24 @@ pub fn on_instance_released(app: &AppHandle, label: &str) {
     }
 }
 
+/// aiTerminal ジョブの今回を飛ばすか。前回このジョブが開いた端末（`recorded`）が、いまも生きている
+/// このインスタンスの端末（`live_ids`）に含まれていれば飛ばす。
+fn skip_ai_job(recorded: Option<&str>, live_ids: &[String]) -> bool {
+    recorded.map_or(false, |r| live_ids.iter().any(|l| l == r))
+}
+
+/// ランナーが持つジョブごとの状態。1 つのロックにまとめて、「端末の記録」と「実行中の印」を
+/// 同時に更新する（別々にすると、その隙間で次の tick がどちらの歯止めにも当たらず二重に開く）。
+#[derive(Default)]
+struct JobState {
+    /// 実行中のジョブ ID
+    inflight: HashSet<String>,
+    /// aiTerminal ジョブ ID → 直近に開いた terminal_id
+    terminals: HashMap<String, String>,
+    /// 端末が残っているため飛ばしている最中のジョブ ID（ログを遷移のときだけ出すため）
+    skipping: HashSet<String>,
+}
+
 /// 次の分の境目までの待ち時間（1〜60 秒）。
 fn sleep_until_next_minute(now: &NaiveDateTime) -> std::time::Duration {
     let into = now.second() as u64;
@@ -188,7 +214,8 @@ fn sleep_until_next_minute(now: &NaiveDateTime) -> std::time::Duration {
 }
 
 async fn run_loop(app: AppHandle, label: String) {
-    let inflight: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+    let state: Arc<Mutex<JobState>> = Arc::new(Mutex::new(JobState::default()));
+    let key = |ctx: &crate::app_instance::InstanceContext| (ctx.worktree_id.clone(), ctx.artifact_id.clone());
     let mut last = Local::now().naive_local();
     loop {
         tokio::time::sleep(sleep_until_next_minute(&Local::now().naive_local())).await;
@@ -221,7 +248,53 @@ async fn run_loop(app: AppHandle, label: String) {
             if spec.first_fire_in(from, now).is_none() {
                 continue;
             }
-            let fresh = inflight.lock().map(|mut s| s.insert(job.id.clone())).unwrap_or(false);
+            // aiTerminal ジョブ: 前回開いた端末が残っていれば今回は飛ばす（端末の生死は PTY の生存で判定）
+            if matches!(job.action, SchedulerAction::AiTerminal { .. }) {
+                let recorded = state.lock().ok().and_then(|s| s.terminals.get(&job.id).cloned());
+                if recorded.is_some() {
+                    let live: Vec<String> = crate::ai_terminal::list_for(&app, &key(&ctx))
+                        .into_iter()
+                        .map(|t| t.terminal_id)
+                        .collect();
+                    let skip = skip_ai_job(recorded.as_deref(), &live);
+                    let transition = state
+                        .lock()
+                        .map(|mut s| {
+                            if skip {
+                                s.skipping.insert(job.id.clone())
+                            } else {
+                                s.terminals.remove(&job.id);
+                                s.skipping.remove(&job.id)
+                            }
+                        })
+                        .unwrap_or(false);
+                    if skip {
+                        if transition {
+                            crate::app_instance::add_log(
+                                &app,
+                                &ctx.worktree_id,
+                                &ctx.artifact_id,
+                                "info",
+                                format!(
+                                    "スケジューラー: ジョブ '{}' が前回開いた AI ターミナルが残っているため、閉じられるまで実行を飛ばします",
+                                    job.id
+                                ),
+                            );
+                        }
+                        continue;
+                    }
+                    if transition {
+                        crate::app_instance::add_log(
+                            &app,
+                            &ctx.worktree_id,
+                            &ctx.artifact_id,
+                            "info",
+                            format!("スケジューラー: ジョブ '{}' の AI ターミナルが閉じられたため、実行を再開します", job.id),
+                        );
+                    }
+                }
+            }
+            let fresh = state.lock().map(|mut s| s.inflight.insert(job.id.clone())).unwrap_or(false);
             if !fresh {
                 crate::app_instance::add_log(
                     &app,
@@ -234,12 +307,16 @@ async fn run_loop(app: AppHandle, label: String) {
             }
             let app2 = app.clone();
             let label2 = label.clone();
-            let inflight2 = inflight.clone();
+            let state2 = state.clone();
             let resolved = grant.resolved.clone();
             tauri::async_runtime::spawn(async move {
-                run_job(&app2, &label2, &resolved, &job).await;
-                if let Ok(mut s) = inflight2.lock() {
-                    s.remove(&job.id);
+                let opened = run_job(&app2, &label2, &resolved, &job).await;
+                // 端末の記録を先に入れてから実行中の印を外す（同じロックの中で。隙間を作らない）
+                if let Ok(mut s) = state2.lock() {
+                    if let Some(tid) = opened {
+                        s.terminals.insert(job.id.clone(), tid);
+                    }
+                    s.inflight.remove(&job.id);
                 }
             });
         }
@@ -251,13 +328,15 @@ async fn run_job(
     label: &str,
     resolved: &crate::app_manifest::ResolvedPermissions,
     job: &SchedulerJob,
-) {
+) -> Option<String> {
     // 実行の直前にもう一度、起動中かを確かめる（待っている間に停止されたかもしれない）
-    let Ok(ctx) = crate::app_instance::context_for_label(app, label) else { return };
+    let Ok(ctx) = crate::app_instance::context_for_label(app, label) else { return None };
     let log = |level: &str, msg: String| {
         crate::app_instance::add_log(app, &ctx.worktree_id, &ctx.artifact_id, level, msg);
     };
     log("info", format!("スケジューラー: ジョブ '{}' を実行します（{}）", job.id, job.cron));
+    // 成功した aiTerminal ジョブが開いた terminal_id（次回を飛ばすかの判定に使う）
+    let mut opened: Option<String> = None;
     let result: Result<String, String> = match &job.action {
         SchedulerAction::Tool { tool, params } => {
             crate::mcp_server::call_tool_for_app_instance(
@@ -280,7 +359,10 @@ async fn run_job(
                 model: model.clone(),
                 cwd: cwd.clone(),
             };
-            crate::ai_terminal::open_inner(app, &ctx, params).await.map(|_| "aiTerminal.open".to_string())
+            crate::ai_terminal::open_inner(app, &ctx, params).await.map(|v| {
+                opened = v.get("terminalId").and_then(|t| t.as_str()).map(str::to_string);
+                "aiTerminal.open".to_string()
+            })
         }
     };
     match result {
@@ -290,6 +372,7 @@ async fn run_job(
             log("warn", format!("拒否: scheduler[{}] — {}{}", job.id, e, note));
         }
     }
+    opened
 }
 
 #[cfg(test)]
@@ -398,6 +481,18 @@ mod tests {
         assert_eq!(s.first_fire_in(after, at(2026, 11, 3, 10, 5)), Some(at(2026, 11, 3, 10, 5)));
         // 窓が逆（時計が戻った）なら発火しない
         assert_eq!(s.first_fire_in(at(2026, 11, 3, 10, 5), at(2026, 11, 3, 10, 0)), None);
+    }
+
+    #[test]
+    fn skips_ai_job_only_while_its_previous_terminal_is_alive() {
+        let live = vec!["t1".to_string(), "t2".to_string()];
+        // 前回開いた端末が残っている → 飛ばす
+        assert!(skip_ai_job(Some("t1"), &live));
+        // 閉じられた・エージェントが終了した（生きている一覧に無い）→ 再開
+        assert!(!skip_ai_job(Some("gone"), &live));
+        assert!(!skip_ai_job(Some("t1"), &[]));
+        // まだ一度も開いていない
+        assert!(!skip_ai_job(None, &live));
     }
 
     #[test]
