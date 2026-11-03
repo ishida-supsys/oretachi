@@ -25,9 +25,13 @@
 //!
 //! # 資源
 //!
-//! 接続はインスタンス（ウィンドウラベル）× 実パスごとに 1 本、host 側で持つ。iframe のリロードをまたいで
-//! 維持し（前提 10）、インスタンスの停止で閉じる。1 本だけなので、`BEGIN` と `COMMIT` を別の呼び出しに
-//! 分けても成り立つ。実行時間・結果の行数とバイト数・接続数には上限がある。
+//! 接続は**呼び出したウィンドウ**（常駐ウィンドウ `appinst-<n>` と各サブウィンドウ `appinst-<n>-w<k>`）×
+//! 実パスごとに 1 本、host 側で持つ。同じインスタンスでもウィンドウ同士は接続を共有しない（あるウィンドウの
+//! `BEGIN` 〜 `COMMIT` の途中に、別ウィンドウの文が割り込まない）。同じファイルを複数のウィンドウが開いた場合の
+//! 排他は SQLite のロック（`BUSY_TIMEOUT` まで待つ）に任せる。
+//! iframe のリロードをまたいで維持し（前提 10）、ウィンドウが閉じたとき・インスタンスの停止で閉じる。
+//! 1 ウィンドウに 1 本だけなので、`BEGIN` と `COMMIT` を別の呼び出しに分けても成り立つ。
+//! 実行時間・結果の行数とバイト数・接続数には上限がある。
 
 use crate::app_manifest::ResolvedFs;
 use base64::Engine;
@@ -55,7 +59,7 @@ pub const MAX_DB_BYTES: u64 = 256 * 1024 * 1024;
 const DEFAULT_PAGE_SIZE: u64 = 4096;
 /// 1 つの文字列 / BLOB / SQL 文の最大長（`zeroblob(1e9)` のような一括確保を防ぐ）。
 const MAX_VALUE_BYTES: c_int = 16 * 1024 * 1024;
-/// 1 インスタンスが同時に開ける DB の数。
+/// 1 ウィンドウが同時に開ける DB の数。
 pub const MAX_CONNECTIONS_PER_INSTANCE: usize = 8;
 const MAX_SQL_BYTES: usize = 1024 * 1024;
 const MAX_PARAMS: usize = 1000;
@@ -361,10 +365,10 @@ type Shared = Arc<tokio::sync::Mutex<Option<SqliteConnection>>>;
 
 #[derive(Default)]
 struct Inner {
-    /// ウィンドウラベル → (実パス, 書き込み可) → 接続
+    /// ウィンドウラベル（常駐ウィンドウ・サブウィンドウそれぞれ）→ (実パス, 書き込み可) → 接続
     conns: HashMap<String, HashMap<(PathBuf, bool), Shared>>,
-    /// 停止したインスタンスのラベル（ラベルは再利用されない）。開いている最中の接続が、停止の後に
-    /// 台帳へ入ってしまわないようにする
+    /// 停止したインスタンス・閉じたサブウィンドウのラベル（ラベルは再利用されない）。開いている最中の接続が、
+    /// 停止・クローズの後に台帳へ入ってしまわないようにする
     dead: HashSet<String>,
     /// 実行中の「閉じるタスク」の数。0 になると `closed` を通知する
     closing: usize,
@@ -384,8 +388,9 @@ enum InsertOutcome {
 }
 
 impl AppDbRegistry {
-    fn is_dead(&self, label: &str) -> bool {
-        self.inner.lock().map(|i| i.dead.contains(label)).unwrap_or(true)
+    /// `instance` は常駐ウィンドウのラベル、`window` は呼び出したウィンドウ（サブウィンドウならそのラベル）。
+    fn is_dead(&self, instance: &str, window: &str) -> bool {
+        self.inner.lock().map(|i| i.dead.contains(instance) || i.dead.contains(window)).unwrap_or(true)
     }
 
     fn get(&self, label: &str, key: &(PathBuf, bool)) -> Option<Shared> {
@@ -393,11 +398,17 @@ impl AppDbRegistry {
         inner.conns.get(label)?.get(key).cloned()
     }
 
-    fn insert(&self, label: &str, key: (PathBuf, bool), conn: SqliteConnection) -> Result<InsertOutcome, (String, SqliteConnection)> {
+    fn insert(
+        &self,
+        instance: &str,
+        label: &str,
+        key: (PathBuf, bool),
+        conn: SqliteConnection,
+    ) -> Result<InsertOutcome, (String, SqliteConnection)> {
         let Ok(mut inner) = self.inner.lock() else {
             return Err(("DB 台帳のロックが壊れています".to_string(), conn));
         };
-        if inner.dead.contains(label) {
+        if inner.dead.contains(instance) || inner.dead.contains(label) {
             return Err(("アプリが停止しました".to_string(), conn));
         }
         let map = inner.conns.entry(label.to_string()).or_default();
@@ -421,12 +432,28 @@ impl AppDbRegistry {
         inner.conns.get_mut(label)?.remove(key)
     }
 
-    /// そのインスタンスの接続を台帳から外して返す（閉じはしない）。`stopped` なら以後は開けない。
-    fn take_instance(&self, label: &str, stopped: bool) -> Vec<Shared> {
+    /// そのインスタンスの接続（常駐ウィンドウと、所有するサブウィンドウのすべて）を台帳から外して返す
+    /// （閉じはしない）。`stopped` なら以後は開けない。
+    fn take_instance(&self, instance: &str, stopped: bool) -> Vec<Shared> {
         let Ok(mut inner) = self.inner.lock() else { return Vec::new() };
         if stopped {
-            inner.dead.insert(label.to_string());
+            inner.dead.insert(instance.to_string());
         }
+        // サブウィンドウのラベルは `<instance>-w<k>`。`appinst-1-` は `appinst-10-…` に前方一致しない
+        let sub_prefix = format!("{}-", instance);
+        let labels: Vec<String> = inner
+            .conns
+            .keys()
+            .filter(|l| l.as_str() == instance || l.starts_with(&sub_prefix))
+            .cloned()
+            .collect();
+        labels.iter().filter_map(|l| inner.conns.remove(l)).flat_map(|m| m.into_values()).collect()
+    }
+
+    /// 1 つのウィンドウの接続だけを外して返す。以後そのラベルでは開けない（ラベルは再利用されない）。
+    fn take_window(&self, label: &str) -> Vec<Shared> {
+        let Ok(mut inner) = self.inner.lock() else { return Vec::new() };
+        inner.dead.insert(label.to_string());
         inner.conns.remove(label).map(|m| m.into_values().collect()).unwrap_or_default()
     }
 
@@ -483,6 +510,14 @@ pub fn on_instance_released(app: &AppHandle, label: &str) {
     reg.spawn_close(conns);
 }
 
+/// ウィンドウ（主にサブウィンドウ）が閉じたとき。そのウィンドウが開いていた接続だけを閉じる
+/// （インスタンスの他のウィンドウの接続は維持する）。
+pub fn on_window_closed(app: &AppHandle, label: &str) {
+    let reg = app.state::<AppDbRegistry>();
+    let conns = reg.take_window(label);
+    reg.spawn_close(conns);
+}
+
 /// 権限セットが入れ替わったとき。開いている接続を閉じる（次の呼び出しが新しい grant で開き直す）。
 pub fn on_grant_replaced(app: &AppHandle, label: &str) {
     let reg = app.state::<AppDbRegistry>();
@@ -495,6 +530,11 @@ pub fn on_grant_replaced(app: &AppHandle, label: &str) {
 struct Call {
     ctx: crate::app_instance::InstanceContext,
     shared: Shared,
+}
+
+/// 接続の持ち主になるウィンドウのラベル（呼び出した webview のもの。サブウィンドウならそのラベル）。
+fn window_key(window: &tauri::Window) -> String {
+    window.label().to_string()
 }
 
 fn caller_db(window: &tauri::Window, app: &AppHandle) -> Result<(crate::app_instance::InstanceContext, ResolvedFs), String> {
@@ -549,12 +589,13 @@ async fn prepare(window: &tauri::Window, app: &AppHandle, path: &str) -> Result<
     let reg = app.state::<AppDbRegistry>();
     let key = (real.clone(), writable);
     // 停止済みのインスタンスには、既存の接続も新しい接続も渡さない
-    if reg.is_dead(&ctx.instance_label) {
+    let wlabel = window_key(window);
+    if reg.is_dead(&ctx.instance_label, &wlabel) {
         let e = "アプリが停止しました".to_string();
         log_failure(app, &ctx, "open", path, "", &e);
         return Err(e);
     }
-    if let Some(shared) = reg.get(&ctx.instance_label, &key) {
+    if let Some(shared) = reg.get(&wlabel, &key) {
         return Ok(Call { ctx, shared });
     }
     // 開くと（write なら）ファイルとディレクトリを作る。停止・削除と競って、消した後の同梱領域を
@@ -564,7 +605,7 @@ async fn prepare(window: &tauri::Window, app: &AppHandle, path: &str) -> Result<
         log_failure(app, &ctx, "open", path, "", &e);
         e
     })?;
-    match reg.insert(&ctx.instance_label, key, conn) {
+    match reg.insert(&ctx.instance_label, &wlabel, key, conn) {
         Ok(InsertOutcome::Inserted(shared)) | Ok(InsertOutcome::Existing(shared)) => Ok(Call { ctx, shared }),
         Err((e, conn)) => {
             let _ = conn.close().await;
@@ -641,7 +682,7 @@ pub async fn app_db_close(window: tauri::Window, app: AppHandle, path: String) -
             e
         })?;
     let reg = app.state::<AppDbRegistry>();
-    match reg.remove(&ctx.instance_label, &(real, writable)) {
+    match reg.remove(&window_key(&window), &(real, writable)) {
         Some(shared) => {
             close_all(vec![shared]).await;
             Ok(true)
@@ -968,7 +1009,7 @@ mod tests {
             let reg = Arc::new(AppDbRegistry::default());
             let (path, writable) = crate::app_fs::resolve_db_path(&fs, "artifact://d.db").unwrap();
             let c = open_connection(&path, writable).await.unwrap();
-            let shared = match reg.insert("appinst-1", (path.clone(), writable), c) {
+            let shared = match reg.insert("appinst-1", "appinst-1", (path.clone(), writable), c) {
                 Ok(InsertOutcome::Inserted(s)) => s,
                 _ => panic!("insert"),
             };
@@ -1004,12 +1045,12 @@ mod tests {
 
             // 通常の登録と、同じキーへの二重登録（後から来た接続は台帳に入らない）
             let c1 = open_connection(&path, writable).await.unwrap();
-            let shared = match reg.insert("appinst-1", key.clone(), c1) {
+            let shared = match reg.insert("appinst-1", "appinst-1", key.clone(), c1) {
                 Ok(InsertOutcome::Inserted(s)) => s,
                 _ => panic!("first insert"),
             };
             let c2 = open_connection(&path, writable).await.unwrap();
-            assert!(matches!(reg.insert("appinst-1", key.clone(), c2), Ok(InsertOutcome::Existing(_))));
+            assert!(matches!(reg.insert("appinst-1", "appinst-1", key.clone(), c2), Ok(InsertOutcome::Existing(_))));
             assert!(reg.get("appinst-1", &key).is_some());
 
             // 停止: 台帳から外れ、閉じるまで待てる。以後の登録は拒否される（開いている最中の接続の取りこぼし防止）
@@ -1018,7 +1059,7 @@ mod tests {
             close_all(taken).await;
             assert!(shared.lock().await.is_none(), "connection must be closed");
             let c3 = open_connection(&path, writable).await.unwrap();
-            match reg.insert("appinst-1", key.clone(), c3) {
+            match reg.insert("appinst-1", "appinst-1", key.clone(), c3) {
                 Err((e, c)) => {
                     assert!(e.contains("停止"));
                     c.close().await.unwrap();
@@ -1028,21 +1069,21 @@ mod tests {
 
             // 権限の入れ替えでは「停止」扱いにしない（開き直せる）
             let c4 = open_connection(&path, writable).await.unwrap();
-            assert!(matches!(reg.insert("appinst-2", key.clone(), c4), Ok(InsertOutcome::Inserted(_))));
+            assert!(matches!(reg.insert("appinst-2", "appinst-2", key.clone(), c4), Ok(InsertOutcome::Inserted(_))));
             close_all(reg.take_instance("appinst-2", false)).await;
             let c5 = open_connection(&path, writable).await.unwrap();
-            assert!(matches!(reg.insert("appinst-2", key.clone(), c5), Ok(InsertOutcome::Inserted(_))));
+            assert!(matches!(reg.insert("appinst-2", "appinst-2", key.clone(), c5), Ok(InsertOutcome::Inserted(_))));
             close_all(reg.take_instance("appinst-2", true)).await;
 
             // 接続数の上限
             for i in 0..MAX_CONNECTIONS_PER_INSTANCE {
                 let p = base.join("art").join(format!("n{}.db", i));
                 let c = open_connection(&p, true).await.unwrap();
-                assert!(matches!(reg.insert("appinst-3", (p, true), c), Ok(InsertOutcome::Inserted(_))));
+                assert!(matches!(reg.insert("appinst-3", "appinst-3", (p, true), c), Ok(InsertOutcome::Inserted(_))));
             }
             let p = base.join("art").join("over.db");
             let c = open_connection(&p, true).await.unwrap();
-            match reg.insert("appinst-3", (p, true), c) {
+            match reg.insert("appinst-3", "appinst-3", (p, true), c) {
                 Err((e, c)) => {
                     assert!(e.contains("同時に開ける"));
                     c.close().await.unwrap();
@@ -1052,6 +1093,54 @@ mod tests {
             close_all(reg.take_instance("appinst-3", true)).await;
         });
         // 閉じてあるので、フォルダごと消せる（Windows で開いたままのファイルは消せない）
+        std::fs::remove_dir_all(&base).expect("no open handles left");
+    }
+
+    #[test]
+    fn windows_of_one_instance_do_not_share_connections() {
+        let (base, fs) = setup("win", &[], &["artifact://"], false);
+        run(async {
+            let reg = AppDbRegistry::default();
+            let (path, writable) = crate::app_fs::resolve_db_path(&fs, "artifact://w.db").unwrap();
+            let key = (path.clone(), writable);
+
+            // 常駐ウィンドウとサブウィンドウは、同じファイルでも別の接続になる
+            let c1 = open_connection(&path, writable).await.unwrap();
+            let main = match reg.insert("appinst-1", "appinst-1", key.clone(), c1) {
+                Ok(InsertOutcome::Inserted(s)) => s,
+                _ => panic!("main insert"),
+            };
+            assert!(reg.get("appinst-1-w1", &key).is_none(), "sub window must not see the main connection");
+            let c2 = open_connection(&path, writable).await.unwrap();
+            let sub = match reg.insert("appinst-1", "appinst-1-w1", key.clone(), c2) {
+                Ok(InsertOutcome::Inserted(s)) => s,
+                _ => panic!("sub insert"),
+            };
+            assert!(!Arc::ptr_eq(&main, &sub));
+
+            // 前方一致で別インスタンス（appinst-10）のものを巻き込まない
+            let c3 = open_connection(&path, writable).await.unwrap();
+            let other = match reg.insert("appinst-10", "appinst-10", key.clone(), c3) {
+                Ok(InsertOutcome::Inserted(s)) => s,
+                _ => panic!("other insert"),
+            };
+
+            // サブウィンドウを閉じても、常駐ウィンドウの接続は残る。閉じたラベルでは開き直せない
+            close_all(reg.take_window("appinst-1-w1")).await;
+            assert!(sub.lock().await.is_none());
+            assert!(main.lock().await.is_some());
+            assert!(reg.is_dead("appinst-1", "appinst-1-w1"));
+            assert!(!reg.is_dead("appinst-1", "appinst-1-w2"));
+
+            // インスタンスの停止は、残りのウィンドウの接続をまとめて閉じ、別インスタンスには触れない
+            let c4 = open_connection(&path, writable).await.unwrap();
+            assert!(matches!(reg.insert("appinst-1", "appinst-1-w2", key.clone(), c4), Ok(InsertOutcome::Inserted(_))));
+            let taken = reg.take_instance("appinst-1", true);
+            assert_eq!(taken.len(), 2);
+            close_all(taken).await;
+            assert!(other.lock().await.is_some());
+            close_all(reg.take_instance("appinst-10", true)).await;
+        });
         std::fs::remove_dir_all(&base).expect("no open handles left");
     }
 }

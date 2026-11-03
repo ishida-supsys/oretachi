@@ -108,7 +108,7 @@ struct Inner {
 #[derive(Debug, Clone)]
 pub struct InstanceContext {
     /// 常駐ウィンドウ（`appinst-<n>`）のラベル。サブウィンドウから呼ばれても**インスタンスの**ラベル。
-    /// DB 接続・実行中の通信など、インスタンスごとに持つ資源のキーに使う
+    /// 実行中の通信など、インスタンスごとに持つ資源のキーに使う（DB 接続は呼び出したウィンドウごと）
     pub instance_label: String,
     pub worktree_id: String,
     pub artifact_id: String,
@@ -865,6 +865,8 @@ pub fn on_window_destroyed(app: &AppHandle, label: &str) {
     if !label.starts_with(LABEL_PREFIX) {
         return;
     }
+    // そのウィンドウが開いていた DB 接続を閉じる（サブウィンドウの接続はウィンドウごとに持つ）
+    crate::app_db::on_window_closed(app, label);
     // サブウィンドウが閉じても、インスタンスは止めない（所有者の管理から外して、アプリへ知らせるだけ）
     if crate::app_subwindow::on_window_destroyed(app, label) {
         return;
