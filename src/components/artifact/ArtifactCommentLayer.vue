@@ -64,9 +64,14 @@ async function refresh() {
   const adapter = currentAdapter();
   if (!adapter) return;
   const seq = ++refreshSeq;
-  const next = await adapter.locate(props.comments);
-  if (seq !== refreshSeq) return;
-  positions.value = next;
+  try {
+    const next = await adapter.locate(props.comments);
+    if (seq !== refreshSeq) return;
+    positions.value = next;
+  } catch (e) {
+    // ここで握りつぶすとピンが出ない理由が見えなくなるので、必ず残す
+    console.warn("comment locate failed", e);
+  }
 }
 
 /** 表示する順の連番（ピンの数字）。位置の取れないコメントは出さない */

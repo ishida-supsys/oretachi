@@ -207,6 +207,20 @@ export function sanitizeFrameAnchor(raw: unknown): PickedAnchor | null {
   return Object.keys(out).length > 0 ? out : null;
 }
 
+/**
+ * locate の問い合わせ本体。iframe へ postMessage で送る。
+ * コメントは Vue の reactive（Proxy）で渡ってくることがあり、そのままでは構造化複製できず
+ * DataCloneError になる。anchor は元が JSON なので、JSON の往復で素のデータへ直す。
+ */
+export function buildLocateItems(
+  comments: readonly { id: string; anchor: CommentAnchor }[],
+): { id: string; anchor: CommentAnchor }[] {
+  return comments.map((c) => ({
+    id: c.id,
+    anchor: JSON.parse(JSON.stringify(c.anchor ?? {})) as CommentAnchor,
+  }));
+}
+
 export type FramePosition = { x: number; y: number; orphan: boolean } | null;
 
 /** `locate` の返事を `{ commentId: 位置 }` へ絞る。要求していない ID は捨てる */
@@ -271,7 +285,15 @@ export function createFrameCommentAdapter(
         clearTimeout(timer);
         resolve(r);
       });
-      frame.contentWindow!.postMessage({ [ARTIFACT_COMMENT_PROBE_MARKER]: true, id, ...message }, "*");
+      try {
+        frame.contentWindow!.postMessage({ [ARTIFACT_COMMENT_PROBE_MARKER]: true, id, ...message }, "*");
+      } catch (e) {
+        // 複製できない値などで送れなくても、タイムアウトまで待たずに「答えなし」で返す
+        console.warn("comment probe postMessage failed", e);
+        clearTimeout(timer);
+        pending.delete(id);
+        resolve(null);
+      }
     });
   }
 
@@ -315,7 +337,7 @@ export function createFrameCommentAdapter(
       if (!off || hidden || comments.length === 0) return Object.fromEntries(ids.map((id) => [id, null]));
       const res = await ask({
         op: "locate",
-        items: comments.map((c) => ({ id: c.id, anchor: c.anchor })),
+        items: buildLocateItems(comments),
       });
       const positions = sanitizeFramePositions(res?.positions, ids);
       const out: Record<string, FramePosition> = {};

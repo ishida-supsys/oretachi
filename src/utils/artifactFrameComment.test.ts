@@ -1,9 +1,11 @@
 import { describe, expect, it } from "vitest";
+import { reactive } from "vue";
 import {
   ARTIFACT_COMMENT_PROBE_CHANGED_MARKER,
   ARTIFACT_COMMENT_PROBE_JS,
   ARTIFACT_COMMENT_PROBE_MARKER,
   ARTIFACT_COMMENT_PROBE_RESULT_MARKER,
+  buildLocateItems,
   sanitizeFrameAnchor,
   sanitizeFramePositions,
 } from "./artifactFrameComment";
@@ -125,5 +127,19 @@ describe("sanitizeFramePositions", () => {
 
   it("prototype のキーを拾わない", () => {
     expect(sanitizeFramePositions({}, ["toString", "hasOwnProperty"])).toEqual({ toString: null, hasOwnProperty: null });
+  });
+});
+
+describe("buildLocateItems", () => {
+  /** postMessage は構造化複製を使う。Vue の reactive（Proxy）のままでは DataCloneError になる */
+  it("Vue の reactive なコメントを渡しても structuredClone できる", () => {
+    const comments = reactive([
+      { id: "a", anchor: { kind: "point", x: 0.5, y: 0.5, selector: "#root > div" } },
+    ]);
+    const items = buildLocateItems(comments as never);
+    expect(() => structuredClone(items)).not.toThrow();
+    expect(structuredClone(items)).toEqual([
+      { id: "a", anchor: { kind: "point", x: 0.5, y: 0.5, selector: "#root > div" } },
+    ]);
   });
 });
