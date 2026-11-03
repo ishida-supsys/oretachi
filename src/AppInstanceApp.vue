@@ -59,7 +59,7 @@ import { wsCommandFor } from "./utils/wsBridge";
 import ArtifactCommentLayer from "./components/artifact/ArtifactCommentLayer.vue";
 import { createFrameCommentAdapter } from "./utils/artifactFrameComment";
 import type { ArtifactComment, ArtifactCommentsChangedEvent, CommentAnchor } from "./types/artifactComment";
-import type { CommentAdapter } from "./utils/commentAnchor";
+import { commentsForWindow, type CommentAdapter } from "./utils/commentAnchor";
 
 interface Bootstrap {
   worktreeId: string;
@@ -456,10 +456,11 @@ const allComments = ref<ArtifactComment[]>([]);
 /** コメントに記録するこのウィンドウの識別子（常駐は "main"、サブウィンドウはその ID） */
 const windowId = computed(() => boot.value?.subWindow?.id ?? "main");
 
-/** このウィンドウに付けたコメントだけ出す（window の無いコメント = AI が付けたものなどは常駐ウィンドウ扱い） */
-const windowComments = computed(() =>
-  allComments.value.filter((c) => (c.anchor?.window ?? "main") === windowId.value),
-);
+/**
+ * このウィンドウに出すコメント。window の無いコメント（AI が付けたものなど）は常駐ウィンドウ扱い。
+ * 閉じたサブウィンドウ宛のコメントは常駐ウィンドウの右上に位置なしで出す（見えない・解決できない状態を作らない）
+ */
+const windowComments = computed(() => commentsForWindow(allComments.value, windowId.value));
 
 const commentAdapter: CommentAdapter = (() => {
   const inner = createFrameCommentAdapter(() => frame.value, () => shellEl.value);

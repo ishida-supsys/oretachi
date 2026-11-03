@@ -117,13 +117,23 @@ async function loadList() {
   }
 }
 
-async function loadStates() {
-  try {
-    states.value = await props.dataSource.listStates();
-  } catch (e) {
-    // サイドカーは補助情報なので、読めなくても一覧の表示は続ける
-    console.error("list_artifact_states failed", e);
-  }
+/**
+ * サイドカーの取り直しは直列化する。並行して走らせると完了順が入れ替わり、古いスナップショットで
+ * `states` を上書きしうる。世代で捨てる方式にしないのは、捨てられた側の呼び出し元
+ * （onStateChanged の pushMemory）が「自分の通知の後に読んだ値」を前提にしているため。
+ * 連鎖させれば、各呼び出しは自分より後に始まった読み取りの結果を見て完了する。
+ */
+let statesChain: Promise<void> = Promise.resolve();
+function loadStates(): Promise<void> {
+  statesChain = statesChain.then(async () => {
+    try {
+      states.value = await props.dataSource.listStates();
+    } catch (e) {
+      // サイドカーは補助情報なので、読めなくても一覧の表示は続ける
+      console.error("list_artifact_states failed", e);
+    }
+  });
+  return statesChain;
 }
 
 function isPinned(id: string): boolean {

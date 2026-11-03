@@ -72,6 +72,22 @@ export function hasAnchorPosition(anchor: CommentAnchor | undefined): boolean {
   return typeof anchor.x === "number" && typeof anchor.y === "number";
 }
 
+/**
+ * アプリのウィンドウごとに見せるコメントを決める。
+ * サブウィンドウの ID は起動のたびに採番し直すので、閉じて開き直すと旧 ID のコメントの持ち主がいなくなる。
+ * そのため常駐ウィンドウ（"main"）には、他ウィンドウ宛のコメントも位置なしで出す
+ * （他ウィンドウのセレクタを main の DOM へ当てるとずれた場所に出るため、anchor は抜粋だけにする。
+ * 返信・解決・削除は ID で行うので影響しない）。サブウィンドウには自分宛のものだけを出す。
+ */
+export function commentsForWindow(all: ArtifactComment[], windowId: string): ArtifactComment[] {
+  if (windowId !== "main") return all.filter((c) => c.anchor?.window === windowId);
+  return all.map((c) => {
+    const w = c.anchor?.window ?? "main";
+    if (w === "main") return c;
+    return { ...c, anchor: { excerpt: c.anchor?.excerpt, window: w } };
+  });
+}
+
 /** 表示用の並び（付けた順）と未解決だけの絞り込み */
 export function visibleComments(list: ArtifactComment[] | undefined): ArtifactComment[] {
   return (list ?? [])

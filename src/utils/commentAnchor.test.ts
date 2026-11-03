@@ -3,6 +3,7 @@ import type { ArtifactComment } from "../types/artifactComment";
 import {
   boxFromPoints,
   clamp01,
+  commentsForWindow,
   EXCERPT_MAX_CHARS,
   fromFraction,
   hasAnchorPosition,
@@ -65,6 +66,31 @@ describe("commentAnchor", () => {
     expect(hasAnchorPosition({ x: 0.5 })).toBe(false);
     expect(hasAnchorPosition({ x: 0.5, y: 0.2 })).toBe(true);
     expect(hasAnchorPosition({ selector: ":scope > p" })).toBe(true);
+  });
+
+  it("commentsForWindow: サブウィンドウは自分宛だけ、main は他ウィンドウ宛を位置なしで受ける", () => {
+    const mk = (id: string, anchor: ArtifactComment["anchor"]): ArtifactComment => ({
+      ...comment(id, 1),
+      anchor,
+    });
+    const all = [
+      mk("m", { x: 0.1, y: 0.2, window: "main" }),
+      mk("none", {}),
+      mk("w1", { x: 0.3, y: 0.4, selector: ":scope > p", excerpt: "本文", window: "w1" }),
+      mk("w9", { x: 0.5, y: 0.6, selector: ":scope > div", excerpt: "古い", window: "w9" }),
+    ];
+    expect(commentsForWindow(all, "w1").map((c) => c.id)).toEqual(["w1"]);
+    expect(commentsForWindow(all, "w2")).toEqual([]);
+    const main = commentsForWindow(all, "main");
+    expect(main.map((c) => c.id)).toEqual(["m", "none", "w1", "w9"]);
+    // 自分宛と window 無しはそのまま
+    expect(main[0].anchor).toEqual({ x: 0.1, y: 0.2, window: "main" });
+    expect(main[1].anchor).toEqual({});
+    // 他ウィンドウ宛は位置を落とす（スタックへ回る）
+    expect(main[3].anchor).toEqual({ excerpt: "古い", window: "w9" });
+    expect(hasAnchorPosition(main[3].anchor)).toBe(false);
+    // 元の配列は変えない
+    expect(all[3].anchor.selector).toBe(":scope > div");
   });
 
   it("placePopup はルートからはみ出さない", () => {

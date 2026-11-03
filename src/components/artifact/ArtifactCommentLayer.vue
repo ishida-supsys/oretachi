@@ -153,6 +153,12 @@ function onPointerMove(e: PointerEvent) {
   dragEnd.value = toRootPoint(e);
 }
 
+/** キャンセルされたドラッグは拾い上げない（座標が不定なので、選択を捨てるだけ） */
+function onPointerCancel() {
+  dragStart.value = null;
+  dragEnd.value = null;
+}
+
 async function onPointerUp(e: PointerEvent) {
   const start = dragStart.value;
   if (!start) return;
@@ -308,7 +314,7 @@ function onTextareaKeydown(e: KeyboardEvent, submit: () => void) {
     @pointerdown="onPointerDown"
     @pointermove="onPointerMove"
     @pointerup="onPointerUp"
-    @pointercancel="onPointerUp"
+    @pointercancel="onPointerCancel"
   >
     <div v-if="active" class="cl-hint">
       <i class="pi pi-comment" />

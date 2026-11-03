@@ -2575,7 +2575,7 @@ impl NotifyService {
         }
     }
 
-    #[tool(description = "アーティファクトに付けられたコメント（ユーザーが画面上の位置に付けた修正指示）を確認・返信・解決する。list: コメント一覧 (id / author(user|ai) / body / anchor / replies / resolved)。anchor.excerpt は付けた時点の対象箇所の抜粋なので、アーティファクトを書き換えた後でも何を指していたかを追える。add: AI からコメントを付ける, reply: 返信, resolve / unresolve / resolve_all: 解決状態の変更。コメントはアーティファクト本体とは別に保存され、アーティファクトを update / rewrite / 同じ ID で create し直しても消えない。コメントの書き込みは locked_while_open の対象外 (本体に触らないため)。ユーザーのコメントに従ってアーティファクトを直したら、reply で報告するか resolve すること。対象は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は project_dir が必須", annotations(read_only_hint = true))]
+    #[tool(description = "アーティファクトに付けられたコメント（ユーザーが画面上の位置に付けた修正指示）を確認・返信・解決する。list: コメント一覧 (id / author(user|ai) / body / anchor / replies / resolved)。anchor.excerpt は付けた時点の対象箇所の抜粋なので、アーティファクトを書き換えた後でも何を指していたかを追える。add: AI からコメントを付ける, reply: 返信, resolve / unresolve / resolve_all: 解決状態の変更。コメントはアーティファクト本体とは別に保存され、アーティファクトを update / rewrite / 同じ ID で create し直しても消えない。コメントの書き込みは locked_while_open の対象外 (本体に触らないため)。ユーザーのコメントに従ってアーティファクトを直したら、reply で報告するか resolve すること。解決済みのコメントへ reply すると未解決に戻る (解決済みはビューアで非表示になり、返信が見えなくなるため) ので、reply と resolve の両方を行う場合は reply → resolve の順で呼ぶこと。対象は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は project_dir が必須", annotations(read_only_hint = true))]
     async fn artifact_comment(
         &self,
         Parameters(ArtifactCommentParams {
