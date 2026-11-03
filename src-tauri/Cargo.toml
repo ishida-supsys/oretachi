@@ -53,6 +53,7 @@ portable-pty = "0.8"
 log = "0.4"
 rmcp = { version = "0.17", features = ["server", "transport-streamable-http-server"] }
 axum = "0.8"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 tokio = { version = "1", features = ["net", "sync", "time", "process", "io-util", "macros", "rt"] }
 notify = "7"
 notify-debouncer-mini = "0.5"

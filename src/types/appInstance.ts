@@ -73,6 +73,30 @@ export interface AppResolvedMedia {
   allow: string[];
 }
 
+/** スケジューラージョブの実行内容（承認した値そのもの） */
+export type AppSchedulerAction =
+  | { type: "tool"; tool: string; params: Record<string, unknown> }
+  | {
+      type: "aiTerminal";
+      title?: string;
+      initialPrompt: string;
+      systemPrompt?: string;
+      model?: string;
+      cwd?: string;
+    };
+
+export interface AppSchedulerJob {
+  id: string;
+  /** 5 フィールドの cron 式（ローカル時刻） */
+  cron: string;
+  action: AppSchedulerAction;
+}
+
+/** cron 式で動く無人ジョブ（アプリが起動中のあいだだけ。承認した値そのものが実行の入力になる） */
+export interface AppSchedulerPermission {
+  jobs: AppSchedulerJob[];
+}
+
 export interface AppResolvedPermissions {
   mcp?: { tools: string[]; targets: AppResolvedTarget[] };
   memory?: { maxBytes: number };
@@ -85,6 +109,7 @@ export interface AppResolvedPermissions {
   subWindow?: AppSubWindowPermission;
   audio?: AppAudioPermission;
   media?: AppResolvedMedia;
+  scheduler?: AppSchedulerPermission;
 }
 
 export interface AppRequestedPermissions {
@@ -97,6 +122,7 @@ export interface AppRequestedPermissions {
   subWindow?: AppSubWindowPermission;
   audio?: AppAudioPermission;
   media?: { read: string[]; allow: string[] };
+  scheduler?: AppSchedulerPermission;
 }
 
 export interface AppGrant {

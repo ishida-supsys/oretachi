@@ -46,6 +46,10 @@ export function summarizeGrant(resolved: AppResolvedPermissions): SummaryPart[] 
   if (mediaLocal + mediaNet > 0) {
     parts.push({ key: "summaryMedia", params: { local: mediaLocal, net: mediaNet }, critical: false });
   }
+  const jobs = v.rows.filter((r) => r.kind === "scheduler");
+  if (jobs.length > 0) {
+    parts.push({ key: "summaryScheduler", params: { count: jobs.length }, critical: jobs.some((r) => r.severity === "critical") });
+  }
   const sw = v.rows.find((r) => r.kind === "subWindow");
   if (sw) {
     const overlay = v.rows.some((r) => r.kind === "subWindowFlag" && r.severity === "danger");

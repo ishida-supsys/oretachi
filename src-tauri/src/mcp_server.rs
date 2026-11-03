@@ -6994,6 +6994,8 @@ pub(crate) fn resolve_app_permissions(
             .media
             .as_ref()
             .map(|m| crate::app_manifest::ResolvedMedia { fs: None, allow: m.allow.clone() }),
+        // 実行内容はそのまま（承認した値が実行の入力になる）
+        scheduler: requested.scheduler.clone(),
     })
 }
 
@@ -10306,6 +10308,7 @@ mod tests {
             sub_window: None,
             audio: None,
             media: None,
+            scheduler: None,
         }
     }
 
@@ -10348,6 +10351,7 @@ mod tests {
             sub_window: None,
             audio: None,
             media: None,
+            scheduler: None,
         };
         assert!(crate::app_manifest::authorize_app_cross_target(&r, &dest).is_ok());
         let dest_other = cross_worktree_dest_targets(&settings, "wt-other");

@@ -88,6 +88,17 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
               <strong>{{ t("aiTerminalSummary", { spec: r.value }) }}</strong>
               <div class="why">{{ t("aiTerminalWarning") }}</div>
             </template>
+            <template v-else-if="r.kind === 'scheduler'">
+              <span class="kind">{{ t("kindScheduler") }}</span>
+              <strong>{{ r.label }}</strong>
+              <code class="path">{{ r.cron }}</code>
+              <div class="spec">
+                {{ r.action === "aiTerminal" ? t("schedulerAiTerminal", { prompt: r.detail }) : t("schedulerTool", { tool: r.detail }) }}
+              </div>
+              <div class="why" :class="{ neutral: r.severity !== 'critical' }">
+                {{ r.action === "aiTerminal" ? t("schedulerAiWarning") : r.severity === "critical" ? t("schedulerDangerToolWarning") : t("schedulerNote") }}
+              </div>
+            </template>
             <template v-else-if="r.kind === 'audio'">
               <span class="kind">{{ t("kindAudio") }}</span>
               <strong>{{ t("audioSummary") }}</strong>
@@ -172,6 +183,7 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
               <s v-else-if="r.kind === 'memory'">{{ t("memoryMax", { bytes: r.value }) }}</s>
               <s v-else-if="r.kind === 'aiTerminal'">{{ t("aiTerminalSummary", { spec: r.value }) }}</s>
               <s v-else-if="r.kind === 'audio'">{{ t("audioSummary") }} ({{ r.value }})</s>
+              <s v-else-if="r.kind === 'scheduler'">{{ r.label }} <code>{{ r.cron }}</code> {{ r.detail }}</s>
               <s v-else-if="r.kind === 'network' || r.kind === 'mediaNet' || r.kind === 'mediaRead'"><code>{{ r.label }}</code></s>
               <s v-else-if="r.kind === 'subWindow'">{{ t("subWindowSummary", { spec: r.label }) }}</s>
               <s v-else-if="r.kind === 'subWindowFlag'">{{ t("subWindowFlag_" + r.value) }}</s>
@@ -435,6 +447,12 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
     "audioSpec": "(up to {spec})",
     "audioWarning": "The app can hear everything the microphone picks up, including your voice and anything said near your PC, as raw audio. Recording is shown in the launch screen and in the window titles, and stops when the app stops, reloads, or you press Stop recording. The audio is not saved by oretachi.",
     "kindAiTerminal": "AI terminal",
+    "kindScheduler": "Scheduler",
+    "schedulerTool": "Calls the tool {tool} (with the parameters written in the app's manifest).",
+    "schedulerAiTerminal": "Opens an AI terminal with this prompt: {prompt}",
+    "schedulerNote": "Runs on this schedule (local time) while the app is running, with nobody watching. Only when the app is running; runs missed while it was stopped are not made up.",
+    "schedulerDangerToolWarning": "Runs on this schedule (local time) while the app is running, with nobody watching. This tool can act with the same authority as you (typing into terminals, answering dialogs, starting tasks).",
+    "schedulerAiWarning": "Starts an agent on this schedule (local time) while the app is running, with nobody watching. The agent runs with the same authority as you and can run arbitrary commands and edit files in this worktree. Scheduled terminals stay open until the app or you close them, and count toward the app's AI terminal limit.",
     "aiTerminalSummary": "Open dedicated AI terminals ({spec})",
     "aiTerminalWarning": "Starts an agent that runs with the same authority as you (it can run arbitrary commands and edit files in this worktree). The app can type into it, read its output and answer its permission dialogs. This is the strongest permission.",
     "kindFsRead": "Read files",
@@ -507,6 +525,12 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
     "audioSpec": "（{spec}）",
     "audioWarning": "あなたの声や PC の近くで話された内容を含む、マイクが拾うすべての音を、生の音声としてアプリが聞けます。録音中は起動画面とウィンドウのタイトルに表示され、アプリの停止・リロード・起動画面の「録音を止める」で止まります。oretachi は音声を保存しません。",
     "kindAiTerminal": "AI ターミナル",
+    "kindScheduler": "スケジューラー",
+    "schedulerTool": "ツール {tool} を呼びます（パラメーターは manifest に書かれた内容そのまま）。",
+    "schedulerAiTerminal": "次のプロンプトで AI ターミナルを開きます: {prompt}",
+    "schedulerNote": "アプリが起動しているあいだ、この周期（ローカル時刻）で、誰も見ていなくても実行されます。アプリが止まっている間の分は、あとから実行されません。",
+    "schedulerDangerToolWarning": "アプリが起動しているあいだ、この周期（ローカル時刻）で、誰も見ていなくても実行されます。このツールはあなたと同じ権限で動けます（端末への入力・ダイアログへの回答・タスクの開始）。",
+    "schedulerAiWarning": "アプリが起動しているあいだ、この周期（ローカル時刻）で、誰も見ていなくてもエージェントを起動します。エージェントはあなたと同じ権限で動き、このワークツリーで任意のコマンド実行やファイル編集ができます。開いた端末は、アプリかあなたが閉じるまで残り、アプリの AI ターミナル数の上限に数えられます。",
     "aiTerminalSummary": "専用の AI ターミナルを開く（{spec}）",
     "aiTerminalWarning": "あなたと同じ権限で動くエージェントを起動します（このワークツリーで任意のコマンド実行やファイル編集ができます）。アプリはそのエージェントへ入力し、出力を読み、許可ダイアログに回答できます。最も強い権限です。",
     "kindFsRead": "ファイルの読み取り",

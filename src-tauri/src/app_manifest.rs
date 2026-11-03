@@ -23,6 +23,11 @@ pub const AI_TERMINAL_AGENTS: &[&str] = &["claude"];
 /// `aiTerminal.maxConcurrent` の上限（インスタンスごと）。
 pub const AI_TERMINAL_MAX_CONCURRENT_CAP: u32 = 4;
 
+/// `scheduler.jobs` の最大件数と、tool ジョブの `params` の最大バイト数（シリアライズ後）。
+pub const SCHEDULER_MAX_JOBS: usize = 10;
+pub const SCHEDULER_PARAMS_MAX_BYTES: usize = 16 * 1024;
+const SCHEDULER_MAX_ID_CHARS: usize = 40;
+
 /// `subWindow.maxCount` の上限（インスタンスごと）。
 pub const SUB_WINDOW_MAX_COUNT_CAP: u32 = 4;
 /// `subWindow.maxWidth` / `maxHeight` の下限（書いた場合のみ）。上限は設けない（省略 = 上限なし）
@@ -84,6 +89,53 @@ pub struct AiTerminalPermission {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkPermission {
     pub allow: Vec<String>,
+}
+
+/// スケジューラージョブの実行内容。承認ダイアログに**そのまま**見せる（無人で動くので、何が走るかを
+/// 承認時点で固定する）。`tool` は `mcp.tools` の、`aiTerminal` は `aiTerminal` 権限の範囲でだけ動く
+/// （parse 時に宣言を要求し、実行時も既存の関門を通る）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum SchedulerAction {
+    #[serde(rename = "tool")]
+    Tool {
+        tool: String,
+        /// JSON オブジェクト（省略は `{}`）
+        #[serde(default = "empty_object")]
+        params: serde_json::Value,
+    },
+    #[serde(rename = "aiTerminal", rename_all = "camelCase")]
+    AiTerminal {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        initial_prompt: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        system_prompt: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
+}
+
+fn empty_object() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerJob {
+    pub id: String,
+    /// 5 フィールドの cron 式（空白 1 つに正規化済み。ローカル時刻で評価する）
+    pub cron: String,
+    pub action: SchedulerAction,
+}
+
+/// manifest の `scheduler`。アプリのインスタンスが**起動中**（Running）のあいだだけ、ホスト側が
+/// `jobs` を cron 式どおりに実行する。再起動をまたいで復活しない・取りこぼした回の追いかけ実行はしない。
+/// `jobs` は id でソート済み。解決で変わるものがない（承認した値がそのまま実行の入力になる）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SchedulerPermission {
+    pub jobs: Vec<SchedulerJob>,
 }
 
 /// manifest の `media`。`<video>` / `<audio>` の `src` に直接渡せるローカルファイルと URL の申請。
@@ -211,6 +263,9 @@ pub struct RequestedPermissions {
     /// manifest の `media`。動画・音声の再生（`app_media.rs` の appmedia プロトコル）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media: Option<RequestedMedia>,
+    /// manifest の `scheduler`。cron 式で動く無人ジョブ（`app_scheduler.rs`）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler: Option<SchedulerPermission>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -265,6 +320,9 @@ pub struct ResolvedPermissions {
     /// `read` はパスを解決した形（`fs` と同様）。`allow` はそのまま
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media: Option<ResolvedMedia>,
+    /// 解決で変わるものがない（承認した値がそのまま実行の入力になる）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduler: Option<SchedulerPermission>,
 }
 
 /// host 側に保存する承認。キーはアーティファクト識別子（`<worktreeId>/<artifactId>`）。
@@ -370,6 +428,7 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
             "subWindow" => out.sub_window = parse_sub_window(val)?,
             "audio" => out.audio = parse_audio(val)?,
             "media" => out.media = parse_media(val)?,
+            "scheduler" => out.scheduler = parse_scheduler(val)?,
             k if RESERVED_PERMISSION_KEYS.contains(&k) => {
                 return Err(format!(
                     "権限 '{}' はこの版ではまだ使えません（対応する機能が未実装です）。manifest から外してください",
@@ -378,13 +437,43 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
             }
             other => {
                 return Err(format!(
-                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs / db / network / subWindow / aiTerminal / audio / media だけです",
+                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs / db / network / subWindow / aiTerminal / audio / media / scheduler だけです",
                     other
                 ));
             }
         }
     }
+    check_scheduler_against_permissions(&out)?;
     Ok(out)
+}
+
+/// スケジューラーが他の権限の迂回路にならないようにする。tool ジョブは `mcp.tools` に宣言済みのツールだけ、
+/// aiTerminal ジョブは `aiTerminal` 権限を申請したときだけ書ける（承認ダイアログで別々に見えるものを、
+/// スケジューラー経由で黙って使わせない）。
+fn check_scheduler_against_permissions(p: &RequestedPermissions) -> Result<(), String> {
+    let Some(sch) = &p.scheduler else { return Ok(()) };
+    for job in &sch.jobs {
+        match &job.action {
+            SchedulerAction::Tool { tool, .. } => {
+                let declared = p.mcp.as_ref().map(|m| m.tools.iter().any(|t| t == tool)).unwrap_or(false);
+                if !declared {
+                    return Err(format!(
+                        "app.permissions.scheduler のジョブ '{}' が呼ぶツール '{}' は、app.permissions.mcp.tools にも宣言してください",
+                        job.id, tool
+                    ));
+                }
+            }
+            SchedulerAction::AiTerminal { .. } => {
+                if p.ai_terminal.is_none() {
+                    return Err(format!(
+                        "app.permissions.scheduler のジョブ '{}' は AI ターミナルを開きます。app.permissions.aiTerminal も申請してください",
+                        job.id
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn string_list(
@@ -593,6 +682,110 @@ fn parse_audio(v: &serde_json::Value) -> Result<Option<AudioPermission>, String>
         Some(_) => return Err("app.permissions.audio.sampleRates は整数の配列である必要があります".to_string()),
     };
     Ok(Some(AudioPermission { microphone: true, max_seconds, sample_rates }))
+}
+
+fn parse_scheduler(v: &serde_json::Value) -> Result<Option<SchedulerPermission>, String> {
+    let what = "app.permissions.scheduler";
+    let obj = expect_object(v, what)?;
+    if let Some(k) = obj.keys().find(|k| k.as_str() != "jobs") {
+        return Err(format!("{} の未知のキー '{}' です（jobs だけ）", what, k));
+    }
+    let items = match obj.get("jobs") {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(serde_json::Value::Array(a)) => a,
+        Some(_) => return Err(format!("{}.jobs はオブジェクトの配列である必要があります", what)),
+    };
+    if items.is_empty() {
+        return Ok(None);
+    }
+    if items.len() > SCHEDULER_MAX_JOBS {
+        return Err(format!("{}.jobs は {} 件までです", what, SCHEDULER_MAX_JOBS));
+    }
+    let mut jobs: Vec<SchedulerJob> = Vec::with_capacity(items.len());
+    for (i, item) in items.iter().enumerate() {
+        let jwhat = format!("{}.jobs[{}]", what, i);
+        let jobj = expect_object(item, &jwhat)?;
+        if let Some(k) = jobj.keys().find(|k| !matches!(k.as_str(), "id" | "cron" | "action")) {
+            return Err(format!("{} の未知のキー '{}' です（id / cron / action だけ）", jwhat, k));
+        }
+        let id = optional_text(jobj, "id", SCHEDULER_MAX_ID_CHARS)?
+            .ok_or_else(|| format!("{}.id は必須です（空でない文字列）", jwhat))?;
+        if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+            return Err(format!("{}.id は英数字・-・_ だけにしてください: {}", jwhat, id));
+        }
+        if jobs.iter().any(|j| j.id == id) {
+            return Err(format!("{}.id '{}' が重複しています", what, id));
+        }
+        let cron_raw = optional_text(jobj, "cron", 100)?
+            .ok_or_else(|| format!("{}.cron は必須です（5 フィールドの cron 式）", jwhat))?;
+        let cron = crate::app_scheduler::normalize_cron(&cron_raw);
+        crate::app_scheduler::CronSpec::parse(&cron).map_err(|e| format!("{}.cron が不正です: {}", jwhat, e))?;
+        let action = parse_scheduler_action(jobj.get("action"), &format!("{}.action", jwhat))?;
+        jobs.push(SchedulerJob { id, cron, action });
+    }
+    jobs.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(Some(SchedulerPermission { jobs }))
+}
+
+fn parse_scheduler_action(v: Option<&serde_json::Value>, what: &str) -> Result<SchedulerAction, String> {
+    let obj = expect_object(v.ok_or_else(|| format!("{} は必須です", what))?, what)?;
+    let ty = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    match ty {
+        "tool" => {
+            if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "type" | "tool" | "params")) {
+                return Err(format!("{} の未知のキー '{}' です（type / tool / params だけ）", what, k));
+            }
+            let tool = optional_text(obj, "tool", MAX_TARGET_CHARS)?
+                .ok_or_else(|| format!("{}.tool は必須です", what))?;
+            let params = match obj.get("params") {
+                None | Some(serde_json::Value::Null) => empty_object(),
+                Some(p @ serde_json::Value::Object(_)) => p.clone(),
+                Some(_) => return Err(format!("{}.params は JSON オブジェクトである必要があります", what)),
+            };
+            let size = serde_json::to_string(&params).map_err(|e| e.to_string())?.len();
+            if size > SCHEDULER_PARAMS_MAX_BYTES {
+                return Err(format!("{}.params は {} バイト以内にしてください（{} バイト）", what, SCHEDULER_PARAMS_MAX_BYTES, size));
+            }
+            Ok(SchedulerAction::Tool { tool, params })
+        }
+        "aiTerminal" => {
+            const KEYS: &[&str] = &["type", "title", "initialPrompt", "systemPrompt", "model", "cwd"];
+            if let Some(k) = obj.keys().find(|k| !KEYS.contains(&k.as_str())) {
+                return Err(format!("{} の未知のキー '{}' です（{} だけ）", what, k, KEYS.join(" / ")));
+            }
+            let text = |key: &str, max: usize| -> Result<Option<String>, String> {
+                match obj.get(key) {
+                    None | Some(serde_json::Value::Null) => Ok(None),
+                    Some(serde_json::Value::String(s)) => {
+                        if s.chars().count() > max {
+                            return Err(format!("{}.{} は {} 文字以内にしてください", what, key, max));
+                        }
+                        if s.contains('\0') {
+                            return Err(format!("{}.{} に NUL は使えません", what, key));
+                        }
+                        Ok(Some(s.clone()).filter(|s| !s.trim().is_empty()))
+                    }
+                    Some(_) => Err(format!("{}.{} は文字列である必要があります", what, key)),
+                }
+            };
+            // 無人で起動するエージェントが何をするかは initialPrompt で決まる。空は「何もしない端末を開く」
+            // だけなので、書き忘れとして拒否する
+            let initial_prompt = text("initialPrompt", crate::ai_terminal::MAX_PROMPT_CHARS)?
+                .ok_or_else(|| format!("{}.initialPrompt は必須です（空でない文字列）", what))?;
+            let model = text("model", MAX_NAME_CHARS)?;
+            if let Some(m) = model.as_deref() {
+                crate::ai_terminal::validate_model(m).map_err(|e| format!("{}.model: {}", what, e))?;
+            }
+            Ok(SchedulerAction::AiTerminal {
+                title: text("title", crate::ai_terminal::MAX_TITLE_CHARS)?,
+                initial_prompt,
+                system_prompt: text("systemPrompt", crate::ai_terminal::MAX_PROMPT_CHARS)?,
+                model,
+                cwd: text("cwd", 260)?,
+            })
+        }
+        other => Err(format!("{}.type '{}' は指定できません（tool / aiTerminal）", what, other)),
+    }
 }
 
 fn parse_memory(v: &serde_json::Value) -> Result<Option<MemoryPermission>, String> {
@@ -1054,6 +1247,146 @@ mod tests {
         assert!(!requested_changed(&a.permissions, &c.permissions));
     }
 
+    fn sched(jobs: serde_json::Value, extra: serde_json::Value) -> serde_json::Value {
+        let mut perms = json!({ "scheduler": { "jobs": jobs } });
+        if let (Some(o), Some(e)) = (perms.as_object_mut(), extra.as_object()) {
+            for (k, v) in e {
+                o.insert(k.clone(), v.clone());
+            }
+        }
+        json!({ "name": "x", "permissions": perms })
+    }
+
+    fn tool_job(id: &str, cron: &str) -> serde_json::Value {
+        json!({ "id": id, "cron": cron, "action": { "type": "tool", "tool": "notify_worktree", "params": { "kind": "message" } } })
+    }
+
+    fn mcp_notify() -> serde_json::Value {
+        json!({ "mcp": { "tools": ["notify_worktree"] } })
+    }
+
+    #[test]
+    fn parses_scheduler_and_normalizes() {
+        let m = ok(sched(
+            json!([
+                tool_job("b-job", "  0   9 * *  1-5 "),
+                {
+                    "id": "a_job", "cron": "*/30 * * * *",
+                    "action": { "type": "aiTerminal", "initialPrompt": "run report", "title": "  ", "model": null }
+                }
+            ]),
+            json!({ "mcp": { "tools": ["notify_worktree"] }, "aiTerminal": { "agents": ["claude"], "maxConcurrent": 1 } }),
+        ));
+        let jobs = m.permissions.scheduler.unwrap().jobs;
+        // id でソート、cron は空白 1 つに正規化
+        assert_eq!(jobs.iter().map(|j| j.id.as_str()).collect::<Vec<_>>(), vec!["a_job", "b-job"]);
+        assert_eq!(jobs[1].cron, "0 9 * * 1-5");
+        match &jobs[0].action {
+            SchedulerAction::AiTerminal { title, initial_prompt, model, .. } => {
+                assert_eq!((title.as_deref(), initial_prompt.as_str(), model.as_deref()), (None, "run report", None));
+            }
+            other => panic!("{other:?}"),
+        }
+        // params 省略は {}
+        let m = ok(sched(
+            json!([{ "id": "t", "cron": "* * * * *", "action": { "type": "tool", "tool": "notify_worktree" } }]),
+            mcp_notify(),
+        ));
+        match &m.permissions.scheduler.unwrap().jobs[0].action {
+            SchedulerAction::Tool { params, .. } => assert_eq!(params, &json!({})),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn empty_scheduler_means_no_permission() {
+        assert!(ok(json!({ "name": "x", "permissions": { "scheduler": { "jobs": [] } } })).permissions.scheduler.is_none());
+        assert!(ok(json!({ "name": "x", "permissions": { "scheduler": {} } })).permissions.scheduler.is_none());
+    }
+
+    #[test]
+    fn rejects_bad_scheduler() {
+        let e = |jobs: serde_json::Value, extra: serde_json::Value| err(sched(jobs, extra));
+        let m = mcp_notify();
+        assert!(err(json!({ "name": "x", "permissions": { "scheduler": { "jobs": [], "tz": "UTC" } } })).contains("未知のキー"));
+        assert!(err(json!({ "name": "x", "permissions": { "scheduler": { "jobs": "x" } } })).contains("配列"));
+        assert!(e(json!([tool_job("a", "* * * *")]), m.clone()).contains("cron"));
+        assert!(e(json!([tool_job("a", "61 * * * *")]), m.clone()).contains("cron"));
+        assert!(e(json!([tool_job("a b", "* * * * *")]), m.clone()).contains("id"));
+        assert!(e(json!([tool_job("a", "* * * * *"), tool_job("a", "0 * * * *")]), m.clone()).contains("重複"));
+        assert!(e(json!([{ "cron": "* * * * *", "action": { "type": "tool", "tool": "notify_worktree" } }]), m.clone()).contains("id"));
+        assert!(e(json!([{ "id": "a", "cron": "* * * * *" }]), m.clone()).contains("action"));
+        assert!(e(json!([{ "id": "a", "cron": "* * * * *", "action": { "type": "shell", "cmd": "x" } }]), m.clone()).contains("type"));
+        assert!(e(json!([{ "id": "a", "cron": "* * * * *", "action": { "type": "tool", "tool": "notify_worktree", "x": 1 } }]), m.clone()).contains("未知のキー"));
+        assert!(e(json!([{ "id": "a", "cron": "* * * * *", "action": { "type": "tool", "tool": "notify_worktree", "params": [] } }]), m.clone()).contains("オブジェクト"));
+        assert!(e(json!([{ "id": "a", "cron": "* * * * *", "extra": 1, "action": { "type": "tool", "tool": "notify_worktree" } }]), m.clone()).contains("未知のキー"));
+        let big = "x".repeat(SCHEDULER_PARAMS_MAX_BYTES + 1);
+        assert!(e(json!([{ "id": "a", "cron": "* * * * *", "action": { "type": "tool", "tool": "notify_worktree", "params": { "k": big } } }]), m.clone()).contains("バイト"));
+        let many: Vec<_> = (0..=SCHEDULER_MAX_JOBS).map(|i| tool_job(&format!("j{i}"), "* * * * *")).collect();
+        assert!(e(json!(many), m).contains("件まで"));
+    }
+
+    #[test]
+    fn rejects_bad_scheduler_ai_terminal_action() {
+        let ai = json!({ "aiTerminal": { "agents": ["claude"], "maxConcurrent": 1 } });
+        let job = |action: serde_json::Value| json!([{ "id": "a", "cron": "* * * * *", "action": action }]);
+        // initialPrompt は必須（空・空白も不可）
+        assert!(err(sched(job(json!({ "type": "aiTerminal" })), ai.clone())).contains("initialPrompt"));
+        assert!(err(sched(job(json!({ "type": "aiTerminal", "initialPrompt": "  " })), ai.clone())).contains("initialPrompt"));
+        assert!(err(sched(job(json!({ "type": "aiTerminal", "initialPrompt": "x", "permissionMode": "bypass" })), ai.clone())).contains("未知のキー"));
+        assert!(err(sched(job(json!({ "type": "aiTerminal", "initialPrompt": "x\u{0}" })), ai.clone())).contains("NUL"));
+        assert!(err(sched(job(json!({ "type": "aiTerminal", "initialPrompt": "x", "model": "--dangerous flag" })), ai)).contains("model"));
+    }
+
+    #[test]
+    fn scheduler_cannot_bypass_other_permissions() {
+        // tool ジョブは mcp.tools に宣言したツールだけ
+        let e = err(sched(json!([tool_job("a", "* * * * *")]), json!({})));
+        assert!(e.contains("mcp.tools"), "{e}");
+        let e = err(sched(json!([tool_job("a", "* * * * *")]), json!({ "mcp": { "tools": ["oretachi_poll_inbox"] } })));
+        assert!(e.contains("mcp.tools"), "{e}");
+        // aiTerminal ジョブは aiTerminal 権限が要る
+        let e = err(sched(
+            json!([{ "id": "a", "cron": "* * * * *", "action": { "type": "aiTerminal", "initialPrompt": "x" } }]),
+            json!({}),
+        ));
+        assert!(e.contains("aiTerminal"), "{e}");
+    }
+
+    #[test]
+    fn scheduler_change_requires_reapproval() {
+        let a = ok(sched(json!([tool_job("a", "0 9 * * *")]), mcp_notify()));
+        let same = ok(sched(json!([tool_job("a", "0  9 * * *")]), mcp_notify())); // 空白の揺れ
+        let later = ok(sched(json!([tool_job("a", "0 10 * * *")]), mcp_notify()));
+        let none = ok(json!({ "name": "x", "permissions": mcp_notify() }));
+        assert!(!requested_changed(&a.permissions, &same.permissions));
+        assert!(requested_changed(&a.permissions, &later.permissions));
+        assert!(requested_changed(&a.permissions, &none.permissions));
+        assert!(requested_changed(&none.permissions, &a.permissions));
+    }
+
+    #[test]
+    fn legacy_grant_without_scheduler_deserializes_as_no_scheduler() {
+        let raw = r#"{"grantedAt":1,"requested":{"memory":{"maxBytes":10}},"resolved":{"memory":{"maxBytes":10}}}"#;
+        let g: AppGrant = serde_json::from_str(raw).unwrap();
+        assert!(g.resolved.scheduler.is_none() && g.requested.scheduler.is_none());
+    }
+
+    #[test]
+    fn scheduler_grant_roundtrips_through_json() {
+        let m = ok(sched(
+            json!([
+                tool_job("t", "5 4 * * *"),
+                { "id": "ai", "cron": "0 * * * *", "action": { "type": "aiTerminal", "initialPrompt": "p", "systemPrompt": "s", "cwd": "sub" } }
+            ]),
+            json!({ "mcp": { "tools": ["notify_worktree"] }, "aiTerminal": { "agents": ["claude"], "maxConcurrent": 1 } }),
+        ));
+        let sch = m.permissions.scheduler.clone().unwrap();
+        let s = serde_json::to_string(&sch).unwrap();
+        assert!(s.contains("\"type\":\"aiTerminal\"") && s.contains("initialPrompt") && s.contains("\"type\":\"tool\""));
+        assert_eq!(serde_json::from_str::<SchedulerPermission>(&s).unwrap(), sch);
+    }
+
     #[test]
     fn legacy_grant_without_media_deserializes_as_no_media() {
         // #402 より前に保存された grant（media キー無し）は、media 権限なしとして読める
@@ -1347,6 +1680,7 @@ mod tests {
             sub_window: None,
             audio: None,
             media: None,
+            scheduler: None,
         }
     }
 
@@ -1388,6 +1722,7 @@ mod tests {
                 sub_window: None,
                 audio: None,
                 media: Some(RequestedMedia { read: vec!["worktree://videos/".into()], allow: vec!["https://cdn.example.com/".into()] }),
+                scheduler: None,
             },
             resolved: resolved(&["notify_worktree"], &["wt-b"]),
         };

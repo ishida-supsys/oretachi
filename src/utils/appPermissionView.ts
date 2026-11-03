@@ -31,6 +31,7 @@ export const PERMISSION_ROW_KINDS = [
   "audio",
   "mediaRead",
   "mediaNet",
+  "scheduler",
 ] as const;
 
 export type PermissionRowKind = (typeof PERMISSION_ROW_KINDS)[number];
@@ -59,6 +60,10 @@ export interface PermissionRow {
   severity: PermissionSeverity;
   /** 越境先がワイルドカードか（承認後に作られるワークツリーにも当たる） */
   wildcard: boolean;
+  /** `scheduler` 行: ジョブの cron 式 / 実行内容の種別 / 実行内容の 1 行表示（ツール名または initialPrompt の冒頭） */
+  cron?: string;
+  action?: "tool" | "aiTerminal";
+  detail?: string;
   /** 再承認で、直前の権限に無かった行 */
   added: boolean;
 }
@@ -164,6 +169,24 @@ function rowsOf(perm: AppResolvedPermissions, dangerous: ReadonlySet<string>): P
       added: false,
     });
   }
+  // スケジューラー（#413）: 無人で動くジョブ 1 件ごとに 1 行。value に実行内容の全体を入れるので、
+  // cron・ツール・params・プロンプトのどれが変わっても再承認の差分（追加・外れ）に出る。
+  // AI ターミナルを開くジョブと、危険なツールを呼ぶジョブは、人が見ていない所で動くので critical
+  for (const job of perm.scheduler?.jobs ?? []) {
+    const a = job.action;
+    const isAi = a.type === "aiTerminal";
+    rows.push({
+      kind: "scheduler",
+      value: JSON.stringify([job.id, job.cron, a]),
+      label: job.id,
+      cron: job.cron,
+      action: a.type,
+      detail: isAi ? truncate(a.initialPrompt, 200) : a.tool,
+      severity: isAi || dangerous.has(a.tool) ? "critical" : "normal",
+      wildcard: false,
+      added: false,
+    });
+  }
   // サブウィンドウ: 数と大きさの上限を 1 行、申請した見た目・位置の権限を 1 件ごとに 1 行。
   // 透明・枠なし・常に前面は、他のウィンドウの上に重なって操作を横取りできるので danger。位置の指定は normal
   if (perm.subWindow) {
@@ -191,6 +214,11 @@ function rowsOf(perm: AppResolvedPermissions, dangerous: ReadonlySet<string>): P
   if (perm.fs) rows.push(...scopeRows(perm.fs, "fs", "fsSensitive"));
   if (perm.db) rows.push(...scopeRows(perm.db, "db", "dbSensitive"));
   return rows;
+}
+
+function truncate(s: string, max: number): string {
+  const t = s.replace(/\s+/g, " ").trim();
+  return t.length > max ? t.slice(0, max) + "…" : t;
 }
 
 /** FS / DB のスコープの行（両者は同じ形で、種別だけ違う） */
