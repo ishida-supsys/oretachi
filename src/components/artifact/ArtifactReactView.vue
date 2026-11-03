@@ -83,7 +83,12 @@ function pushMemory(memory: Record<string, unknown>) {
   postArtifactBridgeMemoryChanged(frame.value, memory);
 }
 
-defineExpose({ pushMemory });
+/** コメント層が iframe 内の座標を問い合わせるために使う */
+function getFrame(): HTMLIFrameElement | null {
+  return frame.value;
+}
+
+defineExpose({ pushMemory, getFrame });
 
 /**
  * iframe からの MCP ツール呼び出し。
@@ -220,7 +225,9 @@ const vendorHead = computed(() => {
 // content が変わっても vendorHead は再計算されない
 const srcdocHtml = computed(() => {
   if (!vendorHead.value) return "";
-  return buildReactSrcdoc(vendorHead.value, props.content, props.modules, initialMemory.value);
+  return buildReactSrcdoc(vendorHead.value, props.content, props.modules, initialMemory.value, {
+    comment: true,
+  });
 });
 
 // Code タブへ切り替えると iframe は v-show で隠れる。座標が残ったままになるので閉じる。

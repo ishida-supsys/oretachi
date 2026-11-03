@@ -1,4 +1,5 @@
 import type { AppManifestView } from "./appInstance";
+import type { ArtifactComment } from "./artifactComment";
 
 /** URL アーティファクトの content_type（Rust 側は artifact_url.rs の URL_ARTIFACT_CONTENT_TYPE） */
 export const URL_ARTIFACT_CONTENT_TYPE = "text/uri-list";
@@ -55,6 +56,11 @@ export interface ArtifactState {
    * `expected_updated_at`（楽観ロック）で突き合わせる値。
    */
   memoryUpdatedAt?: number;
+  /**
+   * コメント（人が付ける修正指示と AI の返信）。本体と別ファイルなので、AI が同じ ID で
+   * 作り直しても残る。転送・エクスポートでは持ち出さない。
+   */
+  comments?: ArtifactComment[];
 }
 
 /** MCP の `artifact_store` がストアを書き換えたときに飛ぶイベント */

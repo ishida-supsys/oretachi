@@ -16,6 +16,7 @@ mod app_instance;
 mod app_manifest;
 mod archive_db;
 mod artifact_export;
+mod artifact_comments;
 mod artifact_lock;
 mod artifact_url;
 mod claude_plugin;
@@ -91,7 +92,7 @@ pub(crate) fn artifacts_dir_in(
     Ok(data_dir.join("artifacts").join(worktree_id))
 }
 
-fn artifacts_dir(
+pub(crate) fn artifacts_dir(
     app_handle: &tauri::AppHandle,
     worktree_id: &str,
 ) -> Result<std::path::PathBuf, String> {
@@ -1060,7 +1061,7 @@ async fn list_artifact_states(
 /// 書き換える。マージするのは、同じファイルへ `pinned` / `memory` と別々のキーが
 /// 独立に書かれるため（丸ごと上書きすると他方が消える）。
 /// 変更後が空になったらファイルごと削除して、既定値だけのゴミを残さない。
-async fn update_artifact_state<F>(
+pub(crate) async fn update_artifact_state<F>(
     dir: std::path::PathBuf,
     artifact_id: &str,
     mutate: F,
@@ -2529,6 +2530,11 @@ pub fn run() {
             delete_artifact,
             list_artifact_states,
             set_artifact_pinned,
+            artifact_comments::add_artifact_comment,
+            artifact_comments::reply_artifact_comment,
+            artifact_comments::set_artifact_comment_resolved,
+            artifact_comments::resolve_all_artifact_comments,
+            artifact_comments::delete_artifact_comment,
             set_artifact_memory,
             list_repo_artifacts,
             read_repo_artifact,
@@ -2585,6 +2591,14 @@ pub fn run() {
             app_subwindow::app_subwindow_start_drag,
             app_instance::app_set_memory,
             app_instance::app_get_memory,
+            artifact_comments::app_comment_mode_set,
+            artifact_comments::app_comment_mode_get,
+            artifact_comments::app_comment_mode_exit,
+            artifact_comments::app_comments_list,
+            artifact_comments::app_comment_add,
+            artifact_comments::app_comment_reply,
+            artifact_comments::app_comment_resolve,
+            artifact_comments::app_comment_remove,
             app_instance::app_grant_respond,
             app_instance::list_pending_app_grants,
             app_instance::list_app_instances,

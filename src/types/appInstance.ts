@@ -233,6 +233,13 @@ export interface AppLaunchApi {
   log(artifactId: string): Promise<AppLogEntry[]>;
   grant(artifactId: string): Promise<AppGrant | null>;
   revoke(artifactId: string): Promise<boolean>;
+  /**
+   * アプリのウィンドウ（常駐 + サブ）のコメントモードを切り替える。起動していないアプリはエラー。
+   * 付けたコメントの UI はアプリ側のウィンドウが持つ（この起動画面にはコメントを付けない）。
+   */
+  setCommentMode(artifactId: string, enabled: boolean): Promise<void>;
+  /** アプリ側のウィンドウでコメントモードを抜けた（終了ボタン / Esc）ときの通知 */
+  onCommentModeExit(handler: (args: { artifactId: string }) => void): Promise<() => void>;
   onChanged(handler: (status: AppInstanceStatus) => void): Promise<() => void>;
   onLog(handler: (args: { artifactId: string; entry: AppLogEntry }) => void): Promise<() => void>;
 }

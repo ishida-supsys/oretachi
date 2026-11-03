@@ -1,6 +1,7 @@
 import type { InjectionKey } from "vue";
 import type { ArtifactMeta, ArtifactData, ArtifactState, CopyArtifactResult } from "../types/artifact";
 import type { AppLaunchApi } from "../types/appInstance";
+import type { CommentAnchor } from "../types/artifactComment";
 
 /**
  * ArtifactViewerApp.vue が使うデータアクセス / プラットフォーム操作の抽象層。
@@ -36,6 +37,8 @@ export interface ArtifactCapabilities {
    * Web ビューアは false（新しい特権 API は HTTP に出さない。起動不可と表示する）。
    */
   appLaunch: boolean;
+  /** コメントの付与・返信・解決（Web ビューアは false。書き込み用の HTTP API を出さない） */
+  comment: boolean;
 }
 
 export interface ArtifactChangedHandlerArgs {
@@ -50,6 +53,18 @@ export interface ArtifactChangedHandlerArgs {
 
 export interface ArtifactStateChangedHandlerArgs {
   artifactId: string;
+}
+
+/** capabilities.comment が true のときのみ利用可能。書き手は常に user（AI は MCP の artifact_comment） */
+export interface ArtifactCommentApi {
+  add(artifactId: string, body: string, anchor: CommentAnchor): Promise<string>;
+  reply(artifactId: string, commentId: string, body: string): Promise<string>;
+  setResolved(artifactId: string, commentId: string, resolved: boolean): Promise<void>;
+  /** 解決した件数を返す */
+  resolveAll(artifactId: string): Promise<number>;
+  remove(artifactId: string, commentId: string): Promise<void>;
+  /** コメントの変更通知（メモリーの onStateChanged とは別系統。React の iframe へ何も押し込まない） */
+  onChanged(handler: (args: { artifactId: string }) => void): Promise<() => void>;
 }
 
 export interface ArtifactDataSource {
@@ -92,6 +107,9 @@ export interface ArtifactDataSource {
 
   /** capabilities.appLaunch が true（かつワークツリースコープ）のときのみ利用可能 */
   app?: AppLaunchApi;
+
+  /** capabilities.comment が true のときのみ利用可能 */
+  comments?: ArtifactCommentApi;
 
   /** イベント購読。戻り値は購読解除関数（このスコープ宛でないイベントは実装側で捨てる） */
   onArtifactChanged(handler: (args: ArtifactChangedHandlerArgs) => void): Promise<() => void>;

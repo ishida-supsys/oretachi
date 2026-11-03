@@ -140,6 +140,7 @@ describe("createTauriArtifactViewerContext", () => {
       copyPng: true,
       transfer: true,
       appLaunch: true,
+      comment: true,
     });
   });
 

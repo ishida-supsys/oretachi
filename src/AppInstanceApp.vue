@@ -56,6 +56,10 @@ import { readArtifactLinkHoverMessage } from "./utils/artifactFrameLink";
 import { applyFrameLinkHover } from "./utils/artifactLinkHover";
 import { ARTIFACT_VIEWER_HOST_KEY, type ArtifactViewerHost } from "./utils/artifactDataSource";
 import { wsCommandFor } from "./utils/wsBridge";
+import ArtifactCommentLayer from "./components/artifact/ArtifactCommentLayer.vue";
+import { createFrameCommentAdapter } from "./utils/artifactFrameComment";
+import type { ArtifactComment, ArtifactCommentsChangedEvent, CommentAnchor } from "./types/artifactComment";
+import { commentsForWindow, type CommentAdapter } from "./utils/commentAnchor";
 
 interface Bootstrap {
   worktreeId: string;
@@ -103,6 +107,8 @@ const srcdoc = computed(() =>
     ? buildReactSrcdoc(vendorHead.value, boot.value.content, boot.value.modules, boot.value.memory, {
         nonce: nonce.value,
         app: true,
+        // コメント層（このシェルが持つ）が座標を問い合わせるためのプローブ
+        comment: true,
         mediaOrigin,
         ...(boot.value.subWindow
           ? {
@@ -436,6 +442,72 @@ async function pushExternalMemory() {
   }
 }
 
+// ─── コメント ─────────────────────────────────────────────────────────────────
+//
+// コメントの UI（ピン・入力・ポップアップ）はこのシェルが持ち、アプリの iframe には置かない
+// （アプリのコードは信頼しない）。iframe は座標問い合わせに答えるだけで、答えはシェルが検査してから使う。
+// モードの切り替えはビューアだけが行える。コメントの読み書きは Rust がこのウィンドウのラベルから
+// 引いたインスタンスのアーティファクトに限る（引数で選ばせない）。
+
+const shellEl = ref<HTMLElement | null>(null);
+const commentMode = ref(false);
+const allComments = ref<ArtifactComment[]>([]);
+
+/** コメントに記録するこのウィンドウの識別子（常駐は "main"、サブウィンドウはその ID） */
+const windowId = computed(() => boot.value?.subWindow?.id ?? "main");
+
+/**
+ * このウィンドウに出すコメント。window の無いコメント（AI が付けたものなど）は常駐ウィンドウ扱い。
+ * 閉じたサブウィンドウ宛のコメントは常駐ウィンドウの右上に位置なしで出す（見えない・解決できない状態を作らない）
+ */
+const windowComments = computed(() => commentsForWindow(allComments.value, windowId.value));
+
+const commentAdapter: CommentAdapter = (() => {
+  const inner = createFrameCommentAdapter(() => frame.value, () => shellEl.value);
+  return {
+    ...inner,
+    async pick(a, b) {
+      const picked = await inner.pick(a, b);
+      return picked ? { ...picked, window: windowId.value } : null;
+    },
+  };
+})();
+
+async function refreshComments() {
+  try {
+    allComments.value = await invoke<ArtifactComment[]>("app_comments_list");
+  } catch (e) {
+    report("warn", `コメントの取得に失敗: ${errorText(e)}`);
+  }
+}
+
+async function runCommentCommand(fn: () => Promise<unknown>) {
+  try {
+    await fn();
+    await refreshComments();
+  } catch (e) {
+    report("warn", `コメント操作に失敗: ${errorText(e)}`);
+  }
+}
+
+function onCommentSubmit(anchor: CommentAnchor, body: string) {
+  void runCommentCommand(() => invoke("app_comment_add", { body, anchor }));
+}
+function onCommentReply(commentId: string, body: string) {
+  void runCommentCommand(() => invoke("app_comment_reply", { commentId, body }));
+}
+function onCommentResolve(commentId: string) {
+  void runCommentCommand(() => invoke("app_comment_resolve", { commentId }));
+}
+function onCommentRemove(commentId: string) {
+  void runCommentCommand(() => invoke("app_comment_remove", { commentId }));
+}
+function onCommentExit() {
+  commentMode.value = false;
+  // ビューアのトグルも合わせる（全ウィンドウのモードを抜ける）
+  void invoke("app_comment_mode_exit").catch(() => {});
+}
+
 const unlisteners: UnlistenFn[] = [];
 
 onMounted(async () => {
@@ -482,6 +554,22 @@ onMounted(async () => {
         }
       }),
     );
+    // コメントモードの切り替え（ビューアから。Rust が `emit_to` で、このインスタンスのウィンドウだけへ送る）
+    unlisteners.push(
+      await getCurrentWebviewWindow().listen<boolean>("app-comment-mode", (event) => {
+        commentMode.value = event.payload === true;
+      }),
+    );
+    // コメントの変更（MCP の返信・別ウィンドウの追加を含む）
+    unlisteners.push(
+      await listen<ArtifactCommentsChangedEvent>("artifact-comments-changed", (event) => {
+        const p = event.payload;
+        const b = boot.value;
+        if (b && p.scope === "worktree" && p.scopeId === b.worktreeId && p.artifactId === b.artifactId) {
+          void refreshComments();
+        }
+      }),
+    );
     const [b, vendors] = await Promise.all([
       invoke<Bootstrap>("app_instance_bootstrap"),
       loadVendors(),
@@ -490,6 +578,9 @@ onMounted(async () => {
     applyWindowBackground(b);
     vendorHead.value = buildVendorHead(vendors.react, vendors.reactDom, vendors.babel, vendors.tailwind, { mediaOrigin });
     nonce.value = createCspNonce();
+    // 起動後に開いたサブウィンドウは、すでに ON のモードをここで拾う
+    commentMode.value = await invoke<boolean>("app_comment_mode_get").catch(() => false);
+    void refreshComments();
   } catch (e) {
     loadError.value = errorText(e);
     report("error", `実行ウィンドウの読み込みに失敗: ${loadError.value}`);
@@ -504,7 +595,7 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="appinst-shell" :class="{ transparent: boot?.subWindow?.transparent }">
+  <div ref="shellEl" class="appinst-shell" :class="{ transparent: boot?.subWindow?.transparent }">
     <div v-if="loadError" class="shell-error">{{ loadError }}</div>
     <iframe
       v-else-if="srcdoc"
@@ -516,6 +607,17 @@ onBeforeUnmount(() => {
     />
     <div v-else class="shell-loading">…</div>
     <ArtifactLinkHoverPopup ref="linkPopup" />
+    <ArtifactCommentLayer
+      v-if="srcdoc"
+      :comments="windowComments"
+      :active="commentMode"
+      :adapter="commentAdapter"
+      @submit="onCommentSubmit"
+      @reply="onCommentReply"
+      @resolve="onCommentResolve"
+      @remove="onCommentRemove"
+      @exit="onCommentExit"
+    />
   </div>
 </template>
 

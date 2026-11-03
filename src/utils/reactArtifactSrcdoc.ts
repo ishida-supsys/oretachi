@@ -4,6 +4,7 @@
  */
 
 import { ARTIFACT_LINK_INTERCEPT_JS } from "./artifactFrameLink";
+import { ARTIFACT_COMMENT_PROBE_JS } from "./artifactFrameComment";
 import {
   ARTIFACT_APP_FLAG,
   ARTIFACT_BRIDGE_JS,
@@ -178,6 +179,11 @@ export function buildReactSrcdoc(
      */
     standalone?: boolean;
     /**
+     * コメント用のプローブ（親からの座標問い合わせに答える）を注入するか。通常のビューアだけが true にする。
+     * エクスポートした単体 HTML やアプリのシェルには要らない。
+     */
+    comment?: boolean;
+    /**
      * アプリ（常駐ウィンドウのシェル）の iframe として組み立てる。メモリー保存に最大待ちと、
      * 拒否された書き込みの巻き戻しが効く（`ARTIFACT_APP_FLAG` の説明を参照）。通常のビューアは付けない
      */
@@ -239,6 +245,7 @@ export function buildReactSrcdoc(
     openTag(RUNTIME_JS) + "\n" +
     // React は要素を動的に差し替えるため、document 上の capture リスナーで拾う
     openTag(ARTIFACT_LINK_INTERCEPT_JS) + "\n" +
+    (options?.comment ? openTag(ARTIFACT_COMMENT_PROBE_JS) + "\n" : "") +
     "</body>\n</html>"
   );
 }

@@ -327,7 +327,7 @@ fn emit_grant_cancelled(app: &AppHandle, request_ids: &[String]) {
 
 /// 起動画面を持つビューア（`artifact-*`）からだけ受け付ける。`appinst-*` から呼べてしまうと
 /// アプリ自身が自分の起動・停止・承認取り消しをできてしまう。
-fn require_viewer(window: &tauri::Window) -> Result<(), String> {
+pub(crate) fn require_viewer(window: &tauri::Window) -> Result<(), String> {
     if window.label().starts_with("artifact-") {
         Ok(())
     } else {
@@ -817,6 +817,8 @@ fn release(app: &AppHandle, label: &str) -> Option<(String, String)> {
         crate::app_media::on_instance_released(app, label);
         // インスタンスが開いたサブウィンドウもすべて閉じる（再起動での復元はしない）
         crate::app_subwindow::on_instance_released(app, label);
+        // コメントモードも外す（再起動したアプリがコメントモードのまま始まらないように）
+        crate::artifact_comments::clear_app_mode(&inst.worktree_id, &inst.artifact_id);
         // インスタンスが開いた専用 AI ターミナルも、停止とともにすべて閉じる（再起動での復元はしない）。
         // ホットリロードは `release` を通らないので、リロードをまたいで維持される。
         crate::ai_terminal::close_all_for_instance(app, &(inst.worktree_id.clone(), inst.artifact_id.clone()));

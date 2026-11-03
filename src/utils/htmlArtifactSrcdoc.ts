@@ -18,6 +18,7 @@
  */
 
 import { ARTIFACT_LINK_INTERCEPT_JS } from "./artifactFrameLink";
+import { ARTIFACT_COMMENT_PROBE_JS } from "./artifactFrameComment";
 import {
   buildCspViolationReportJs,
   createCspNonce,
@@ -30,7 +31,13 @@ export interface HtmlArtifactSrcdoc {
   nonce: string;
 }
 
-export function buildHtmlSrcdoc(content: string): HtmlArtifactSrcdoc {
+export function buildHtmlSrcdoc(
+  content: string,
+  options?: {
+    /** コメント用のプローブを注入するか（通常のビューアだけ true） */
+    comment?: boolean;
+  },
+): HtmlArtifactSrcdoc {
   const doc = new DOMParser().parseFromString(content, "text/html");
 
   const script = doc.createElement("script");
@@ -40,6 +47,12 @@ export function buildHtmlSrcdoc(content: string): HtmlArtifactSrcdoc {
   const host =
     doc.body && doc.body.tagName !== "FRAMESET" ? doc.body : doc.head;
   host.appendChild(script);
+
+  if (options?.comment) {
+    const probe = doc.createElement("script");
+    probe.textContent = ARTIFACT_COMMENT_PROBE_JS;
+    host.appendChild(probe);
+  }
 
   // 違反収集は meta より後・他のどのリソースより前でなければ取りこぼす。
   // meta → 収集スクリプトの順になるよう、逆順に head の先頭へ差し込む

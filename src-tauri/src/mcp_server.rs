@@ -1360,6 +1360,31 @@ pub struct ArtifactStoreParams {
     pub expected_updated_at: Option<u64>,
 }
 
+/// `artifact_comment` のパラメータ。
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ArtifactCommentParams {
+    #[schemars(description = "操作の種類: \"list\"(コメント一覧。既定は未解決のみ) / \"add\"(コメントを付ける。anchor を省略するとアーティファクト全体へのコメント) / \"reply\"(返信。解決済みへの返信は未解決に戻る) / \"resolve\"(解決済みにする) / \"unresolve\"(未解決へ戻す) / \"resolve_all\"(未解決をすべて解決済みにする)")]
+    pub command: String,
+    #[schemars(description = "アーティファクトID")]
+    pub id: String,
+    #[schemars(description = "現在の作業ディレクトリ。これを渡すのが最も確実。HOMEタブやリポジトリルートで作業している場合は repository/branch では特定できないため必須")]
+    pub project_dir: Option<String>,
+    #[schemars(description = "対象ワークツリーID（project_dir で特定できない場合に指定）")]
+    pub worktree_id: Option<String>,
+    #[schemars(description = "リポジトリ名。project_dir を渡す場合は不要。指定する場合は branch と両方セットで")]
+    pub repository: Option<String>,
+    #[schemars(description = "ブランチ名。project_dir を渡す場合は不要。指定する場合は repository と両方セットで")]
+    pub branch: Option<String>,
+    #[schemars(description = "add / reply 時必須: コメント・返信の本文 (4000 文字まで)")]
+    pub body: Option<String>,
+    #[schemars(description = "reply / resolve / unresolve 時必須: 対象のコメントID (list で得た id)")]
+    pub comment_id: Option<String>,
+    #[schemars(description = "add 時の任意: コメントの位置 (JSON オブジェクト, 8KB まで)。ユーザーが付けたコメントの anchor は {kind: \"point\"|\"element\"|\"region\", x, y, w?, h? (ドキュメント内の割合 0..1), selector?, excerpt? (対象要素のテキスト/HTML の抜粋), window? (アプリのウィンドウ)} の形。AI が付けるときは {excerpt: \"対象箇所の文言\"} だけで構わない。省略するとアーティファクト全体へのコメント")]
+    pub anchor: Option<serde_json::Value>,
+    #[schemars(description = "list 時の任意: true にすると解決済みも含めて返す (既定 false)")]
+    pub include_resolved: Option<bool>,
+}
+
 /// `artifact_file` のパラメータ。アプリ（`app` 付きアーティファクト）の同梱領域 `artifact://` へ
 /// バイナリを届ける。`artifact_module` の `file_path` は UTF-8 テキストで 1MB までなので、wasm や
 /// 初期 DB のようなバイナリは別ツールにしている。
@@ -2548,6 +2573,133 @@ impl NotifyService {
                 None,
             )),
         }
+    }
+
+    #[tool(description = "アーティファクトに付けられたコメント（ユーザーが画面上の位置に付けた修正指示）を確認・返信・解決する。list: コメント一覧 (id / author(user|ai) / body / anchor / replies / resolved)。anchor.excerpt は付けた時点の対象箇所の抜粋なので、アーティファクトを書き換えた後でも何を指していたかを追える。add: AI からコメントを付ける, reply: 返信, resolve / unresolve / resolve_all: 解決状態の変更。コメントはアーティファクト本体とは別に保存され、アーティファクトを update / rewrite / 同じ ID で create し直しても消えない。コメントの書き込みは locked_while_open の対象外 (本体に触らないため)。ユーザーのコメントに従ってアーティファクトを直したら、reply で報告するか resolve すること。解決済みのコメントへ reply すると未解決に戻る (解決済みはビューアで非表示になり、返信が見えなくなるため) ので、reply と resolve の両方を行う場合は reply → resolve の順で呼ぶこと。対象は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は project_dir が必須", annotations(read_only_hint = true))]
+    async fn artifact_comment(
+        &self,
+        Parameters(ArtifactCommentParams {
+            command,
+            id,
+            project_dir,
+            worktree_id: target_worktree_id,
+            repository,
+            branch,
+            body,
+            comment_id,
+            anchor,
+            include_resolved,
+        }): Parameters<ArtifactCommentParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use crate::artifact_comments as comments;
+
+        let settings_manager = self.app_handle.state::<SettingsManager>();
+        let settings = settings_manager.get();
+        let wt = resolve_artifact_worktree(
+            &settings,
+            target_worktree_id.as_deref(),
+            project_dir.as_deref(),
+            repository.as_deref(),
+            branch.as_deref(),
+        )?;
+        let worktree_id = wt.id.clone();
+
+        validate_artifact_id(&id)?;
+
+        let dir = self.app_handle.path().app_data_dir()
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            .join("artifacts")
+            .join(&worktree_id);
+        if !dir.join(format!("{}.json", id)).exists() {
+            return Err(McpError::invalid_params(format!("アーティファクト '{}' が存在しません", id), None));
+        }
+
+        let invalid = |e: String| McpError::invalid_params(e, None);
+        let need = |v: Option<String>, name: &str| {
+            v.ok_or_else(|| McpError::invalid_params(format!("{} コマンドには {} が必須です", command, name), None))
+        };
+
+        let json = match command.as_str() {
+            "list" => {
+                let read_dir = dir.clone();
+                let read_id = id.clone();
+                let include = include_resolved.unwrap_or(false);
+                let list = tokio::task::spawn_blocking(move || {
+                    let obj = comments::read_state_object(&read_dir, &read_id);
+                    comments::list_comments(&obj, include)
+                })
+                .await
+                .map_err(|e| McpError::internal_error(format!("task join error: {}", e), None))?;
+                serde_json::json!({ "id": id, "comments": list })
+            }
+            "add" => {
+                let body = need(body, "body")?;
+                let anchor = anchor.unwrap_or_else(|| serde_json::json!({}));
+                let new_id = comments::apply(
+                    dir,
+                    &id,
+                    comments::Op::Add { author: comments::AUTHOR_AI.to_string(), body, anchor },
+                )
+                .await
+                .map_err(invalid)?;
+                serde_json::json!({ "id": id, "command": command, "comment_id": new_id })
+            }
+            "reply" => {
+                let body = need(body, "body")?;
+                let comment_id = need(comment_id, "comment_id")?;
+                let reply_id = comments::apply(
+                    dir,
+                    &id,
+                    comments::Op::Reply {
+                        comment_id: comment_id.clone(),
+                        author: comments::AUTHOR_AI.to_string(),
+                        body,
+                    },
+                )
+                .await
+                .map_err(invalid)?;
+                serde_json::json!({ "id": id, "command": command, "comment_id": comment_id, "reply_id": reply_id })
+            }
+            "resolve" | "unresolve" => {
+                let comment_id = need(comment_id, "comment_id")?;
+                comments::apply(
+                    dir,
+                    &id,
+                    comments::Op::SetResolved {
+                        comment_id: comment_id.clone(),
+                        resolved: command == "resolve",
+                    },
+                )
+                .await
+                .map_err(invalid)?;
+                serde_json::json!({ "id": id, "command": command, "comment_id": comment_id })
+            }
+            "resolve_all" => {
+                let n = comments::apply(dir, &id, comments::Op::ResolveAll)
+                    .await
+                    .map_err(invalid)?;
+                serde_json::json!({ "id": id, "command": command, "resolved": n.parse::<u64>().unwrap_or(0) })
+            }
+            other => {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "不明なコマンド '{}'. list / add / reply / resolve / unresolve / resolve_all のいずれかを指定してください",
+                        other
+                    ),
+                    None,
+                ));
+            }
+        };
+
+        if command != "list" {
+            log::info!("[mcp] artifact_comment command={} id={} worktree_id={}", command, id, worktree_id);
+            // 開いているビューア・アプリウィンドウの表示を更新させる
+            // （`artifact-state-changed` は使わない。React の iframe へメモリーを押し込む購読者がいる）
+            comments::emit_changed(&self.app_handle, "worktree", &worktree_id, &id);
+        }
+        let text = serde_json::to_string_pretty(&json)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
     #[tool(description = "アプリ（manifest の `app` を持つ React アーティファクト）の同梱領域 `artifact://` を操作する。アプリは承認された fs 権限の範囲でこの領域を読み書きできる。put: スキル同梱の wasm や初期 DB などのバイナリを `file_path` から `artifact://<相対>` へコピー（`artifact_module` の file_path は UTF-8 テキスト 1MB までで、バイナリは通らない）, list: 同梱ファイルの一覧, delete: 同梱ファイル・ディレクトリの削除。同梱領域はアーティファクトを削除すると一緒に消える。アーティファクトの転送・エクスポート・インポートでは持ち出されない（移した先で put し直すこと）。対象は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は project_dir が必須", annotations(read_only_hint = true))]
@@ -9798,6 +9950,7 @@ mod tests {
             "artifact",
             "artifact_module",
             "artifact_store",
+            "artifact_comment",
             "search_artifact",
             "oretachi_get_worktree_status",
             "oretachi_inspect_worktree",
@@ -9874,6 +10027,7 @@ mod tests {
             "artifact",
             "artifact_module",
             "artifact_store",
+            "artifact_comment",
         ] {
             assert!(
                 !ARTIFACT_CALLABLE_TOOLS.contains(&name),

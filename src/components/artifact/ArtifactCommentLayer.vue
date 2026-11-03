@@ -1,0 +1,789 @@
+<script setup lang="ts">
+import { ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from "vue";
+import { useI18n } from "vue-i18n";
+import type { ArtifactComment, CommentAnchor } from "../../types/artifactComment";
+import {
+  boxFromPoints,
+  hasAnchorPosition,
+  isDrag,
+  placePopup,
+  type CommentAdapter,
+  type Point,
+} from "../../utils/commentAnchor";
+import { createDomCommentAdapter } from "../../utils/commentDomAdapter";
+
+/**
+ * アーティファクトの表示領域に重ねるコメント層。親要素（`position: relative` の描画ルート）いっぱいに
+ * 広がり、ピン（アイコン）・ポップアップ・コメントモード中の拾い上げを受け持つ。
+ *
+ * 位置の拾い上げと解決は `adapter` に任せる（同一文書の DOM / sandbox iframe など描画方式ごとに違う）。
+ * 未指定なら親要素の DOM を相手にする。コメントの保存は親が行う（ここは見た目と入力だけ）。
+ */
+const props = defineProps<{
+  /** 表示するコメント（未解決のみ。解決済みは非表示） */
+  comments: ArtifactComment[];
+  /** コメントモード（クリック / ドラッグで位置を選ぶ） */
+  active: boolean;
+  adapter?: CommentAdapter;
+}>();
+
+const emit = defineEmits<{
+  (e: "submit", anchor: CommentAnchor, body: string): void;
+  (e: "reply", commentId: string, body: string): void;
+  (e: "resolve", commentId: string): void;
+  (e: "remove", commentId: string): void;
+  (e: "exit"): void;
+}>();
+
+const { t } = useI18n();
+
+const layerEl = ref<HTMLElement | null>(null);
+const rootEl = computed(() => layerEl.value?.parentElement ?? null);
+
+const POPUP_SIZE = { width: 300, height: 200 };
+
+let domAdapter: CommentAdapter | null = null;
+function currentAdapter(): CommentAdapter | null {
+  if (props.adapter) return props.adapter;
+  if (!domAdapter && rootEl.value) {
+    domAdapter = createDomCommentAdapter(
+      rootEl.value,
+      (el) => !!layerEl.value && layerEl.value.contains(el),
+    );
+  }
+  return domAdapter;
+}
+
+// ─── ピンの位置 ────────────────────────────────────────────────────────────
+
+type Located = { x: number; y: number; orphan: boolean } | null;
+const positions = ref<Record<string, Located>>({});
+let refreshSeq = 0;
+
+async function refresh() {
+  const adapter = currentAdapter();
+  if (!adapter) return;
+  const seq = ++refreshSeq;
+  try {
+    const next = await adapter.locate(props.comments);
+    if (seq !== refreshSeq) return;
+    positions.value = next;
+  } catch (e) {
+    // ここで握りつぶすとピンが出ない理由が見えなくなるので、必ず残す
+    console.warn("comment locate failed", e);
+  }
+}
+
+/** 表示する順の連番（ピンの数字）。位置の取れないコメントは出さない */
+const pins = computed(() =>
+  props.comments
+    .map((c, i) => ({ comment: c, index: i + 1, pos: positions.value[c.id] ?? null }))
+    // orphan（今の表示に無い）はピンにしない。別ページの同じ位置へ出してしまうため、下の一覧へ回す
+    .filter((p): p is { comment: ArtifactComment; index: number; pos: NonNullable<Located> } => !!p.pos && !p.pos.orphan),
+);
+
+/**
+ * 指していた要素が今の表示に無いコメント（別のページ・画面にある、または AI の書き換えで内容が変わった）。
+ * ピンにはできないが、見えなくなると解決も削除もできないので、右下のチップから一覧で辿れるようにする。
+ */
+const missingItems = computed(() =>
+  props.comments
+    .map((c, i) => ({ comment: c, index: i + 1 }))
+    .filter((it) => positions.value[it.comment.id]?.orphan === true),
+);
+const missingOpen = ref(false);
+watch(
+  () => missingItems.value.length,
+  (n) => {
+    if (n === 0) missingOpen.value = false;
+  },
+);
+
+let unsubscribe: (() => void) | null = null;
+
+function unbindAdapter() {
+  unsubscribe?.();
+  unsubscribe = null;
+  refreshSeq++;
+  positions.value = {};
+}
+
+function bindAdapter() {
+  unsubscribe?.();
+  unsubscribe = currentAdapter()?.subscribe(() => void refresh()) ?? null;
+  void refresh();
+}
+
+/**
+ * 位置の監視（スクロール・リサイズ・DOM の変化）は、コメントがあるかコメントモード中の間だけ動かす。
+ * コメントの無いアーティファクトに常時の監視コストを掛けない（アニメーションするアプリでは特に）。
+ */
+const needsAdapter = computed(() => props.active || props.comments.length > 0);
+
+watch(needsAdapter, (need) => {
+  if (need) bindAdapter();
+  else unbindAdapter();
+});
+
+onMounted(() => {
+  if (needsAdapter.value) bindAdapter();
+});
+onBeforeUnmount(() => {
+  unsubscribe?.();
+  window.removeEventListener("keydown", onKeydown, true);
+});
+
+watch(() => props.comments, () => void refresh(), { deep: true });
+watch(
+  () => props.adapter,
+  () => {
+    if (needsAdapter.value) bindAdapter();
+  },
+);
+
+// ─── コメントモード（クリック / ドラッグ） ─────────────────────────────────
+
+const dragStart = ref<Point | null>(null);
+const dragEnd = ref<Point | null>(null);
+const dragBox = computed(() =>
+  dragStart.value && dragEnd.value && isDrag(dragStart.value, dragEnd.value)
+    ? boxFromPoints(dragStart.value, dragEnd.value)
+    : null,
+);
+
+/** 新規コメントの入力中。`at` はポップアップを置く位置（ルート内 px） */
+const draft = ref<{ anchor: CommentAnchor; at: Point } | null>(null);
+const draftBody = ref("");
+const draftInput = ref<HTMLTextAreaElement | null>(null);
+
+function toRootPoint(e: PointerEvent): Point {
+  const r = layerEl.value!.getBoundingClientRect();
+  return { x: e.clientX - r.left, y: e.clientY - r.top };
+}
+
+function onPointerDown(e: PointerEvent) {
+  // ピン・ポップアップ・ヒントの操作は拾い上げにしない（層そのものを押したときだけ）
+  if (!props.active || e.target !== layerEl.value || e.button !== 0) return;
+  e.preventDefault();
+  layerEl.value!.setPointerCapture(e.pointerId);
+  dragStart.value = toRootPoint(e);
+  dragEnd.value = dragStart.value;
+  openId.value = null;
+}
+
+function onPointerMove(e: PointerEvent) {
+  if (!dragStart.value) return;
+  dragEnd.value = toRootPoint(e);
+}
+
+/** キャンセルされたドラッグは拾い上げない（座標が不定なので、選択を捨てるだけ） */
+function onPointerCancel() {
+  dragStart.value = null;
+  dragEnd.value = null;
+}
+
+async function onPointerUp(e: PointerEvent) {
+  const start = dragStart.value;
+  if (!start) return;
+  const end = toRootPoint(e);
+  dragStart.value = null;
+  dragEnd.value = null;
+  const adapter = currentAdapter();
+  if (!adapter) return;
+  const picked = await adapter.pick(start, isDrag(start, end) ? end : null);
+  if (!picked) return;
+  const rootRect = layerEl.value!.getBoundingClientRect();
+  draft.value = {
+    anchor: picked,
+    at: placePopup(end, POPUP_SIZE, { width: rootRect.width, height: rootRect.height }),
+  };
+  draftBody.value = "";
+  await nextTick();
+  draftInput.value?.focus();
+}
+
+function submitDraft() {
+  const body = draftBody.value.trim();
+  if (!draft.value || !body) return;
+  emit("submit", draft.value.anchor, body);
+  draft.value = null;
+  draftBody.value = "";
+}
+
+function cancelDraft() {
+  draft.value = null;
+  draftBody.value = "";
+}
+
+function onKeydown(e: KeyboardEvent) {
+  if (e.key !== "Escape") return;
+  if (draft.value) {
+    cancelDraft();
+  } else if (openId.value) {
+    openId.value = null;
+  } else if (props.active) {
+    emit("exit");
+  } else {
+    return;
+  }
+  e.stopPropagation();
+}
+
+onMounted(() => window.addEventListener("keydown", onKeydown, true));
+
+watch(
+  () => props.active,
+  (active) => {
+    if (!active) {
+      dragStart.value = null;
+      dragEnd.value = null;
+      cancelDraft();
+    }
+  },
+);
+
+// ─── スレッド（ピンのポップアップ） ────────────────────────────────────────
+
+const openId = ref<string | null>(null);
+const replyBody = ref("");
+
+/**
+ * 位置の手がかりを持たないコメント（AI が `{ excerpt }` だけ・anchor 無しで付けたもの）。
+ * ピンにできないので、層の右上に縦に並べて出す（見えなくならないように）。
+ */
+const STACK_TOP = 40;
+const STACK_STEP = 34;
+const STACK_RIGHT = 8;
+const PIN_RADIUS = 13;
+const stackItems = computed(() =>
+  props.comments
+    .map((c, i) => ({ comment: c, index: i + 1 }))
+    .filter((it) => !hasAnchorPosition(it.comment.anchor))
+    .map((it, slot) => ({ ...it, slot })),
+);
+
+/** ポップアップを開いているコメント（ピンまたは右上の並び）と、その基準位置 */
+const openEntry = computed(() => {
+  const id = openId.value;
+  if (!id) return null;
+  const pin = pins.value.find((p) => p.comment.id === id);
+  if (pin) return { comment: pin.comment, orphan: pin.pos.orphan, at: pin.pos };
+  const missing = missingItems.value.find((m) => m.comment.id === id);
+  if (missing && layerEl.value) {
+    // 右下のチップの上に出す
+    const rect = layerEl.value.getBoundingClientRect();
+    return { comment: missing.comment, orphan: false, at: { x: rect.width - 40, y: rect.height - 60 } };
+  }
+  const stacked = stackItems.value.find((s) => s.comment.id === id);
+  if (stacked && layerEl.value) {
+    const width = layerEl.value.getBoundingClientRect().width;
+    return {
+      comment: stacked.comment,
+      orphan: false,
+      at: { x: width - STACK_RIGHT - PIN_RADIUS, y: STACK_TOP + PIN_RADIUS + stacked.slot * STACK_STEP },
+    };
+  }
+  return null;
+});
+const openPopupAt = computed(() => {
+  const entry = openEntry.value;
+  if (!entry || !layerEl.value) return null;
+  const rect = layerEl.value.getBoundingClientRect();
+  return placePopup(entry.at, POPUP_SIZE, { width: rect.width, height: rect.height });
+});
+
+// 解決・削除・書き換えでコメントが消えたらポップアップも閉じる
+watch(openEntry, (entry) => {
+  if (!entry) openId.value = null;
+});
+
+function togglePin(id: string) {
+  openId.value = openId.value === id ? null : id;
+  replyBody.value = "";
+  cancelDraft();
+}
+
+function submitReply() {
+  const body = replyBody.value.trim();
+  if (!openId.value || !body) return;
+  emit("reply", openId.value, body);
+  replyBody.value = "";
+}
+
+function onResolve() {
+  if (!openId.value) return;
+  emit("resolve", openId.value);
+  openId.value = null;
+}
+
+function onRemove() {
+  if (!openId.value) return;
+  emit("remove", openId.value);
+  openId.value = null;
+}
+
+function authorLabel(author: string): string {
+  return author === "ai" ? t("author.ai") : t("author.user");
+}
+
+function onTextareaKeydown(e: KeyboardEvent, submit: () => void) {
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+    e.preventDefault();
+    submit();
+  }
+}
+</script>
+
+<template>
+  <div
+    ref="layerEl"
+    class="comment-layer"
+    :class="{ active }"
+    data-comment-layer
+    @pointerdown="onPointerDown"
+    @pointermove="onPointerMove"
+    @pointerup="onPointerUp"
+    @pointercancel="onPointerCancel"
+  >
+    <div v-if="active" class="cl-hint">
+      <i class="pi pi-comment" />
+      <span>{{ t("hint") }}</span>
+      <button type="button" class="cl-hint-exit" @click="emit('exit')">{{ t("exit") }}</button>
+    </div>
+
+    <div
+      v-if="dragBox"
+      class="cl-drag"
+      :style="{ left: `${dragBox.left}px`, top: `${dragBox.top}px`, width: `${dragBox.width}px`, height: `${dragBox.height}px` }"
+    />
+
+    <button
+      v-for="pin in pins"
+      :key="pin.comment.id"
+      type="button"
+      class="cl-pin"
+      :class="{ orphan: pin.pos.orphan, open: pin.comment.id === openId }"
+      :style="{ left: `${pin.pos.x}px`, top: `${pin.pos.y}px` }"
+      :title="pin.pos.orphan ? t('orphan') : pin.comment.body"
+      @click.stop="togglePin(pin.comment.id)"
+    >
+      <i class="pi pi-comment" />
+      <span class="cl-pin-index">{{ pin.index }}</span>
+    </button>
+
+    <button
+      v-for="item in stackItems"
+      :key="item.comment.id"
+      type="button"
+      class="cl-pin cl-stacked"
+      :class="{ open: item.comment.id === openId }"
+      :style="{ top: `${STACK_TOP + PIN_RADIUS + item.slot * STACK_STEP}px`, right: `${STACK_RIGHT}px` }"
+      :title="item.comment.body"
+      @click.stop="togglePin(item.comment.id)"
+    >
+      <i class="pi pi-comment" />
+      <span class="cl-pin-index">{{ item.index }}</span>
+    </button>
+
+    <div v-if="missingItems.length > 0" class="cl-missing">
+      <div v-if="missingOpen" class="cl-missing-list">
+        <button
+          v-for="item in missingItems"
+          :key="item.comment.id"
+          type="button"
+          class="cl-missing-item"
+          :class="{ open: item.comment.id === openId }"
+          :title="item.comment.anchor?.excerpt || item.comment.body"
+          @click.stop="togglePin(item.comment.id)"
+        >
+          <span class="cl-missing-index">{{ item.index }}</span>
+          <span class="cl-missing-text">{{ item.comment.body }}</span>
+        </button>
+      </div>
+      <button type="button" class="cl-missing-chip" :title="t('missingTooltip')" @click.stop="missingOpen = !missingOpen">
+        <i class="pi pi-comments" />
+        <span>{{ t("missingChip", { count: missingItems.length }) }}</span>
+      </button>
+    </div>
+
+    <div
+      v-if="draft"
+      class="cl-popup"
+      :style="{ left: `${draft.at.x}px`, top: `${draft.at.y}px`, width: `${POPUP_SIZE.width}px` }"
+    >
+      <div v-if="draft.anchor.excerpt" class="cl-excerpt">{{ draft.anchor.excerpt }}</div>
+      <textarea
+        ref="draftInput"
+        v-model="draftBody"
+        class="cl-textarea"
+        rows="3"
+        :placeholder="t('draftPlaceholder')"
+        @keydown="onTextareaKeydown($event, submitDraft)"
+      />
+      <div class="cl-actions">
+        <button type="button" class="cl-btn" @click="cancelDraft">{{ t("cancel") }}</button>
+        <button type="button" class="cl-btn primary" :disabled="!draftBody.trim()" @click="submitDraft">
+          {{ t("submit") }}
+        </button>
+      </div>
+    </div>
+
+    <div
+      v-if="openEntry && openPopupAt"
+      class="cl-popup"
+      :style="{ left: `${openPopupAt.x}px`, top: `${openPopupAt.y}px`, width: `${POPUP_SIZE.width}px` }"
+    >
+      <div v-if="openEntry.orphan" class="cl-orphan">{{ t("orphan") }}</div>
+      <div v-if="openEntry.comment.anchor?.excerpt" class="cl-excerpt">{{ openEntry.comment.anchor.excerpt }}</div>
+      <div class="cl-thread">
+        <div class="cl-msg">
+          <div class="cl-msg-head">{{ authorLabel(openEntry.comment.author) }}</div>
+          <div class="cl-msg-body">{{ openEntry.comment.body }}</div>
+        </div>
+        <div v-for="r in openEntry.comment.replies" :key="r.id" class="cl-msg reply">
+          <div class="cl-msg-head">{{ authorLabel(r.author) }}</div>
+          <div class="cl-msg-body">{{ r.body }}</div>
+        </div>
+      </div>
+      <textarea
+        v-model="replyBody"
+        class="cl-textarea"
+        rows="2"
+        :placeholder="t('replyPlaceholder')"
+        @keydown="onTextareaKeydown($event, submitReply)"
+      />
+      <div class="cl-actions">
+        <button type="button" class="cl-btn danger" @click="onRemove">{{ t("remove") }}</button>
+        <span class="cl-spacer" />
+        <button type="button" class="cl-btn" :disabled="!replyBody.trim()" @click="submitReply">
+          {{ t("reply") }}
+        </button>
+        <button type="button" class="cl-btn primary" @click="onResolve">{{ t("resolve") }}</button>
+      </div>
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.comment-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  /* モード外はコンテンツの操作を邪魔しない。ピンとポップアップだけが受ける */
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.comment-layer.active {
+  pointer-events: auto;
+  cursor: crosshair;
+  touch-action: none;
+  outline: 2px solid var(--p-primary-color, #89b4fa);
+  outline-offset: -2px;
+}
+
+.cl-hint,
+.cl-pin,
+.cl-missing,
+.cl-popup {
+  pointer-events: auto;
+  cursor: default;
+}
+
+.cl-hint {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 10px;
+  border-radius: 14px;
+  background: var(--p-primary-color, #89b4fa);
+  color: var(--p-primary-contrast-color, #11111b);
+  font-size: 12px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.35);
+}
+
+.cl-hint-exit {
+  border: 1px solid currentColor;
+  border-radius: 10px;
+  background: transparent;
+  color: inherit;
+  font-size: 11px;
+  padding: 0 8px;
+  cursor: pointer;
+}
+
+.cl-drag {
+  position: absolute;
+  border: 1.5px dashed var(--p-primary-color, #89b4fa);
+  background: rgba(137, 180, 250, 0.15);
+  pointer-events: none;
+}
+
+.cl-pin {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  width: 26px;
+  height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid #fff;
+  border-radius: 50%;
+  background: var(--p-primary-color, #89b4fa);
+  color: var(--p-primary-contrast-color, #11111b);
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.5);
+  cursor: pointer;
+  padding: 0;
+}
+
+.cl-pin i {
+  font-size: 12px;
+}
+
+.cl-pin-index {
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  min-width: 15px;
+  height: 15px;
+  border-radius: 8px;
+  background: #11111b;
+  color: #fff;
+  font-size: 10px;
+  line-height: 15px;
+  text-align: center;
+}
+
+.cl-missing {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  max-width: 280px;
+}
+
+.cl-missing-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px dashed #f9e2af;
+  border-radius: 14px;
+  background: var(--p-content-background, #1e1e2e);
+  color: #f9e2af;
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.cl-missing-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 4px;
+  border: 1px solid var(--p-content-border-color, #45475a);
+  border-radius: 8px;
+  background: var(--p-content-background, #1e1e2e);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+
+.cl-missing-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--p-text-color, #cdd6f4);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cl-missing-item:hover,
+.cl-missing-item.open {
+  background: var(--p-content-hover-background, rgba(255, 255, 255, 0.08));
+}
+
+.cl-missing-index {
+  flex: 0 0 auto;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  background: #f9e2af;
+  color: #11111b;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.cl-missing-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.cl-pin.cl-stacked {
+  transform: translateY(-50%);
+  left: auto;
+}
+
+.cl-pin.orphan {
+  background: #f9e2af;
+  border-style: dashed;
+}
+
+.cl-pin.open {
+  outline: 2px solid #fff;
+}
+
+.cl-popup {
+  position: absolute;
+  box-sizing: border-box;
+  max-height: 80%;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--p-content-border-color, #45475a);
+  border-radius: 8px;
+  background: var(--p-content-background, #1e1e2e);
+  color: var(--p-text-color, #cdd6f4);
+  font-size: 12px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+}
+
+.cl-excerpt {
+  padding: 4px 6px;
+  border-left: 3px solid var(--p-primary-color, #89b4fa);
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--p-text-muted-color, #a6adc8);
+  font-size: 11px;
+  max-height: 3.6em;
+  overflow: hidden;
+  word-break: break-all;
+}
+
+.cl-orphan {
+  color: #f9e2af;
+  font-size: 11px;
+}
+
+.cl-thread {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.cl-msg-head {
+  font-weight: 600;
+  font-size: 11px;
+  color: var(--p-text-muted-color, #a6adc8);
+}
+
+.cl-msg.reply {
+  padding-left: 10px;
+  border-left: 2px solid var(--p-content-border-color, #45475a);
+}
+
+.cl-msg-body {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.cl-textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  padding: 6px;
+  border: 1px solid var(--p-content-border-color, #45475a);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.cl-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cl-spacer {
+  flex: 1;
+}
+
+.cl-btn {
+  padding: 3px 10px;
+  border: 1px solid var(--p-content-border-color, #45475a);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.cl-btn:hover:not(:disabled) {
+  background: var(--p-content-hover-background, rgba(255, 255, 255, 0.08));
+}
+
+.cl-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.cl-btn.primary {
+  background: var(--p-primary-color, #89b4fa);
+  border-color: transparent;
+  color: var(--p-primary-contrast-color, #11111b);
+}
+
+.cl-btn.danger {
+  color: #f38ba8;
+}
+</style>
+
+<i18n lang="json">
+{
+  "en": {
+    "hint": "Comment mode: click a spot, or drag to select an area",
+    "exit": "Done",
+    "draftPlaceholder": "Write a comment (Ctrl+Enter to send)",
+    "replyPlaceholder": "Reply (Ctrl+Enter to send)",
+    "submit": "Comment",
+    "cancel": "Cancel",
+    "reply": "Reply",
+    "resolve": "Resolve",
+    "remove": "Delete",
+    "orphan": "The original element is gone, so this is shown at its last position",
+    "missingChip": "{count} comment(s) not in this view",
+    "missingTooltip": "These comments point to something that is not on screen now (another page, or the artifact was rewritten)",
+    "author": { "user": "You", "ai": "AI" }
+  },
+  "ja": {
+    "hint": "コメントモード: 位置をクリック、またはドラッグで範囲を選択",
+    "exit": "終了",
+    "draftPlaceholder": "コメントを入力（Ctrl+Enter で送信）",
+    "replyPlaceholder": "返信（Ctrl+Enter で送信）",
+    "submit": "コメントする",
+    "cancel": "キャンセル",
+    "reply": "返信",
+    "resolve": "解決",
+    "remove": "削除",
+    "orphan": "元の要素が見つからないため、最後の位置に表示しています",
+    "missingChip": "この表示に無いコメント {count}",
+    "missingTooltip": "別のページ・画面にあるか、アーティファクトの書き換えで指していた要素が変わったコメントです",
+    "author": { "user": "あなた", "ai": "AI" }
+  }
+}
+</i18n>

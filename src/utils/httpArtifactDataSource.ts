@@ -54,6 +54,7 @@ const WEB_CAPABILITIES: ArtifactCapabilities = {
   transfer: false,
   // アプリ形式アーティファクトは起動不可（特権 API を HTTP に出さない）
   appLaunch: false,
+  comment: false,
 };
 
 async function apiFetch<T>(
