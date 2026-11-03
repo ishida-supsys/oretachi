@@ -41,6 +41,8 @@ export function useTerminalVisibility(options: TerminalVisibilityOptions) {
   function loadWebgl(): void {
     const terminal = getTerminal();
     if (webglAddon || !terminal) return;
+    // #421 診断（dev 限定）: WebGL 描画が欠けの原因かを確かめるため DOM レンダラーに固定する
+    if (import.meta.env.DEV && import.meta.env.VITE_ORETACHI_DISABLE_WEBGL === "1") return;
     if (webglContextCount >= MAX_WEBGL_CONTEXTS) {
       logDebug(`[Terminal] WebGL load skipped (limit ${MAX_WEBGL_CONTEXTS}) sid=${getSessionId()}`);
       return;
@@ -110,5 +112,5 @@ export function useTerminalVisibility(options: TerminalVisibilityOptions) {
     disposeWebgl();
   }
 
-  return { updateVisibility, dispose };
+  return { updateVisibility, dispose, isWebglLoaded: () => webglAddon !== null };
 }

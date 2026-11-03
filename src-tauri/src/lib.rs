@@ -34,6 +34,7 @@ pub mod mcp_server;
 mod process_utils;
 mod prompt_parser;
 mod pty_manager;
+mod pty_tap;
 mod report_db;
 mod settings;
 mod system_metrics;
@@ -2446,6 +2447,7 @@ pub fn run() {
         .manage(mcp_server::NotificationRegistry::default())
         .manage(mcp_server::CloseWorktreeAckRegistry::default())
         .manage(mcp_server::ImportWorktreeAckRegistry::default())
+        .manage(mcp_server::DebugSnapshotAckRegistry::default())
         .manage(ai_judge::ApprovalManager::new())
         .manage(ai_commit_message::CommitMessageManager::new())
         .manage(ai_description::DescriptionManager::new())
@@ -2510,6 +2512,7 @@ pub fn run() {
             mcp_server::sync_notification_state,
             mcp_server::mcp_close_worktree_result,
             mcp_server::mcp_import_worktree_result,
+            mcp_server::mcp_debug_terminal_snapshot_result,
             download_update,
             install_downloaded_update,
             ai_judge::judge_approval,

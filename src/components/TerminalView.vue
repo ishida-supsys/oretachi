@@ -13,6 +13,7 @@ import { SerializeAddon } from "@xterm/addon-serialize";
 import { usePty } from "../composables/usePty";
 import { usePtyWriteBatcher } from "../composables/usePtyWriteBatcher";
 import { useTerminalVisibility } from "../composables/useTerminalVisibility";
+import { useTerminalDebugSnapshot } from "../composables/useTerminalDebugSnapshot";
 import { useSettings } from "../composables/useSettings";
 import { matchesHotkey } from "../composables/useHotkeys";
 import { useTerminalSearch } from "../composables/useTerminalSearch";
@@ -69,6 +70,13 @@ const visibility = useTerminalVisibility({
   isOffscreen,
   setWriteSuspended: batcher.setSuspended,
   getSessionId: () => sessionId.value,
+});
+// #421 診断（dev 限定）: MCP からの xterm 状態スナップショット要求に応答する
+const debugSnapshot = useTerminalDebugSnapshot({
+  getTerminal: () => terminal,
+  getSessionId: () => sessionId.value,
+  isOffscreen,
+  isWebglLoaded: visibility.isWebglLoaded,
 });
 const { settings } = useSettings();
 
@@ -398,6 +406,7 @@ onMounted(async () => {
   terminalActiveCount++;
   logDebug(`[TerminalView] onMounted initialSessionId=${props.initialSessionId} autoStart=${props.autoStart} cwd=${props.cwd}`);
   initTerminal();
+  void debugSnapshot.start();
   if (props.initialSessionId !== undefined) {
     logDebug(`[TerminalView] attaching to session ${props.initialSessionId}`);
     await attachPty(props.initialSessionId, props.initialSnapshot);
@@ -418,6 +427,7 @@ onUnmounted(() => {
   resizeObserver?.disconnect();
   batcher.dispose();
   search.dispose();
+  debugSnapshot.dispose();
   visibility.dispose(); // terminal.dispose() より前に WebGL カウンタを整合させる
   serializeAddon?.dispose();
   terminal?.dispose();
