@@ -4,6 +4,9 @@ import {
   boxFromPoints,
   clamp01,
   commentsForWindow,
+  excerptMatches,
+  fractionPin,
+  pinPointInRect,
   EXCERPT_MAX_CHARS,
   fromFraction,
   hasAnchorPosition,
@@ -103,5 +106,36 @@ describe("commentAnchor", () => {
     expect(placePopup({ x: 100, y: 550 }, popup, root).y).toBe(400);
     // ルートより大きくても負にならない
     expect(placePopup({ x: 10, y: 10 }, popup, { width: 100, height: 100 })).toEqual({ x: 0, y: 0 });
+  });
+});
+
+describe("excerptMatches / pinPointInRect / fractionPin", () => {
+  it("excerptMatches: 先頭で突き合わせ、空の抜粋は一致扱い", () => {
+    expect(excerptMatches(undefined, "何でも")).toBe(true);
+    expect(excerptMatches("", "何でも")).toBe(true);
+    expect(excerptMatches("ログイン画面", "ログイン画面\n  続き")).toBe(true);
+    expect(excerptMatches("ログイン画面", "タスク一覧")).toBe(false);
+    // 後ろへ伸びた分は許す（先頭 40 文字だけ比べる）
+    const head = "あ".repeat(40);
+    expect(excerptMatches(head + "旧", head + "新")).toBe(true);
+    // 短い抜粋は全体を比べる。要素のテキストが縮んだら不一致
+    expect(excerptMatches("abcdef", "abc")).toBe(false);
+  });
+
+  it("pinPointInRect: rx/ry があればそこ、旧形式は point=中央・element=右上", () => {
+    const r = { left: 100, top: 50, width: 200, height: 100 };
+    expect(pinPointInRect({ kind: "element", rx: 0.25, ry: 0.5 }, r)).toEqual({ x: 150, y: 100 });
+    expect(pinPointInRect({ kind: "point" }, r)).toEqual({ x: 200, y: 100 });
+    // 旧形式の element は右上（1px 内側）
+    expect(pinPointInRect({ kind: "element" }, r)).toEqual({ x: 299, y: 51 });
+    // 範囲外の割合は矩形の内側へ収める
+    expect(pinPointInRect({ rx: 5, ry: -3 }, r)).toEqual({ x: 299, y: 51 });
+  });
+
+  it("fractionPin: 範囲は右上、位置の無いものは null", () => {
+    const size = { width: 1000, height: 500 };
+    expect(fractionPin({ kind: "point", x: 0.2, y: 0.4, w: 0.5 }, size)).toEqual({ x: 200, y: 200 });
+    expect(fractionPin({ kind: "region", x: 0.2, y: 0.4, w: 0.3 }, size)).toEqual({ x: 500, y: 200 });
+    expect(fractionPin({ excerpt: "x" }, size)).toBeNull();
   });
 });

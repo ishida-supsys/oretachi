@@ -165,33 +165,86 @@ export function anchorBox(root: Element): Box {
   return { left: r.left, top: r.top, width: r.width, height: r.height };
 }
 
+/** 抜粋の突き合わせに使う先頭の文字数 */
+export const EXCERPT_MATCH_CHARS = 40;
+
 /**
- * コメントの表示位置（ルート左上を原点とする px）。解決できなければ退避の割合位置を使い、
- * `orphan` を立てる（要素が書き換えで消えた印。表示は残す）。
- * ルートの表示領域の外（スクロールで隠れている）なら null。
+ * 保存した抜粋と、いまの要素のテキストが同じ要素を指しているとみなせるか。
+ * ページ切り替えのある SPA では、別の画面の同じ構造の要素に同じセレクタが当たってしまうので、
+ * 内容で確かめる。抜粋が空（画像・図形など）なら確かめようがないので一致扱い。
+ * 先頭だけ比べるのは、要素のテキストが後ろへ伸びる（件数・時刻の表示など）程度の変化を許すため。
  */
-export function locateAnchor(
-  root: Element,
-  anchor: CommentAnchor,
-): { x: number; y: number; orphan: boolean } | null {
-  const rootBox = anchorBox(root);
-  const el = resolveSelector(root, anchor.selector);
-  if (el) {
-    const r = el.getBoundingClientRect();
-    if (r.width > 0 || r.height > 0) {
-      const point =
-        anchor.kind === "point"
-          ? { x: r.left + clamp01(anchor.rx ?? 0.5) * r.width, y: r.top + clamp01(anchor.ry ?? 0.5) * r.height }
-          : { x: r.right, y: r.top };
-      const x = point.x - rootBox.left;
-      const y = point.y - rootBox.top;
-      if (x < 0 || y < 0 || x > rootBox.width || y > rootBox.height) return null;
-      return { x, y, orphan: false };
-    }
+export function excerptMatches(stored: string | undefined, current: string | null | undefined): boolean {
+  if (!stored) return true;
+  const cur = makeExcerpt(current);
+  const n = Math.min(EXCERPT_MATCH_CHARS, stored.length);
+  return cur.slice(0, n) === stored.slice(0, n);
+}
+
+/**
+ * 要素の矩形（ビューポート座標）に対するピンの位置。
+ * `rx`/`ry` があればそこ（矩形の 1px 内側へ収める）。旧形式は point = 中央、それ以外 = 右上。
+ */
+export function pinPointInRect(anchor: CommentAnchor, r: Box): Point {
+  const hasRel = typeof anchor.rx === "number" || typeof anchor.ry === "number";
+  const rx = hasRel ? clamp01(anchor.rx ?? 0) : anchor.kind === "point" ? 0.5 : 1;
+  const ry = hasRel ? clamp01(anchor.ry ?? 0) : anchor.kind === "point" ? 0.5 : 0;
+  const x = r.left + rx * r.width;
+  const y = r.top + ry * r.height;
+  return {
+    x: r.width > 1 ? Math.min(Math.max(x, r.left + 1), r.left + r.width - 1) : x,
+    y: r.height > 1 ? Math.min(Math.max(y, r.top + 1), r.top + r.height - 1) : y,
+  };
+}
+
+/** 点が矩形の中にあるか（端を含む） */
+export function pointInBox(p: Point, b: Box): boolean {
+  return p.x >= b.left && p.y >= b.top && p.x <= b.left + b.width && p.y <= b.top + b.height;
+}
+
+/** セレクタを持たないコメントの退避位置（文書・ルートに対する割合から）。範囲は右上 */
+export function fractionPin(anchor: CommentAnchor, size: { width: number; height: number }): Point | null {
+  if (typeof anchor.x !== "number" || typeof anchor.y !== "number") return null;
+  const w = anchor.kind === "point" ? 0 : (anchor.w ?? 0);
+  return { x: clamp01(anchor.x + w) * size.width, y: clamp01(anchor.y) * size.height };
+}
+
+/** 位置の解決結果。`orphan` = 指していた要素が今の表示に無い（別ページ・書き換え） */
+export type Located = { x: number; y: number; orphan: boolean } | null;
+
+/** 要素の祖先（root の手前まで）に `overflow` で切り取る箱があり、点がその外なら true */
+function clippedByAncestor(el: Element, root: Element, p: Point): boolean {
+  for (let a = el.parentElement; a && a !== root; a = a.parentElement) {
+    const cs = getComputedStyle(a);
+    if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
+    const r = a.getBoundingClientRect();
+    if (!pointInBox(p, { left: r.left, top: r.top, width: r.width, height: r.height })) return true;
   }
-  if (anchor.x === undefined || anchor.y === undefined) return null;
-  const p = fromFraction({ x: anchor.x, y: anchor.y }, rootBox);
-  return { ...p, orphan: !!anchor.selector };
+  return false;
+}
+
+/**
+ * コメントの表示位置（ルート左上を原点とする px）。
+ * - セレクタを持つ: 要素が見つからない・大きさが無い・抜粋が合わないなら `orphan`（今の表示には無い）。
+ *   座標へは退避しない（別ページの同じ位置にピンが出てしまう）。
+ * - 見つかっても、スクロール・パンで隠れている（ルートの外、または overflow の箱の外）なら null。
+ * - セレクタを持たない: 割合の座標。
+ */
+export function locateAnchor(root: Element, anchor: CommentAnchor): Located {
+  const rootBox = anchorBox(root);
+  if (anchor.selector) {
+    const el = resolveSelector(root, anchor.selector);
+    const r = el?.getBoundingClientRect();
+    if (!el || !r || (r.width <= 0 && r.height <= 0) || !excerptMatches(anchor.excerpt, el.textContent)) {
+      return { x: 0, y: 0, orphan: true };
+    }
+    const p = pinPointInRect(anchor, { left: r.left, top: r.top, width: r.width, height: r.height });
+    if (!pointInBox(p, { left: rootBox.left, top: rootBox.top, width: rootBox.width, height: rootBox.height })) return null;
+    if (clippedByAncestor(el, root, p)) return null;
+    return { x: p.x - rootBox.left, y: p.y - rootBox.top, orphan: false };
+  }
+  const f = fractionPin(anchor, rootBox);
+  return f ? { ...f, orphan: false } : null;
 }
 
 // ─── 描画方式ごとの差を吸収するアダプタ ─────────────────────────────────────
@@ -206,10 +259,8 @@ export type PickedAnchor = CommentAnchor;
 export interface CommentAdapter {
   /** `b` が null ならクリック（点）、あれば `a`〜`b` のドラッグ。拾えなければ null */
   pick(a: Point, b: Point | null): Promise<PickedAnchor | null>;
-  /** 各コメントの表示位置。隠れている・位置を持たないものは null */
-  locate(
-    comments: ArtifactComment[],
-  ): Promise<Record<string, { x: number; y: number; orphan: boolean } | null>>;
+  /** 各コメントの表示位置。隠れている（スクロール・パンの外）・位置を持たないものは null。今の表示に無いものは orphan */
+  locate(comments: ArtifactComment[]): Promise<Record<string, Located>>;
   /** スクロール・リサイズ・内容変化で位置が変わりうるとき `cb` を呼ぶ。戻り値は購読解除 */
   subscribe(cb: () => void): () => void;
 }

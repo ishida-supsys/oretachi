@@ -78,7 +78,25 @@ async function refresh() {
 const pins = computed(() =>
   props.comments
     .map((c, i) => ({ comment: c, index: i + 1, pos: positions.value[c.id] ?? null }))
-    .filter((p): p is { comment: ArtifactComment; index: number; pos: NonNullable<Located> } => !!p.pos),
+    // orphan（今の表示に無い）はピンにしない。別ページの同じ位置へ出してしまうため、下の一覧へ回す
+    .filter((p): p is { comment: ArtifactComment; index: number; pos: NonNullable<Located> } => !!p.pos && !p.pos.orphan),
+);
+
+/**
+ * 指していた要素が今の表示に無いコメント（別のページ・画面にある、または AI の書き換えで内容が変わった）。
+ * ピンにはできないが、見えなくなると解決も削除もできないので、右下のチップから一覧で辿れるようにする。
+ */
+const missingItems = computed(() =>
+  props.comments
+    .map((c, i) => ({ comment: c, index: i + 1 }))
+    .filter((it) => positions.value[it.comment.id]?.orphan === true),
+);
+const missingOpen = ref(false);
+watch(
+  () => missingItems.value.length,
+  (n) => {
+    if (n === 0) missingOpen.value = false;
+  },
 );
 
 let unsubscribe: (() => void) | null = null;
@@ -250,6 +268,12 @@ const openEntry = computed(() => {
   if (!id) return null;
   const pin = pins.value.find((p) => p.comment.id === id);
   if (pin) return { comment: pin.comment, orphan: pin.pos.orphan, at: pin.pos };
+  const missing = missingItems.value.find((m) => m.comment.id === id);
+  if (missing && layerEl.value) {
+    // 右下のチップの上に出す
+    const rect = layerEl.value.getBoundingClientRect();
+    return { comment: missing.comment, orphan: false, at: { x: rect.width - 40, y: rect.height - 60 } };
+  }
   const stacked = stackItems.value.find((s) => s.comment.id === id);
   if (stacked && layerEl.value) {
     const width = layerEl.value.getBoundingClientRect().width;
@@ -361,6 +385,27 @@ function onTextareaKeydown(e: KeyboardEvent, submit: () => void) {
       <span class="cl-pin-index">{{ item.index }}</span>
     </button>
 
+    <div v-if="missingItems.length > 0" class="cl-missing">
+      <div v-if="missingOpen" class="cl-missing-list">
+        <button
+          v-for="item in missingItems"
+          :key="item.comment.id"
+          type="button"
+          class="cl-missing-item"
+          :class="{ open: item.comment.id === openId }"
+          :title="item.comment.anchor?.excerpt || item.comment.body"
+          @click.stop="togglePin(item.comment.id)"
+        >
+          <span class="cl-missing-index">{{ item.index }}</span>
+          <span class="cl-missing-text">{{ item.comment.body }}</span>
+        </button>
+      </div>
+      <button type="button" class="cl-missing-chip" :title="t('missingTooltip')" @click.stop="missingOpen = !missingOpen">
+        <i class="pi pi-comments" />
+        <span>{{ t("missingChip", { count: missingItems.length }) }}</span>
+      </button>
+    </div>
+
     <div
       v-if="draft"
       class="cl-popup"
@@ -439,6 +484,7 @@ function onTextareaKeydown(e: KeyboardEvent, submit: () => void) {
 
 .cl-hint,
 .cl-pin,
+.cl-missing,
 .cl-popup {
   pointer-events: auto;
   cursor: default;
@@ -510,6 +556,80 @@ function onTextareaKeydown(e: KeyboardEvent, submit: () => void) {
   font-size: 10px;
   line-height: 15px;
   text-align: center;
+}
+
+.cl-missing {
+  position: absolute;
+  right: 8px;
+  bottom: 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+  max-width: 280px;
+}
+
+.cl-missing-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border: 1px dashed #f9e2af;
+  border-radius: 14px;
+  background: var(--p-content-background, #1e1e2e);
+  color: #f9e2af;
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+.cl-missing-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: 4px;
+  border: 1px solid var(--p-content-border-color, #45475a);
+  border-radius: 8px;
+  background: var(--p-content-background, #1e1e2e);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.5);
+}
+
+.cl-missing-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 6px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--p-text-color, #cdd6f4);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.cl-missing-item:hover,
+.cl-missing-item.open {
+  background: var(--p-content-hover-background, rgba(255, 255, 255, 0.08));
+}
+
+.cl-missing-index {
+  flex: 0 0 auto;
+  min-width: 16px;
+  height: 16px;
+  border-radius: 8px;
+  background: #f9e2af;
+  color: #11111b;
+  font-size: 10px;
+  line-height: 16px;
+  text-align: center;
+}
+
+.cl-missing-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .cl-pin.cl-stacked {
@@ -646,6 +766,8 @@ function onTextareaKeydown(e: KeyboardEvent, submit: () => void) {
     "resolve": "Resolve",
     "remove": "Delete",
     "orphan": "The original element is gone, so this is shown at its last position",
+    "missingChip": "{count} comment(s) not in this view",
+    "missingTooltip": "These comments point to something that is not on screen now (another page, or the artifact was rewritten)",
     "author": { "user": "You", "ai": "AI" }
   },
   "ja": {
@@ -659,6 +781,8 @@ function onTextareaKeydown(e: KeyboardEvent, submit: () => void) {
     "resolve": "解決",
     "remove": "削除",
     "orphan": "元の要素が見つからないため、最後の位置に表示しています",
+    "missingChip": "この表示に無いコメント {count}",
+    "missingTooltip": "別のページ・画面にあるか、アーティファクトの書き換えで指していた要素が変わったコメントです",
     "author": { "user": "あなた", "ai": "AI" }
   }
 }

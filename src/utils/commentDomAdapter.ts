@@ -66,6 +66,14 @@ export function createDomCommentAdapter(
       if (target && target !== root) {
         result.selector = buildSelector(target, root) ?? undefined;
         result.excerpt = makeExcerpt(target.textContent);
+        // ピンはドラッグした範囲の右上に置く（共通祖先は範囲よりずっと大きいことがある）
+        const r = target.getBoundingClientRect();
+        if (r.width > 0 && r.height > 0) {
+          result.rx = clamp01((box.left + drag.left + drag.width - r.left) / r.width);
+          result.ry = clamp01((box.top + drag.top - r.top) / r.height);
+          result.rw = clamp01(drag.width / r.width);
+          result.rh = clamp01(drag.height / r.height);
+        }
       }
       return result;
     },

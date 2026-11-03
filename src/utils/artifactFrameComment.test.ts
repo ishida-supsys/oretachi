@@ -143,3 +143,119 @@ describe("buildLocateItems", () => {
     ]);
   });
 });
+
+/** 要素のスタブ。locate が触る最小限だけを持つ */
+function stubEl(opts: {
+  rect: { left: number; top: number; width: number; height: number };
+  text?: string;
+  parent?: unknown;
+}) {
+  const r = opts.rect;
+  return {
+    getBoundingClientRect: () => ({ ...r, right: r.left + r.width, bottom: r.top + r.height }),
+    textContent: opts.text ?? "",
+    parentElement: opts.parent ?? null,
+  };
+}
+
+/** プローブを起動して、locate を 1 回問い合わせた結果（{ id: 位置 }）を返す */
+function locateWith(
+  items: { id: string; anchor: Record<string, unknown> }[],
+  elements: Record<string, unknown>,
+  styles: Map<unknown, { overflowX: string; overflowY: string }> = new Map(),
+) {
+  const listeners: Record<string, ((e: unknown) => void)[]> = {};
+  const sent: Record<string, any>[] = [];
+  const parent = { postMessage: (m: Record<string, any>) => sent.push(m) };
+  const body = {
+    scrollWidth: 1000,
+    scrollHeight: 2000,
+    contains: () => true,
+    querySelector: (sel: string) => elements[sel] ?? null,
+    querySelectorAll: () => [],
+  };
+  const doc = {
+    body,
+    documentElement: { scrollWidth: 1000, scrollHeight: 2000 },
+    addEventListener: () => {},
+    removeEventListener: () => {},
+    elementsFromPoint: () => [],
+  };
+  const win = {
+    innerWidth: 800,
+    innerHeight: 600,
+    scrollX: 0,
+    scrollY: 0,
+    addEventListener: (type: string, fn: (e: unknown) => void) => {
+      (listeners[type] ??= []).push(fn);
+    },
+    removeEventListener: () => {},
+  };
+  new Function(
+    "document",
+    "window",
+    "parent",
+    "MutationObserver",
+    "getComputedStyle",
+    ARTIFACT_COMMENT_PROBE_JS,
+  )(doc, win, parent, class { observe() {} disconnect() {} }, (el: unknown) => styles.get(el) ?? { overflowX: "visible", overflowY: "visible" });
+  listeners.message[0]({
+    source: parent,
+    data: { [ARTIFACT_COMMENT_PROBE_MARKER]: true, id: 1, op: "locate", items },
+  });
+  return sent[0].positions as Record<string, { x: number; y: number; orphan: boolean } | null>;
+}
+
+describe("ARTIFACT_COMMENT_PROBE_JS: ページ切り替え・パンへの対応", () => {
+  const rect = { left: 100, top: 100, width: 200, height: 100 };
+
+  it("ドラッグのコメントは、範囲の右上（要素の rx/ry）にピンを置く", () => {
+    const out = locateWith(
+      [{ id: "a", anchor: { kind: "element", selector: "#p", rx: 0.25, ry: 0.5, excerpt: "本文" } }],
+      { "#p": stubEl({ rect, text: "本文" }) },
+    );
+    expect(out.a).toEqual({ x: 150, y: 150, orphan: false });
+  });
+
+  it("要素が今の表示に無ければ、座標へ退避せず orphan にする", () => {
+    const out = locateWith(
+      [{ id: "a", anchor: { kind: "point", x: 0.5, y: 0.1, selector: "#gone", excerpt: "x" } }],
+      {},
+    );
+    expect(out.a?.orphan).toBe(true);
+  });
+
+  it("大きさの無い（display:none など）要素は orphan", () => {
+    const out = locateWith(
+      [{ id: "a", anchor: { kind: "point", selector: "#p", rx: 0.5, ry: 0.5 } }],
+      { "#p": stubEl({ rect: { left: 0, top: 0, width: 0, height: 0 } }) },
+    );
+    expect(out.a?.orphan).toBe(true);
+  });
+
+  it("同じセレクタが別画面の別の要素に当たっても（抜粋が違えば）orphan", () => {
+    const out = locateWith(
+      [{ id: "a", anchor: { kind: "point", selector: "#p", rx: 0.5, ry: 0.5, excerpt: "ログイン画面のボタン" } }],
+      { "#p": stubEl({ rect, text: "タスク一覧の見出し" }) },
+    );
+    expect(out.a?.orphan).toBe(true);
+  });
+
+  it("overflow の箱（パン・内側スクロールの外）に隠れた要素は null（ピンを出さない）", () => {
+    const clipper = stubEl({ rect: { left: 0, top: 0, width: 800, height: 80 } });
+    const el = stubEl({ rect, text: "本文", parent: clipper });
+    const styles = new Map([[clipper, { overflowX: "hidden", overflowY: "hidden" }]]);
+    const out = locateWith(
+      [{ id: "a", anchor: { kind: "point", selector: "#p", rx: 0.5, ry: 0.5, excerpt: "本文" } }],
+      { "#p": el },
+      styles,
+    );
+    // 要素の中央 (200,150) は箱 (高さ 80) の外
+    expect(out.a).toBeNull();
+  });
+
+  it("セレクタの無いコメントは文書の割合で置く（範囲は右上）", () => {
+    const out = locateWith([{ id: "a", anchor: { kind: "region", x: 0.2, y: 0.1, w: 0.3 } }], {});
+    expect(out.a).toEqual({ x: 500, y: 200, orphan: false });
+  });
+});

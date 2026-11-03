@@ -97,33 +97,63 @@ export const ARTIFACT_COMMENT_PROBE_JS =
   "    }" +
   "    var eb=hit(d.x2,d.y2);" +
   "    t=(ea&&eb)?common(ea,eb):(ea||eb);" +
+  "    var left=Math.min(d.x,d.x2),top=Math.min(d.y,d.y2),dw=Math.abs(d.x-d.x2),dh=Math.abs(d.y-d.y2);" +
   "    a={kind:t?'element':'region'," +
-  "       x:clamp((Math.min(d.x,d.x2)+sx)/ds.w),y:clamp((Math.min(d.y,d.y2)+sy)/ds.h)," +
-  "       w:clamp(Math.abs(d.x-d.x2)/ds.w),h:clamp(Math.abs(d.y-d.y2)/ds.h)};" +
-  "    if(t){var s2=selectorOf(t);if(s2)a.selector=s2;a.excerpt=excerpt(t.textContent);}" +
+  "       x:clamp((left+sx)/ds.w),y:clamp((top+sy)/ds.h)," +
+  "       w:clamp(dw/ds.w),h:clamp(dh/ds.h)};" +
+  "    if(t){" +
+  "      var s2=selectorOf(t);if(s2)a.selector=s2;" +
+  "      a.excerpt=excerpt(t.textContent);" +
+  "      var tr=t.getBoundingClientRect();" +
+  "      if(tr.width>0&&tr.height>0){" +
+  "        a.rx=clamp((left+dw-tr.left)/tr.width);a.ry=clamp((top-tr.top)/tr.height);" +
+  "        a.rw=clamp(dw/tr.width);a.rh=clamp(dh/tr.height);" +
+  "      }" +
+  "    }" +
   "    return a;" +
+  "  }" +
+  "  function excerptOk(stored,cur){" +
+  "    if(!stored)return true;" +
+  "    var c=excerpt(cur),n=Math.min(40,stored.length);" +
+  "    return c.slice(0,n)===stored.slice(0,n);" +
+  "  }" +
+  "  function clipped(el,px,py){" +
+  "    var r=root(),a=el.parentElement,cs,b;" +
+  "    while(a&&a!==r&&a!==document.documentElement){" +
+  "      cs=getComputedStyle(a);" +
+  "      if(cs.overflowX!=='visible'||cs.overflowY!=='visible'){" +
+  "        b=a.getBoundingClientRect();" +
+  "        if(px<b.left||py<b.top||px>b.right||py>b.bottom)return true;" +
+  "      }" +
+  "      a=a.parentElement;" +
+  "    }" +
+  "    return false;" +
   "  }" +
   "  function locateOne(a){" +
   "    if(!a||typeof a!=='object')return null;" +
-  "    var vw=window.innerWidth,vh=window.innerHeight,px,py,orphan=false,el=null;" +
+  "    var vw=window.innerWidth,vh=window.innerHeight,px,py;" +
   "    if(typeof a.selector==='string'&&a.selector){" +
+  "      var el=null;" +
   "      try{el=root().querySelector(a.selector);}catch(err){el=null;}" +
+  "      var r=el?el.getBoundingClientRect():null;" +
+  "      if(!el||!r||(r.width<=0&&r.height<=0)||!excerptOk(a.excerpt,el.textContent)){" +
+  "        return {x:0,y:0,orphan:true};" +
+  "      }" +
+  "      var rel=(typeof a.rx==='number'||typeof a.ry==='number');" +
+  "      var rx=rel?clamp(a.rx||0):(a.kind==='point'?0.5:1);" +
+  "      var ry=rel?clamp(a.ry||0):(a.kind==='point'?0.5:0);" +
+  "      px=r.left+rx*r.width;py=r.top+ry*r.height;" +
+  "      if(r.width>1)px=Math.min(Math.max(px,r.left+1),r.left+r.width-1);" +
+  "      if(r.height>1)py=Math.min(Math.max(py,r.top+1),r.top+r.height-1);" +
+  "      if(px<0||py<0||px>vw||py>vh)return null;" +
+  "      if(clipped(el,px,py))return null;" +
+  "      return {x:px,y:py,orphan:false};" +
   "    }" +
-  "    if(el){" +
-  "      var r=el.getBoundingClientRect();" +
-  "      if(r.width>0||r.height>0){" +
-  "        if(a.kind==='point'){px=r.left+clamp(a.rx===undefined?0.5:a.rx)*r.width;py=r.top+clamp(a.ry===undefined?0.5:a.ry)*r.height;}" +
-  "        else{px=r.right;py=r.top;}" +
-  "      }else{el=null;}" +
-  "    }" +
-  "    if(!el){" +
-  "      if(typeof a.x!=='number'||typeof a.y!=='number')return null;" +
-  "      var ds=docSize();" +
-  "      px=clamp(a.x)*ds.w-window.scrollX;py=clamp(a.y)*ds.h-window.scrollY;" +
-  "      orphan=!!a.selector;" +
-  "    }" +
+  "    if(typeof a.x!=='number'||typeof a.y!=='number')return null;" +
+  "    var ds=docSize(),w=(a.kind==='point'||typeof a.w!=='number')?0:a.w;" +
+  "    px=clamp(a.x+w)*ds.w-window.scrollX;py=clamp(a.y)*ds.h-window.scrollY;" +
   "    if(px<0||py<0||px>vw||py>vh)return null;" +
-  "    return {x:px,y:py,orphan:orphan};" +
+  "    return {x:px,y:py,orphan:false};" +
   "  }" +
   "  window.addEventListener('message',function(e){" +
   "    if(e.source!==parent)return;" +
@@ -145,14 +175,14 @@ export const ARTIFACT_COMMENT_PROBE_JS =
   "  });" +
   // 位置が動きうる変化の監視は、親が位置を問い合わせている間（コメントがある・コメントモード中）だけ動かす。
   // 常時監視すると、アニメーションするアプリが毎フレーム親へ通知し続けてしまう。
-  // 通知も間引く（スクロール・リサイズは素早く、DOM の変化は粗く）
+  // 通知も間引く（スクロール・リサイズは素早く、DOM の変化はやや粗く。パン・ズームの transform は DOM の変化なので追従に効く）
   "  var armed=false,mo=null,timer=0;" +
   "  function changed(ms){" +
   "    if(timer)return;" +
   "    timer=setTimeout(function(){timer=0;var m={};m[CHG]=true;post(m);},ms);" +
   "  }" +
   "  function onScroll(){changed(32);}" +
-  "  function onMutate(){changed(250);}" +
+  "  function onMutate(){changed(80);}" +
   "  function arm(){" +
   "    if(armed)return;" +
   "    armed=true;" +
@@ -196,7 +226,7 @@ export function sanitizeFrameAnchor(raw: unknown): PickedAnchor | null {
   const r = raw as Record<string, unknown>;
   const out: CommentAnchor = {};
   if (typeof r.kind === "string" && KINDS.has(r.kind)) out.kind = r.kind as CommentAnchor["kind"];
-  for (const key of ["x", "y", "w", "h", "rx", "ry"] as const) {
+  for (const key of ["x", "y", "w", "h", "rx", "ry", "rw", "rh"] as const) {
     const v = frac(r[key]);
     if (v !== undefined) out[key] = v;
   }
