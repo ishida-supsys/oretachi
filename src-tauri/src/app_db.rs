@@ -60,7 +60,7 @@ const DEFAULT_PAGE_SIZE: u64 = 4096;
 /// 1 つの文字列 / BLOB / SQL 文の最大長（`zeroblob(1e9)` のような一括確保を防ぐ）。
 const MAX_VALUE_BYTES: c_int = 16 * 1024 * 1024;
 /// 1 ウィンドウが同時に開ける DB の数。
-pub const MAX_CONNECTIONS_PER_INSTANCE: usize = 8;
+pub const MAX_CONNECTIONS_PER_WINDOW: usize = 8;
 const MAX_SQL_BYTES: usize = 1024 * 1024;
 const MAX_PARAMS: usize = 1000;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(3);
@@ -416,9 +416,9 @@ impl AppDbRegistry {
             drop(conn);
             return Ok(InsertOutcome::Existing(existing.clone()));
         }
-        if map.len() >= MAX_CONNECTIONS_PER_INSTANCE {
+        if map.len() >= MAX_CONNECTIONS_PER_WINDOW {
             return Err((
-                format!("同時に開ける DB は {} 個までです。使い終わったものは db.close で閉じてください", MAX_CONNECTIONS_PER_INSTANCE),
+                format!("1 つのウィンドウで同時に開ける DB は {} 個までです。使い終わったものは db.close で閉じてください", MAX_CONNECTIONS_PER_WINDOW),
                 conn,
             ));
         }
@@ -441,6 +441,11 @@ impl AppDbRegistry {
         }
         // サブウィンドウのラベルは `<instance>-w<k>`。`appinst-1-` は `appinst-10-…` に前方一致しない
         let sub_prefix = format!("{}-", instance);
+        if stopped {
+            // 停止後は `instance` の 1 件で足りる（`insert` / `is_dead` は instance も見る）ので、
+            // 閉じたサブウィンドウが個別に積んだラベルは畳む。再承認（stopped=false）では畳まない
+            inner.dead.retain(|l| !l.starts_with(&sub_prefix));
+        }
         let labels: Vec<String> = inner
             .conns
             .keys()
@@ -1076,7 +1081,7 @@ mod tests {
             close_all(reg.take_instance("appinst-2", true)).await;
 
             // 接続数の上限
-            for i in 0..MAX_CONNECTIONS_PER_INSTANCE {
+            for i in 0..MAX_CONNECTIONS_PER_WINDOW {
                 let p = base.join("art").join(format!("n{}.db", i));
                 let c = open_connection(&p, true).await.unwrap();
                 assert!(matches!(reg.insert("appinst-3", "appinst-3", (p, true), c), Ok(InsertOutcome::Inserted(_))));
@@ -1138,6 +1143,13 @@ mod tests {
             let taken = reg.take_instance("appinst-1", true);
             assert_eq!(taken.len(), 2);
             close_all(taken).await;
+            {
+                let dead = &reg.inner.lock().unwrap().dead;
+                assert!(!dead.contains("appinst-1-w1") && !dead.contains("appinst-1-w2"), "sub labels are folded");
+                assert!(dead.contains("appinst-1"));
+            }
+            assert!(reg.is_dead("appinst-1", "appinst-1-w1"), "still refused after folding");
+            assert!(!reg.is_dead("appinst-10", "appinst-10"));
             assert!(other.lock().await.is_some());
             close_all(reg.take_instance("appinst-10", true)).await;
         });
