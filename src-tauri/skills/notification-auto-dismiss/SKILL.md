@@ -104,9 +104,10 @@ oretachi の自動承認は、許可ダイアログを承認しても、同じ�
 1. `oretachi_list_worktree_notifications` を呼び、`kind == "approval"` で `lastAutoApprovedAt` が null でない item だけを候補にする。`lastAutoApprovedAt` は自動承認が実際にダイアログを承認した直近時刻で、アプリ再起動で消える。null なら人の入力待ちかもしれないので候補にしない。
 2. 候補ごとに、次を**すべて**満たすものだけを「承認後の残留」とする。1 つでも欠けるか迷ったら残す。
    - `oretachi_get_worktree_status` の `autoApproval` が `true`。
-   - `lastAutoApprovedAt - 1000 <= firstNotifiedAt <= lastAutoApprovedAt + 30000`（ミリ秒）。バッジが承認の直後に積まれたことの確認。承認より前から残っているバッジは別の入力待ちかもしれない。
-   - そのワークツリーの全ターミナル（`oretachi_list_terminals` の `worktreeId` が一致するもの）について `oretachi_inspect_prompt` の `shape` が `"text"`。`permission` / `plan` / `askUserQuestion` / `yesno` / `numbered` が 1 つでもあれば、いま人の回答待ちのダイアログが出ているので残す。`unknown` / `pager` も判断できないので残す。
-3. Step 3 と同じく、`expected_count`（item の `count`）と `expected_kind: "approval"` を付けて `oretachi_clear_worktree_notification` を呼ぶ。`skipped: true` ならクリアせず残す。
+   - `lastAutoApprovedAt - 1000 <= firstNotifiedAt <= lastAutoApprovedAt + 30000`（ミリ秒）。バッジが承認の直後に積まれたことの確認。承認より前から残っているバッジは別の入力待ちかもしれない。遅延フックは承認の約 6 秒後に届き、ダイアログ待ち 2 秒を経てバッジになるので、通常は約 8 秒後に収まる。
+   - `count == 1`。2 件以上は、承認直後に Stop(completed) などが合算されて `kind` だけ approval に見えている可能性があり、今回の `poll_inbox` に入っていない Stop を巻き込みうるので残す。
+   - そのワークツリーの全ターミナル（`oretachi_list_terminals` の `worktreeId` が一致するもの）が**1 件以上あり**、かつ全件について `oretachi_inspect_prompt` の `shape` が `"text"`。0 件（閉じた直後・一覧が取れない）は何も検査していないので残す。`permission` / `plan` / `askUserQuestion` / `yesno` / `numbered` が 1 つでもあれば、いま人の回答待ちのダイアログが出ているので残す。`unknown` / `pager` も判断できないので残す。
+3. Step 3 と同じく、`expected_count`（item の `count`）と `expected_kind: "approval"` を付けて `oretachi_clear_worktree_notification` を呼ぶ。`skipped: true` ならクリアせず残す。主なガードは `expected_count` の一致で、`expected_kind` は最後の kind しか見ないので、判定からクリアまでの間に積まれた別の通知はこの 2 つで検出する。
 4. **Step 3 でそのワークツリーを残すと決めた（Stop の入力要が混ざる）場合は、Step 5 でもクリアしない。** `count` が Stop と approval の合算で `kind` は最後に来た方になるので、条件が一致しても片方が人の入力待ちである可能性が残る。
 
 プラン承認（ExitPlanMode）と AskUserQuestion は自動承認の対象外で、ダイアログは出たままなので、2 のダイアログ判定で必ず残る。
