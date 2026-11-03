@@ -387,3 +387,94 @@ describe("buildPermissionView", () => {
     });
   });
 });
+
+describe("scheduler rows", () => {
+  const tool = (id: string, cron: string, name = "notify_worktree") => ({
+    id,
+    cron,
+    action: { type: "tool" as const, tool: name, params: { kind: "message" } },
+  });
+  const ai = { id: "nightly", cron: "0 3 * * *", action: { type: "aiTerminal" as const, initialPrompt: "run   the\nreport" } };
+
+  it("makes one row per job with the cron and a one-line detail", () => {
+    const v = buildPermissionView({ scheduler: { jobs: [tool("ping", "*/5 * * * *"), ai] } }, null, DANGEROUS);
+    expect(v.rows.map((r) => [r.kind, r.label, r.cron, r.action, r.detail])).toEqual([
+      ["scheduler", "ping", "*/5 * * * *", "tool", "notify_worktree"],
+      ["scheduler", "nightly", "0 3 * * *", "aiTerminal", "run the report"],
+    ]);
+  });
+
+  it("marks unattended AI terminals and dangerous tools as critical, other tools as normal", () => {
+    const v = buildPermissionView(
+      { scheduler: { jobs: [tool("a", "* * * * *"), tool("b", "* * * * *", "oretachi_write_terminal"), ai] } },
+      null,
+      DANGEROUS,
+    );
+    expect(v.rows.map((r) => r.severity)).toEqual(["normal", "critical", "critical"]);
+    expect(v.hasCritical).toBe(true);
+  });
+
+  it("shows any change to a job (cron, params, prompt) as removed + added on re-approval", () => {
+    const before = { scheduler: { jobs: [tool("a", "0 9 * * *")] } };
+    const later = buildPermissionView({ scheduler: { jobs: [tool("a", "0 10 * * *")] } }, before, DANGEROUS);
+    expect(later.rows[0].added).toBe(true);
+    expect(later.removed).toHaveLength(1);
+    const params = buildPermissionView(
+      { scheduler: { jobs: [{ ...tool("a", "0 9 * * *"), action: { type: "tool", tool: "notify_worktree", params: { kind: "approval" } } }] } },
+      before,
+      DANGEROUS,
+    );
+    expect(params.rows[0].added).toBe(true);
+    const same = buildPermissionView(before, before, DANGEROUS);
+    expect(same.rows[0].added).toBe(false);
+    expect(same.removed).toHaveLength(0);
+  });
+
+  it("exposes the full action so the approver sees every parameter and the re-approval diff is distinguishable", () => {
+    const send = (text: string) => ({
+      id: "t",
+      cron: "0 9 * * *",
+      action: { type: "tool" as const, tool: "oretachi_write_terminal", params: { session_id: 1, text } },
+    });
+    const v = buildPermissionView({ scheduler: { jobs: [send("rm -rf build")] } }, { scheduler: { jobs: [send("ls")] } }, DANGEROUS);
+    // 追加された行の全文に params がそのまま入る（切り詰めない）
+    expect(v.rows[0].fullText).toContain("oretachi_write_terminal");
+    expect(v.rows[0].fullText).toContain('"text": "rm -rf build"');
+    // params だけの変更でも、追加行と外れた行は同じ id・cron・detail だが fullText が違う
+    expect(v.removed).toHaveLength(1);
+    expect(v.rows[0].label).toBe(v.removed[0].label);
+    expect(v.rows[0].cron).toBe(v.removed[0].cron);
+    expect(v.rows[0].detail).toBe(v.removed[0].detail);
+    expect(v.rows[0].fullText).not.toBe(v.removed[0].fullText);
+  });
+
+  it("shows the whole AI terminal job: long prompt, systemPrompt, model and cwd", () => {
+    const longPrompt = "a".repeat(500);
+    const job = {
+      id: "x",
+      cron: "* * * * *",
+      action: { type: "aiTerminal" as const, initialPrompt: longPrompt, systemPrompt: "be careful", model: "opus", cwd: "sub/dir", title: "T" },
+    };
+    const v = buildPermissionView({ scheduler: { jobs: [job] } }, null, DANGEROUS);
+    const full = v.rows[0].fullText ?? "";
+    expect(full).toContain(longPrompt);
+    for (const s of ["systemPrompt:\nbe careful", "model: opus", "cwd: sub/dir", "title: T"]) expect(full).toContain(s);
+    // 一覧用の detail は切り詰める
+    expect(v.rows[0].detail?.length).toBe(201);
+    // systemPrompt だけの変更も差分に出る
+    const changed = buildPermissionView(
+      { scheduler: { jobs: [{ ...job, action: { ...job.action, systemPrompt: "be reckless" } }] } },
+      { scheduler: { jobs: [job] } },
+      DANGEROUS,
+    );
+    expect(changed.rows[0].added).toBe(true);
+    expect(changed.removed[0].fullText).toContain("be careful");
+  });
+
+  it("truncates a long prompt for display", () => {
+    const long = { id: "x", cron: "* * * * *", action: { type: "aiTerminal" as const, initialPrompt: "a".repeat(500) } };
+    const v = buildPermissionView({ scheduler: { jobs: [long] } }, null, DANGEROUS);
+    expect(v.rows[0].detail?.length).toBe(201);
+    expect(v.rows[0].detail?.endsWith("…")).toBe(true);
+  });
+});

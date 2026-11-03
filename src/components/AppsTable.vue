@@ -142,6 +142,8 @@ function rowValue(r: ReturnType<typeof detailRows>[number]): string {
       return t("summaryAiTerminal", { spec: r.value });
     case "audio":
       return t("summaryAudio", { spec: r.value });
+    case "scheduler":
+      return t("schedulerRow", { id: r.label, cron: r.cron ?? "", detail: r.detail ?? "" });
     case "subWindow":
       return t("summarySubWindow", { spec: r.label });
     case "fsSensitive":
@@ -457,6 +459,9 @@ onBeforeUnmount(() => {
     "summaryMemory": "memory {bytes} B",
     "summaryAiTerminal": "AI terminal {spec}",
     "summaryAudio": "Microphone ({spec})",
+    "summaryScheduler": "scheduler ({count} jobs)",
+    "schedulerRow": "{id}  [{cron}]  {detail}",
+    "kind_scheduler": "Scheduler",
     "summaryFs": "files (read {read} / write {write})",
     "summaryFsSensitive": "writes to hook/workflow files",
     "summaryDb": "databases (read-only {read} / read-write {write})",
@@ -510,6 +515,9 @@ onBeforeUnmount(() => {
     "summaryMemory": "メモリー {bytes} B",
     "summaryAiTerminal": "AI ターミナル {spec}",
     "summaryAudio": "マイク（{spec}）",
+    "summaryScheduler": "スケジューラー（ジョブ {count} 件）",
+    "schedulerRow": "{id}  [{cron}]  {detail}",
+    "kind_scheduler": "スケジューラー",
     "summaryFs": "ファイル（読 {read} / 書 {write}）",
     "summaryFsSensitive": "フック・ワークフローのファイルへの書き込み",
     "summaryDb": "データベース（読み取り専用 {read} / 読み書き {write}）",

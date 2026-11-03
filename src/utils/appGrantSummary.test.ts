@@ -128,3 +128,27 @@ describe("row actions", () => {
     expect(canOpenWindow(item({ appName: "", manifestError: "bad" }))).toBe(true);
   });
 });
+
+describe("summarizeGrant scheduler", () => {
+  const job = (id: string, name: string) => ({
+    id,
+    cron: "* * * * *",
+    action: { type: "tool" as const, tool: name, params: {} },
+  });
+
+  it("counts jobs and is not critical for ordinary tools", () => {
+    const resolved: AppResolvedPermissions = { scheduler: { jobs: [job("a", "notify_worktree"), job("b", "notify_worktree")] } };
+    expect(summarizeGrant(resolved).find((p) => p.key === "summaryScheduler")).toEqual({
+      key: "summaryScheduler",
+      params: { count: 2 },
+      critical: false,
+    });
+  });
+
+  it("is critical when any job opens an AI terminal", () => {
+    const resolved: AppResolvedPermissions = {
+      scheduler: { jobs: [{ id: "n", cron: "0 3 * * *", action: { type: "aiTerminal", initialPrompt: "go" } }] },
+    };
+    expect(summarizeGrant(resolved).find((p) => p.key === "summaryScheduler")?.critical).toBe(true);
+  });
+});

@@ -9,6 +9,7 @@ mod app_net;
 mod app_ws;
 mod app_subwindow;
 mod app_audio;
+mod app_scheduler;
 mod app_fs;
 mod app_grant;
 mod app_instance;
@@ -2440,6 +2441,7 @@ pub fn run() {
         .manage(app_ws::AppWsRegistry::default())
         .manage(app_subwindow::AppSubWindowRegistry::default())
         .manage(app_audio::AppAudioRegistry::default())
+        .manage(app_scheduler::AppSchedulerRegistry::default())
         .manage(mcp_server::NotificationRegistry::default())
         .manage(mcp_server::CloseWorktreeAckRegistry::default())
         .manage(mcp_server::ImportWorktreeAckRegistry::default())

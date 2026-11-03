@@ -6994,6 +6994,8 @@ pub(crate) fn resolve_app_permissions(
             .media
             .as_ref()
             .map(|m| crate::app_manifest::ResolvedMedia { fs: None, allow: m.allow.clone() }),
+        // 実行内容はそのまま（承認した値が実行の入力になる）
+        scheduler: requested.scheduler.clone(),
     })
 }
 
@@ -10306,7 +10308,27 @@ mod tests {
             sub_window: None,
             audio: None,
             media: None,
+            scheduler: None,
         }
+    }
+
+    /// scheduler は解決で変わるものがなく、承認した値がそのまま grant の resolved に入る
+    /// （落ちるとジョブが黙って動かなくなる。構造体の組み立てはコンパイラが欠落を拾えない形もある）
+    #[test]
+    fn resolve_app_permissions_carries_scheduler_through() {
+        use crate::app_manifest::{SchedulerAction, SchedulerJob, SchedulerPermission};
+        let settings = target_settings();
+        let sch = SchedulerPermission {
+            jobs: vec![SchedulerJob {
+                id: "j".into(),
+                cron: "0 9 * * *".into(),
+                action: SchedulerAction::Tool { tool: "notify_worktree".into(), params: serde_json::json!({ "kind": "general" }) },
+            }],
+        };
+        let mut req = app_req(&["notify_worktree"], &[]);
+        req.scheduler = Some(sch.clone());
+        assert_eq!(resolve_app_permissions(&settings, &req).unwrap().scheduler, Some(sch));
+        assert_eq!(resolve_app_permissions(&settings, &app_req(&["notify_worktree"], &[])).unwrap().scheduler, None);
     }
 
     /// 名前で申請したワークツリーは承認時に ID へ解決して保存される。改名しても、保存済みの
@@ -10348,6 +10370,7 @@ mod tests {
             sub_window: None,
             audio: None,
             media: None,
+            scheduler: None,
         };
         assert!(crate::app_manifest::authorize_app_cross_target(&r, &dest).is_ok());
         let dest_other = cross_worktree_dest_targets(&settings, "wt-other");

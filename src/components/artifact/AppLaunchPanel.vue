@@ -220,6 +220,10 @@ function hhmmss(ms: number): string {
                 {{ t("granted.aiTerminal", { spec: r.value }) }}
                 <span class="tag">{{ t("granted.aiTerminalTag") }}</span>
               </template>
+              <template v-else-if="r.kind === 'scheduler'">
+                {{ t("granted.scheduler", { id: r.label, cron: r.cron ?? "", detail: r.detail ?? "" }) }}
+                <span v-if="r.severity === 'critical'" class="tag">{{ t("granted.schedulerTag") }}</span>
+              </template>
               <template v-else-if="r.kind === 'audio'">
                 {{ t("granted.audio", { spec: r.value }) }}
                 <span class="tag">{{ t("granted.audioTag") }}</span>
@@ -543,6 +547,8 @@ function hhmmss(ms: number): string {
       "network": "Network",
       "mediaRead": "Media playback (local files)",
       "mediaNet": "Media playback (URL)",
+      "scheduler": "Scheduled job {id} [{cron}]: {detail}",
+      "schedulerTag": "runs unattended",
       "subWindow": "Sub-windows (up to {spec})",
       "subWindowFlag_transparent": "Sub-window: transparent",
       "subWindowFlag_frameless": "Sub-window: no title bar",
@@ -595,6 +601,8 @@ function hhmmss(ms: number): string {
       "network": "ネットワーク",
       "mediaRead": "メディア再生（ローカルファイル）",
       "mediaNet": "メディア再生（URL）",
+      "scheduler": "スケジュールジョブ {id} [{cron}]: {detail}",
+      "schedulerTag": "無人で実行",
       "subWindow": "サブウィンドウ（最大 {spec}）",
       "subWindowFlag_transparent": "サブウィンドウ: 透明",
       "subWindowFlag_frameless": "サブウィンドウ: 枠なし",

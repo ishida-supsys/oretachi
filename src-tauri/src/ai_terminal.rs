@@ -544,7 +544,7 @@ fn check_text(what: &str, s: &str) -> Result<(), String> {
     Ok(())
 }
 
-async fn open_inner(app: &AppHandle, ctx: &InstanceContext, p: OpenParams) -> Result<Value, String> {
+pub(crate) async fn open_inner(app: &AppHandle, ctx: &InstanceContext, p: OpenParams) -> Result<Value, String> {
     let perm = granted(app, ctx)?;
     let system_prompt = p.system_prompt.unwrap_or_default();
     let initial_prompt = p.initial_prompt.unwrap_or_default();

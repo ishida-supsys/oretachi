@@ -739,6 +739,8 @@ async fn start_inner(
         }
     }
     add_log(app, worktree_id, artifact_id, "info", format!("起動しました（{}）", label));
+    // 承認済みの scheduler ジョブがあれば、起動中のあいだだけ動かす（ジョブの有無は tick ごとに grant から引く）
+    crate::app_scheduler::on_instance_started(app, label);
     emit_changed(app, worktree_id, artifact_id);
     refresh_memory_bytes(app, worktree_id, artifact_id, true).await;
 
@@ -807,6 +809,8 @@ fn release(app: &AppHandle, label: &str) -> Option<(String, String)> {
         crate::app_db::on_instance_released(app, label);
         // 実行中のネットワーク通信は中断し、以後は出せなくする
         crate::app_net::on_instance_released(app, label);
+        // スケジューラーのタスクも止める（実行中のジョブは完了まで走るが、以後は新しく起動しない）
+        crate::app_scheduler::on_instance_released(app, label);
         // マイクの録音も止める（停止・承認の取り消し・ウィンドウを閉じる・削除のどれでも）
         crate::app_audio::on_instance_released(app, label);
         // 実行中のメディア要求（動画・音声の Range 取得）も中断する
@@ -1682,7 +1686,7 @@ mod tests {
     }
 
     fn perms(max: u64) -> RequestedPermissions {
-        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None, db: None, network: None, sub_window: None, audio: None, media: None }
+        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None, db: None, network: None, sub_window: None, audio: None, media: None, scheduler: None }
     }
 
     #[test]

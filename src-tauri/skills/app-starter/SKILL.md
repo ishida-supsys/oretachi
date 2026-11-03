@@ -15,7 +15,7 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
 - **manifest だけでは何も動かない。** AI が書いた manifest は信頼されない。ユーザーがアーティファクトウィンドウの**起動画面**で起動し、承認ダイアログで許可して初めて権限が有効になる。承認の前に、あなたが API を呼べるようにする手段は無い。
 - **宣言したものだけが使える。** manifest に無い権限（ツール・越境先・メモリー）は、承認済みでも常に拒否される。
 - **通常のビューアでは動かない。** `app` 付きのアーティファクトは起動画面を出す。実行は承認後の常駐ウィンドウの中（`sandbox` iframe）。Web ビューアでは起動できない。
-- 今の版で書ける権限は `mcp`（`tools` と `targets`）、`memory`（`maxBytes` 必須）、`fs`、`db`（下記）、`aiTerminal`（`agents` と `maxConcurrent` 必須）、`network`（`allow` に URL プレフィックス。下記）、`subWindow`（専用サブウィンドウ。下記）、`audio`（マイクの音声入力。下記）、`media`（動画・音声の再生。下記）だけ。`wasm` は未対応で、書くとエラーになる。
+- 今の版で書ける権限は `mcp`（`tools` と `targets`）、`memory`（`maxBytes` 必須）、`fs`、`db`（下記）、`aiTerminal`（`agents` と `maxConcurrent` 必須）、`network`（`allow` に URL プレフィックス。下記）、`subWindow`（専用サブウィンドウ。下記）、`audio`（マイクの音声入力。下記）、`media`（動画・音声の再生。下記）、`scheduler`（cron 式で動く無人ジョブ。下記）だけ。`wasm` は未対応で、書くとエラーになる。
 - コード（content / modules）を更新しても再承認は要らず、起動中なら**承認を保ったまま iframe がリロードされる**（フルリロード。メモリー以外の JS の状態は失われる）。**権限（manifest の `permissions`）を変えたときだけ**、起動中なら直ちに再承認のダイアログが出る。承認までは旧権限のまま動き（リロードもされない）、新しい権限が要る呼び出しは拒否される。承認でリロード、拒否で停止。
 
 ## manifest
@@ -62,6 +62,21 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
 - `network`: アプリが通信してよい URL のプレフィックス。`{ "allow": ["https://api.example.com/v1/"] }`（最大 20 件）。`http` / `https` / `ws` / `wss` のみで、`?` / `#` / `user:pass@` は書けない。**この配下にだけ**通信でき、承認ダイアログにはプレフィックスがそのまま出る（平文の `http` / `ws` は警告つき）。`ws://` / `wss://` は WebSocket（`net.ws`）用で、**スキームは完全一致**する（`https://x/` の許可で `wss://x/` へは繋げず、`wss://x/` の許可で `net.fetch` もできない。両方使うなら両方書く）。**ループバック・プライベート IP・oretachi 自身のポートは常に拒否され、解除する手段は無い**（`localhost` や `192.168.x.x` を書くと manifest がエラーになる）。
 
 - `media`: `<video>` / `<audio>` の `src` に直接使えるローカルファイルと URL の申請。`{ "read": ["worktree://videos/"], "allow": ["https://cdn.example.com/"] }`。**`fs` / `network` の権限とは独立**で、承認ダイアログには「メディア再生」として出る（`media` を申請しても `fs.read` や `net.fetch` は使えない）。`read` は `fs` と同じ `worktree://…` / `artifact://…` のディレクトリのプレフィックスで**読み取り専用**（`write` と `allowSensitivePaths` は書くと manifest ごと拒否される）、`allow` は `network` と同じ URL プレフィックスだが **`http` / `https` だけ**（`ws` / `wss` は拒否）。どちらも最大 20 件で、片方だけでもよい。承認ダイアログには解決済みの絶対パスと URL プレフィックスが出る（平文の `http` は警告つき）。ループバック・プライベート IP・oretachi 自身のポートは `network` と同じく常に拒否される。
+
+- `scheduler`: アプリが**起動している間だけ**、cron 式どおりに自動で実行するジョブの申請。ジョブは **manifest に静的に書く**（実行時に増やす API は無い）。承認ダイアログには、ジョブごとに cron 式と実行内容がそのまま出て、人が見ていない所で動くことが明示される（AI ターミナルを開くジョブと危険なツールを呼ぶジョブは最も強い警告）。
+  ```json
+  "scheduler": { "jobs": [
+    { "id": "morning-ping", "cron": "0 9 * * 1-5",
+      "action": { "type": "tool", "tool": "notify_worktree", "params": { "worktree_name": "自分のワークツリー名", "kind": "general", "body": "おはよう" } } },
+    { "id": "nightly-report", "cron": "0 3 * * *",
+      "action": { "type": "aiTerminal", "title": "夜間レポート", "initialPrompt": "git log を要約して report.md に書いて" } }
+  ] }
+  ```
+  - `jobs`: 最大 10 件。`id` は英数字・`-`・`_`（40 文字まで・重複不可）。`cron` は **5 フィールド（分 時 日 月 曜日）で `*` `,` `-` `/` だけ**（`@daily` や `MON` などの名前は不可）。**ローカル時刻**で評価し、曜日は 0〜7（0 と 7 が日曜）。日と曜日の両方を制限したときは「どちらかに当たれば」実行（Vixie cron と同じ）。
+  - `action.type: "tool"`: `tool` と `params`（JSON オブジェクト、16KB まで）。**ツールは `mcp.tools` にも宣言が要る**（宣言が無いと manifest エラー）。実行時は通常のツール呼び出しと同じ関門（承認済みのツールだけ・越境先は `mcp.targets`）を通る。
+  - `action.type: "aiTerminal"`: `initialPrompt`（必須）と、任意の `title` / `systemPrompt` / `model` / `cwd`。**`aiTerminal` 権限も申請が要る**（無いと manifest エラー）。`aiTerminal.open` と同じ関門を通るので、`maxConcurrent` と全体上限の枠が空いていないとその回は失敗する。**開いた端末は自動では閉じない**（アプリが `aiTerminal.close` するか、ユーザーが閉じるか、アプリの停止で閉じる）。**そのジョブが前回開いた端末が残っている間は、次回以降の実行を飛ばす**（枠を使い切らないため。飛ばし始めと再開のときだけデバッグログに出る）。端末が閉じられた（エージェントの終了を含む）次の回から再開するので、周期ごとに実行したいなら、終わったジョブの端末を `aiTerminal.close` で閉じる。
+  - **アプリが停止している間は動かず、取りこぼした回をあとから実行することもしない**（再起動をまたいで復活しない）。同じジョブの前回の実行が終わっていなければ、その回は飛ばす。結果（許可・拒否・失敗）はアプリのデバッグログに出る。**時刻はローカルの壁時計で照合し、夏時間は考慮しない**（秋の巻き戻しでは繰り返す時間帯の日次ジョブが 2 回走りうる。春の飛び越しでは飛ばされた時間帯の日次ジョブはその日走らない。毎分・毎時のジョブは影響なし）。
+  - ジョブを変える（cron・params・プロンプトなど）と権限の変更なので、起動中なら再承認のダイアログが出る。
 
 - `subWindow`: アプリが専用のウィンドウ（透明・枠なしも可。アシスタントキャラクターの表示など）を開く申請。省略したキーは既定で埋まる。`{ "maxCount": 1, "maxWidth": 800, "maxHeight": 600, "transparent": true, "frameless": true, "alwaysOnTop": true, "position": true }`
   - `maxCount`: 同時に開ける数（1〜4、既定 1）。`maxWidth` / `maxHeight`: 開くウィンドウの大きさの上限（64 ピクセル以上）。**任意で、省略すると上限なし**（ユーザーは自由にリサイズでき、最大化もできる）。書くと、アプリからの `open` / `setSize` もユーザーの手動リサイズもその値までになり、最大化はできなくなる。大きさを省略して開くときの既定は 480 × 640。
