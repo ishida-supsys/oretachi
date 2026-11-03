@@ -72,6 +72,8 @@ struct PtySession {
     /// 別の幅の VT エミュレータへ流すと行の折り返し位置がずれて選択肢行が壊れる。
     /// `resize` は master へ渡すだけで値を保持していなかったため、ここで覚えておく。
     screen_size: Arc<Mutex<(u16, u16)>>,
+    /// #421 診断用の生バイト記録（dev ビルド + `ORETACHI_PTY_TAP=1` のときだけ `Some`）。
+    tap: Option<Arc<crate::pty_tap::PtyTap>>,
 }
 
 /// 寿命の切れた exited セッションを `sessions` map から除去する。
@@ -901,7 +903,15 @@ impl PtyManagerCore {
             }
         });
 
+        // #421 診断用タップ（dev 限定）。reader 起動前に開き、spawn 時点から記録する
+        let tap = app_handle
+            .path()
+            .app_log_dir()
+            .ok()
+            .and_then(|d| crate::pty_tap::PtyTap::open(&d.join("pty-tap"), session_id, rows, cols));
+
         // 読み取りスレッド起動
+        let tap_for_reader = tap.clone();
         let app_handle_reader = app_handle.clone();
         let history_for_reader = output_history.clone();
         let pending_for_reader = output_pending.clone();
@@ -918,6 +928,9 @@ impl PtyManagerCore {
                     Ok(0) => break,
                     Ok(n) => {
                         let data = buf[..n].to_vec();
+                        if let Some(t) = &tap_for_reader {
+                            t.output(total_for_reader.load(Ordering::Relaxed), &data);
+                        }
                         // リングバッファへ push と total 更新を **同じ critical section で実行**。
                         // 別 lock にすると read_output_history が中間状態（hist は新しいが total は古い）を観測し、
                         // buf_start = total - hist.len() が巻き戻って差分読みが重複する。
@@ -1020,6 +1033,7 @@ impl PtyManagerCore {
             last_command_exit_code,
             exited_at,
             screen_size: Arc::new(Mutex::new((rows, cols))),
+            tap,
         };
 
         self.sessions.lock().map_err(|e| format!("lock error: {}", e))?.insert(session_id, session);
@@ -1037,14 +1051,17 @@ impl PtyManagerCore {
     /// send が "input channel closed" で失敗するようになる。キューが満杯
     /// （子プロセスが stdin を読まず writer がブロック中）の場合も即時エラーを返す。
     pub fn write(&self, session_id: u32, data: Vec<u8>) -> Result<(), String> {
-        let tx = {
+        let (tx, tap) = {
             let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
             sweep_exited(&mut sessions);
             let session = sessions
                 .get(&session_id)
                 .ok_or_else(|| format!("Session {} not found", session_id))?;
-            session.input_tx.clone()
+            (session.input_tx.clone(), session.tap.clone())
         };
+        if let Some(t) = &tap {
+            t.input(&data);
+        }
 
         tx.try_send(data).map_err(|e| match e {
             std::sync::mpsc::TrySendError::Full(_) => format!(
@@ -1124,13 +1141,13 @@ impl PtyManagerCore {
 
     pub fn resize(&self, session_id: u32, rows: u16, cols: u16) -> Result<(), String> {
         log::debug!("[Terminal] pty_manager::resize session_id={} rows={} cols={}", session_id, rows, cols);
-        let (master_arc, size_arc) = {
+        let (master_arc, size_arc, tap) = {
             let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
             sweep_exited(&mut sessions);
             let session = sessions
                 .get(&session_id)
                 .ok_or_else(|| format!("Session {} not found", session_id))?;
-            (session.master.clone(), session.screen_size.clone())
+            (session.master.clone(), session.screen_size.clone(), session.tap.clone())
         };
 
         if let Some(master) = master_arc.lock().map_err(|e| format!("lock error: {}", e))?.as_ref() {
@@ -1142,6 +1159,9 @@ impl PtyManagerCore {
                     pixel_height: 0,
                 })
                 .map_err(|e| format!("Resize error: {}", e))?;
+            if let Some(t) = &tap {
+                t.resize(rows, cols);
+            }
             // **master へ通知できたときだけ覚える。** ブロックの外に置くと、子が
             // 自然終了して master が drop されたあと（`if let` が false）にも更新が走り、
             // `prompt_parser` が「その幅で描かれていない履歴」を新しい幅で再生して
@@ -1153,6 +1173,21 @@ impl PtyManagerCore {
         }
 
         Ok(())
+    }
+
+    /// #421 診断用: タップのファイルパスと、reader が書き込んだ累積バイト数。
+    /// タップが無効（release / 環境変数なし）なら `None`。
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    pub fn tap_info(&self, session_id: u32) -> Result<Option<(std::path::PathBuf, u64)>, String> {
+        let mut sessions = self.sessions.lock().map_err(|e| format!("lock error: {}", e))?;
+        sweep_exited(&mut sessions);
+        let session = sessions
+            .get(&session_id)
+            .ok_or_else(|| format!("Session {} not found", session_id))?;
+        Ok(session
+            .tap
+            .as_ref()
+            .map(|t| (t.path().to_path_buf(), session.total_bytes_written.load(Ordering::Relaxed))))
     }
 
     /// 直近に PTY へ通知した画面サイズ `(rows, cols)`。

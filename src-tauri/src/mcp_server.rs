@@ -510,6 +510,45 @@ pub fn mcp_close_worktree_result(
     }
 }
 
+/// #421 診断: `oretachi_debug_terminal_snapshot` がフロント（xterm）の状態を受け取るための
+/// oneshot 送信側。dev 限定ツールだが、command 登録を cfg で分けないため型は常に存在する。
+#[derive(Default)]
+pub struct DebugSnapshotAckRegistry(pub Mutex<HashMap<String, oneshot::Sender<serde_json::Value>>>);
+
+impl DebugSnapshotAckRegistry {
+    #[cfg_attr(not(debug_assertions), allow(dead_code))]
+    fn register(&self, request_id: String) -> oneshot::Receiver<serde_json::Value> {
+        let (tx, rx) = oneshot::channel();
+        match self.0.lock() {
+            Ok(mut g) => { g.insert(request_id, tx); }
+            Err(e) => { e.into_inner().insert(request_id, tx); }
+        }
+        rx
+    }
+
+    fn take(&self, request_id: &str) -> Option<oneshot::Sender<serde_json::Value>> {
+        match self.0.lock() {
+            Ok(mut g) => g.remove(request_id),
+            Err(e) => e.into_inner().remove(request_id),
+        }
+    }
+}
+
+/// フロントエンドが xterm の状態スナップショットを MCP ツールへ返す（#421 診断、dev 限定）。
+#[tauri::command]
+pub fn mcp_debug_terminal_snapshot_result(
+    request_id: String,
+    snapshot: serde_json::Value,
+    registry: tauri::State<'_, DebugSnapshotAckRegistry>,
+) {
+    if let Some(tx) = registry.take(&request_id) {
+        let _ = tx.send(snapshot);
+    }
+}
+
+#[cfg_attr(not(debug_assertions), allow(dead_code))]
+static DEBUG_SNAPSHOT_REQUEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
 /// ワークツリー取り込みの最終結果。
 pub enum ImportWorktreeOutcome {
     /// 登録できた（ワークツリーID）
@@ -1613,6 +1652,12 @@ pub struct ListTerminalsParams {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct KillTerminalParams {
     #[schemars(description = "停止する PTY セッションID（oretachi_list_terminals で取得）")]
+    pub session_id: u32,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DebugTerminalSnapshotParams {
+    #[schemars(description = "PTY セッションID（oretachi_list_terminals で取得）")]
     pub session_id: u32,
 }
 
@@ -4800,6 +4845,91 @@ impl NotifyService {
             .map_err(|e| McpError::internal_error(e, None))?;
         log::info!("[mcp] oretachi_kill_terminal: session_id={}", session_id);
         Ok(CallToolResult::success(vec![Content::text("killed")]))
+    }
+
+    #[tool(description = "【dev ビルド限定の診断】指定 PTY セッションの描画状態を、xterm（バッファ・カーソル・全角セル幅・WebGL 有無）と参照エミュレータ vt100（ORETACHI_PTY_TAP=1 で記録した生バイトを spawn 時点から再生）で並べて返す。日本語入力中に文字・カーソルが欠ける症状（#421）の層の切り分け用。症状が出た直後、↑↓ などで再描画させる前に呼ぶこと", annotations(read_only_hint = true))]
+    async fn oretachi_debug_terminal_snapshot(
+        &self,
+        Parameters(DebugTerminalSnapshotParams { session_id }): Parameters<DebugTerminalSnapshotParams>,
+    ) -> Result<CallToolResult, McpError> {
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = session_id;
+            return Err(McpError::invalid_params("dev build only", None));
+        }
+        #[cfg(debug_assertions)]
+        {
+            let pty = self.app_handle.state::<PtyManager>();
+            let tap_info = pty
+                .tap_info(session_id)
+                .map_err(|e| McpError::invalid_params(e, None))?;
+
+            // フロント側 (xterm) の状態を要求する
+            let request_id = format!(
+                "dbgsnap-{}",
+                DEBUG_SNAPSHOT_REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed)
+            );
+            let rx = self
+                .app_handle
+                .state::<DebugSnapshotAckRegistry>()
+                .register(request_id.clone());
+            if let Err(e) = self.app_handle.emit(
+                "debug-terminal-snapshot-request",
+                serde_json::json!({ "requestId": request_id, "sessionId": session_id }),
+            ) {
+                self.app_handle.state::<DebugSnapshotAckRegistry>().take(&request_id);
+                return Err(McpError::internal_error(e.to_string(), None));
+            }
+            let xterm = match tokio::time::timeout(std::time::Duration::from_secs(3), rx).await {
+                Ok(Ok(v)) => v,
+                _ => {
+                    self.app_handle.state::<DebugSnapshotAckRegistry>().take(&request_id);
+                    serde_json::json!({ "error": "xterm snapshot timed out (session not mounted?)" })
+                }
+            };
+
+            let reference = match &tap_info {
+                None => serde_json::json!({
+                    "error": "tap disabled (start the dev build with ORETACHI_PTY_TAP=1)"
+                }),
+                Some((path, total)) => {
+                    let replay = crate::pty_tap::replay_file(path, 3);
+                    match replay {
+                        Ok(r) => {
+                            let tail = crate::pty_tap::read_output_bytes(path)
+                                .map(|b| crate::pty_tap::visualize_tail(&b, 4096))
+                                .unwrap_or_default();
+                            serde_json::json!({
+                                "tapFile": path.display().to_string(),
+                                "backendTotalBytes": total,
+                                "replayedBytes": r.replayed_bytes,
+                                "rows": r.rows,
+                                "cols": r.cols,
+                                "cursor": { "row": r.cursor.0, "col": r.cursor.1 },
+                                "lines": r.lines.iter()
+                                    .map(|(n, t)| serde_json::json!({ "row": n, "text": t }))
+                                    .collect::<Vec<_>>(),
+                                "cursorRowCells": r.cursor_row_cells.iter()
+                                    .map(|(c, t, w)| serde_json::json!([c, t, w]))
+                                    .collect::<Vec<_>>(),
+                                "rawOutputTail": tail,
+                            })
+                        }
+                        Err(e) => serde_json::json!({ "error": e }),
+                    }
+                }
+            };
+
+            let out = serde_json::json!({
+                "sessionId": session_id,
+                "note": "xterm は 16ms flush + rAF 分だけ遅れうる。replayedBytes と backendTotalBytes が一致していることを先に確認すること",
+                "xterm": xterm,
+                "reference": reference,
+            });
+            Ok(CallToolResult::success(vec![Content::text(
+                serde_json::to_string_pretty(&out).unwrap_or_default(),
+            )]))
+        }
     }
 
     #[tool(description = "指定 PTY セッションの最近の出力履歴を返す。レスポンスは JSON: { text, cursor, lostBytes }。text は ANSI 除去済み UTF-8。連続ポーリングで重複を避けるには、次回呼び出しの from_cursor に前回の cursor を渡す（差分読み）。lostBytes>0 はリングバッファ溢れで先頭が欠落したことを意味する。先に oretachi_list_terminals で session_id を取得すること", annotations(read_only_hint = true))]
