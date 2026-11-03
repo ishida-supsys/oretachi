@@ -20,13 +20,14 @@ import type { ArtifactLinkRect } from "../../utils/artifactFrameLink";
  * 開けるのは `resolveExternalLink` が通す http(s) だけで、`artifact:` や相対パスは
  * テキストとコピーのみになる。
  *
- * 押す前に確認ダイアログを挟むのは次の2つだけ。それ以外は1クリックで開く。
- * - `selfDeclared`（html / react ビュー）: URL も座標も iframe 内のスクリプトの自己申告で
- *   （アーティファクトの JS と同じレルムで動く）、ホバーしていなくても任意の URL の
- *   「開く」ボタンをカーソル直下へ出せてしまう。
- * - URL が長くて表示が打ち切られているとき: 見えている範囲に安全なホスト名だけを置いて
- *   実ホストを隠す小細工（`https://safe.example/...@evil.example/`）が通ってしまうため、
- *   全文が見えていないなら「押した対象＝開く URL」が成立しない。
+ * 押す前に確認ダイアログを挟むのは `selfDeclared`（html / react ビュー）のときだけ。
+ * URL も座標も iframe 内のスクリプトの自己申告で（アーティファクトの JS と同じレルムで
+ * 動く）、ホバーしていなくても任意の URL の「開く」ボタンをカーソル直下へ出せてしまう。
+ * それ以外は1クリックで開く。
+ *
+ * URL が長くて表示が打ち切られていても押下は妨げない。全文は URL テキストへ
+ * マウスを乗せたときのネイティブのツールチップ（title）で確かめられる
+ * （ArtifactLinkUrlText）。
  *
  * 座標は呼び出し側がリンクのビューポート座標で渡す。position: fixed で body へ
  * teleport するのは、markdown ビューの overflow や iframe の枠で切られないため。
@@ -65,8 +66,6 @@ const openBtnRef = ref<HTMLButtonElement | null>(null);
 const href = ref("");
 /** 表示中の URL が iframe の自己申告か（true なら開く前に確認ダイアログを挟む） */
 const selfDeclared = ref(false);
-/** URL の表示が max-height で打ち切られているか（ArtifactLinkUrlText が通知する） */
-const truncated = ref(false);
 /** ポップアップ自身にマウスが乗っているか。iframe からの閉じる要求と競合するため必要 */
 const hovering = ref(false);
 /** ポップアップ内にフォーカスがあるか。キーボードで URL ボタンへ移る間に閉じないため */
@@ -136,9 +135,6 @@ function showFor(rawHref: string, rect: ArtifactLinkRect, options?: ShowOptions)
   selfDeclared.value = options?.selfDeclared === true;
   // 別のリンクへ移ったらコピー済み表示は持ち越さない（別 URL なのに「コピーしました」に見える）
   if (url !== href.value) {
-    // 実測は ArtifactLinkUrlText が nextTick で返す。それまでは「打ち切られている」側に
-    // 倒しておく（確認ダイアログが1回余計に出るだけで、隠れた URL を無確認で開かない）
-    truncated.value = true;
     copied.value = false;
     if (copyTimer) {
       clearTimeout(copyTimer);
@@ -221,8 +217,8 @@ const openTarget = computed(() => resolveExternalLink(href.value));
 async function open() {
   const url = openTarget.value;
   if (!url || !host) return;
-  // 全文が見えていない / 自己申告の URL は、実 URL を見せて同意を取ってから外に出す
-  const needsConfirm = selfDeclared.value || truncated.value;
+  // 自己申告の URL は、実 URL を見せて同意を取ってから外に出す
+  const needsConfirm = selfDeclared.value;
   // 開いたらポップアップの役目は終わり。残すと他ウィンドウへフォーカスが移った先で
   // 前面に浮いたままになる
   hideNow();
@@ -313,10 +309,10 @@ defineExpose({ showFor, scheduleHide, cancelHide, hideNow, focusOpen });
         <!-- aria-label は置かない。ボタンのアクセシブルネームを URL そのものにしておかないと
              「押した対象＝開く URL を確かめる」という機能が支援技術で成立しない。
              用途は視覚的に隠したテキストで後ろから補う -->
-        <ArtifactLinkUrlText :href="href" @update:truncated="truncated = $event" />
+        <ArtifactLinkUrlText :href="href" />
         <span class="link-hover-open-hint">{{ t("open") }}</span>
       </button>
-      <ArtifactLinkUrlText v-else :href="href" @update:truncated="truncated = $event" />
+      <ArtifactLinkUrlText v-else :href="href" />
       <button
         type="button"
         class="link-hover-copy"
