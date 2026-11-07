@@ -99,8 +99,115 @@ mod imp {
     }
 }
 
+/// アプリ API `process`（`app_process.rs`）が起動する子プロセスごとの Job Object。
+///
+/// 子とその子孫を 1 つの Job に入れ、`terminate` で**ツリーごと**止める。Job ハンドルを閉じると
+/// （`Drop`）`KILL_ON_JOB_CLOSE` で残りも止まる。oretachi 全体の Job（`assign_current_process_to_job`）の
+/// 入れ子になる（Windows 8 以降。全体の Job は UI limits を持たないので割り当てられる）。
+#[cfg(target_os = "windows")]
+mod process_job {
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, SetInformationJobObject, TerminateJobObject,
+        JobObjectExtendedLimitInformation, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    pub struct ProcessJob {
+        handle: isize,
+    }
+
+    impl ProcessJob {
+        pub fn new() -> Result<Self, String> {
+            unsafe {
+                let job: HANDLE = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                if job.is_null() {
+                    return Err(format!("Job Object を作れませんでした: {}", std::io::Error::last_os_error()));
+                }
+                let mut info: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = std::mem::zeroed();
+                info.BasicLimitInformation.LimitFlags |= JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+                let ok = SetInformationJobObject(
+                    job,
+                    JobObjectExtendedLimitInformation,
+                    &info as *const _ as *const core::ffi::c_void,
+                    std::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                );
+                if ok == 0 {
+                    let e = std::io::Error::last_os_error();
+                    CloseHandle(job);
+                    return Err(format!("Job Object を設定できませんでした: {}", e));
+                }
+                Ok(Self { handle: job as isize })
+            }
+        }
+
+        /// `process` は `CREATE_SUSPENDED` で作ったばかりのプロセスのハンドル。
+        pub fn assign(&self, process: *mut core::ffi::c_void) -> Result<(), String> {
+            let ok = unsafe { AssignProcessToJobObject(self.handle as HANDLE, process as HANDLE) };
+            if ok == 0 {
+                return Err(format!("プロセスを Job Object へ割り当てられませんでした: {}", std::io::Error::last_os_error()));
+            }
+            Ok(())
+        }
+
+        /// ジョブ内の全プロセスを止める（何度呼んでもよい）。
+        pub fn terminate(&self) {
+            unsafe {
+                TerminateJobObject(self.handle as HANDLE, 1);
+            }
+        }
+    }
+
+    impl Drop for ProcessJob {
+        fn drop(&mut self) {
+            // KILL_ON_JOB_CLOSE: 閉じた時点で、残っているプロセスも止まる
+            unsafe {
+                CloseHandle(self.handle as HANDLE);
+            }
+        }
+    }
+
+    /// `CREATE_SUSPENDED` で起動したプロセスのスレッドを再開する（Job への割り当てが済んでから呼ぶ。
+    /// 割り当て前に子孫が生まれて Job の外へ出るのを防ぐ）。
+    pub fn resume_process_threads(pid: u32) -> Result<(), String> {
+        unsafe {
+            let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+            if snap == INVALID_HANDLE_VALUE {
+                return Err(format!("スレッド一覧を取得できませんでした: {}", std::io::Error::last_os_error()));
+            }
+            let mut entry: THREADENTRY32 = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            let mut resumed = 0u32;
+            let mut more = Thread32First(snap, &mut entry);
+            while more != 0 {
+                if entry.th32OwnerProcessID == pid {
+                    let th = OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID);
+                    if !th.is_null() {
+                        if ResumeThread(th) != u32::MAX {
+                            resumed += 1;
+                        }
+                        CloseHandle(th);
+                    }
+                }
+                more = Thread32Next(snap, &mut entry);
+            }
+            CloseHandle(snap);
+            if resumed == 0 {
+                return Err("プロセスのスレッドを再開できませんでした".to_string());
+            }
+            Ok(())
+        }
+    }
+}
+
 #[cfg(target_os = "windows")]
 pub use imp::{assign_current_process_to_job, release_kill_on_close};
+#[cfg(target_os = "windows")]
+pub use process_job::{resume_process_threads, ProcessJob};
 
 /// 非 Windows では no-op。
 #[cfg(not(target_os = "windows"))]

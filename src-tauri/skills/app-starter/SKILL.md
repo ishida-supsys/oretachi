@@ -15,7 +15,7 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
 - **manifest だけでは何も動かない。** AI が書いた manifest は信頼されない。ユーザーがアーティファクトウィンドウの**起動画面**で起動し、承認ダイアログで許可して初めて権限が有効になる。承認の前に、あなたが API を呼べるようにする手段は無い。
 - **宣言したものだけが使える。** manifest に無い権限（ツール・越境先・メモリー）は、承認済みでも常に拒否される。
 - **通常のビューアでは動かない。** `app` 付きのアーティファクトは起動画面を出す。実行は承認後の常駐ウィンドウの中（`sandbox` iframe）。Web ビューアでは起動できない。
-- 今の版で書ける権限は `mcp`（`tools` と `targets`）、`memory`（`maxBytes` 必須）、`fs`、`db`（下記）、`aiTerminal`（`agents` と `maxConcurrent` 必須）、`network`（`allow` に URL プレフィックス。下記）、`subWindow`（専用サブウィンドウ。下記）、`audio`（マイクの音声入力。下記）、`media`（動画・音声の再生。下記）、`scheduler`（cron 式で動く無人ジョブ。下記）だけ。`wasm` は未対応で、書くとエラーになる。
+- 今の版で書ける権限は `mcp`（`tools` と `targets`）、`memory`（`maxBytes` 必須）、`fs`、`db`（下記）、`aiTerminal`（`agents` と `maxConcurrent` 必須）、`network`（`allow` に URL プレフィックス。下記）、`subWindow`（専用サブウィンドウ。下記）、`audio`（マイクの音声入力。下記）、`media`（動画・音声の再生。下記）、`scheduler`（cron 式で動く無人ジョブ。下記）、`process`（宣言したコマンドの起動。下記）だけ。`wasm` は未対応で、書くとエラーになる。
 - コード（content / modules）を更新しても再承認は要らず、起動中なら**承認を保ったまま iframe がリロードされる**（フルリロード。メモリー以外の JS の状態は失われる）。**権限（manifest の `permissions`）を変えたときだけ**、起動中なら直ちに再承認のダイアログが出る。承認までは旧権限のまま動き（リロードもされない）、新しい権限が要る呼び出しは拒否される。承認でリロード、拒否で停止。
 
 ## manifest
@@ -77,6 +77,42 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
   - `action.type: "aiTerminal"`: `initialPrompt`（必須）と、任意の `title` / `systemPrompt` / `model` / `cwd`。**`aiTerminal` 権限も申請が要る**（無いと manifest エラー）。`aiTerminal.open` と同じ関門を通るので、`maxConcurrent` と全体上限の枠が空いていないとその回は失敗する。**開いた端末は自動では閉じない**（アプリが `aiTerminal.close` するか、ユーザーが閉じるか、アプリの停止で閉じる）。**そのジョブが前回開いた端末が残っている間は、次回以降の実行を飛ばす**（枠を使い切らないため。飛ばし始めと再開のときだけデバッグログに出る）。端末が閉じられた（エージェントの終了を含む）次の回から再開するので、周期ごとに実行したいなら、終わったジョブの端末を `aiTerminal.close` で閉じる。
   - **アプリが停止している間は動かず、取りこぼした回をあとから実行することもしない**（再起動をまたいで復活しない）。同じジョブの前回の実行が終わっていなければ、その回は飛ばす。結果（許可・拒否・失敗）はアプリのデバッグログに出る。**時刻はローカルの壁時計で照合し、夏時間は考慮しない**（秋の巻き戻しでは繰り返す時間帯の日次ジョブが 2 回走りうる。春の飛び越しでは飛ばされた時間帯の日次ジョブはその日走らない。毎分・毎時のジョブは影響なし）。
   - ジョブを変える（cron・params・プロンプトなど）と権限の変更なので、起動中なら再承認のダイアログが出る。
+
+- `process`: **宣言して承認されたコマンドだけ**を、アプリが自分で起動して、標準出力・終了コードを受け取る権限。コマンドは名前つきで宣言し、アプリが渡せるのは**名前とパラメータの値だけ**（実行ファイルや固定の引数は変えられない）。**ユーザーと同じ権限でコマンドを実行できる**ので、承認ダイアログで最も強い警告になり、「理解した」のチェックが必須になる。
+  ```json
+  "process": { "commands": {
+    "run-workflow": {
+      "exec": "python",
+      "args": [
+        "-X", "utf8",
+        "worktree://.claude/skills/my-app/scripts/run_workflow.py",
+        { "param": "request", "type": "path", "under": "worktree://runs/" },
+        { "param": "quality", "type": "enum", "values": ["draft", "final"] },
+        { "param": "tag", "type": "token" }
+      ],
+      "cwd": "worktree://",
+      "env": { "inherit": ["PATH", "USERPROFILE"] },
+      "stdin": "none",
+      "maxConcurrent": 4,
+      "timeoutSec": 3600,
+      "maxOutputBytes": 67108864
+    }
+  } }
+  ```
+  - コマンド名は `[A-Za-z0-9_-]{1,64}`、最大 16 件。シェルは経由せず、argv で直接起動する。
+  - `exec`: **絶対パス / `worktree://…` / `artifact://…` のファイル / 裸のコマンド名**。裸の名前は、**承認時に PATH の絶対パスのディレクトリから探した絶対パス**が承認される（承認ダイアログにも絶対パスが出る）。PATH が変わって解決結果が変わると再承認になる。**`.bat` / `.cmd` は書けない**（コマンドライン引数の解釈による注入の恐れ。manifest ごと拒否）。Windows では `.exe` / `.com` だけ。**Microsoft Store 版の Python は使えない**: `%LOCALAPPDATA%\Microsoft\WindowsApps\python.exe` は 0 バイトの実行エイリアス（スタブ）で、裸の名前でも絶対パスでも実行ファイルとして扱わない（PATH の探索では飛ばして次の候補へ進む）。python.org のインストーラ版、または `py.exe`（`exec: "py"`, `args: ["-3", …]`）を使う。
+  - `args`: **固定の文字列**か、**型つきのパラメータ**（`{ "param": 名前, "type": … }`、最大 64 件）。`worktree://` / `artifact://` で始まる固定の引数は、承認時に**絶対パスへ解決**される（それ以外は文字列のまま）。パラメータの型は 3 つ:
+    - `path`（`under` 必須）: `under`（`worktree://…/` / `artifact://…/`）の配下に解決できる値だけ。`..`・リンク（junction・symlink）による脱出・生の絶対パスは拒否。子にはワークツリーの絶対パスで渡る。
+    - `token`: `[A-Za-z0-9_-]{1,64}`。
+    - `enum`（`values` 必須）: 宣言した候補のどれか（1〜64 件。候補は `-` で始められない）。
+    - **どの型でも、値は `-` で始められない**（オプションとして解釈されるのを防ぐ。`rm -rf` 的な注入ができない）。呼び出しで宣言外のパラメータを渡す・必須のものを欠く・文字列以外を渡すのも拒否。
+  - `cwd`: `worktree://…` / `artifact://…`（省略 = `worktree://`）。ディレクトリが存在すること。
+  - `env.inherit`: 親（oretachi）から**子へ渡す環境変数の名前**。ここに無い変数は渡らない（値を直接書く手段は無い）。**`ORETACHI_` / `MCP_` / `CLAUDE_` で始まる名前は書けない**（oretachi 自身の MCP のポート・トークンを漏らさないため。manifest ごと拒否し、起動時にも除外する）。Windows は `SystemRoot` を常に渡す（無いと Winsock などを使うツールが起動できない）。
+  - `stdin`: `"none"` だけ（標準入力は渡せない）。`maxConcurrent`: 1〜8（コマンドごと、既定 1）。`timeoutSec`: 1〜604800（既定 無制限）。`maxOutputBytes`: 1KiB〜1GiB（累計の出力量。既定 64MiB。超えるとツリーごと止める）。
+  - **`fs.write` / `db`（書き込み）が、`exec`・固定のパス引数（`cwd` 基準の相対パス `scripts/run.py` や `-m` のモジュール名も含む。`-` 始まりのオプションは除く）・`cwd` のどれかを覆う（その配下にある）manifest は拒否される。** アプリ自身がスクリプトを書き換えて、承認なしの iframe から任意のコードを実行できてしまうため（検査を `..` で外されないよう、**固定の引数と絶対パスの `exec` に `..` を含む形、Windows のドライブ相対パス `C:foo` は manifest ごと拒否**する。承認時にも、cwd と結合した固定引数・`exec`・`cwd` を、リンク（junction・symlink）を辿った実パスで再検査する）。スクリプトは書き込めない場所に置き、`fs.write` は結果の置き場所（`worktree://runs/` など）に絞る。
+  - **この検査は、パスの形をした一般的な書き方を拾うだけで、安全の境界ではない。** 拾うのは `exec`・`cwd`・パスの形の固定引数（`worktree://…`、cwd 基準の相対パス、`--名前=値` の右辺、`..`・ドライブ相対・UNC の拒否）と、承認時のリンクを辿った実パスでの照合。**不透明な引数の中身は見えない**: `python -c "exec(open('scripts/run.py').read())"`、`@レスポンスファイル`、cwd から読まれる設定ファイルのように、書ける場所のファイルを読ませる書き方は、検査を通る。`fs.write` / `db` の書き込みと `process` を併せて申請するときは、承認ダイアログの警告を信頼の根拠にする。
+  - **他所から `import` されるファイルは守れない。** `path` パラメータの `under` に、アプリ自身が書けるフォルダを指定できる（`runs/<id>/request.json` を書いて渡す、がこの API の主な使い方）ので、実行ファイルがそのファイルを**コードとして実行する**形 — `python -X utf8 {script}` のようにインタプリタへパラメータをスクリプトとして渡す形 — だと、アプリが書いたコードをそのまま実行できる。manifest の検査で拒否するのは、最初の引数が `path` パラメータで、その `under` に書ける形（`exec: python, args: [{path}]`）だけで、`-X utf8` のようなオプションを先に置く形などは通る。**`path` パラメータは「データ」として使い、コードとして実行させない設計にする**（スクリプトは固定の引数で指す）。承認ダイアログには、アプリ自身が書けるフォルダを指す `path` パラメータの警告が出る。
+  - **スクリプトを書き換えられる相手（AI や MCP クライアント）は、この承認を通して任意のコードを実行できる**。これは仕様で、承認ダイアログに警告が出る（`worktree://` の中にスクリプトを置くなら、ワークツリーを書き換えられる相手を信頼する前提）。エントリのハッシュ固定（`pin`）は将来の拡張で、今は書くとエラー。
 
 - `subWindow`: アプリが専用のウィンドウ（透明・枠なしも可。アシスタントキャラクターの表示など）を開く申請。省略したキーは既定で埋まる。`{ "maxCount": 1, "maxWidth": 800, "maxHeight": 600, "transparent": true, "frameless": true, "alwaysOnTop": true, "position": true }`
   - `maxCount`: 同時に開ける数（1〜4、既定 1）。`maxWidth` / `maxHeight`: 開くウィンドウの大きさの上限（64 ピクセル以上）。**任意で、省略すると上限なし**（ユーザーは自由にリサイズでき、最大化もできる）。書くと、アプリからの `open` / `setSize` もユーザーの手動リサイズもその値までになり、最大化はできなくなる。大きさを省略して開くときの既定は 480 × 640。
@@ -235,6 +271,41 @@ artifact_file(command: "delete", id: "<アプリ id>", project_dir: <作業デ�
 - 数の上限は `maxConcurrent`（アプリごと）と全体 8 個。インスタンスを停止すると、開いた端末はすべて閉じる（コードの更新によるリロードでは維持され、新しい iframe は `list()` で取り直す）。
 - **既知の制限:** 同じ作業ディレクトリの Claude Code のセッションは `~/.claude/projects/<cwd>` の履歴を共有するので、メインのセッションの `/resume` の一覧に専用端末のセッションが並ぶ。`cwd` をワークツリー内の専用サブディレクトリにすると履歴は分かれる（フックの除外は `terminal_id` で判定する。サブディレクトリで起動するときは、フックを効かせるため cwd 直下にもプラグイン設定を書くので、その `.claude/` がサブディレクトリにできる）。
 - `initialPrompt` は `claude -- "<prompt>"` の位置引数として渡る（先頭が `-` でもフラグとして解釈されない）。`model` は英数字と `. _ - [ ]` だけで、先頭に `-` は使えない。
+
+## コマンド起動 API（`process`）
+
+`process` を承認されたアプリだけが、`const { process } = require('oretachi')` で使える。iframe からは何も起動できない（CSP と sandbox）ので、**宣言して承認されたコマンドを Rust 側が起動し、出力を push する**。AI のターンも、メインの端末も通らない（本文を AI の経路に載せたくない入力は、ファイルへ書いてそのパスを渡す）。`import { process } from 'oretachi'` と書いてよい（ブラウザのグローバルに `process` は無いので衝突しない）。
+
+```js
+const { process } = require('oretachi');
+const h = await process.start('run-workflow', { request: 'worktree://runs/20260101000000-abc/request.json', quality: 'final' });
+// h = { id, startedAt }。起動できたかどうかだけ。終わりは onExit
+const offOut = process.onOutput(h.id, ({ stream, seq, text }) => { /* 1 行ずつ。stream は 'stdout' / 'stderr' */ });
+const offExit = process.onExit(h.id, ({ code, signal, durationMs }) => { /* signal: 'killed' | 'timeout' | 'output-limit' | null */ });
+await process.kill(h.id);               // プロセスツリーごと止める。実行中だったら true
+const running = await process.list();   // 自分のプロセス。リロード後に拾い直す
+const r = await process.read(h.id, { sinceSeq: 0 }); // 出力の取り戻し
+```
+
+| 呼び出し | 内容 |
+|---|---|
+| `process.start(name, params?)` | 宣言したコマンドを起動する。`{ id, startedAt }`。`params` はパラメータ名 → 値（文字列）。宣言外のコマンド・パラメータ・型に合わない値・`-` で始まる値・`under` の外のパスは reject |
+| `process.onOutput(id, fn)` | 出力を 1 行ずつ受け取る。`fn({ stream, seq, text })`。`seq` はプロセスごとに 0 から。解除関数が返る |
+| `process.onExit(id, fn)` | 終了を 1 回受け取る。`fn({ code, signal, durationMs })`。登録の前に終わっていても、登録時に呼ばれる。解除関数が返る |
+| `process.kill(id)` | ツリーごと止める（Windows は Job Object、Unix はプロセスグループ）。`onExit` に `signal: 'killed'` が届く |
+| `process.list()` | 自インスタンスのプロセス `[{ id, command, startedAt, running, exit, nextSeq }]`（終了済みも最新 16 件まで） |
+| `process.read(id, { sinceSeq? })` | `sinceSeq`（含む。既定 0）以降の行 `{ lines, nextSeq, truncated, running, exit }`。`truncated` は、古い行がバッファから捨てられて欠けているとき |
+
+- **リロードでは殺さない。** 数時間かかる処理（学習など）が走っていても、コードの更新・再承認の承認後のリロードをまたいで生き続ける。新しい iframe は `process.list()` で `id` を拾い、`process.read(id)` で出力を取り戻してから `onOutput` を付ける（`seq` で重複を除ける。`read` の間に届いた行は、`onOutput` の登録まで iframe が溜める）。**インスタンスの停止（停止ボタン・承認の取り消し・実行ウィンドウを閉じる・削除）・oretachi の終了では、プロセスツリーごと殺す。** 再起動では復元しない。再承認で、コマンドが消えた・解決結果（exec の絶対パス・引数・cwd・env・上限）が変わったときは、そのコマンドの実行中のプロセスも止まる。
+- **終了は直下の子が終わった時点。** 子が先に終わって孫が残る場合（バックグラウンドで起動して戻るスクリプトなど）は、孫もツリーごと止められる。子の終了後に残りの出力を吸い切ってから `onExit` が届く。**常駐させたいデーモンの起動には使えない**（その用途はこの API の対象外）。
+- **出力**: 行単位（`\n` と `\r` の両方で区切る。tqdm のような `\r` だけで更新する進捗表示も行として届く。1 行は 16KiB で分割）。stdout と stderr は別の `stream`。push は 50〜100ms ごとにまとめて届く。1 プロセスあたり直近 1MiB までをバッファし、`read` で取り戻せる。累計が `maxOutputBytes` を超えるとツリーごと止まる（`signal: 'output-limit'`）。`timeoutSec` を超えても止まる（`'timeout'`）。
+- **上限**: コマンドごとに `maxConcurrent`、アプリごとに同時 8 個、oretachi 全体で同時 16 個。超える `start` は reject。拒否・失敗・起動・終了は起動画面のデバッグログに出る（パラメータの値は出さない）。
+- **エンコーディング**: 出力は UTF-8 として読む（不正なバイトは `U+FFFD`）。Windows の Python は `-X utf8`（または `PYTHONUTF8=1`）を付けないと、標準出力が cp932 になり日本語が化ける。
+- **環境**: `env.inherit` に書いた変数だけが子に渡る。`PATH` を渡さないと、子が別のコマンドを探せない（`python` が `pip` 経由で別のツールを呼ぶ場合など）。
+- **入力は信頼しない**: `path` で渡すファイルの中身も、スクリプトが読む環境も、AI や他の経路が書き換えうる。スクリプト側で検証する。
+- **既知の環境の問題**: インストーラから起動した oretachi は、junction の通過を制限する OS の緩和策（RedirectionGuard）を子プロセスへ引き継ぐことがあり、起動したコマンドの中で junction を辿れずに失敗する。oretachi をスタートメニューから起動し直すと解消する。
+- **作業フォルダ**: `cwd` はリンク・ドライブ割り当てを解決した実パスで渡る。ネットワークドライブ上のワークツリーだと UNC パス（`\\server\share\…`）になり、`cmd.exe` などは UNC を作業フォルダにできない。
+- Windows 10 / 11 と Unix で動く。Web ビューアでは起動できない（HTTP には出さない）。
 
 ## 音声入力 API（`audio`）
 

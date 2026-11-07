@@ -478,3 +478,107 @@ describe("scheduler rows", () => {
     expect(v.rows[0].detail?.endsWith("…")).toBe(true);
   });
 });
+
+describe("process rows", () => {
+  const scope = (path: string) => ({ scheme: "worktree" as const, prefix: "runs/", path, write: false });
+  const cmd = (over: Record<string, unknown> = {}) => ({
+    exec: String.raw`\\?\C:\Python310\python.exe`,
+    args: [
+      { type: "fixed" as const, value: "-X" },
+      { type: "fixed" as const, value: String.raw`C:\wt\scripts\run script.py` },
+      {
+        type: "path" as const,
+        param: "request",
+        under: "worktree://runs/",
+        fs: { worktreeRoot: String.raw`\\?\C:\wt`, scopes: [scope(String.raw`\\?\C:\wt\runs`)], allowSensitivePaths: false },
+      },
+      { type: "token" as const, param: "mode" },
+      { type: "enum" as const, param: "size", values: ["l", "s"] },
+    ],
+    cwd: String.raw`\\?\C:\wt`,
+    envInherit: ["PATH", "USERPROFILE"],
+    maxConcurrent: 4,
+    timeoutSec: 3600,
+    maxOutputBytes: 64 * 1024 * 1024,
+    ...over,
+  });
+  const perm = (c = cmd()): AppResolvedPermissions => ({ process: { commands: { "run-workflow": c } } });
+
+  it("makes one critical row per command, showing the resolved absolute paths and the argument template", () => {
+    const v = buildPermissionView(perm(), null, DANGEROUS);
+    expect(v.rows).toHaveLength(1);
+    const r = v.rows[0];
+    expect(r.kind).toBe("process");
+    expect(r.label).toBe("run-workflow");
+    expect(r.severity).toBe("critical");
+    expect(v.hasCritical).toBe(true);
+    // 解決済みの絶対パス（拡張長パスの接頭辞は表示から外す）
+    expect(r.procExec).toBe(String.raw`C:\Python310\python.exe`);
+    expect(r.procCwd).toBe(String.raw`C:\wt`);
+    // 引数の雛形: 固定はそのまま（空白を含むものは引用）、パラメータは {名前: 型}、path は under の絶対パス付き
+    expect(r.procArgs).toEqual([
+      "-X",
+      JSON.stringify(String.raw`C:\wt\scripts\run script.py`),
+      String.raw`{request: path under C:\wt\runs}`,
+      "{mode: token}",
+      "{size: l | s}",
+    ]);
+    expect(r.procEnv).toEqual(["PATH", "USERPROFILE"]);
+    expect(r.procLimits).toBe("max 4 · timeout 3600s · output ≤ 64 MiB");
+  });
+
+  it("shows an unlimited timeout and small output limits plainly", () => {
+    const v = buildPermissionView(perm(cmd({ timeoutSec: undefined, maxOutputBytes: 1024, maxConcurrent: 1 })), null, DANGEROUS);
+    expect(v.rows[0].procLimits).toBe("max 1 · no timeout · output ≤ 1 KiB");
+  });
+
+  it("shows a change to any part of a command as removed + added on re-approval", () => {
+    const before = perm();
+    for (const changed of [
+      cmd({ exec: String.raw`C:\Other\python.exe` }),
+      cmd({ cwd: String.raw`C:\elsewhere` }),
+      cmd({ envInherit: ["PATH"] }),
+      cmd({ maxConcurrent: 1 }),
+      cmd({ args: [{ type: "fixed", value: "other.py" }] }),
+    ]) {
+      const v = buildPermissionView(perm(changed), before, DANGEROUS);
+      expect(v.rows[0].added).toBe(true);
+      expect(v.removed).toHaveLength(1);
+      expect(v.removed[0].kind).toBe("process");
+    }
+    const same = buildPermissionView(before, before, DANGEROUS);
+    expect(same.rows[0].added).toBe(false);
+    expect(same.removed).toHaveLength(0);
+  });
+
+  it("flags path parameters whose folder the app itself can write (a file it writes can be handed to the command)", () => {
+    const withScope = (path: string, write = true): AppResolvedPermissions => ({
+      ...perm(),
+      fs: {
+        worktreeRoot: String.raw`\\?\C:\wt`,
+        scopes: [{ scheme: "worktree" as const, prefix: "", path, write }],
+        allowSensitivePaths: false,
+      },
+    });
+    const flagged = (p: AppResolvedPermissions) => buildPermissionView(p, null, DANGEROUS).rows.find((r) => r.kind === "process")!.procWritableParams;
+    // under（C:\wt\runs）と同じ・親・子の書き込みスコープは重なる（拡張長パスの接頭辞・大文字小文字・区切りの違いは無視）
+    expect(flagged(withScope(String.raw`\\?\C:\wt\runs`))).toEqual(["request"]);
+    expect(flagged(withScope(String.raw`\\?\C:\wt`))).toEqual(["request"]);
+    expect(flagged(withScope(String.raw`C:\WT\Runs\sub`))).toEqual(["request"]);
+    // 重ならない書き込み・読み取りだけのスコープ・fs 無しは出さない（`C:\wt\runs2` は別のフォルダ）
+    expect(flagged(withScope(String.raw`\\?\C:\wt\out`))).toBeUndefined();
+    expect(flagged(withScope(String.raw`\\?\C:\wt\runs2`))).toBeUndefined();
+    expect(flagged(withScope(String.raw`\\?\C:\wt\runs`, false))).toBeUndefined();
+    expect(flagged(perm())).toBeUndefined();
+    // db の書き込みスコープも同じ
+    const db: AppResolvedPermissions = {
+      ...perm(),
+      db: { scopes: [{ scheme: "worktree", prefix: "runs/", path: String.raw`\\?\C:\wt\runs`, write: true }], allowSensitivePaths: false },
+    };
+    expect(flagged(db)).toEqual(["request"]);
+  });
+
+  it("has no process row without the permission", () => {
+    expect(buildPermissionView({ memory: { maxBytes: 1 } }, null, DANGEROUS).rows.some((r) => r.kind === "process")).toBe(false);
+  });
+});

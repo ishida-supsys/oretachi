@@ -144,6 +144,8 @@ function rowValue(r: ReturnType<typeof detailRows>[number]): string {
       return t("summaryAudio", { spec: r.value });
     case "scheduler":
       return t("schedulerRow", { id: r.label, cron: r.cron ?? "", detail: r.detail ?? "" });
+    case "process":
+      return t("processRow", { name: r.label, exec: r.procExec ?? "", args: (r.procArgs ?? []).join(" ") });
     case "subWindow":
       return t("summarySubWindow", { spec: r.label });
     case "fsSensitive":
@@ -462,6 +464,9 @@ onBeforeUnmount(() => {
     "summaryScheduler": "scheduler ({count} jobs)",
     "schedulerRow": "{id}  [{cron}]  {detail}",
     "kind_scheduler": "Scheduler",
+    "kind_process": "Run command",
+    "summaryProcess": "run commands ({count})",
+    "processRow": "{name}: {exec} {args}",
     "summaryFs": "files (read {read} / write {write})",
     "summaryFsSensitive": "writes to hook/workflow files",
     "summaryDb": "databases (read-only {read} / read-write {write})",
@@ -518,6 +523,9 @@ onBeforeUnmount(() => {
     "summaryScheduler": "スケジューラー（ジョブ {count} 件）",
     "schedulerRow": "{id}  [{cron}]  {detail}",
     "kind_scheduler": "スケジューラー",
+    "kind_process": "コマンドの実行",
+    "summaryProcess": "コマンドの実行（{count} 件）",
+    "processRow": "{name}: {exec} {args}",
     "summaryFs": "ファイル（読 {read} / 書 {write}）",
     "summaryFsSensitive": "フック・ワークフローのファイルへの書き込み",
     "summaryDb": "データベース（読み取り専用 {read} / 読み書き {write}）",

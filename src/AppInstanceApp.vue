@@ -37,6 +37,7 @@ import {
   ARTIFACT_BRIDGE_METHOD_MCP_CALL,
   ARTIFACT_BRIDGE_METHOD_MEMORY_SET,
   ARTIFACT_BRIDGE_METHOD_NET_WS_PREFIX,
+  ARTIFACT_BRIDGE_METHOD_PROCESS_PREFIX,
   ARTIFACT_BRIDGE_METHOD_SUB_WINDOW_PREFIX,
   readArtifactBridgeRequest,
   postArtifactBridgeResult,
@@ -44,11 +45,13 @@ import {
   postArtifactBridgeFlush,
   postArtifactBridgeAiTerminalEvent,
   postArtifactBridgeAudioEvent,
+  postArtifactBridgeProcessEvent,
   postArtifactBridgeSubWindowEvent,
   postArtifactBridgeWsEvent,
   type ArtifactBridgeRequest,
 } from "./utils/artifactMemory";
 import { aiTerminalCommandFor } from "./utils/aiTerminalBridge";
+import { processCommandFor } from "./utils/processBridge";
 import { subWindowCommandFor } from "./utils/subWindowBridge";
 import { audioCommandFor } from "./utils/audioBridge";
 import ArtifactLinkHoverPopup from "./components/artifact/ArtifactLinkHoverPopup.vue";
@@ -305,6 +308,19 @@ async function handleBridgeRequest(request: ArtifactBridgeRequest) {
     }
     return;
   }
+  // コマンドの起動。宣言・承認・引数の型・パスの範囲・上限・停止と許可・拒否のログは Rust（`app_process`）が
+  // すべて行う。プロセスはリロードをまたいで生きるので、リロード時にここで閉じる処理は無い
+  if (request.method.startsWith(ARTIFACT_BRIDGE_METHOD_PROCESS_PREFIX)) {
+    try {
+      const cmd = processCommandFor(request.method, request.params);
+      if (!cmd) throw new Error(`このアプリでは使えない API です: ${request.method}`);
+      const result = await invoke<unknown>(cmd.command, cmd.args);
+      reply(request, { ok: true, result });
+    } catch (e) {
+      reply(request, { ok: false, error: errorText(e) });
+    }
+    return;
+  }
   // 専用サブウィンドウ。権限・上限・見た目の検査と許可・拒否のログは Rust がすべて行う
   if (request.method.startsWith(ARTIFACT_BRIDGE_METHOD_SUB_WINDOW_PREFIX)) {
     try {
@@ -535,6 +551,14 @@ onMounted(async () => {
     unlisteners.push(
       await getCurrentWebviewWindow().listen<Record<string, unknown>>("app-ws-event", (event) => {
         if (nonce.value) postArtifactBridgeWsEvent(frame.value, event.payload, nonce.value);
+      }),
+    );
+    // 起動したプロセスの出力（まとめた行）と終了（Rust が `emit_to(label)` で、このインスタンスのウィンドウだけへ
+    // 送る）。受け手はプロセス ID で選ばれる。リロード中に届いたものは nonce が無いので捨てる
+    // （新しい iframe は `process.list` / `process.read` で取り戻す）
+    unlisteners.push(
+      await getCurrentWebviewWindow().listen<Record<string, unknown>>("app-process-event", (event) => {
+        if (nonce.value) postArtifactBridgeProcessEvent(frame.value, event.payload, nonce.value);
       }),
     );
     // 自分が開いたサブウィンドウがユーザーに閉じられた通知（Rust が `emit_to(label)` で、このインスタンスの

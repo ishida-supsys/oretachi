@@ -200,6 +200,13 @@ pub fn normalize_scope(s: &str) -> Result<String, String> {
     Ok(format!("{}{}", scheme.uri_prefix(), prefix_of(&comps)))
 }
 
+/// ファイル（またはディレクトリ）1 件の URI を正規化する（`worktree://a\b.py` → `worktree://a/b.py`）。
+/// [`normalize_scope`] と違い末尾に `/` を足さない。`process` の exec・固定引数・cwd が使う。
+pub fn normalize_path_uri(s: &str) -> Result<String, String> {
+    let (scheme, comps) = split_uri(s.trim())?;
+    Ok(format!("{}{}", scheme.uri_prefix(), comps.join("/")))
+}
+
 /// 正規化済みのスコープが、既定拒否パスの成分を含む `worktree://` か。
 pub fn scope_hits_sensitive(scope: &str) -> bool {
     match split_uri(scope) {
@@ -311,7 +318,7 @@ pub fn resolve_requested_fs(
 /// 存在判定は `symlink_metadata`（リンクを辿らない）。在るのに `canonicalize` できないもの
 /// （壊れた symlink / junction）は、まだ無いファイルとして扱わず**拒否**する。字句結合に落とすと、
 /// 後でリンクが辿られて範囲外へ出る。
-fn canonicalize_allow_missing_tail(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn canonicalize_allow_missing_tail(path: &Path) -> Result<PathBuf, String> {
     let mut tail: Vec<OsString> = Vec::new();
     let mut cur = path.to_path_buf();
     loop {

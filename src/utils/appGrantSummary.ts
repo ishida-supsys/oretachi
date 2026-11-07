@@ -50,6 +50,9 @@ export function summarizeGrant(resolved: AppResolvedPermissions): SummaryPart[] 
   if (jobs.length > 0) {
     parts.push({ key: "summaryScheduler", params: { count: jobs.length }, critical: jobs.some((r) => r.severity === "critical") });
   }
+  // コマンドの起動はユーザーの権限で実行できるので、常に最も強い警告
+  const procs = count("process");
+  if (procs > 0) parts.push({ key: "summaryProcess", params: { count: procs }, critical: true });
   const sw = v.rows.find((r) => r.kind === "subWindow");
   if (sw) {
     const overlay = v.rows.some((r) => r.kind === "subWindowFlag" && r.severity === "danger");

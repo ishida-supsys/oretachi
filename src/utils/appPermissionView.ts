@@ -1,4 +1,10 @@
-import type { AppResolvedFs, AppResolvedPermissions, AppSchedulerAction } from "../types/appInstance";
+import type {
+  AppProcessResolvedArg,
+  AppProcessResolvedCommand,
+  AppResolvedFs,
+  AppResolvedPermissions,
+  AppSchedulerAction,
+} from "../types/appInstance";
 
 /**
  * 承認ダイアログに並べる権限の行を組み立てる純関数（描画は呼び出し側）。
@@ -6,7 +12,7 @@ import type { AppResolvedFs, AppResolvedPermissions, AppSchedulerAction } from "
  * - `critical`: 最も強い警告。ワイルドカードの越境先（今後作られるワークツリーも含み、メインの
  *   クローンの端末にも届く）、FS / DB の既定拒否パス解除（`.git/hooks` などへ書けるので任意コード実行になる）、
  *   専用 AI ターミナル（ユーザーと同じ権限で動くエージェントを起動できる）、マイクの音声入力
- *   （ユーザーの発話を聞ける）。
+ *   （ユーザーの発話を聞ける）、コマンドの起動（`process`。ユーザーの権限で、承認した絶対パスの実行ファイルを動かせる）。
  * - `danger`: ユーザーと同等の権限（任意コマンド実行）になりうるツールと、ファイル・DB の書き込み。
  * - `normal`: それ以外。
  *
@@ -32,6 +38,7 @@ export const PERMISSION_ROW_KINDS = [
   "mediaRead",
   "mediaNet",
   "scheduler",
+  "process",
 ] as const;
 
 export type PermissionRowKind = (typeof PERMISSION_ROW_KINDS)[number];
@@ -70,6 +77,24 @@ export interface PermissionRow {
    * 何が実行されるかをすべて見られなければならない（`detail` は一覧用の 1 行表示）
    */
   fullText?: string;
+  /**
+   * `process` 行（コマンド 1 件。`label` がコマンド名）: 承認時に解決した絶対パスの実行ファイル・引数の雛形
+   * （固定の引数はそのまま、パラメータは `{名前: 型 …}`）・cwd・継承する環境変数・上限の表示。
+   * manifest の生文字列ではなく**解決済みの形**を出す
+   */
+  procExec?: string;
+  procArgs?: string[];
+  procCwd?: string;
+  procEnv?: string[];
+  procLimits?: string;
+  /**
+   * `process` 行: `under` が、このアプリ自身の書き込みスコープ（`fs` / `db`）と重なっている `path` パラメータの名前。
+   * アプリが自分で書いたファイルをそのままコマンドへ渡せる（それをコードとして実行する実行ファイル —
+   * インタプリタにスクリプトのパスを渡す形など — なら、アプリが任意のコードを実行できる）。
+   * manifest の検査は「exec・固定のパス引数・cwd・先頭の path パラメータ」だけを塞ぐ限定的なもので、
+   * これはそこから漏れる形を人に見せるための警告（空・無しなら出さない）
+   */
+  procWritableParams?: string[];
   /** 再承認で、直前の権限に無かった行 */
   added: boolean;
 }
@@ -194,6 +219,32 @@ function rowsOf(perm: AppResolvedPermissions, dangerous: ReadonlySet<string>): P
       added: false,
     });
   }
+  // コマンドの起動（#428）: コマンド 1 件ごとに 1 行。常に critical（ユーザーの権限でコマンドを実行できる。
+  // exec やスクリプトを書き換えられる相手も、この承認を通して任意のコードを実行できる）。
+  // value にコマンドの解決済みの全体を入れるので、exec の絶対パス・引数・cwd・環境変数・上限のどれが
+  // 変わっても再承認の差分（追加・外れ）に出る
+  const writable = writableRoots(perm);
+  for (const [name, cmd] of Object.entries(perm.process?.commands ?? {})) {
+    const writableParams = cmd.args.flatMap((a) =>
+      a.type === "path" && a.fs.scopes.some((s) => writable.some((w) => pathsOverlap(w, normalizePath(s.path))))
+        ? [a.param]
+        : [],
+    );
+    rows.push({
+      kind: "process",
+      value: JSON.stringify([name, cmd]),
+      label: name,
+      procExec: displayFsPath(cmd.exec),
+      procArgs: cmd.args.map(processArgTemplate),
+      procCwd: displayFsPath(cmd.cwd),
+      procEnv: cmd.envInherit,
+      procLimits: processLimits(cmd),
+      ...(writableParams.length > 0 ? { procWritableParams: writableParams } : {}),
+      severity: "critical",
+      wildcard: false,
+      added: false,
+    });
+  }
   // サブウィンドウ: 数と大きさの上限を 1 行、申請した見た目・位置の権限を 1 件ごとに 1 行。
   // 透明・枠なし・常に前面は、他のウィンドウの上に重なって操作を横取りできるので danger。位置の指定は normal
   if (perm.subWindow) {
@@ -221,6 +272,49 @@ function rowsOf(perm: AppResolvedPermissions, dangerous: ReadonlySet<string>): P
   if (perm.fs) rows.push(...scopeRows(perm.fs, "fs", "fsSensitive"));
   if (perm.db) rows.push(...scopeRows(perm.db, "db", "dbSensitive"));
   return rows;
+}
+
+/** 引数の雛形 1 件。固定の引数はそのまま、パラメータは `{名前: 型 …}`（`path` は解決済みの `under` の絶対パス付き） */
+export function processArgTemplate(a: AppProcessResolvedArg): string {
+  switch (a.type) {
+    case "fixed":
+      return /[\s"]/.test(a.value) ? JSON.stringify(a.value) : a.value;
+    case "path": {
+      const under = a.fs.scopes[0] ? displayFsPath(a.fs.scopes[0].path) : a.under;
+      return `{${a.param}: path under ${under}}`;
+    }
+    case "token":
+      return `{${a.param}: token}`;
+    case "enum":
+      return `{${a.param}: ${a.values.join(" | ")}}`;
+  }
+}
+
+/** 比較用のパス（表示と同じく拡張長パスの接頭辞を外し、区切りを `/` に、大文字小文字は無視、末尾の区切りは落とす） */
+function normalizePath(p: string): string {
+  return displayFsPath(p).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+function pathsOverlap(a: string, b: string): boolean {
+  return a === b || a.startsWith(b + "/") || b.startsWith(a + "/");
+}
+
+/** このアプリ自身が書き込めるスコープ（`fs` / `db` の write）の絶対パス */
+function writableRoots(perm: AppResolvedPermissions): string[] {
+  return [...(perm.fs?.scopes ?? []), ...(perm.db?.scopes ?? [])].filter((s) => s.write).map((s) => normalizePath(s.path));
+}
+
+function formatBytes(n: number): string {
+  if (n >= 1024 * 1024 * 1024) return `${+(n / 1024 / 1024 / 1024).toFixed(1)} GiB`;
+  if (n >= 1024 * 1024) return `${+(n / 1024 / 1024).toFixed(1)} MiB`;
+  if (n >= 1024) return `${+(n / 1024).toFixed(1)} KiB`;
+  return `${n} B`;
+}
+
+/** 同時実行数・実行時間・出力量の上限の 1 行表示（承認した値のまま） */
+function processLimits(c: AppProcessResolvedCommand): string {
+  const time = c.timeoutSec == null ? "no timeout" : `timeout ${c.timeoutSec}s`;
+  return `max ${c.maxConcurrent} · ${time} · output ≤ ${formatBytes(c.maxOutputBytes)}`;
 }
 
 function schedulerFullText(a: AppSchedulerAction): string {

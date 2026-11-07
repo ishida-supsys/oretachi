@@ -36,6 +36,7 @@ const hasWildcard = computed(() => view.value.rows.some((r) => r.wildcard));
 const hasSensitive = computed(() => view.value.rows.some((r) => r.kind === "fsSensitive" || r.kind === "dbSensitive"));
 const hasAiTerminal = computed(() => view.value.rows.some((r) => r.kind === "aiTerminal"));
 const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"));
+const hasProcess = computed(() => view.value.rows.some((r) => r.kind === "process"));
 </script>
 
 <template>
@@ -102,6 +103,34 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
               <div class="why" :class="{ neutral: r.severity !== 'critical' }">
                 {{ r.action === "aiTerminal" ? t("schedulerAiWarning") : r.severity === "critical" ? t("schedulerDangerToolWarning") : t("schedulerNote") }}
               </div>
+            </template>
+            <template v-else-if="r.kind === 'process'">
+              <span class="kind">{{ t("kindProcess") }}</span>
+              <strong>{{ r.label }}</strong>
+              <div class="why">{{ t("processWarning") }}</div>
+              <div v-if="r.procWritableParams && r.procWritableParams.length > 0" class="why">
+                {{ t("processWritableParams", { params: r.procWritableParams.join(", ") }) }}
+              </div>
+              <dl class="proc">
+                <dt>{{ t("procExec") }}</dt>
+                <dd><code class="path">{{ r.procExec }}</code></dd>
+                <dt>{{ t("procArgs") }}</dt>
+                <dd>
+                  <code v-if="r.procArgs && r.procArgs.length > 0" class="path">{{ r.procArgs.join(" ") }}</code>
+                  <span v-else class="muted">{{ t("procNoArgs") }}</span>
+                </dd>
+                <dt>{{ t("procCwd") }}</dt>
+                <dd><code class="path">{{ r.procCwd }}</code></dd>
+                <dt>{{ t("procEnv") }}</dt>
+                <dd>
+                  <code v-if="r.procEnv && r.procEnv.length > 0" class="path">{{ r.procEnv.join(", ") }}</code>
+                  <span v-else class="muted">{{ t("procNoEnv") }}</span>
+                  <div class="muted">{{ t("procEnvNote") }}</div>
+                </dd>
+                <dt>{{ t("procLimits") }}</dt>
+                <dd>{{ r.procLimits }}</dd>
+              </dl>
+              <div class="why neutral">{{ t("processNote") }}</div>
             </template>
             <template v-else-if="r.kind === 'audio'">
               <span class="kind">{{ t("kindAudio") }}</span>
@@ -187,6 +216,9 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
               <s v-else-if="r.kind === 'memory'">{{ t("memoryMax", { bytes: r.value }) }}</s>
               <s v-else-if="r.kind === 'aiTerminal'">{{ t("aiTerminalSummary", { spec: r.value }) }}</s>
               <s v-else-if="r.kind === 'audio'">{{ t("audioSummary") }} ({{ r.value }})</s>
+              <s v-else-if="r.kind === 'process'">
+                {{ r.label }} <code>{{ r.procExec }} {{ (r.procArgs ?? []).join(" ") }}</code>
+              </s>
               <template v-else-if="r.kind === 'scheduler'">
                 <s>{{ r.label }} <code>{{ r.cron }}</code></s>
                 <pre class="sched-old">{{ r.fullText }}</pre>
@@ -211,6 +243,8 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
           <template v-if="hasAiTerminal">{{ t("understandAiTerminal") }}</template>
           <template v-if="hasAudio && (hasWildcard || hasSensitive || hasAiTerminal)"> </template>
           <template v-if="hasAudio">{{ t("understandAudio") }}</template>
+          <template v-if="hasProcess && (hasWildcard || hasSensitive || hasAiTerminal || hasAudio)"> </template>
+          <template v-if="hasProcess">{{ t("understandProcess") }}</template>
         </span>
       </label>
 
@@ -347,6 +381,26 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
   background: #89b4fa;
   color: #1e1e2e;
 }
+.proc {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 2px 10px;
+  margin: 6px 0 0;
+  font-size: 12px;
+}
+.proc dt {
+  color: #6c7086;
+}
+.proc dd {
+  margin: 0;
+  min-width: 0;
+}
+.proc .path {
+  word-break: break-all;
+}
+.muted {
+  color: #6c7086;
+}
 .sched-full {
   margin-top: 4px;
 }
@@ -472,6 +526,18 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
     "audioSummary": "Listen to your microphone",
     "audioSpec": "(up to {spec})",
     "audioWarning": "The app can hear everything the microphone picks up, including your voice and anything said near your PC, as raw audio. Recording is shown in the launch screen and in the window titles, and stops when the app stops, reloads, or you press Stop recording. The audio is not saved by oretachi.",
+    "kindProcess": "Run command",
+    "processWarning": "If you approve, this app can run this command with your authority, any time it is running. Anyone who can edit the executable or the script it runs (including an AI or an MCP client in this worktree) can run arbitrary code through this approval. This is the strongest permission.",
+    "processWritableParams": "This app can also write files in the folder(s) that the parameter(s) {params} point to (see its file permissions), and pass them to the command. If the program runs such a file as code (for example an interpreter given a script path), the app can run arbitrary code through it.",
+    "procExec": "Program",
+    "procArgs": "Arguments",
+    "procCwd": "Working folder",
+    "procEnv": "Environment",
+    "procLimits": "Limits",
+    "procNoArgs": "(none)",
+    "procNoEnv": "(no variables inherited)",
+    "procEnvNote": "Only the variables listed here are passed on (plus SystemRoot on Windows). Variables starting with ORETACHI_, MCP_ or CLAUDE_ are never passed. A name in curly braces in the arguments marks a value the app chooses; each is checked against its type, may not start with \"-\", and paths must stay under the folder shown.",
+    "processNote": "The program is started directly, without a shell. The whole process tree is stopped when the app stops or oretachi exits. It keeps running when the app reloads.",
     "kindAiTerminal": "AI terminal",
     "kindScheduler": "Scheduler",
     "schedulerFull": "Full content that will run",
@@ -525,6 +591,7 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
     "understandSensitive": "I understand this lets the app run commands with my authority by editing hook and workflow files.",
     "understandAiTerminal": "I understand this lets the app start an agent that runs with my authority and drive it.",
     "understandAudio": "I understand this lets the app listen to my microphone.",
+    "understandProcess": "I understand this lets the app run the commands above with my authority, and that anyone who can change those programs or scripts can run code through it.",
     "changeHint": "Denying stops the app.",
     "waiting": "{count} more approval request(s) are waiting.",
     "approve": "Allow and start",
@@ -551,6 +618,18 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
     "audioSummary": "マイクの音声を取得する",
     "audioSpec": "（{spec}）",
     "audioWarning": "あなたの声や PC の近くで話された内容を含む、マイクが拾うすべての音を、生の音声としてアプリが聞けます。録音中は起動画面とウィンドウのタイトルに表示され、アプリの停止・リロード・起動画面の「録音を止める」で止まります。oretachi は音声を保存しません。",
+    "kindProcess": "コマンドの実行",
+    "processWarning": "承認すると、このアプリは、起動しているあいだいつでも、あなたの権限でこのコマンドを実行できます。実行ファイルや、実行するスクリプトを書き換えられる相手（このワークツリーの AI や MCP クライアントを含む）は、この承認を通して任意のコードを実行できます。最も強い権限です。",
+    "processWritableParams": "このアプリは、パラメータ {params} が指すフォルダにファイルを書くこともでき（ファイルの権限を参照）、それをコマンドへ渡せます。実行ファイルがそのファイルをコードとして実行する場合（インタプリタにスクリプトのパスを渡す形など）、アプリはこれを通して任意のコードを実行できます。",
+    "procExec": "実行ファイル",
+    "procArgs": "引数",
+    "procCwd": "作業フォルダ",
+    "procEnv": "環境変数",
+    "procLimits": "上限",
+    "procNoArgs": "（なし）",
+    "procNoEnv": "（継承しません）",
+    "procEnvNote": "ここに挙げた変数だけを子へ渡します（Windows は SystemRoot も）。ORETACHI_・MCP_・CLAUDE_ で始まる変数は、書かれていても渡しません。引数の中で波かっこに入った名前は、アプリが決める値で、型の検査を受け、「-」で始められず、パスは表示のフォルダの配下に限られます。",
+    "processNote": "シェルを経由せず、実行ファイルを直接起動します。アプリの停止・oretachi の終了ではプロセスツリーごと止まります。アプリのリロードでは止まりません。",
     "kindAiTerminal": "AI ターミナル",
     "kindScheduler": "スケジューラー",
     "schedulerFull": "実行される内容の全文",
@@ -604,6 +683,7 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
     "understandSensitive": "フックやワークフローのファイルを書き換えて、私の権限でコマンドを実行できてしまうことを理解しました。",
     "understandAiTerminal": "アプリが私の権限で動くエージェントを起動し、操作できることを理解しました。",
     "understandAudio": "アプリが私のマイクの音声を聞けることを理解しました。",
+    "understandProcess": "アプリが上記のコマンドを私の権限で実行でき、そのプログラムやスクリプトを書き換えられる相手が、これを通してコードを実行できることを理解しました。",
     "changeHint": "拒否するとアプリは停止します。",
     "waiting": "ほかに {count} 件の承認要求が待っています。",
     "approve": "許可して起動",
