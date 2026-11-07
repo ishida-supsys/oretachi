@@ -304,7 +304,9 @@ pub fn build_argv(cmd: &ResolvedProcessCommand, params: &serde_json::Value) -> R
     };
     let declared: HashSet<&str> = cmd.args.iter().filter_map(declared_param).collect();
     if let Some(k) = obj.keys().find(|k| !declared.contains(k.as_str())) {
-        return Err(format!("宣言されていないパラメータ '{}' です", k));
+        // キー名は呼び出し側が決める任意の文字列。長さと制御文字を抑えてから出す
+        let shown: String = k.chars().filter(|c| !c.is_control()).take(64).collect();
+        return Err(format!("宣言されていないパラメータ '{}' です", shown));
     }
     let mut argv = Vec::with_capacity(cmd.args.len());
     for a in &cmd.args {
@@ -327,9 +329,16 @@ pub fn build_argv(cmd: &ResolvedProcessCommand, params: &serde_json::Value) -> R
             return Err(format!("パラメータ '{}' は '-' で始まる値にできません", name));
         }
         match a {
-            ResolvedProcessArg::Path { fs, .. } => {
-                let p = crate::app_fs::resolve_scoped_path(fs, v, Access::Read)
-                    .map_err(|e| format!("パラメータ '{}': {}", name, e))?;
+            ResolvedProcessArg::Path { fs, under, .. } => {
+                // 値（パス）はエラー文に出さない。この文はデバッグログにも残り、起動画面に見えるうえ、
+                // 本文を AI の経路に載せたくない入力（プロンプトなど）を指すパスもありうるため。
+                // `app_fs` の詳細なエラー文は値を含むので、種類だけ伝える
+                let p = crate::app_fs::resolve_scoped_path(fs, v, Access::Read).map_err(|_| {
+                    format!(
+                        "パラメータ '{}' のパスが不正か、承認された範囲（{}）の外です（worktree:// / artifact:// の形で、.. ・リンクによる脱出・範囲外・ルートの移動は拒否されます）",
+                        name, under
+                    )
+                })?;
                 argv.push(OsString::from(strip_verbatim(&p.to_string_lossy())));
             }
             ResolvedProcessArg::Token { .. } => {
@@ -489,33 +498,45 @@ pub struct TreeKiller {
 }
 
 impl TreeKiller {
-    /// ツリーを止める（何度呼んでもよい）。Unix は SIGTERM のあと、猶予を置いて SIGKILL。
+    /// 明示の kill・タイムアウト・出力量の超過で止める（何度呼んでもよい）。Unix は SIGTERM のあと、
+    /// 猶予を置いて、まだ残っていれば SIGKILL（スクリプトが後始末できるように）。Windows は即時。
     pub fn kill(&self) {
-        #[cfg(windows)]
-        self.job.terminate();
-        #[cfg(unix)]
-        {
-            let pgid = self.pgid;
-            unsafe {
-                libc::kill(-pgid, libc::SIGTERM);
-            }
-            std::thread::spawn(move || {
-                std::thread::sleep(Duration::from_secs(2));
-                unsafe {
-                    libc::kill(-pgid, libc::SIGKILL);
-                }
-            });
-        }
+        self.kill_impl(true);
     }
 
-    /// 猶予なしで止める（oretachi の終了時）。
+    /// 猶予なしで止める。子が終わったあとの掃除（孫の回収）と、oretachi の終了で使う。
+    /// 子を回収したあとに猶予付きの kill を使うと、空になったグループ ID が別のプロセスに再利用された
+    /// あとで SIGKILL が飛びうるので、終了後の掃除は必ずこちら。
     pub fn kill_now(&self) {
-        #[cfg(windows)]
+        self.kill_impl(false);
+    }
+
+    #[cfg(windows)]
+    fn kill_impl(&self, _graceful: bool) {
         self.job.terminate();
-        #[cfg(unix)]
-        unsafe {
-            libc::kill(-self.pgid, libc::SIGKILL);
+    }
+
+    #[cfg(unix)]
+    fn kill_impl(&self, graceful: bool) {
+        let pgid = self.pgid;
+        if !graceful {
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+            return;
         }
+        unsafe {
+            libc::kill(-pgid, libc::SIGTERM);
+        }
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_secs(2));
+            // グループがまだ残っているときだけ（空なら ID が再利用されているかもしれないので撃たない）
+            unsafe {
+                if libc::kill(-pgid, 0) == 0 {
+                    libc::kill(-pgid, libc::SIGKILL);
+                }
+            }
+        });
     }
 }
 
@@ -1016,8 +1037,9 @@ pub async fn spawn_process(
             },
             None => child.wait().await,
         };
-        // 終了の定義は直下の子の `wait()`。出力を継承した孫がパイプを握っていても、ここで止めて吸い切る
-        killer.kill();
+        // 終了の定義は直下の子の `wait()`。出力を継承した孫がパイプを握っていても、ここで止めて吸い切る。
+        // 子はもう回収済みなので、猶予付きの kill（遅れて SIGKILL を撃つ）は使わない
+        killer.kill_now();
         for r in readers {
             let abort = r.abort_handle();
             if tokio::time::timeout(DRAIN_TIMEOUT, r).await.is_err() {
@@ -1393,7 +1415,9 @@ mod tests {
             "artifact://x",                         // 承認されていないスキーム
             "-worktree://runs/a",                   // `-` 始まり
         ] {
-            assert!(build_argv(&cmd, &json(serde_json::json!({"request": bad}))).is_err(), "{}", bad);
+            let e = build_argv(&cmd, &json(serde_json::json!({"request": bad}))).expect_err(bad);
+            // 拒否の理由はデバッグログにも残るので、値（パス）そのものは含めない
+            assert!(!e.contains(bad), "エラー文に値が入っている: {}", e);
         }
         let _ = std::fs::remove_dir_all(&dir);
     }

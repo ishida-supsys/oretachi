@@ -551,6 +551,33 @@ describe("process rows", () => {
     expect(same.removed).toHaveLength(0);
   });
 
+  it("flags path parameters whose folder the app itself can write (a file it writes can be handed to the command)", () => {
+    const withScope = (path: string, write = true): AppResolvedPermissions => ({
+      ...perm(),
+      fs: {
+        worktreeRoot: String.raw`\\?\C:\wt`,
+        scopes: [{ scheme: "worktree" as const, prefix: "", path, write }],
+        allowSensitivePaths: false,
+      },
+    });
+    const flagged = (p: AppResolvedPermissions) => buildPermissionView(p, null, DANGEROUS).rows.find((r) => r.kind === "process")!.procWritableParams;
+    // under（C:\wt\runs）と同じ・親・子の書き込みスコープは重なる（拡張長パスの接頭辞・大文字小文字・区切りの違いは無視）
+    expect(flagged(withScope(String.raw`\\?\C:\wt\runs`))).toEqual(["request"]);
+    expect(flagged(withScope(String.raw`\\?\C:\wt`))).toEqual(["request"]);
+    expect(flagged(withScope(String.raw`C:\WT\Runs\sub`))).toEqual(["request"]);
+    // 重ならない書き込み・読み取りだけのスコープ・fs 無しは出さない（`C:\wt\runs2` は別のフォルダ）
+    expect(flagged(withScope(String.raw`\\?\C:\wt\out`))).toBeUndefined();
+    expect(flagged(withScope(String.raw`\\?\C:\wt\runs2`))).toBeUndefined();
+    expect(flagged(withScope(String.raw`\\?\C:\wt\runs`, false))).toBeUndefined();
+    expect(flagged(perm())).toBeUndefined();
+    // db の書き込みスコープも同じ
+    const db: AppResolvedPermissions = {
+      ...perm(),
+      db: { scopes: [{ scheme: "worktree", prefix: "runs/", path: String.raw`\\?\C:\wt\runs`, write: true }], allowSensitivePaths: false },
+    };
+    expect(flagged(db)).toEqual(["request"]);
+  });
+
   it("has no process row without the permission", () => {
     expect(buildPermissionView({ memory: { maxBytes: 1 } }, null, DANGEROUS).rows.some((r) => r.kind === "process")).toBe(false);
   });

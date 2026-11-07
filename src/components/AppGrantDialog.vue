@@ -108,6 +108,9 @@ const hasProcess = computed(() => view.value.rows.some((r) => r.kind === "proces
               <span class="kind">{{ t("kindProcess") }}</span>
               <strong>{{ r.label }}</strong>
               <div class="why">{{ t("processWarning") }}</div>
+              <div v-if="r.procWritableParams && r.procWritableParams.length > 0" class="why">
+                {{ t("processWritableParams", { params: r.procWritableParams.join(", ") }) }}
+              </div>
               <dl class="proc">
                 <dt>{{ t("procExec") }}</dt>
                 <dd><code class="path">{{ r.procExec }}</code></dd>
@@ -525,6 +528,7 @@ const hasProcess = computed(() => view.value.rows.some((r) => r.kind === "proces
     "audioWarning": "The app can hear everything the microphone picks up, including your voice and anything said near your PC, as raw audio. Recording is shown in the launch screen and in the window titles, and stops when the app stops, reloads, or you press Stop recording. The audio is not saved by oretachi.",
     "kindProcess": "Run command",
     "processWarning": "If you approve, this app can run this command with your authority, any time it is running. Anyone who can edit the executable or the script it runs (including an AI or an MCP client in this worktree) can run arbitrary code through this approval. This is the strongest permission.",
+    "processWritableParams": "This app can also write files in the folder(s) that the parameter(s) {params} point to (see its file permissions), and pass them to the command. If the program runs such a file as code (for example an interpreter given a script path), the app can run arbitrary code through it.",
     "procExec": "Program",
     "procArgs": "Arguments",
     "procCwd": "Working folder",
@@ -616,6 +620,7 @@ const hasProcess = computed(() => view.value.rows.some((r) => r.kind === "proces
     "audioWarning": "あなたの声や PC の近くで話された内容を含む、マイクが拾うすべての音を、生の音声としてアプリが聞けます。録音中は起動画面とウィンドウのタイトルに表示され、アプリの停止・リロード・起動画面の「録音を止める」で止まります。oretachi は音声を保存しません。",
     "kindProcess": "コマンドの実行",
     "processWarning": "承認すると、このアプリは、起動しているあいだいつでも、あなたの権限でこのコマンドを実行できます。実行ファイルや、実行するスクリプトを書き換えられる相手（このワークツリーの AI や MCP クライアントを含む）は、この承認を通して任意のコードを実行できます。最も強い権限です。",
+    "processWritableParams": "このアプリは、パラメータ {params} が指すフォルダにファイルを書くこともでき（ファイルの権限を参照）、それをコマンドへ渡せます。実行ファイルがそのファイルをコードとして実行する場合（インタプリタにスクリプトのパスを渡す形など）、アプリはこれを通して任意のコードを実行できます。",
     "procExec": "実行ファイル",
     "procArgs": "引数",
     "procCwd": "作業フォルダ",

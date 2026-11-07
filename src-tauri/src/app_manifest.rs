@@ -848,6 +848,9 @@ fn parse_process(v: &serde_json::Value) -> Result<Option<ProcessPermission>, Str
 /// （親ディレクトリを覆うスコープは、配下であるこれらも覆うのでこの検査に含まれる）。
 /// 先頭の引数が `path` パラメータで、その `under` が書き込めるものも拒否する
 /// （`exec: python, args: [{path}]` は、書いたファイルをそのまま実行する形になる）。
+/// **これは限定的なヒューリスティック**で、`-X utf8` のようなオプションを先に置く形などは通る
+/// （`path` パラメータの `under` に書けること自体が、この API の主な使い方〔request.json を書いて渡す〕なので、
+/// 一律には拒否できない）。そこは承認ダイアログの警告（`procWritableParams`）で人に見せる。
 /// 他所から `import` されるファイルまでは守れない（案 A と同じ限界）。
 fn check_process_against_write_scopes(p: &RequestedPermissions) -> Result<(), String> {
     let Some(proc_perm) = &p.process else { return Ok(()) };

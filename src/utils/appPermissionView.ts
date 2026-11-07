@@ -87,6 +87,14 @@ export interface PermissionRow {
   procCwd?: string;
   procEnv?: string[];
   procLimits?: string;
+  /**
+   * `process` 行: `under` が、このアプリ自身の書き込みスコープ（`fs` / `db`）と重なっている `path` パラメータの名前。
+   * アプリが自分で書いたファイルをそのままコマンドへ渡せる（それをコードとして実行する実行ファイル —
+   * インタプリタにスクリプトのパスを渡す形など — なら、アプリが任意のコードを実行できる）。
+   * manifest の検査は「exec・固定のパス引数・cwd・先頭の path パラメータ」だけを塞ぐ限定的なもので、
+   * これはそこから漏れる形を人に見せるための警告（空・無しなら出さない）
+   */
+  procWritableParams?: string[];
   /** 再承認で、直前の権限に無かった行 */
   added: boolean;
 }
@@ -215,7 +223,13 @@ function rowsOf(perm: AppResolvedPermissions, dangerous: ReadonlySet<string>): P
   // exec やスクリプトを書き換えられる相手も、この承認を通して任意のコードを実行できる）。
   // value にコマンドの解決済みの全体を入れるので、exec の絶対パス・引数・cwd・環境変数・上限のどれが
   // 変わっても再承認の差分（追加・外れ）に出る
+  const writable = writableRoots(perm);
   for (const [name, cmd] of Object.entries(perm.process?.commands ?? {})) {
+    const writableParams = cmd.args.flatMap((a) =>
+      a.type === "path" && a.fs.scopes.some((s) => writable.some((w) => pathsOverlap(w, normalizePath(s.path))))
+        ? [a.param]
+        : [],
+    );
     rows.push({
       kind: "process",
       value: JSON.stringify([name, cmd]),
@@ -225,6 +239,7 @@ function rowsOf(perm: AppResolvedPermissions, dangerous: ReadonlySet<string>): P
       procCwd: displayFsPath(cmd.cwd),
       procEnv: cmd.envInherit,
       procLimits: processLimits(cmd),
+      ...(writableParams.length > 0 ? { procWritableParams: writableParams } : {}),
       severity: "critical",
       wildcard: false,
       added: false,
@@ -273,6 +288,20 @@ export function processArgTemplate(a: AppProcessResolvedArg): string {
     case "enum":
       return `{${a.param}: ${a.values.join(" | ")}}`;
   }
+}
+
+/** 比較用のパス（表示と同じく拡張長パスの接頭辞を外し、区切りを `/` に、大文字小文字は無視、末尾の区切りは落とす） */
+function normalizePath(p: string): string {
+  return displayFsPath(p).replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+}
+
+function pathsOverlap(a: string, b: string): boolean {
+  return a === b || a.startsWith(b + "/") || b.startsWith(a + "/");
+}
+
+/** このアプリ自身が書き込めるスコープ（`fs` / `db` の write）の絶対パス */
+function writableRoots(perm: AppResolvedPermissions): string[] {
+  return [...(perm.fs?.scopes ?? []), ...(perm.db?.scopes ?? [])].filter((s) => s.write).map((s) => normalizePath(s.path));
 }
 
 function formatBytes(n: number): string {
