@@ -569,6 +569,20 @@ fn has_control_chars(s: &str) -> bool {
     s.chars().any(|c| (c as u32) < 0x20 || c == '\u{7f}')
 }
 
+/// 区切り（`/` と `\`）で分けた成分に `..` があるか。固定引数・絶対パスの exec は、書き込みスコープとの
+/// 照合を字句で行うので、`..` で外へ回り込むものは受け付けない（`a/../b` を畳んだ結果が覆われるかを
+/// 照合側で正しく見るより、拒否するほうが確実）。
+fn has_dotdot(s: &str) -> bool {
+    s.split(['/', '\\']).any(|c| c == "..")
+}
+
+/// Windows のドライブ相対パス（`C:scripts\run.py`。ドライブ文字のあとにルートが無い）。
+/// 子の作業フォルダ基準で解決され、`Path::join` は基準を置き換えるため、照合の対象から外れてしまう。
+fn is_drive_relative(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 2 && b[0].is_ascii_alphabetic() && b[1] == b':' && !(b.len() >= 3 && (b[2] == b'\\' || b[2] == b'/'))
+}
+
 fn is_drive_absolute(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
@@ -604,6 +618,9 @@ fn parse_exec(raw: &str, what: &str) -> Result<String, String> {
         return Err(format!("{} に UNC パス / \\\\?\\ 形式は使えません: {}", what, s));
     }
     if is_drive_absolute(s) || s.starts_with('/') {
+        if has_dotdot(s) {
+            return Err(format!("{} '{}' に '..' は使えません（絶対パスは畳んだ形で書いてください）", what, s));
+        }
         return Ok(s.to_string());
     }
     if s.contains(['/', '\\', ':']) || s.contains(['"', '*', '?', '<', '>', '|']) || s.starts_with('-') {
@@ -629,7 +646,26 @@ fn parse_process_arg(v: &serde_json::Value, what: &str) -> Result<ProcessArg, St
                 ));
             }
             // worktree:// / artifact:// で始まるものは承認時に絶対パスへ解決する固定のパス
-            let value = if is_path_uri(s) { crate::app_fs::normalize_path_uri(s)? } else { s.clone() };
+            let value = if is_path_uri(s) {
+                crate::app_fs::normalize_path_uri(s)?
+            } else {
+                // 書き込みスコープとの照合（cwd 基準の相対パスとして解決される値）を `..` や Windows の
+                // ドライブ相対パスで外れないよう、この 2 つの形だけは manifest の時点で拒否する
+                // （`:` や `*` を含む普通の文字列まで一律に拒否はしない）
+                if has_dotdot(s) {
+                    return Err(format!(
+                        "{} に '..' は使えません（パスは worktree://… の形か、cwd からの相対パスで、'..' を含めずに書いてください）",
+                        what
+                    ));
+                }
+                if is_drive_relative(s) {
+                    return Err(format!(
+                        "{} はドライブ相対パス（C:foo の形）です。worktree://… か、ルートつきの絶対パスで書いてください",
+                        what
+                    ));
+                }
+                s.clone()
+            };
             Ok(ProcessArg::Fixed { value })
         }
         serde_json::Value::Object(obj) => {
@@ -2084,6 +2120,28 @@ mod tests {
         for scope in ["worktree://scripts/", "worktree://", "worktree://scripts/run.py"] {
             let e = parse_manifest(&with(json!({ "write": [scope] }), script.clone())).unwrap_err();
             assert!(e.contains("書き込める場所"), "{}: {}", scope, e);
+        }
+        // `..` で書き込みスコープの検査を外す形は、manifest の時点で拒否する（cwd は scripts/ の外の work/）
+        let dotdot = |arg: &str| json!({ "exec": "python", "args": [arg], "cwd": "worktree://work/" });
+        for arg in ["../scripts/run.py", "scripts/../scripts/run.py", "..\\scripts\\run.py", ".."] {
+            let e = parse_manifest(&with(json!({ "write": ["worktree://scripts/"] }), dotdot(arg))).unwrap_err();
+            assert!(e.contains("'..'"), "{}: {}", arg, e);
+        }
+        // 絶対パスの exec も `..` を含められない
+        for exec in ["C:\\repo\\work\\..\\scripts\\x.exe", "/repo/work/../scripts/x"] {
+            let e = parse_manifest(&with(json!({ "write": ["worktree://scripts/"] }), json!({ "exec": exec }))).unwrap_err();
+            assert!(e.contains("'..'"), "{}: {}", exec, e);
+        }
+        // Windows のドライブ相対パスは、cwd 基準の相対パスとして照合できないので拒否
+        let e = parse_manifest(&with(json!({ "write": ["worktree://scripts/"] }), dotdot("C:scripts\\run.py"))).unwrap_err();
+        assert!(e.contains("ドライブ相対"), "{}", e);
+        // 普通の文字列は拒否しない（`..` を成分としてでなく含む・`:` や `*` を含む・オプション）
+        for arg in ["--range=a..b", "key:value", "*.py", "-X", "utf8", "1.5"] {
+            assert!(
+                parse_manifest(&with(json!({ "write": ["worktree://runs/"] }), dotdot(arg))).is_ok(),
+                "{} は通る",
+                arg
+            );
         }
         // cwd 基準の相対パスの固定引数（`python scripts/run.py`、`python -m pkg`）も、書ける場所なら拒否。
         // `-X utf8` の `utf8` のようなオプションの値は、覆われない限り誤検知しない

@@ -251,20 +251,29 @@ pub fn check_resolved_against_write_scopes(
     }
     for (name, cmd) in &process.commands {
         let mut targets: Vec<(&str, &str)> = vec![("exec", cmd.exec.as_str()), ("cwd", cmd.cwd.as_str())];
+        // 実パスの形も照合する（リンクを辿ると書き込みスコープの中を指すもの）。実パスにできない
+        // （まだ無い・文字として不正）ものは、字句の形だけで照合する
+        let real = |p: &Path| -> Option<String> {
+            crate::app_fs::canonicalize_allow_missing_tail(p).ok().map(|c| c.to_string_lossy().into_owned())
+        };
+        let mut owned: Vec<String> = Vec::new();
+        owned.extend(real(Path::new(&cmd.exec)));
+        owned.extend(real(Path::new(&cmd.cwd)));
         // 固定の引数は、絶対パスならそのまま、そうでなければ cwd 基準の相対パスとして照合する
-        // （`python scripts/run.py` の `scripts/run.py`。オプション（`-` 始まり）は対象外）
-        let joined: Vec<String> = cmd
-            .args
-            .iter()
-            .filter_map(|a| match a {
-                ResolvedProcessArg::Fixed { value } if !value.starts_with('-') => {
-                    Some(Path::new(&cmd.cwd).join(value).to_string_lossy().into_owned())
+        // （`python scripts/run.py` の `scripts/run.py`。オプション（`-` 始まり）は対象外）。
+        // `..`・cwd 内の junction / symlink は実パス化して畳む（manifest は `..` とドライブ相対を拒否済み）
+        for a in &cmd.args {
+            if let ResolvedProcessArg::Fixed { value } = a {
+                if value.starts_with('-') {
+                    continue;
                 }
-                _ => None,
-            })
-            .collect();
-        for j in &joined {
-            targets.push(("固定の引数", j.as_str()));
+                let joined = Path::new(&cmd.cwd).join(value);
+                owned.extend(real(&joined));
+                owned.push(joined.to_string_lossy().into_owned());
+            }
+        }
+        for o in &owned {
+            targets.push(("exec / cwd / 固定の引数（実パス・結合後）", o.as_str()));
         }
         if let Some(ResolvedProcessArg::Path { fs: pfs, .. }) = cmd.args.first() {
             for s in &pfs.scopes {
@@ -1617,6 +1626,31 @@ mod tests {
         let rel_process = ResolvedProcess { commands: [("c".to_string(), rel)].into_iter().collect() };
         assert!(check_resolved_against_write_scopes(&rel_process, Some(&fs_write("runs")), None).is_ok());
         assert!(check_resolved_against_write_scopes(&rel_process, Some(&fs_write("scripts")), None).is_err());
+        // 相対の固定引数が cwd 内のリンク（work/link → scripts/）を通る形は、実パスで見て拒否する。
+        // `..` を畳まない字句の比較だけでは、work/link/run.py は scripts/ の配下に見えない
+        std::fs::create_dir_all(wt.join("scripts")).unwrap();
+        std::fs::create_dir_all(wt.join("work")).unwrap();
+        if make_dir_link(&wt.join("scripts"), &wt.join("work").join("link")) {
+            let mut via = spec(1);
+            via.exec = "C:\\Python\\python.exe".into();
+            via.cwd = strip_verbatim(&wt.join("work").to_string_lossy());
+            via.args = vec![ResolvedProcessArg::Fixed { value: "link/run.py".into() }];
+            let via_process = ResolvedProcess { commands: [("c".to_string(), via)].into_iter().collect() };
+            let e = check_resolved_against_write_scopes(&via_process, Some(&fs_write("scripts")), None).unwrap_err();
+            assert!(e.contains("書き込める場所"), "{}", e);
+            // 書き込めない場所へ向いたリンクなら通る
+            assert!(check_resolved_against_write_scopes(&via_process, Some(&fs_write("runs")), None).is_ok());
+        } else {
+            eprintln!("リンクを作れない環境のためスキップ");
+        }
+        // exec が書き込める場所へのリンクを通る形（実パスで見る）
+        if make_dir_link(&wt.join("scripts"), &wt.join("work").join("bin")) {
+            let mut via = spec(1);
+            via.exec = strip_verbatim(&wt.join("work").join("bin").join("run.exe").to_string_lossy());
+            via.cwd = strip_verbatim(&wt.join("work").to_string_lossy());
+            let p = ResolvedProcess { commands: [("c".to_string(), via)].into_iter().collect() };
+            assert!(check_resolved_against_write_scopes(&p, Some(&fs_write("scripts")), None).is_err());
+        }
         let _ = std::fs::remove_dir_all(&wt);
     }
 

@@ -318,7 +318,7 @@ pub fn resolve_requested_fs(
 /// 存在判定は `symlink_metadata`（リンクを辿らない）。在るのに `canonicalize` できないもの
 /// （壊れた symlink / junction）は、まだ無いファイルとして扱わず**拒否**する。字句結合に落とすと、
 /// 後でリンクが辿られて範囲外へ出る。
-fn canonicalize_allow_missing_tail(path: &Path) -> Result<PathBuf, String> {
+pub(crate) fn canonicalize_allow_missing_tail(path: &Path) -> Result<PathBuf, String> {
     let mut tail: Vec<OsString> = Vec::new();
     let mut cur = path.to_path_buf();
     loop {
