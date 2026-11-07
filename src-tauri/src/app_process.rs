@@ -251,10 +251,20 @@ pub fn check_resolved_against_write_scopes(
     }
     for (name, cmd) in &process.commands {
         let mut targets: Vec<(&str, &str)> = vec![("exec", cmd.exec.as_str()), ("cwd", cmd.cwd.as_str())];
-        for a in &cmd.args {
-            if let ResolvedProcessArg::Fixed { value } = a {
-                targets.push(("固定の引数", value.as_str()));
-            }
+        // 固定の引数は、絶対パスならそのまま、そうでなければ cwd 基準の相対パスとして照合する
+        // （`python scripts/run.py` の `scripts/run.py`。オプション（`-` 始まり）は対象外）
+        let joined: Vec<String> = cmd
+            .args
+            .iter()
+            .filter_map(|a| match a {
+                ResolvedProcessArg::Fixed { value } if !value.starts_with('-') => {
+                    Some(Path::new(&cmd.cwd).join(value).to_string_lossy().into_owned())
+                }
+                _ => None,
+            })
+            .collect();
+        for j in &joined {
+            targets.push(("固定の引数", j.as_str()));
         }
         if let Some(ResolvedProcessArg::Path { fs: pfs, .. }) = cmd.args.first() {
             for s in &pfs.scopes {
@@ -927,7 +937,9 @@ async fn pump(
                     if let PushOutcome::Stored { line, crossed_limit } = reg.push_output(&label, &id, stream, text, max_bytes) {
                         batch.push(line);
                         if crossed_limit {
-                            killer.kill();
+                            // 異常な出力量なので猶予は置かない（子の終了後に読み残した出力で超えた場合に、
+                            // 回収済みのグループへ遅れて SIGKILL を撃たないためにもこちら）
+                            killer.kill_now();
                         }
                         if batch.len() >= FLUSH_MAX_LINES {
                             flush(&mut batch);
@@ -981,7 +993,6 @@ pub async fn spawn_process(
             let job = crate::job_object::ProcessJob::new()?;
             let handle = child.raw_handle().ok_or_else(|| "プロセスのハンドルを取得できませんでした".to_string())?;
             job.assign(handle)?;
-            crate::job_object::resume_process_threads(pid)?;
             Ok(job)
         })();
         match setup {
@@ -1001,6 +1012,14 @@ pub async fn spawn_process(
         let _ = child.start_kill();
         let _ = child.wait().await;
         return Err("アプリの停止中のため、起動を取り消しました".to_string());
+    }
+    // 停止手段を登録してから再開する（停止要求と競合しても、停止済みのプロセスが一瞬も動かない）
+    #[cfg(windows)]
+    if let Err(e) = crate::job_object::resume_process_threads(pid) {
+        killer.kill_now();
+        let _ = child.start_kill();
+        let _ = child.wait().await;
+        return Err(e);
     }
 
     let stdout = child.stdout.take();
@@ -1587,6 +1606,17 @@ mod tests {
         assert!(check_resolved_against_write_scopes(&process, Some(&fs_write("scripts")), None).is_err());
         // ルートが書ける → 全部覆う（db の書き込みスコープでも同じ）
         assert!(check_resolved_against_write_scopes(&process, None, Some(&fs_write(""))).is_err());
+        // cwd 基準の相対パスの固定引数（`python scripts/run.py`）。オプションは対象外
+        let mut rel = spec(1);
+        rel.exec = "C:\\Python\\python.exe".into();
+        rel.cwd = strip_verbatim(&wt.to_string_lossy());
+        rel.args = vec![
+            ResolvedProcessArg::Fixed { value: "-X".into() },
+            ResolvedProcessArg::Fixed { value: "scripts/run.py".into() },
+        ];
+        let rel_process = ResolvedProcess { commands: [("c".to_string(), rel)].into_iter().collect() };
+        assert!(check_resolved_against_write_scopes(&rel_process, Some(&fs_write("runs")), None).is_ok());
+        assert!(check_resolved_against_write_scopes(&rel_process, Some(&fs_write("scripts")), None).is_err());
         let _ = std::fs::remove_dir_all(&wt);
     }
 

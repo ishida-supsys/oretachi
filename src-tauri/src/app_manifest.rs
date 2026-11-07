@@ -871,12 +871,31 @@ fn check_process_against_write_scopes(p: &RequestedPermissions) -> Result<(), St
     };
     for (name, cmd) in &proc_perm.commands {
         let mut targets: Vec<(&str, &str)> = vec![("exec", cmd.exec.as_str()), ("cwd", cmd.cwd.as_str())];
+        // cwd 基準の相対パスとして解決される固定引数（`python scripts/run.py`、`python -m pkg` の `pkg` など）。
+        // `-` 始まり（オプション）と、`://` を含む・絶対パスのものは対象外。誤検知は、書き込みスコープが
+        // その相対パスを実際に覆うときだけ（`utf8` のような引数は `worktree://utf8` として照合され、通常は覆われない）
+        let mut relative: Vec<String> = Vec::new();
         for a in &cmd.args {
             if let ProcessArg::Fixed { value } = a {
                 if is_path_uri(value) {
                     targets.push(("固定のパス引数", value.as_str()));
+                } else if is_path_uri(&cmd.cwd)
+                    && !value.starts_with('-')
+                    && !value.contains("://")
+                    && !value.starts_with('/')
+                    && !is_drive_absolute(value)
+                {
+                    // cwd は `worktree://`（ルート）か `worktree://a/b`（末尾の区切り無し）
+                    let sep = if cmd.cwd.ends_with("://") { "" } else { "/" };
+                    let joined = format!("{}{}{}", cmd.cwd, sep, value.replace('\\', "/"));
+                    if crate::app_fs::split_uri(&joined).is_ok() {
+                        relative.push(joined);
+                    }
                 }
             }
+        }
+        for r in &relative {
+            targets.push(("cwd 基準の相対パスの固定引数", r.as_str()));
         }
         if let Some(ProcessArg::Path { under, .. }) = cmd.args.first() {
             targets.push(("先頭の path パラメータの under", under.as_str()));
@@ -2066,6 +2085,14 @@ mod tests {
             let e = parse_manifest(&with(json!({ "write": [scope] }), script.clone())).unwrap_err();
             assert!(e.contains("書き込める場所"), "{}: {}", scope, e);
         }
+        // cwd 基準の相対パスの固定引数（`python scripts/run.py`、`python -m pkg`）も、書ける場所なら拒否。
+        // `-X utf8` の `utf8` のようなオプションの値は、覆われない限り誤検知しない
+        let rel = json!({ "exec": "python", "args": ["-X", "utf8", "scripts\\run.py"] });
+        assert!(parse_manifest(&with(json!({ "write": ["worktree://runs/"] }), rel.clone())).is_ok());
+        let e = parse_manifest(&with(json!({ "write": ["worktree://scripts/"] }), rel)).unwrap_err();
+        assert!(e.contains("相対パス"), "{}", e);
+        let module = json!({ "exec": "python", "args": ["-m", "pkg"] });
+        assert!(parse_manifest(&with(json!({ "write": ["worktree://pkg/"] }), module)).is_err());
         // db の書き込みスコープも同じ
         let db = json!({ "name": "x", "permissions": { "db": { "write": ["worktree://scripts/"] },
             "process": { "commands": { "c": script.clone() }}}});
