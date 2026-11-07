@@ -1687,13 +1687,27 @@ pub(crate) fn submit_body(text: &str) -> String {
     }
 }
 
+/// `submit: false` のときに PTY へ書く text を決める。
+///
+/// text が改行（`\r` / `\n`）だけで構成されているときは、LF を CR へ正規化する。
+/// 親の AI が「Enter だけ」を送るつもりで `"\n"` を書くことが多いが、Claude Code は
+/// 生の LF を入力欄の改行として扱い送信しない（#426）。CR なら送信になる。
+/// Enter の回数は保つ（`"\n\n"` → `"\r\r"`）。本文や単一キーには手を付けない。
+pub(crate) fn raw_write_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.is_empty() && text.chars().all(|c| c == '\r' || c == '\n') {
+        std::borrow::Cow::Owned(text.replace("\r\n", "\r").replace('\n', "\r"))
+    } else {
+        std::borrow::Cow::Borrowed(text)
+    }
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct WriteTerminalParams {
     #[schemars(description = "PTY セッションID（oretachi_list_terminals で取得）")]
     pub session_id: u32,
     #[schemars(description = "送信するテキスト")]
     pub text: String,
-    #[schemars(description = "true なら改行を \\r 正規化＋末尾 \\r 保証してから送信（デフォルト true）。末尾 CR は本文と別 write で送るので Claude Code 宛でも確実にターンが始まる。vitest の単一キー入力など改行不要時は false")]
+    #[schemars(description = "true なら改行を \\r 正規化＋末尾 \\r 保証してから送信（デフォルト true）。末尾 CR は本文と別 write で送るので Claude Code 宛でも確実にターンが始まる。Enter だけ送るなら true で text=\"\"。false は raw のまま送る（vitest の単一キー入力など）が、text が改行だけのときは CR に正規化する（生の LF は Claude Code で Enter にならないため）")]
     pub submit: Option<bool>,
 }
 
@@ -4958,7 +4972,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "指定 PTY セッションへテキストを送信する。submit=true（デフォルト）なら改行を PowerShell/conpty 互換の \\r へ正規化し末尾にも保証して、コマンド送信扱いにする。このとき末尾の CR は本文とは別の write で少し遅らせて送る（宛先が Claude Code の場合、本文と同じ読み取りチャンクに来た CR は送信として扱われず入力欄に残る）。submit=false なら raw のまま送る（vitest の単一キー入力など）。**宛先が AI エージェントの TUI の場合、text は 1 行に畳むこと**（改行はすべて \\r になるので、複数行だと行ごとに送信されてプロンプトが分割して飛ぶ）")]
+    #[tool(description = "指定 PTY セッションへテキストを送信する。**AI エージェント（Claude Code 等）宛には、本文を submit=true（デフォルト）の 1 回の呼び出しで送ること。** submit=true は改行を PowerShell/conpty 互換の \\r へ正規化し末尾にも保証して、送信扱いにする。このとき末尾の CR は本文とは別の write で少し遅らせて送る（宛先が Claude Code の場合、本文と同じ読み取りチャンクに来た CR は送信として扱われず入力欄に残る）。Enter だけ送りたいときは submit=true で text=\"\" を渡す。submit=false なら raw のまま送る（vitest の単一キー入力など）。本文を submit=false で書いて Enter を別呼び出しで送ることもできるが、その Enter は \\r でなければならない: 生の LF（\\n）は Claude Code では入力欄の改行になるだけで送信されない。そのため submit=false でも text が改行（\\r / \\n）だけのときは CR へ正規化する（代償として、改行だけの text で LF を生のまま送ることはできない）。本文中の改行はすべて \\r になる。シェル宛では行ごとに実行される。Claude Code 宛では、複数行（約 2KB）を submit=true の 1 回呼び出しで送って 1 件のプロンプトとして届くことを実測で確認済み")]
     async fn oretachi_write_terminal(
         &self,
         Parameters(WriteTerminalParams { session_id, text, submit }): Parameters<WriteTerminalParams>,
@@ -4973,6 +4987,7 @@ impl NotifyService {
             }
         }
         if !submit.unwrap_or(true) {
+            let text = raw_write_text(&text).into_owned();
             let bytes_len = text.len();
             // 単発の write でもセッションロックを取る（#215）。取らないと
             // `oretachi_answer_prompt` が「画面を照合してから矢印を送る」区間へ
@@ -10203,6 +10218,19 @@ mod tests {
         // 意図的な二重 Enter は回数を保つ（本文の \r 1 個 + 呼び出し側の CR）
         assert_eq!(submit_body("\n\n"), "\r");
         assert_eq!(submit_body("a\n\n"), "a\r");
+    }
+
+    /// `submit: false` の text 正規化。改行だけのときだけ LF を CR へ寄せる（#426）。
+    #[test]
+    fn raw_write_text_normalizes_newline_only_input() {
+        assert_eq!(raw_write_text("\n"), "\r");
+        assert_eq!(raw_write_text("\r\n"), "\r");
+        assert_eq!(raw_write_text("\n\n"), "\r\r");
+        assert_eq!(raw_write_text("\r"), "\r");
+        // 本文・単一キー・空文字には触らない
+        assert_eq!(raw_write_text(""), "");
+        assert_eq!(raw_write_text("a\n"), "a\n");
+        assert_eq!(raw_write_text("q"), "q");
     }
 
     /// ホワイトリスト外は名前だけで弾く（パラメータを見る前に落とす）
