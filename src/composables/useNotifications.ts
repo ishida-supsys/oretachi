@@ -184,8 +184,10 @@ export function useNotifications() {
     });
 
     try {
-      await onAction((notification) => {
-        const name = notification.extra?.worktreeName as string | undefined;
+      await onAction((event) => {
+        // plugin-notification 2.8 で ActionPerformed が { actionId, notification } 形式になり、
+        // extra は notification の下に移った（notification は null のことがある）
+        const name = event.notification?.extra?.worktreeName as string | undefined;
         if (name && focusWorktree) {
           const id = resolveWorktreeId(name);
           if (id) focusWorktree(id);
