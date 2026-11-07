@@ -4972,7 +4972,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(json)]))
     }
 
-    #[tool(description = "指定 PTY セッションへテキストを送信する。**AI エージェント（Claude Code 等）宛には、本文を submit=true（デフォルト）の 1 回の呼び出しで送ること。** submit=true は改行を PowerShell/conpty 互換の \\r へ正規化し末尾にも保証して、送信扱いにする。このとき末尾の CR は本文とは別の write で少し遅らせて送る（宛先が Claude Code の場合、本文と同じ読み取りチャンクに来た CR は送信として扱われず入力欄に残る）。Enter だけ送りたいときは submit=true で text=\"\" を渡す。submit=false なら raw のまま送る（vitest の単一キー入力など）。本文を submit=false で書いて Enter を別呼び出しで送ることもできるが、その Enter は \\r でなければならない: 生の LF（\\n）は Claude Code では入力欄の改行になるだけで送信されない。そのため submit=false でも text が改行（\\r / \\n）だけのときは CR へ正規化する（代償として、改行だけの text で LF を生のまま送ることはできない）。注意: シェル宛では本文中の改行がすべて \\r になるので行ごとに実行される")]
+    #[tool(description = "指定 PTY セッションへテキストを送信する。**AI エージェント（Claude Code 等）宛には、本文を submit=true（デフォルト）の 1 回の呼び出しで送ること。** submit=true は改行を PowerShell/conpty 互換の \\r へ正規化し末尾にも保証して、送信扱いにする。このとき末尾の CR は本文とは別の write で少し遅らせて送る（宛先が Claude Code の場合、本文と同じ読み取りチャンクに来た CR は送信として扱われず入力欄に残る）。Enter だけ送りたいときは submit=true で text=\"\" を渡す。submit=false なら raw のまま送る（vitest の単一キー入力など）。本文を submit=false で書いて Enter を別呼び出しで送ることもできるが、その Enter は \\r でなければならない: 生の LF（\\n）は Claude Code では入力欄の改行になるだけで送信されない。そのため submit=false でも text が改行（\\r / \\n）だけのときは CR へ正規化する（代償として、改行だけの text で LF を生のまま送ることはできない）。本文中の改行はすべて \\r になる。シェル宛では行ごとに実行される。Claude Code 宛では、複数行（約 2KB）を submit=true の 1 回呼び出しで送って 1 件のプロンプトとして届くことを実測で確認済み")]
     async fn oretachi_write_terminal(
         &self,
         Parameters(WriteTerminalParams { session_id, text, submit }): Parameters<WriteTerminalParams>,
