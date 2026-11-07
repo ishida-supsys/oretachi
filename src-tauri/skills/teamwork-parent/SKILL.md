@@ -135,6 +135,7 @@ allowed-tools: mcp__plugin_oretachi_oretachi__oretachi_add_task, mcp__plugin_ore
 - **親の停止条件(エッジ)を飛ばして次タスクを起動しない。** 未クリアの停止条件が残っているエッジの先にあるタスクは、`oretachi_add_task`の対象にしない。
 - 子の停止条件による子の停止を、親の停止として扱わない(親は止まらず流れを継続する)。
 - 停止条件をユーザーに聞かずにAIの判断だけで設定・変更・削除しない。
+- **子の AI セッションへ`oretachi_write_terminal`で直接メッセージを送るとき、本文と Enter を分けて`"\n"`を送らない。** 本文を`submit=true`(既定)の1回の呼び出しで送る(Enter だけなら`submit=true`で`text=""`)。生の LF は Claude Code では入力欄の改行になるだけで送信されず、子のターンが始まらない(#426)。
 - 進捗を別ファイル(マークダウン等)へ二重に記録しない。進捗の唯一の記録先は計画フローartifactの`data/flow`。
 
 ---
