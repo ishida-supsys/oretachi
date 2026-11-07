@@ -558,7 +558,37 @@ fn build_resolved(
     if let Some(media) = resolved.media.as_mut() {
         media.fs = build_resolved_media_fs(app, worktree_id, artifact_id, requested.media.as_ref())?;
     }
+    resolved.process = build_resolved_process(app, worktree_id, artifact_id, requested.process.as_ref())?;
+    if let Some(process) = resolved.process.as_ref() {
+        // manifest の字句検査をリンクで迂回されないよう、解決済みのパスでも「アプリ自身が書けるスクリプトを
+        // 起動できる」組み合わせを拒否する（承認ダイアログへ出す前に）
+        crate::app_process::check_resolved_against_write_scopes(process, resolved.fs.as_ref(), resolved.db.as_ref())?;
+    }
     Ok(resolved)
+}
+
+/// `process` のコマンドを解決する（exec・固定パス・cwd・`path` パラメータの `under` を絶対パスへ）。
+/// PATH の差し替えやワークツリーの移動で結果が変わるので、起動のたびに保存済みと比べる。
+fn build_resolved_process(
+    app: &AppHandle,
+    worktree_id: &str,
+    artifact_id: &str,
+    requested: Option<&app_manifest::ProcessPermission>,
+) -> Result<Option<app_manifest::ResolvedProcess>, String> {
+    let Some(process) = requested else { return Ok(None) };
+    let settings = app.state::<crate::settings::SettingsManager>().get();
+    // fs / db と同じく、ホーム / リポジトリ擬似ワークツリーは worktree:// の根にしない
+    let worktree_path = settings
+        .worktrees
+        .iter()
+        .find(|w| w.id == worktree_id)
+        .filter(|w| !w.is_home && !w.is_repository)
+        .map(|w| std::path::PathBuf::from(&w.path));
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let artifact_dir = crate::app_fs::artifact_files_dir(&data_dir, worktree_id, artifact_id)?;
+    let path_env = std::env::var_os("PATH");
+    crate::app_process::resolve_requested_process(process, worktree_path.as_deref(), &artifact_dir, path_env.as_deref())
+        .map(Some)
 }
 
 /// `media.read` のスコープを解決する。fs と同じ解決（読み取り専用・既定拒否パスは解かない）を通す。
@@ -647,6 +677,10 @@ async fn start_inner(
                 || (requested.media.as_ref().is_some_and(|m| !m.read.is_empty())
                     && build_resolved_media_fs(app, worktree_id, artifact_id, requested.media.as_ref())?
                         != g.resolved.media.as_ref().and_then(|m| m.fs.clone()))
+                // process の exec は PATH から解決した絶対パスを承認する。PATH の先頭に別の実行ファイルが
+                // 現れた・ワークツリーが動いた・スクリプトのリンク先が変わったときは再承認する
+                || (requested.process.is_some()
+                    && build_resolved_process(app, worktree_id, artifact_id, requested.process.as_ref())? != g.resolved.process)
         }
         None => true,
     };
@@ -813,6 +847,8 @@ fn release(app: &AppHandle, label: &str) -> Option<(String, String)> {
         crate::app_scheduler::on_instance_released(app, label);
         // マイクの録音も止める（停止・承認の取り消し・ウィンドウを閉じる・削除のどれでも）
         crate::app_audio::on_instance_released(app, label);
+        // 起動したコマンドもプロセスツリーごと止める（リロードでは止めない。ここだけ）
+        crate::app_process::on_instance_released(app, label);
         // 実行中のメディア要求（動画・音声の Range 取得）も中断する
         crate::app_media::on_instance_released(app, label);
         // インスタンスが開いたサブウィンドウもすべて閉じる（再起動での復元はしない）
@@ -1055,6 +1091,8 @@ pub async fn check_permission_change(app: &AppHandle, worktree_id: &str, artifac
                 crate::app_db::on_grant_replaced(&app2, &label);
                 // 権限が狭まって収まらなくなったサブウィンドウは閉じる（残りは維持）
                 crate::app_subwindow::on_grant_replaced(&app2, &label);
+                // 消えた・解決結果が変わったコマンドの実行中プロセスは止める（変わらないものはリロードをまたいで残す）
+                crate::app_process::on_grant_replaced(&app2, &label, &wt, &aid);
                 // aiTerminal 権限が外れたなら、開いている専用 AI ターミナルを閉じる。権限が無いと
                 // 以後は操作できず、持ち主の居ない端末が残ってしまうため（上限が下がっただけなら
                 // 既存の端末は残し、新しく開く分から効く）
@@ -1688,7 +1726,7 @@ mod tests {
     }
 
     fn perms(max: u64) -> RequestedPermissions {
-        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None, db: None, network: None, sub_window: None, audio: None, media: None, scheduler: None }
+        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None, db: None, network: None, sub_window: None, audio: None, media: None, scheduler: None, process: None }
     }
 
     #[test]

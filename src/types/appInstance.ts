@@ -97,6 +97,41 @@ export interface AppSchedulerPermission {
   jobs: AppSchedulerJob[];
 }
 
+/** `process` コマンドの引数 1 件（申請した形。`under` は正規化済みの `worktree://…/` / `artifact://…/`） */
+export type AppProcessArg =
+  | { type: "fixed"; value: string }
+  | { type: "path"; param: string; under: string }
+  | { type: "token"; param: string }
+  | { type: "enum"; param: string; values: string[] };
+
+/** 承認時に解決した引数。`fixed` のパスは絶対パス、`path` は `under` を解決したスコープを持つ */
+export type AppProcessResolvedArg =
+  | { type: "fixed"; value: string }
+  | { type: "path"; param: string; under: string; fs: AppResolvedFs }
+  | { type: "token"; param: string }
+  | { type: "enum"; param: string; values: string[] };
+
+/**
+ * 承認時に解決したコマンド 1 件。`exec` は**承認時に解決した絶対パス**、`cwd` も絶対パス。
+ * 承認すると、このアプリはユーザーの権限でこのコマンドを実行できる（最も強い警告の対象）。
+ */
+export interface AppProcessResolvedCommand {
+  exec: string;
+  args: AppProcessResolvedArg[];
+  cwd: string;
+  /** 子へ渡す環境変数の名前（これ以外は渡さない。Windows は `SystemRoot` を常に渡す） */
+  envInherit: string[];
+  maxConcurrent: number;
+  /** 省略 = 無制限 */
+  timeoutSec?: number;
+  /** 累計の出力量の上限（超えるとツリーごと止める） */
+  maxOutputBytes: number;
+}
+
+export interface AppProcessResolved {
+  commands: Record<string, AppProcessResolvedCommand>;
+}
+
 export interface AppResolvedPermissions {
   mcp?: { tools: string[]; targets: AppResolvedTarget[] };
   memory?: { maxBytes: number };
@@ -110,6 +145,8 @@ export interface AppResolvedPermissions {
   audio?: AppAudioPermission;
   media?: AppResolvedMedia;
   scheduler?: AppSchedulerPermission;
+  /** 宣言したコマンドの起動（ユーザーと同じ権限でコマンドを実行できる） */
+  process?: AppProcessResolved;
 }
 
 export interface AppRequestedPermissions {
@@ -123,6 +160,20 @@ export interface AppRequestedPermissions {
   audio?: AppAudioPermission;
   media?: { read: string[]; allow: string[] };
   scheduler?: AppSchedulerPermission;
+  process?: {
+    commands: Record<
+      string,
+      {
+        exec: string;
+        args: AppProcessArg[];
+        cwd: string;
+        envInherit: string[];
+        maxConcurrent: number;
+        timeoutSec?: number;
+        maxOutputBytes: number;
+      }
+    >;
+  };
 }
 
 export interface AppGrant {

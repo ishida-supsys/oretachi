@@ -224,6 +224,10 @@ function hhmmss(ms: number): string {
                 {{ t("granted.scheduler", { id: r.label, cron: r.cron ?? "", detail: r.detail ?? "" }) }}
                 <span v-if="r.severity === 'critical'" class="tag">{{ t("granted.schedulerTag") }}</span>
               </template>
+              <template v-else-if="r.kind === 'process'">
+                {{ t("granted.process", { name: r.label }) }}: <code>{{ r.procExec }} {{ (r.procArgs ?? []).join(" ") }}</code>
+                <span class="tag">{{ t("granted.processTag") }}</span>
+              </template>
               <template v-else-if="r.kind === 'audio'">
                 {{ t("granted.audio", { spec: r.value }) }}
                 <span class="tag">{{ t("granted.audioTag") }}</span>
@@ -549,6 +553,8 @@ function hhmmss(ms: number): string {
       "mediaNet": "Media playback (URL)",
       "scheduler": "Scheduled job {id} [{cron}]: {detail}",
       "schedulerTag": "runs unattended",
+      "process": "Run command {name}",
+      "processTag": "runs with your authority",
       "subWindow": "Sub-windows (up to {spec})",
       "subWindowFlag_transparent": "Sub-window: transparent",
       "subWindowFlag_frameless": "Sub-window: no title bar",
@@ -603,6 +609,8 @@ function hhmmss(ms: number): string {
       "mediaNet": "メディア再生（URL）",
       "scheduler": "スケジュールジョブ {id} [{cron}]: {detail}",
       "schedulerTag": "無人で実行",
+      "process": "コマンドの実行 {name}",
+      "processTag": "あなたの権限で実行",
       "subWindow": "サブウィンドウ（最大 {spec}）",
       "subWindowFlag_transparent": "サブウィンドウ: 透明",
       "subWindowFlag_frameless": "サブウィンドウ: 枠なし",

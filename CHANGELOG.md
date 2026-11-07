@@ -6,6 +6,9 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Added
+- アプリ API: 宣言して承認したコマンドの起動（`process`）を追加した。`start` / `onOutput` / `onExit` / `kill` / `list` / `read`。リロードでは殺さず、停止・取り消し・終了ではプロセスツリーごと回収する (#428)
+
 ## [0.37.0] - 2026-11-04
 
 ### Added

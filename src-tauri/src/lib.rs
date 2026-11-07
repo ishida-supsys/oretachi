@@ -7,6 +7,7 @@ mod app_db;
 mod app_media;
 mod app_net;
 mod app_ws;
+mod app_process;
 mod app_subwindow;
 mod app_audio;
 mod app_scheduler;
@@ -796,6 +797,7 @@ async fn download_update(app: tauri::AppHandle) -> Result<bool, String> {
             app_hook
                 .state::<PtyManager>()
                 .kill_all_fast("update-before-exit");
+            app_process::kill_all_fast(&app_hook);
             app_hook.cleanup_before_exit();
             job_object::release_kill_on_close();
         })
@@ -2441,6 +2443,7 @@ pub fn run() {
         .manage(app_net::AppNetRegistry::default())
         .manage(app_media::AppMediaRegistry::default())
         .manage(app_ws::AppWsRegistry::default())
+        .manage(app_process::AppProcessRegistry::default())
         .manage(app_subwindow::AppSubWindowRegistry::default())
         .manage(app_audio::AppAudioRegistry::default())
         .manage(app_scheduler::AppSchedulerRegistry::default())
@@ -2582,6 +2585,10 @@ pub fn run() {
             app_ws::app_ws_send,
             app_ws::app_ws_close,
             app_ws::app_ws_close_all,
+            app_process::app_process_start,
+            app_process::app_process_kill,
+            app_process::app_process_list,
+            app_process::app_process_read,
             app_audio::app_audio_start,
             app_audio::app_audio_stop,
             app_audio::app_audio_stop_for_instance,
@@ -3348,6 +3355,10 @@ pub fn run() {
             // ③ ファイルシステムウォッチャーを停止。
             let fs_watcher = app_handle.state::<FsWatcherManager>();
             fs_watcher.stop_all();
+
+            // ④ アプリ API `process` が起動した子プロセスをツリーごと止める。
+            //    `release()`（インスタンスの停止）を通らない終了経路の保険。クラッシュ時は Job が最終防衛線。
+            app_process::kill_all_fast(app_handle);
         }
     });
 }

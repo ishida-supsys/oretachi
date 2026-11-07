@@ -43,6 +43,25 @@ pub const AUDIO_MAX_SECONDS_CAP: u32 = 600;
 const AUDIO_DEFAULT_MAX_SECONDS: u32 = 60;
 const AUDIO_DEFAULT_SAMPLE_RATE: u32 = 16000;
 
+/// `process` の上限。コマンド名・引数の数・環境変数の数・enum の候補数。
+pub const PROCESS_MAX_COMMANDS: usize = 16;
+const PROCESS_MAX_ARGS: usize = 64;
+const PROCESS_MAX_ENV: usize = 32;
+const PROCESS_MAX_ENUM_VALUES: usize = 64;
+const PROCESS_MAX_FIXED_CHARS: usize = 4096;
+const PROCESS_MAX_EXEC_CHARS: usize = 1024;
+/// `maxConcurrent`（コマンドごと）の上限と既定
+pub const PROCESS_MAX_CONCURRENT_CAP: u32 = 8;
+/// `timeoutSec` の上限（7 日）。省略 = 無制限
+pub const PROCESS_MAX_TIMEOUT_SEC: u64 = 604_800;
+/// `maxOutputBytes`（累計）の下限・上限・既定。超えるとツリーごと止める
+pub const PROCESS_OUTPUT_MIN: u64 = 1024;
+pub const PROCESS_OUTPUT_MAX: u64 = 1 << 30;
+pub const PROCESS_OUTPUT_DEFAULT: u64 = 64 << 20;
+/// 子プロセスへ渡さない環境変数の名前の接頭辞（oretachi の MCP のポート・トークンなど。大文字小文字は無視）。
+/// manifest の `env.inherit` に書かれても拒否し、起動時にも二重に除外する。
+pub const PROCESS_FORBIDDEN_ENV_PREFIXES: &[&str] = &["ORETACHI_", "MCP_", "CLAUDE_"];
+
 const MAX_NAME_CHARS: usize = 100;
 const MAX_DESCRIPTION_CHARS: usize = 500;
 const MAX_VERSION_CHARS: usize = 50;
@@ -237,6 +256,78 @@ pub struct ResolvedFs {
     pub allow_sensitive_paths: bool,
 }
 
+/// コマンドの引数 1 件（manifest の `process.commands.<name>.args` の要素）。
+///
+/// 固定の文字列か、型つきのパラメータだけ。呼び出し側が渡せるのはパラメータの値だけで、
+/// 実行ファイルや固定の引数は変えられない。`Fixed` の値が `worktree://` / `artifact://` で始まるものは
+/// パスとして承認時に絶対パスへ解決する（それ以外は文字列のまま）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ProcessArg {
+    Fixed { value: String },
+    /// `under` 配下（正規化済みの `worktree://…/` / `artifact://…/`）に解決できる値だけ
+    Path { param: String, under: String },
+    /// `[A-Za-z0-9_-]{1,64}`（`-` 始まりは不可）
+    Token { param: String },
+    /// 宣言した候補のどれか（ソート・重複除去済み）
+    Enum { param: String, values: Vec<String> },
+}
+
+/// 申請したコマンド 1 件（正規化済み）。変化検知にだけ使う。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProcessCommand {
+    /// 絶対パス / `worktree://…` / `artifact://…` / 裸の名前（承認時に PATH から絶対パスへ解決する）
+    pub exec: String,
+    pub args: Vec<ProcessArg>,
+    /// `worktree://…` / `artifact://…`（省略時は `worktree://`）
+    pub cwd: String,
+    /// 継承する環境変数の名前（ソート・重複除去済み）。これ以外は子へ渡さない
+    pub env_inherit: Vec<String>,
+    pub max_concurrent: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_sec: Option<u64>,
+    pub max_output_bytes: u64,
+}
+
+/// manifest の `process`。名前つきで宣言したコマンドだけを、アプリが起動できる（`app_process.rs`）。
+/// **ユーザーと同じ権限でコマンドを実行できる**ので、承認ダイアログでは最も強い警告にする。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessPermission {
+    pub commands: std::collections::BTreeMap<String, ProcessCommand>,
+}
+
+/// 承認時に解決した引数。`Path` は `under` を `app_fs::resolve_requested_fs` で解決したスコープを持ち、
+/// 呼び出しのたびに `app_fs::resolve_scoped_path` で照合する。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ResolvedProcessArg {
+    /// パスとして解決したものは絶対パス（`\\?\` は除いた形）
+    Fixed { value: String },
+    Path { param: String, under: String, fs: ResolvedFs },
+    Token { param: String },
+    Enum { param: String, values: Vec<String> },
+}
+
+/// 承認時に解決したコマンド。`exec` は**承認時に解決した絶対パス**（PATH の差し替えへの対策）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedProcessCommand {
+    pub exec: String,
+    pub args: Vec<ResolvedProcessArg>,
+    pub cwd: String,
+    pub env_inherit: Vec<String>,
+    pub max_concurrent: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_sec: Option<u64>,
+    pub max_output_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResolvedProcess {
+    pub commands: std::collections::BTreeMap<String, ResolvedProcessCommand>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct RequestedPermissions {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -266,6 +357,9 @@ pub struct RequestedPermissions {
     /// manifest の `scheduler`。cron 式で動く無人ジョブ（`app_scheduler.rs`）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduler: Option<SchedulerPermission>,
+    /// manifest の `process`。宣言したコマンドの起動（`app_process.rs`）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<ProcessPermission>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,6 +417,9 @@ pub struct ResolvedPermissions {
     /// 解決で変わるものがない（承認した値がそのまま実行の入力になる）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduler: Option<SchedulerPermission>,
+    /// 承認時に解決した形（exec・固定パス・cwd は絶対パス）。`app_instance::build_resolved` が埋める
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process: Option<ResolvedProcess>,
 }
 
 /// host 側に保存する承認。キーはアーティファクト識別子（`<worktreeId>/<artifactId>`）。
@@ -429,6 +526,7 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
             "audio" => out.audio = parse_audio(val)?,
             "media" => out.media = parse_media(val)?,
             "scheduler" => out.scheduler = parse_scheduler(val)?,
+            "process" => out.process = parse_process(val)?,
             k if RESERVED_PERMISSION_KEYS.contains(&k) => {
                 return Err(format!(
                     "権限 '{}' はこの版ではまだ使えません（対応する機能が未実装です）。manifest から外してください",
@@ -437,14 +535,362 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
             }
             other => {
                 return Err(format!(
-                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs / db / network / subWindow / aiTerminal / audio / media / scheduler だけです",
+                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs / db / network / subWindow / aiTerminal / audio / media / scheduler / process だけです",
                     other
                 ));
             }
         }
     }
     check_scheduler_against_permissions(&out)?;
+    check_process_against_write_scopes(&out)?;
     Ok(out)
+}
+
+/// `exec` の拡張子が `.bat` / `.cmd` か（末尾のドット・空白は Windows が黙って剥がすので無視して見る）。
+/// `CreateProcess` はこれらを暗黙に `cmd.exe` 経由で動かし、引数の解釈による注入の恐れがあるので、
+/// どの OS でも manifest の時点で拒否する（OS で通る・通らないが分かれる manifest にしない）。
+pub fn is_forbidden_exec_ext(exec: &str) -> bool {
+    let name = exec.rsplit(['/', '\\']).next().unwrap_or(exec).trim_end_matches(['.', ' ']);
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".bat") || lower.ends_with(".cmd")
+}
+
+/// 環境変数の名前が、子へ渡してはいけない接頭辞か。
+pub fn is_forbidden_env_name(name: &str) -> bool {
+    let up = name.to_ascii_uppercase();
+    PROCESS_FORBIDDEN_ENV_PREFIXES.iter().any(|p| up.starts_with(p))
+}
+
+fn is_path_uri(s: &str) -> bool {
+    s.starts_with("worktree://") || s.starts_with("artifact://")
+}
+
+fn has_control_chars(s: &str) -> bool {
+    s.chars().any(|c| (c as u32) < 0x20 || c == '\u{7f}')
+}
+
+fn is_drive_absolute(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/')
+}
+
+/// `exec` を検査して正規化する。許すのは絶対パス・`worktree://` / `artifact://` のファイル・裸の名前だけ
+/// （`./x` や `bin\x` のような相対パスは、何を指すかが cwd 次第になるので拒否）。
+fn parse_exec(raw: &str, what: &str) -> Result<String, String> {
+    let s = raw.trim();
+    if s.is_empty() {
+        return Err(format!("{} は空にできません", what));
+    }
+    if s.chars().count() > PROCESS_MAX_EXEC_CHARS || has_control_chars(s) {
+        return Err(format!("{} が長すぎるか、制御文字を含んでいます", what));
+    }
+    if is_forbidden_exec_ext(s) {
+        return Err(format!(
+            "{} '{}' は .bat / .cmd です。コマンドライン引数の解釈による注入の恐れがあるため、exec にできません（.exe などを指定してください）",
+            what, s
+        ));
+    }
+    if s.ends_with('.') {
+        return Err(format!("{} '{}' は末尾がドットです", what, s));
+    }
+    if is_path_uri(s) {
+        let n = crate::app_fs::normalize_path_uri(s)?;
+        if n.ends_with("://") {
+            return Err(format!("{} にはファイルを指定してください（ルート自身は指定できません）", what));
+        }
+        return Ok(n);
+    }
+    if s.starts_with("\\\\") {
+        return Err(format!("{} に UNC パス / \\\\?\\ 形式は使えません: {}", what, s));
+    }
+    if is_drive_absolute(s) || s.starts_with('/') {
+        return Ok(s.to_string());
+    }
+    if s.contains(['/', '\\', ':']) || s.contains(['"', '*', '?', '<', '>', '|']) || s.starts_with('-') {
+        return Err(format!(
+            "{} '{}' は絶対パス・worktree:// / artifact:// のファイル・コマンド名（PATH で探す）のどれかで指定してください",
+            what, s
+        ));
+    }
+    Ok(s.to_string())
+}
+
+fn valid_param_name(n: &str) -> bool {
+    !n.is_empty() && n.len() <= 32 && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn parse_process_arg(v: &serde_json::Value, what: &str) -> Result<ProcessArg, String> {
+    match v {
+        serde_json::Value::String(s) => {
+            if s.chars().count() > PROCESS_MAX_FIXED_CHARS || s.contains(['\0', '\r', '\n']) {
+                return Err(format!(
+                    "{} は {} 文字以内で、NUL・改行を含まない文字列にしてください",
+                    what, PROCESS_MAX_FIXED_CHARS
+                ));
+            }
+            // worktree:// / artifact:// で始まるものは承認時に絶対パスへ解決する固定のパス
+            let value = if is_path_uri(s) { crate::app_fs::normalize_path_uri(s)? } else { s.clone() };
+            Ok(ProcessArg::Fixed { value })
+        }
+        serde_json::Value::Object(obj) => {
+            if let Some(k) = obj.keys().find(|k| !matches!(k.as_str(), "param" | "type" | "under" | "values")) {
+                return Err(format!("{} の未知のキー '{}' です（param / type / under / values だけ）", what, k));
+            }
+            let param = obj
+                .get("param")
+                .and_then(|p| p.as_str())
+                .ok_or_else(|| format!("{}.param（パラメータ名）は必須の文字列です", what))?
+                .to_string();
+            if !valid_param_name(&param) {
+                return Err(format!("{}.param '{}' は [A-Za-z0-9_]{{1,32}} で指定してください", what, param));
+            }
+            let ty = obj.get("type").and_then(|t| t.as_str()).unwrap_or("");
+            let reject_extra = |keys: &[&str]| -> Result<(), String> {
+                match keys.iter().find(|k| obj.contains_key(**k)) {
+                    Some(k) => Err(format!("{} の type '{}' には '{}' を指定できません", what, ty, k)),
+                    None => Ok(()),
+                }
+            };
+            match ty {
+                "path" => {
+                    reject_extra(&["values"])?;
+                    let under = obj
+                        .get("under")
+                        .and_then(|u| u.as_str())
+                        .ok_or_else(|| format!("{}.under（worktree://… / artifact://… のプレフィックス）は path に必須です", what))?;
+                    Ok(ProcessArg::Path { param, under: crate::app_fs::normalize_scope(under)? })
+                }
+                "token" => {
+                    reject_extra(&["under", "values"])?;
+                    Ok(ProcessArg::Token { param })
+                }
+                "enum" => {
+                    reject_extra(&["under"])?;
+                    let items = obj
+                        .get("values")
+                        .and_then(|a| a.as_array())
+                        .ok_or_else(|| format!("{}.values（候補の配列）は enum に必須です", what))?;
+                    let mut set = BTreeSet::new();
+                    for item in items {
+                        let s = item
+                            .as_str()
+                            .ok_or_else(|| format!("{}.values の要素は文字列である必要があります", what))?;
+                        if s.is_empty() || s.chars().count() > 256 || has_control_chars(s) {
+                            return Err(format!("{}.values に空・長すぎる・制御文字を含む候補があります", what));
+                        }
+                        if s.starts_with('-') {
+                            return Err(format!("{}.values の候補 '{}' は '-' で始められません（オプションとして解釈されるため）", what, s));
+                        }
+                        set.insert(s.to_string());
+                    }
+                    if set.is_empty() || set.len() > PROCESS_MAX_ENUM_VALUES {
+                        return Err(format!("{}.values は 1〜{} 件にしてください", what, PROCESS_MAX_ENUM_VALUES));
+                    }
+                    Ok(ProcessArg::Enum { param, values: set.into_iter().collect() })
+                }
+                other => Err(format!("{}.type '{}' は使えません（path / token / enum だけ）", what, other)),
+            }
+        }
+        _ => Err(format!("{} は文字列（固定の引数）かオブジェクト（パラメータ）である必要があります", what)),
+    }
+}
+
+fn parse_process_command(name: &str, v: &serde_json::Value) -> Result<ProcessCommand, String> {
+    let what = format!("app.permissions.process.commands.{}", name);
+    let obj = expect_object(v, &what)?;
+    const KEYS: &[&str] = &["exec", "args", "cwd", "env", "stdin", "maxConcurrent", "timeoutSec", "maxOutputBytes", "pin"];
+    if let Some(k) = obj.keys().find(|k| !KEYS.contains(&k.as_str())) {
+        return Err(format!("{} の未知のキー '{}' です（{} だけ）", what, k, KEYS.join(" / ")));
+    }
+    if obj.contains_key("pin") {
+        // エントリのハッシュ固定（前提 9 の案 A）は将来の拡張。黙って無視しない
+        return Err(format!("{}.pin はこの版ではまだ使えません（対応する機能が未実装です）。manifest から外してください", what));
+    }
+    let exec = parse_exec(
+        obj.get("exec")
+            .and_then(|e| e.as_str())
+            .ok_or_else(|| format!("{}.exec（実行ファイル）は必須の文字列です", what))?,
+        &format!("{}.exec", what),
+    )?;
+
+    let args = match obj.get("args") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(serde_json::Value::Array(items)) => {
+            if items.len() > PROCESS_MAX_ARGS {
+                return Err(format!("{}.args は {} 件までです", what, PROCESS_MAX_ARGS));
+            }
+            let mut out = Vec::with_capacity(items.len());
+            let mut names = BTreeSet::new();
+            for (i, item) in items.iter().enumerate() {
+                let arg = parse_process_arg(item, &format!("{}.args[{}]", what, i))?;
+                let pname = match &arg {
+                    ProcessArg::Path { param, .. } | ProcessArg::Token { param } | ProcessArg::Enum { param, .. } => Some(param),
+                    ProcessArg::Fixed { .. } => None,
+                };
+                if let Some(p) = pname {
+                    if !names.insert(p.clone()) {
+                        return Err(format!("{}.args にパラメータ名 '{}' が重複しています", what, p));
+                    }
+                }
+                out.push(arg);
+            }
+            out
+        }
+        Some(_) => return Err(format!("{}.args は配列である必要があります", what)),
+    };
+
+    let cwd = match obj.get("cwd") {
+        None | Some(serde_json::Value::Null) => "worktree://".to_string(),
+        Some(serde_json::Value::String(s)) => {
+            if !is_path_uri(s.trim()) {
+                return Err(format!("{}.cwd は worktree://… または artifact://… で指定してください（絶対パスは受け付けません）", what));
+            }
+            crate::app_fs::normalize_path_uri(s)?
+        }
+        Some(_) => return Err(format!("{}.cwd は文字列である必要があります", what)),
+    };
+
+    let env_inherit = match obj.get("env") {
+        None | Some(serde_json::Value::Null) => Vec::new(),
+        Some(e) => {
+            let eo = expect_object(e, &format!("{}.env", what))?;
+            if let Some(k) = eo.keys().find(|k| k.as_str() != "inherit") {
+                return Err(format!("{}.env の未知のキー '{}' です（inherit だけ。値を直接書くことはできません）", what, k));
+            }
+            let names = string_list(eo, "inherit", &format!("{}.env.inherit", what))?;
+            if names.len() > PROCESS_MAX_ENV {
+                return Err(format!("{}.env.inherit は {} 件までです", what, PROCESS_MAX_ENV));
+            }
+            for n in &names {
+                let valid = n.len() <= 64
+                    && n.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && n.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !valid {
+                    return Err(format!("{}.env.inherit の名前 '{}' は [A-Za-z_][A-Za-z0-9_]{{0,63}} で指定してください", what, n));
+                }
+                if is_forbidden_env_name(n) {
+                    return Err(format!(
+                        "{}.env.inherit に '{}' は指定できません（{} で始まる変数は oretachi 自身の接続情報などを含むため、子へ渡しません）",
+                        what,
+                        n,
+                        PROCESS_FORBIDDEN_ENV_PREFIXES.join(" / ")
+                    ));
+                }
+            }
+            names
+        }
+    };
+
+    match obj.get("stdin") {
+        None | Some(serde_json::Value::Null) => {}
+        Some(serde_json::Value::String(s)) if s == "none" => {}
+        Some(_) => return Err(format!("{}.stdin は \"none\" だけです（標準入力は渡せません）", what)),
+    }
+
+    let uint = |key: &str, min: u64, max: u64| -> Result<Option<u64>, String> {
+        match obj.get(key) {
+            None | Some(serde_json::Value::Null) => Ok(None),
+            Some(n) => {
+                let n = n
+                    .as_u64()
+                    .ok_or_else(|| format!("{}.{} は正の整数である必要があります", what, key))?;
+                if n < min || n > max {
+                    return Err(format!("{}.{} は {}〜{} の範囲で指定してください（指定: {}）", what, key, min, max, n));
+                }
+                Ok(Some(n))
+            }
+        }
+    };
+    Ok(ProcessCommand {
+        exec,
+        args,
+        cwd,
+        env_inherit,
+        max_concurrent: uint("maxConcurrent", 1, PROCESS_MAX_CONCURRENT_CAP as u64)?.unwrap_or(1) as u32,
+        timeout_sec: uint("timeoutSec", 1, PROCESS_MAX_TIMEOUT_SEC)?,
+        max_output_bytes: uint("maxOutputBytes", PROCESS_OUTPUT_MIN, PROCESS_OUTPUT_MAX)?.unwrap_or(PROCESS_OUTPUT_DEFAULT),
+    })
+}
+
+fn parse_process(v: &serde_json::Value) -> Result<Option<ProcessPermission>, String> {
+    let what = "app.permissions.process";
+    let obj = expect_object(v, what)?;
+    if let Some(k) = obj.keys().find(|k| k.as_str() != "commands") {
+        return Err(format!("{} の未知のキー '{}' です（commands だけ）", what, k));
+    }
+    let cmds = match obj.get("commands") {
+        None | Some(serde_json::Value::Null) => return Ok(None),
+        Some(c) => expect_object(c, "app.permissions.process.commands")?,
+    };
+    if cmds.is_empty() {
+        return Ok(None);
+    }
+    if cmds.len() > PROCESS_MAX_COMMANDS {
+        return Err(format!("{}.commands は {} 件までです", what, PROCESS_MAX_COMMANDS));
+    }
+    let mut commands = std::collections::BTreeMap::new();
+    for (name, val) in cmds {
+        let valid = !name.is_empty() && name.len() <= 64 && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if !valid {
+            return Err(format!("コマンド名 '{}' は [A-Za-z0-9_-]{{1,64}} で指定してください", name));
+        }
+        commands.insert(name.clone(), parse_process_command(name, val)?);
+    }
+    Ok(Some(ProcessPermission { commands }))
+}
+
+/// `process` が同じ manifest の書き込み権限の迂回路にならないようにする。
+///
+/// 前提 9（案 C）の論拠「書き込める相手は、そもそも MCP クライアントとして同等以上の権限を持つ」は
+/// **外部の書き手**（AI・MCP クライアント）にしか効かない。アプリ自身が `fs.write` / `db`（書き込み）で
+/// スクリプトを書き換えられ、かつ `process` で起動できるなら、承認なしの iframe から任意のコードを
+/// 実行できてしまう。そこで、書き込みスコープが exec・固定のパス引数・cwd（の配下）を覆う組み合わせは拒否する
+/// （親ディレクトリを覆うスコープは、配下であるこれらも覆うのでこの検査に含まれる）。
+/// 先頭の引数が `path` パラメータで、その `under` が書き込めるものも拒否する
+/// （`exec: python, args: [{path}]` は、書いたファイルをそのまま実行する形になる）。
+/// 他所から `import` されるファイルまでは守れない（案 A と同じ限界）。
+fn check_process_against_write_scopes(p: &RequestedPermissions) -> Result<(), String> {
+    let Some(proc_perm) = &p.process else { return Ok(()) };
+    let writes: Vec<(&str, &String)> = p
+        .fs
+        .iter()
+        .flat_map(|f| f.write.iter().map(|s| ("fs", s)))
+        .chain(p.db.iter().flat_map(|d| d.write.iter().map(|s| ("db", s))))
+        .collect();
+    if writes.is_empty() {
+        return Ok(());
+    }
+    let covers = |scope: &str, target: &str| -> bool {
+        match (crate::app_fs::split_uri(scope), crate::app_fs::split_uri(target)) {
+            (Ok((s1, c1)), Ok((s2, c2))) => s1 == s2 && c2.len() >= c1.len() && c2[..c1.len()] == c1[..],
+            _ => false,
+        }
+    };
+    for (name, cmd) in &proc_perm.commands {
+        let mut targets: Vec<(&str, &str)> = vec![("exec", cmd.exec.as_str()), ("cwd", cmd.cwd.as_str())];
+        for a in &cmd.args {
+            if let ProcessArg::Fixed { value } = a {
+                if is_path_uri(value) {
+                    targets.push(("固定のパス引数", value.as_str()));
+                }
+            }
+        }
+        if let Some(ProcessArg::Path { under, .. }) = cmd.args.first() {
+            targets.push(("先頭の path パラメータの under", under.as_str()));
+        }
+        for (kind, uri) in targets {
+            if !is_path_uri(uri) {
+                continue;
+            }
+            if let Some((perm, scope)) = writes.iter().find(|(_, s)| covers(s, uri)) {
+                return Err(format!(
+                    "app.permissions.process のコマンド '{}' の {}（{}）は、app.permissions.{}.write の '{}' に書き込める場所にあります。アプリ自身が書き換えて実行できてしまうため、書き込めない場所に置くか、書き込みのスコープを狭めてください",
+                    name, kind, uri, perm, scope
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// スケジューラーが他の権限の迂回路にならないようにする。tool ジョブは `mcp.tools` に宣言済みのツールだけ、
@@ -1491,6 +1937,219 @@ mod tests {
 
     /// 同梱スキル（app-starter）の manifest は、この版のパーサで受理されること。
     /// 受理されない manifest を配ると、スキルの最初の手順で `artifact create` が失敗する
+    // ─── process ───
+
+    fn proc_manifest(cmd: serde_json::Value) -> serde_json::Value {
+        json!({ "name": "x", "permissions": { "process": { "commands": { "run-workflow": cmd }}}})
+    }
+
+    #[test]
+    fn parses_process_permission() {
+        let m = ok(json!({ "name": "x", "permissions": { "process": { "commands": {
+            "run-workflow": {
+                "exec": "python",
+                "args": [
+                    "-X", "utf8",
+                    "worktree://.claude\\skills/x/run.py",
+                    { "param": "request", "type": "path", "under": "worktree://runs" },
+                    { "param": "mode", "type": "token" },
+                    { "param": "size", "type": "enum", "values": ["s", "l", "s"] }
+                ],
+                "cwd": "worktree://",
+                "env": { "inherit": ["USERPROFILE", "PATH", "PATH"] },
+                "stdin": "none",
+                "maxConcurrent": 4,
+                "timeoutSec": 3600,
+                "maxOutputBytes": 1048576
+            },
+            "ping": { "exec": "C:\\Windows\\System32\\ping.exe" }
+        }}}}));
+        let p = m.permissions.process.unwrap();
+        let c = &p.commands["run-workflow"];
+        assert_eq!(c.exec, "python");
+        assert_eq!(
+            c.args,
+            vec![
+                ProcessArg::Fixed { value: "-X".into() },
+                ProcessArg::Fixed { value: "utf8".into() },
+                // worktree:// で始まる固定の引数は正規化する（区切りの統一）
+                ProcessArg::Fixed { value: "worktree://.claude/skills/x/run.py".into() },
+                ProcessArg::Path { param: "request".into(), under: "worktree://runs/".into() },
+                ProcessArg::Token { param: "mode".into() },
+                ProcessArg::Enum { param: "size".into(), values: vec!["l".into(), "s".into()] },
+            ]
+        );
+        assert_eq!(c.cwd, "worktree://");
+        assert_eq!(c.env_inherit, vec!["PATH", "USERPROFILE"]);
+        assert_eq!((c.max_concurrent, c.timeout_sec, c.max_output_bytes), (4, Some(3600), 1048576));
+        // 省略は既定で埋める
+        let d = &p.commands["ping"];
+        assert_eq!(
+            (d.cwd.as_str(), d.max_concurrent, d.timeout_sec, d.max_output_bytes),
+            ("worktree://", 1, None, PROCESS_OUTPUT_DEFAULT)
+        );
+        // 空は権限なし
+        assert!(ok(json!({ "name": "x", "permissions": { "process": { "commands": {} }}})).permissions.process.is_none());
+    }
+
+    #[test]
+    fn rejects_bad_process_permission() {
+        let e = |cmd: serde_json::Value| err(proc_manifest(cmd));
+        // .bat / .cmd は承認前に弾く（大文字・末尾のドット・パスの途中も）
+        for exec in ["run.bat", "tool.CMD", "worktree://scripts/x.bat", "C:\\x\\y.cmd", "run.bat.", "run.cmd ."] {
+            assert!(e(json!({ "exec": exec })).contains(".bat / .cmd"), "{}", exec);
+        }
+        // exec の形
+        assert!(e(json!({})).contains("exec"));
+        assert!(e(json!({ "exec": "" })).contains("空"));
+        assert!(e(json!({ "exec": "./run.exe" })).contains("絶対パス"));
+        assert!(e(json!({ "exec": "bin\\run.exe" })).contains("絶対パス"));
+        assert!(e(json!({ "exec": "-rf" })).contains("絶対パス"));
+        assert!(e(json!({ "exec": "\\\\server\\share\\run.exe" })).contains("UNC"));
+        assert!(e(json!({ "exec": "worktree://" })).contains("ファイル"));
+        assert!(e(json!({ "exec": "worktree://../x.exe" })).contains("不正"));
+        // 未知のキー・pin・stdin
+        assert!(e(json!({ "exec": "python", "shell": true })).contains("未知のキー"));
+        assert!(e(json!({ "exec": "python", "pin": "sha256" })).contains("pin"));
+        assert!(e(json!({ "exec": "python", "stdin": "inherit" })).contains("stdin"));
+        // 引数
+        assert!(e(json!({ "exec": "python", "args": [1] })).contains("文字列"));
+        assert!(e(json!({ "exec": "python", "args": [{ "param": "a" }] })).contains("path / token / enum"));
+        assert!(e(json!({ "exec": "python", "args": [{ "param": "a b", "type": "token" }] })).contains("param"));
+        assert!(e(json!({ "exec": "python", "args": [{ "param": "a", "type": "path" }] })).contains("under"));
+        assert!(e(json!({ "exec": "python", "args": [{ "param": "a", "type": "path", "under": "/etc/" }] })).contains("worktree://"));
+        assert!(e(json!({ "exec": "python", "args": [{ "param": "a", "type": "path", "under": "worktree://a/../b" }] })).contains("不正"));
+        assert!(e(json!({ "exec": "python", "args": [{ "param": "a", "type": "token", "under": "worktree://a/" }] })).contains("under"));
+        assert!(e(json!({ "exec": "python", "args": [{ "param": "a", "type": "enum", "values": [] }] })).contains("1〜"));
+        assert!(e(json!({ "exec": "python", "args": [{ "param": "a", "type": "enum", "values": ["ok", "-x"] }] })).contains("'-'"));
+        assert!(e(json!({ "exec": "python", "args": [
+            { "param": "a", "type": "token" }, { "param": "a", "type": "token" }
+        ] })).contains("重複"));
+        assert!(e(json!({ "exec": "python", "args": ["a\nb"] })).contains("改行"));
+        // cwd は worktree:// / artifact:// だけ
+        assert!(e(json!({ "exec": "python", "cwd": "C:\\work" })).contains("cwd"));
+        assert!(e(json!({ "exec": "python", "cwd": "worktree://a/../.." })).contains("不正"));
+        // env: 値は書けない。oretachi の接続情報を含む接頭辞は拒否
+        assert!(e(json!({ "exec": "python", "env": { "set": { "A": "1" } } })).contains("未知のキー"));
+        assert!(e(json!({ "exec": "python", "env": { "inherit": ["ORETACHI_MCP_PORT"] } })).contains("指定できません"));
+        assert!(e(json!({ "exec": "python", "env": { "inherit": ["mcp_token"] } })).contains("指定できません"));
+        assert!(e(json!({ "exec": "python", "env": { "inherit": ["Claude_Code_Entrypoint"] } })).contains("指定できません"));
+        assert!(e(json!({ "exec": "python", "env": { "inherit": ["A=B"] } })).contains("inherit"));
+        // 上限の範囲
+        assert!(e(json!({ "exec": "python", "maxConcurrent": 0 })).contains("maxConcurrent"));
+        assert!(e(json!({ "exec": "python", "maxConcurrent": 9 })).contains("maxConcurrent"));
+        assert!(e(json!({ "exec": "python", "timeoutSec": 0 })).contains("timeoutSec"));
+        assert!(e(json!({ "exec": "python", "timeoutSec": 604801 })).contains("timeoutSec"));
+        assert!(e(json!({ "exec": "python", "maxOutputBytes": 10 })).contains("maxOutputBytes"));
+        // コマンド名・形
+        let bad_name = err(json!({ "name": "x", "permissions": { "process": { "commands": { "a b": { "exec": "python" } }}}}));
+        assert!(bad_name.contains("コマンド名"));
+        assert!(err(json!({ "name": "x", "permissions": { "process": { "shell": true }}})).contains("未知のキー"));
+    }
+
+    #[test]
+    fn process_cannot_run_what_the_app_itself_can_write() {
+        let with = |fs: serde_json::Value, cmd: serde_json::Value| {
+            json!({ "name": "x", "permissions": { "fs": fs, "process": { "commands": { "c": cmd }}}})
+        };
+        let script = json!({
+            "exec": "python",
+            "args": ["worktree://scripts/run.py", { "param": "request", "type": "path", "under": "worktree://runs/" }]
+        });
+        // runs/ だけ書ける: スクリプトにも cwd にも届かない
+        assert!(parse_manifest(&with(json!({ "write": ["worktree://runs/"] }), script.clone())).is_ok());
+        // スクリプトのあるディレクトリ・その親・ルートに書ける
+        for scope in ["worktree://scripts/", "worktree://", "worktree://scripts/run.py"] {
+            let e = parse_manifest(&with(json!({ "write": [scope] }), script.clone())).unwrap_err();
+            assert!(e.contains("書き込める場所"), "{}: {}", scope, e);
+        }
+        // db の書き込みスコープも同じ
+        let db = json!({ "name": "x", "permissions": { "db": { "write": ["worktree://scripts/"] },
+            "process": { "commands": { "c": script.clone() }}}});
+        assert!(parse_manifest(&db).unwrap_err().contains("db.write"));
+        // 読み取りだけなら問題ない
+        assert!(parse_manifest(&with(json!({ "read": ["worktree://"] }), script.clone())).is_ok());
+        // artifact:// も同じ
+        let art = json!({ "exec": "artifact://bin/tool.exe" });
+        assert!(parse_manifest(&with(json!({ "write": ["artifact://bin/"] }), art)).is_err());
+        // cwd が書ける場所にあるものも拒否
+        let cwd = json!({ "exec": "python", "cwd": "worktree://runs/" });
+        assert!(parse_manifest(&with(json!({ "write": ["worktree://runs/"] }), cwd)).is_err());
+        // 先頭の引数が path パラメータで、その under に書ける形（書いたファイルをそのまま実行できる）
+        let first = json!({ "exec": "python", "args": [{ "param": "script", "type": "path", "under": "worktree://runs/" }] });
+        assert!(parse_manifest(&with(json!({ "write": ["worktree://runs/"] }), first)).is_err());
+    }
+
+    #[test]
+    fn process_change_requires_reapproval() {
+        let base = ok(proc_manifest(json!({ "exec": "python", "args": ["a.py"] })));
+        let same_renamed = ok(json!({ "name": "renamed", "permissions": { "process": { "commands": {
+            "run-workflow": { "exec": "python", "args": ["a.py"] }
+        }}}}));
+        assert!(!requested_changed(&base.permissions, &same_renamed.permissions));
+        for changed in [
+            json!({ "exec": "python3", "args": ["a.py"] }),
+            json!({ "exec": "python", "args": ["b.py"] }),
+            json!({ "exec": "python", "args": ["a.py"], "cwd": "worktree://x/" }),
+            json!({ "exec": "python", "args": ["a.py"], "env": { "inherit": ["PATH"] } }),
+            json!({ "exec": "python", "args": ["a.py"], "maxConcurrent": 2 }),
+            json!({ "exec": "python", "args": ["a.py", { "param": "t", "type": "token" }] }),
+        ] {
+            let m = ok(proc_manifest(changed.clone()));
+            assert!(requested_changed(&base.permissions, &m.permissions), "{}", changed);
+            assert!(requested_changed(&m.permissions, &base.permissions), "狭まる変更でも出す: {}", changed);
+        }
+    }
+
+    #[test]
+    fn legacy_grant_without_process_deserializes_as_no_process() {
+        let raw = r#"{"grantedAt":1,"requested":{"memory":{"maxBytes":10}},"resolved":{"memory":{"maxBytes":10}}}"#;
+        let g: AppGrant = serde_json::from_str(raw).unwrap();
+        assert!(g.resolved.process.is_none() && g.requested.process.is_none());
+    }
+
+    #[test]
+    fn process_grant_roundtrips_through_json() {
+        let m = ok(proc_manifest(json!({
+            "exec": "python",
+            "args": [{ "param": "request", "type": "path", "under": "worktree://runs/" },
+                     { "param": "size", "type": "enum", "values": ["s", "l"] }]
+        })));
+        let requested = m.permissions;
+        let resolved = ResolvedPermissions {
+            process: Some(ResolvedProcess {
+                commands: requested
+                    .process
+                    .as_ref()
+                    .unwrap()
+                    .commands
+                    .iter()
+                    .map(|(k, c)| {
+                        (
+                            k.clone(),
+                            ResolvedProcessCommand {
+                                exec: "C:\\Python\\python.exe".into(),
+                                args: vec![
+                                    ResolvedProcessArg::Fixed { value: "-X".into() },
+                                    ResolvedProcessArg::Token { param: "mode".into() },
+                                ],
+                                cwd: "C:\\wt".into(),
+                                env_inherit: c.env_inherit.clone(),
+                                max_concurrent: c.max_concurrent,
+                                timeout_sec: c.timeout_sec,
+                                max_output_bytes: c.max_output_bytes,
+                            },
+                        )
+                    })
+                    .collect(),
+            }),
+            ..Default::default()
+        };
+        let g = AppGrant { granted_at: 1, requested, resolved };
+        let back: AppGrant = serde_json::from_str(&serde_json::to_string(&g).unwrap()).unwrap();
+        assert_eq!(back, g);
+    }
+
     #[test]
     fn bundled_starter_manifest_is_valid() {
         let raw = include_str!("../skills/app-starter/app.json");
@@ -1681,6 +2340,7 @@ mod tests {
             audio: None,
             media: None,
             scheduler: None,
+            process: None,
         }
     }
 
@@ -1723,6 +2383,7 @@ mod tests {
                 audio: None,
                 media: Some(RequestedMedia { read: vec!["worktree://videos/".into()], allow: vec!["https://cdn.example.com/".into()] }),
                 scheduler: None,
+                process: None,
             },
             resolved: resolved(&["notify_worktree"], &["wt-b"]),
         };

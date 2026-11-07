@@ -12,7 +12,9 @@ import {
   ARTIFACT_BRIDGE_JS,
   ARTIFACT_BRIDGE_METHOD_NET_FETCH,
   ARTIFACT_BRIDGE_PUSH_WS_EVENT,
+  ARTIFACT_BRIDGE_PUSH_PROCESS_EVENT,
   postArtifactBridgeWsEvent,
+  postArtifactBridgeProcessEvent,
   readArtifactBridgeRequest,
   postArtifactBridgeResult,
   postArtifactBridgeMemoryChanged,
@@ -505,6 +507,153 @@ describe("ブリッジ本体: net.ws", () => {
     const errors: string[] = [];
     h.onError((e: Error) => errors.push(e.message));
     expect(errors[0]).toMatch(/too many messages/);
+  });
+});
+
+describe("ブリッジ本体: process", () => {
+  const reply = (b: ReturnType<typeof runBridge>, index: number, result: unknown = null, ok = true, error?: string) =>
+    b.deliver({
+      [ARTIFACT_BRIDGE_RESULT_MARKER]: true,
+      requestId: b.sent[index].requestId,
+      nonce: "n1",
+      ok,
+      ...(ok ? { result } : { error }),
+    });
+  const push = (b: ReturnType<typeof runBridge>, payload: Record<string, unknown>, nonce = "n1") =>
+    b.deliver({ [ARTIFACT_BRIDGE_PUSH_MARKER]: true, event: ARTIFACT_BRIDGE_PUSH_PROCESS_EVENT, nonce, payload });
+  const lines = (id: string, ...items: Array<[number, string, string?]>) => ({
+    id,
+    kind: "output",
+    lines: items.map(([seq, text, stream]) => ({ stream: stream ?? "stdout", seq, text })),
+  });
+
+  it("start は名前とパラメータの値だけを中継し、{ id, startedAt } を返す", async () => {
+    const b = runBridge({ nonce: "n1" });
+    const p = b.oretachi.process.start("run-workflow", { request: "worktree://runs/a/request.json" });
+    expect(b.sent[0].method).toBe("process.start");
+    expect(b.sent[0].params).toEqual({ name: "run-workflow", params: { request: "worktree://runs/a/request.json" } });
+    reply(b, 0, { id: "p1", startedAt: 123 });
+    await expect(p).resolves.toEqual({ id: "p1", startedAt: 123 });
+    // params 省略は空オブジェクト
+    void b.oretachi.process.start("x").catch(() => {});
+    expect(b.sent[1].params).toEqual({ name: "x", params: {} });
+  });
+
+  it("引数の型が不正なら、Rust へ送らず reject する", async () => {
+    const b = runBridge({ nonce: "n1" });
+    await expect(b.oretachi.process.start("")).rejects.toThrow(/command name/);
+    await expect(b.oretachi.process.start(1)).rejects.toThrow(/command name/);
+    await expect(b.oretachi.process.start("x", ["a"])).rejects.toThrow(/object/);
+    await expect(b.oretachi.process.start("x", "a")).rejects.toThrow(/object/);
+    await expect(b.oretachi.process.kill("")).rejects.toThrow(/id/);
+    await expect(b.oretachi.process.read(1)).rejects.toThrow(/id/);
+    expect(() => b.oretachi.process.onOutput("", () => {})).toThrow(/id/);
+    expect(() => b.oretachi.process.onOutput("p1", null)).toThrow(/function/);
+    expect(() => b.oretachi.process.onExit("p1", 1)).toThrow(/function/);
+    expect(b.sent).toHaveLength(0);
+  });
+
+  it("Rust の拒否はそのまま reject される", async () => {
+    const b = runBridge({ nonce: "n1" });
+    const p = b.oretachi.process.start("evil");
+    reply(b, 0, null, false, "コマンド 'evil' は宣言も承認もされていません");
+    await expect(p).rejects.toThrow("宣言も承認もされていません");
+  });
+
+  it("kill / list / read を中継する（read の sinceSeq は指定したときだけ）", async () => {
+    const b = runBridge({ nonce: "n1" });
+    void b.oretachi.process.kill("p1");
+    expect(b.sent[0]).toMatchObject({ method: "process.kill", params: { id: "p1" } });
+    void b.oretachi.process.list();
+    expect(b.sent[1]).toMatchObject({ method: "process.list", params: {} });
+    void b.oretachi.process.read("p1");
+    expect(b.sent[2].params).toEqual({ id: "p1" });
+    void b.oretachi.process.read("p1", { sinceSeq: 5 });
+    expect(b.sent[3].params).toEqual({ id: "p1", sinceSeq: 5 });
+  });
+
+  it("start の応答より先に届いた出力は、onOutput の登録まで溜めて 1 行ずつ流す（まとめて届いても分ける）", async () => {
+    const b = runBridge({ nonce: "n1" });
+    const p = b.oretachi.process.start("c");
+    push(b, lines("p1", [0, "first"], [1, "second", "stderr"]));
+    reply(b, 0, { id: "p1", startedAt: 1 });
+    const h = await p;
+    const got: unknown[] = [];
+    b.oretachi.process.onOutput(h.id, (l: unknown) => got.push(l));
+    push(b, lines("p1", [2, "third"]));
+    expect(got).toEqual([
+      { stream: "stdout", seq: 0, text: "first" },
+      { stream: "stderr", seq: 1, text: "second" },
+      { stream: "stdout", seq: 2, text: "third" },
+    ]);
+  });
+
+  it("onExit は終了の通知で呼ばれ、登録より前に終了していても登録時に呼ばれる。解除できる", async () => {
+    const b = runBridge({ nonce: "n1" });
+    const early: unknown[] = [];
+    const late: unknown[] = [];
+    b.oretachi.process.onExit("p1", (e: unknown) => early.push(e));
+    push(b, { id: "p1", kind: "exit", code: 3, signal: null, durationMs: 42 });
+    expect(early).toEqual([{ code: 3, signal: null, durationMs: 42 }]);
+    b.oretachi.process.onExit("p1", (e: unknown) => late.push(e));
+    expect(late).toEqual([{ code: 3, signal: null, durationMs: 42 }]);
+    // 解除したリスナーには届かない
+    const off = b.oretachi.process.onOutput("p2", () => {
+      throw new Error("should not be called");
+    });
+    off();
+    expect(() => push(b, lines("p2", [0, "x"]))).not.toThrow();
+    const killed: unknown[] = [];
+    b.oretachi.process.onExit("p3", (e: unknown) => killed.push(e));
+    push(b, { id: "p3", kind: "exit", code: null, signal: "killed", durationMs: 7 });
+    expect(killed).toEqual([{ code: null, signal: "killed", durationMs: 7 }]);
+  });
+
+  it("別のプロセスの通知は届かない。前の文書の nonce の通知は捨てる", async () => {
+    const b = runBridge({ nonce: "n1" });
+    const g1: unknown[] = [];
+    const g2: unknown[] = [];
+    b.oretachi.process.onOutput("p1", (l: { text: string }) => g1.push(l.text));
+    b.oretachi.process.onOutput("p2", (l: { text: string }) => g2.push(l.text));
+    push(b, lines("p2", [0, "for-2"]));
+    push(b, lines("p1", [0, "stale"]), "old");
+    expect(g1).toEqual([]);
+    expect(g2).toEqual(["for-2"]);
+  });
+
+  it("リスナー無しで溜める行数・プロセス数には上限があり、あふれたら古いほうを捨てる", async () => {
+    const b = runBridge({ nonce: "n1" });
+    for (let i = 0; i < 1005; i++) push(b, lines("p1", [i, "l" + i]));
+    const got: Array<{ seq: number }> = [];
+    b.oretachi.process.onOutput("p1", (l: { seq: number }) => got.push(l));
+    expect(got).toHaveLength(1000);
+    expect(got[0].seq).toBe(5);
+    expect(got[999].seq).toBe(1004);
+    // 購読されていないプロセスの id を増やし続けても、エントリは増え続けない（購読中のものは残る）
+    const keep: unknown[] = [];
+    b.oretachi.process.onOutput("keep", (l: unknown) => keep.push(l));
+    for (let i = 0; i < 200; i++) push(b, lines("n" + i, [0, "x"]));
+    push(b, lines("keep", [0, "still here"]));
+    expect(keep).toHaveLength(1);
+  });
+
+  it("process は oretachi の名前付きエクスポートとして公開され、グローバルの process を持ち込まない", () => {
+    const b = runBridge({ nonce: "n1" });
+    expect(Object.keys(b.oretachi.process).sort()).toEqual(["kill", "list", "onExit", "onOutput", "read", "start"]);
+    expect("process" in b.win).toBe(false);
+  });
+});
+
+describe("postArtifactBridgeProcessEvent", () => {
+  it("プロセスのイベントの通知に nonce を載せる", () => {
+    const postMessage = vi.fn();
+    postArtifactBridgeProcessEvent(makeFrame({ postMessage }), { id: "p1", kind: "exit", code: 0 }, "n1");
+    expect(postMessage.mock.calls[0][0]).toMatchObject({
+      [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+      event: ARTIFACT_BRIDGE_PUSH_PROCESS_EVENT,
+      nonce: "n1",
+      payload: { id: "p1", kind: "exit", code: 0 },
+    });
   });
 });
 

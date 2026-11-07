@@ -152,3 +152,27 @@ describe("summarizeGrant scheduler", () => {
     expect(summarizeGrant(resolved).find((p) => p.key === "summaryScheduler")?.critical).toBe(true);
   });
 });
+
+describe("summarizeGrant process", () => {
+  const cmd = {
+    exec: "C:\\Python\\python.exe",
+    args: [{ type: "fixed" as const, value: "run.py" }],
+    cwd: "C:\\wt",
+    envInherit: ["PATH"],
+    maxConcurrent: 1,
+    maxOutputBytes: 1 << 20,
+  };
+
+  it("is always critical and counts the commands", () => {
+    const resolved: AppResolvedPermissions = { process: { commands: { a: cmd, b: cmd } } };
+    expect(summarizeGrant(resolved).find((p) => p.key === "summaryProcess")).toEqual({
+      key: "summaryProcess",
+      params: { count: 2 },
+      critical: true,
+    });
+  });
+
+  it("has no process part without the permission", () => {
+    expect(summarizeGrant({ memory: { maxBytes: 1 } }).some((p) => p.key === "summaryProcess")).toBe(false);
+  });
+});

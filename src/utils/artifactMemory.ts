@@ -162,6 +162,21 @@ export const ARTIFACT_BRIDGE_METHOD_NET_WS_PREFIX = "net.ws.";
  */
 export const ARTIFACT_BRIDGE_PUSH_WS_EVENT = "net.ws.event";
 
+/**
+ * アプリのコマンド起動 API の method 接頭辞。`process.start`（`{ name, params }`）/ `.kill`（`{ id }`）/
+ * `.list` / `.read`（`{ id, sinceSeq? }`）。起動してよいコマンド・引数の型・パスの範囲・上限・停止は
+ * Rust 側（`app_process`）の関門で、ここは中継だけ。通常のビューア（Web ビューアを含む）は処理しないので
+ * 「使えない API」として失敗する。
+ */
+export const ARTIFACT_BRIDGE_METHOD_PROCESS_PREFIX = "process.";
+
+/**
+ * `ARTIFACT_BRIDGE_PUSH_MARKER` の通知種別: 起動したプロセスのイベント。`payload` は
+ * `{ id, kind: "output", lines: [{ stream: "stdout"|"stderr", seq, text }, …] }`（50〜100 ms ごとにまとめて届く）/
+ * `{ id, kind: "exit", code, signal, durationMs }`。
+ */
+export const ARTIFACT_BRIDGE_PUSH_PROCESS_EVENT = "process.event";
+
 /** 応答が返らないまま Promise が残り続けないようにするタイムアウト（iframe 側） */
 const BRIDGE_TIMEOUT_MS = 10000;
 /**
@@ -342,6 +357,29 @@ export function postArtifactBridgeWsEvent(
   }
 }
 
+/** 起動したプロセスのイベント（出力の行・終了）を iframe へ知らせる。応答の無い一方向通知 */
+export function postArtifactBridgeProcessEvent(
+  frame: HTMLIFrameElement | null,
+  payload: Record<string, unknown>,
+  nonce?: string,
+): void {
+  const target = frame?.contentWindow;
+  if (!target) return;
+  try {
+    target.postMessage(
+      {
+        [ARTIFACT_BRIDGE_PUSH_MARKER]: true,
+        event: ARTIFACT_BRIDGE_PUSH_PROCESS_EVENT,
+        payload: JSON.parse(JSON.stringify(payload ?? {})),
+        ...(nonce !== undefined ? { nonce } : {}),
+      },
+      "*",
+    );
+  } catch (e) {
+    console.warn("プロセスのイベントを iframe へ送れませんでした", e);
+  }
+}
+
 /** マイクの音声入力のイベント（PCM のチャンク・終了）を iframe へ知らせる。応答の無い一方向通知 */
 export function postArtifactBridgeAudioEvent(
   frame: HTMLIFrameElement | null,
@@ -475,6 +513,8 @@ export const ARTIFACT_BRIDGE_JS =
   "        emitAudioEvent(d.payload);" +
   "      else if(d.event===" + JSON.stringify(ARTIFACT_BRIDGE_PUSH_WS_EVENT) + ")" +
   "        emitWsEvent(d.payload);" +
+  "      else if(d.event===" + JSON.stringify(ARTIFACT_BRIDGE_PUSH_PROCESS_EVENT) + ")" +
+  "        emitProcessEvent(d.payload);" +
   "      return;" +
   "    }" +
   "    if(d[" + JSON.stringify(ARTIFACT_BRIDGE_RESULT_MARKER) + "]!==true)return;" +
@@ -893,6 +933,88 @@ export const ARTIFACT_BRIDGE_JS =
   "      return call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_NET_FETCH) + ",p," + BRIDGE_LONG_TIMEOUT_MS + ");" +
   "    }" +
   "  };" +
+  // ── コマンドの起動（`process`。manifest の `process` に宣言し承認されたコマンドだけ）──
+  // 宣言・引数の型・パスの範囲・上限・停止の関門は Rust 側。ここは中継と、イベントの振り分けだけ。
+  // プロセスはリロードをまたいで生き続けるので、イベントは id ごとのエントリへ振り分け、リスナー登録前に届いたものは
+  // 溜めておく（start の応答より先に出力が届くこともある）。溜める行数・id の数には上限があり、あふれた分は
+  // `process.read` で取り戻す（`seq` で重複を除ける）
+  "  var PROC_QUEUE_MAX=1000,PROC_IDS_MAX=64,procEntries={},procOrder=[];" +
+  "  function procEntry(id){" +
+  "    var e=procEntries[id];" +
+  "    if(e)return e;" +
+  "    e={o:[],x:[],qo:[],exit:null};" +
+  "    procEntries[id]=e;procOrder.push(id);" +
+  // リスナーのあるエントリは消さない。無いものを古い順に捨てて id の数を抑える
+  "    while(procOrder.length>PROC_IDS_MAX){" +
+  "      var victim=-1;" +
+  "      for(var i=0;i<procOrder.length;i++){var c=procEntries[procOrder[i]];if(!c.o.length&&!c.x.length){victim=i;break;}}" +
+  "      if(victim<0)break;" +
+  "      delete procEntries[procOrder.splice(victim,1)[0]];" +
+  "    }" +
+  "    return e;" +
+  "  }" +
+  "  function procRun(list,arg){" +
+  "    list.slice().forEach(function(fn){try{fn(arg);}catch(err){}});" +
+  "  }" +
+  "  function emitProcessEvent(p){" +
+  "    if(!p||typeof p!=='object'||typeof p.id!=='string')return;" +
+  "    var e=procEntry(p.id);" +
+  "    if(p.kind==='output'&&Array.isArray(p.lines)){" +
+  "      p.lines.forEach(function(l){" +
+  "        if(!l||typeof l!=='object')return;" +
+  "        var line={stream:l.stream==='stderr'?'stderr':'stdout',seq:l.seq,text:String(l.text==null?'':l.text)};" +
+  "        if(e.o.length){procRun(e.o,line);return;}" +
+  "        e.qo.push(line);" +
+  "        if(e.qo.length>PROC_QUEUE_MAX)e.qo.shift();" +
+  "      });" +
+  "    }else if(p.kind==='exit'){" +
+  "      e.exit={code:p.code==null?null:p.code,signal:p.signal==null?null:String(p.signal),durationMs:p.durationMs};" +
+  "      procRun(e.x,e.exit);" +
+  "    }" +
+  "  }" +
+  "  function procId(fn,id){" +
+  "    if(typeof id!=='string'||!id)throw new Error('process.'+fn+': id must be a non-empty string');" +
+  "  }" +
+  "  var proc={" +
+  // start(name, params?) → { id, startedAt }。実行ファイル・固定の引数は変えられない（名前とパラメータの値だけ）
+  "    start:function(name,params){" +
+  "      if(typeof name!=='string'||!name)return Promise.reject(new Error('process.start expects a command name string'));" +
+  "      if(params!=null&&(typeof params!=='object'||Array.isArray(params)))" +
+  "        return Promise.reject(new Error('process.start params must be an object'));" +
+  "      return call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_PROCESS_PREFIX) + "+'start',{name:name,params:params==null?{}:params}," + BRIDGE_LONG_TIMEOUT_MS + ")" +
+  "        .then(function(r){if(r&&typeof r.id==='string')procEntry(r.id);return r;});" +
+  "    }," +
+  "    kill:function(id){" +
+  "      try{procId('kill',id);}catch(err){return Promise.reject(err);}" +
+  "      return call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_PROCESS_PREFIX) + "+'kill',{id:id});" +
+  "    }," +
+  "    list:function(){return call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_PROCESS_PREFIX) + "+'list',{});}," +
+  // read(id, { sinceSeq? }) → { lines, nextSeq, truncated, running, exit }。sinceSeq は「ここから欲しい seq」（含む）
+  "    read:function(id,opts){" +
+  "      try{procId('read',id);}catch(err){return Promise.reject(err);}" +
+  "      var p={id:id};" +
+  "      if(opts&&opts.sinceSeq!=null)p.sinceSeq=opts.sinceSeq;" +
+  "      return call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_PROCESS_PREFIX) + "+'read',p);" +
+  "    }," +
+  // onOutput(id, fn): fn({ stream, seq, text })（1 行ずつ。stdout / stderr）。戻り値は購読解除
+  "    onOutput:function(id,fn){" +
+  "      procId('onOutput',id);" +
+  "      if(typeof fn!=='function')throw new Error('process.onOutput: the listener must be a function');" +
+  "      var e=procEntry(id);" +
+  "      e.o.push(fn);" +
+  "      e.qo.splice(0,e.qo.length).forEach(function(l){try{fn(l);}catch(err){}});" +
+  "      return function(){var i=e.o.indexOf(fn);if(i>=0)e.o.splice(i,1);};" +
+  "    }," +
+  // onExit(id, fn): fn({ code, signal, durationMs })。登録の前に終了していても、登録時に 1 回呼ぶ
+  "    onExit:function(id,fn){" +
+  "      procId('onExit',id);" +
+  "      if(typeof fn!=='function')throw new Error('process.onExit: the listener must be a function');" +
+  "      var e=procEntry(id);" +
+  "      e.x.push(fn);" +
+  "      if(e.exit){try{fn(e.exit);}catch(err){}}" +
+  "      return function(){var i=e.x.indexOf(fn);if(i>=0)e.x.splice(i,1);};" +
+  "    }" +
+  "  };" +
   // ── 専用 AI ターミナル（manifest の `aiTerminal` 権限が承認されたアプリだけが使える）──
   // 権限の関門は Rust 側。ここは中継するだけ。戻り値は JSON ならオブジェクトで返る
   "  var aiListeners=[];" +
@@ -1023,7 +1145,8 @@ export const ARTIFACT_BRIDGE_JS =
   "    aiTerminal:aiTerminal," +
   "    subWindow:subWindow," +
   "    audio:audio," +
-  "    media:media" +
+  "    media:media," +
+  "    process:proc" +
   "  };" +
   // `state` は setMemory ごとに別オブジェクトへ差し替わるので、スナップショットを
   // 掴ませないようゲッターにする（`oretachi.memory` は常に最新を指す）

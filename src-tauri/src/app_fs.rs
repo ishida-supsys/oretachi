@@ -200,6 +200,13 @@ pub fn normalize_scope(s: &str) -> Result<String, String> {
     Ok(format!("{}{}", scheme.uri_prefix(), prefix_of(&comps)))
 }
 
+/// ファイル（またはディレクトリ）1 件の URI を正規化する（`worktree://a\b.py` → `worktree://a/b.py`）。
+/// [`normalize_scope`] と違い末尾に `/` を足さない。`process` の exec・固定引数・cwd が使う。
+pub fn normalize_path_uri(s: &str) -> Result<String, String> {
+    let (scheme, comps) = split_uri(s.trim())?;
+    Ok(format!("{}{}", scheme.uri_prefix(), comps.join("/")))
+}
+
 /// 正規化済みのスコープが、既定拒否パスの成分を含む `worktree://` か。
 pub fn scope_hits_sensitive(scope: &str) -> bool {
     match split_uri(scope) {
