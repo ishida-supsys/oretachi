@@ -264,9 +264,15 @@ pub fn check_resolved_against_write_scopes(
         // `..`・cwd 内の junction / symlink は実パス化して畳む（manifest は `..` とドライブ相対を拒否済み）
         for a in &cmd.args {
             if let ResolvedProcessArg::Fixed { value } = a {
-                if value.starts_with('-') {
-                    continue;
-                }
+                // `--名前=値` は右辺をパスとして見る。それ以外の `-` 始まり（オプション）は対象外
+                let value: &str = if value.starts_with('-') {
+                    match value.split_once('=') {
+                        Some((_, rhs)) if !rhs.is_empty() => rhs,
+                        _ => continue,
+                    }
+                } else {
+                    value
+                };
                 let joined = Path::new(&cmd.cwd).join(value);
                 owned.extend(real(&joined));
                 owned.push(joined.to_string_lossy().into_owned());
@@ -1626,6 +1632,17 @@ mod tests {
         let rel_process = ResolvedProcess { commands: [("c".to_string(), rel)].into_iter().collect() };
         assert!(check_resolved_against_write_scopes(&rel_process, Some(&fs_write("runs")), None).is_ok());
         assert!(check_resolved_against_write_scopes(&rel_process, Some(&fs_write("scripts")), None).is_err());
+        // `--名前=値` の右辺も相対パスとして照合する。値のないオプション・別の場所を指す値は対象外
+        let mut opt = spec(1);
+        opt.exec = "C:\\Python\\python.exe".into();
+        opt.cwd = strip_verbatim(&wt.to_string_lossy());
+        opt.args = vec![ResolvedProcessArg::Fixed { value: "--config=scripts/x.py".into() }];
+        let opt_process = ResolvedProcess { commands: [("c".to_string(), opt.clone())].into_iter().collect() };
+        assert!(check_resolved_against_write_scopes(&opt_process, Some(&fs_write("scripts")), None).is_err());
+        assert!(check_resolved_against_write_scopes(&opt_process, Some(&fs_write("runs")), None).is_ok());
+        opt.args = vec![ResolvedProcessArg::Fixed { value: "--level=2".into() }];
+        let level = ResolvedProcess { commands: [("c".to_string(), opt)].into_iter().collect() };
+        assert!(check_resolved_against_write_scopes(&level, Some(&fs_write("scripts")), None).is_ok());
         // 相対の固定引数が cwd 内のリンク（work/link → scripts/）を通る形は、実パスで見て拒否する。
         // `..` を畳まない字句の比較だけでは、work/link/run.py は scripts/ の配下に見えない
         std::fs::create_dir_all(wt.join("scripts")).unwrap();

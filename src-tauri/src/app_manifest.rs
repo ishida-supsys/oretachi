@@ -573,7 +573,44 @@ fn has_control_chars(s: &str) -> bool {
 /// 照合を字句で行うので、`..` で外へ回り込むものは受け付けない（`a/../b` を畳んだ結果が覆われるかを
 /// 照合側で正しく見るより、拒否するほうが確実）。
 fn has_dotdot(s: &str) -> bool {
-    s.split(['/', '\\']).any(|c| c == "..")
+    // Windows は成分の末尾のドット・空白を黙って剥がす（`".. "` や `"..."` は `..` に解決されうる）ので、
+    // `.` と空白だけでできた 2 文字以上の成分も `..` と同じに扱う
+    s.split(['/', '\\']).any(|c| c == ".." || (c.len() >= 2 && c.chars().all(|ch| ch == '.' || ch == ' ')))
+}
+
+/// UNC・デバイスパス（`\\server\share`、`\\?\`、`\\.\`、`//server/share`）。実パス化すると `\\?\UNC\…` になり、
+/// ドライブ文字の書き込みスコープと前方一致しないため、照合から外れる。
+fn is_unc_like(s: &str) -> bool {
+    s.starts_with("\\\\") || s.starts_with("//")
+}
+
+/// 固定引数が「パスの形」で書き込みスコープの検査を外れる形でないか。`-` 始まりのオプションは対象外だが、
+/// `--config=scripts/x.py` のような `--名前=値` は右辺を同じ検査にかける。
+fn check_fixed_arg_path_forms(s: &str, what: &str) -> Result<(), String> {
+    let target = if s.starts_with('-') {
+        match s.split_once('=') {
+            Some((_, rhs)) if !rhs.is_empty() => rhs,
+            _ => return Ok(()),
+        }
+    } else {
+        s
+    };
+    if has_dotdot(target) {
+        return Err(format!(
+            "{} に '..' は使えません（パスは worktree://… の形か、cwd からの相対パスで、'..' を含めずに書いてください。パスでない文字列（git -C .. など）にも適用されます）",
+            what
+        ));
+    }
+    if is_drive_relative(target) {
+        return Err(format!(
+            "{} はドライブ相対パス（C:foo の形）です。worktree://… か、ルートつきの絶対パスで書いてください",
+            what
+        ));
+    }
+    if is_unc_like(target) {
+        return Err(format!("{} に UNC パス・デバイスパス（\\\\server\\share、\\\\?\\ など）は使えません", what));
+    }
+    Ok(())
 }
 
 /// Windows のドライブ相対パス（`C:scripts\run.py`。ドライブ文字のあとにルートが無い）。
@@ -614,7 +651,7 @@ fn parse_exec(raw: &str, what: &str) -> Result<String, String> {
         }
         return Ok(n);
     }
-    if s.starts_with("\\\\") {
+    if is_unc_like(s) {
         return Err(format!("{} に UNC パス / \\\\?\\ 形式は使えません: {}", what, s));
     }
     if is_drive_absolute(s) || s.starts_with('/') {
@@ -649,21 +686,12 @@ fn parse_process_arg(v: &serde_json::Value, what: &str) -> Result<ProcessArg, St
             let value = if is_path_uri(s) {
                 crate::app_fs::normalize_path_uri(s)?
             } else {
-                // 書き込みスコープとの照合（cwd 基準の相対パスとして解決される値）を `..` や Windows の
-                // ドライブ相対パスで外れないよう、この 2 つの形だけは manifest の時点で拒否する
-                // （`:` や `*` を含む普通の文字列まで一律に拒否はしない）
-                if has_dotdot(s) {
-                    return Err(format!(
-                        "{} に '..' は使えません（パスは worktree://… の形か、cwd からの相対パスで、'..' を含めずに書いてください）",
-                        what
-                    ));
-                }
-                if is_drive_relative(s) {
-                    return Err(format!(
-                        "{} はドライブ相対パス（C:foo の形）です。worktree://… か、ルートつきの絶対パスで書いてください",
-                        what
-                    ));
-                }
+                // 書き込みスコープとの照合（cwd 基準の相対パスとして解決される値）を `..`・Windows のドライブ相対
+                // パス・UNC で外れないよう、これらの形は manifest の時点で拒否する（`:` や `*` を含む普通の
+                // 文字列まで一律に拒否はしない）。**不透明な引数の中身（`python -c "…"`、レスポンスファイル、
+                // cwd から読まれる設定ファイル）は見えないので、これは網羅ではなく、パスの形をした
+                // 一般的な書き方を拾うだけの検査**
+                check_fixed_arg_path_forms(s, what)?;
                 s.clone()
             };
             Ok(ProcessArg::Fixed { value })
@@ -913,17 +941,25 @@ fn check_process_against_write_scopes(p: &RequestedPermissions) -> Result<(), St
         let mut relative: Vec<String> = Vec::new();
         for a in &cmd.args {
             if let ProcessArg::Fixed { value } = a {
+                // `--名前=値` は右辺をパスとして見る（`--config=scripts/x.py`）。それ以外の `-` 始まりは対象外
+                let v: &str = if value.starts_with('-') {
+                    match value.split_once('=') {
+                        Some((_, rhs)) if !rhs.is_empty() => rhs,
+                        _ => continue,
+                    }
+                } else {
+                    value
+                };
                 if is_path_uri(value) {
                     targets.push(("固定のパス引数", value.as_str()));
                 } else if is_path_uri(&cmd.cwd)
-                    && !value.starts_with('-')
-                    && !value.contains("://")
-                    && !value.starts_with('/')
-                    && !is_drive_absolute(value)
+                    && !v.contains("://")
+                    && !v.starts_with('/')
+                    && !is_drive_absolute(v)
                 {
                     // cwd は `worktree://`（ルート）か `worktree://a/b`（末尾の区切り無し）
                     let sep = if cmd.cwd.ends_with("://") { "" } else { "/" };
-                    let joined = format!("{}{}{}", cmd.cwd, sep, value.replace('\\', "/"));
+                    let joined = format!("{}{}{}", cmd.cwd, sep, v.replace('\\', "/"));
                     if crate::app_fs::split_uri(&joined).is_ok() {
                         relative.push(joined);
                     }
@@ -2064,6 +2100,7 @@ mod tests {
         assert!(e(json!({ "exec": "bin\\run.exe" })).contains("絶対パス"));
         assert!(e(json!({ "exec": "-rf" })).contains("絶対パス"));
         assert!(e(json!({ "exec": "\\\\server\\share\\run.exe" })).contains("UNC"));
+        assert!(e(json!({ "exec": "//server/share/run.exe" })).contains("UNC"));
         assert!(e(json!({ "exec": "worktree://" })).contains("ファイル"));
         assert!(e(json!({ "exec": "worktree://../x.exe" })).contains("不正"));
         // 未知のキー・pin・stdin
@@ -2127,8 +2164,33 @@ mod tests {
             let e = parse_manifest(&with(json!({ "write": ["worktree://scripts/"] }), dotdot(arg))).unwrap_err();
             assert!(e.contains("'..'"), "{}: {}", arg, e);
         }
+        // Windows が `..` に畳む形（末尾の空白・ドットだけでできた成分）、`--名前=値` の右辺、UNC
+        for arg in [".. /scripts/run.py", "...", ". ./x", "--config=../x", "--x=..\\scripts\\a"] {
+            let e = parse_manifest(&with(json!({ "write": ["worktree://scripts/"] }), dotdot(arg))).unwrap_err();
+            assert!(e.contains("'..'"), "{}: {}", arg, e);
+        }
+        for arg in ["\\\\localhost\\X$\\wt\\scripts\\run.py", "//srv/share/x", "--config=\\\\srv\\share\\x"] {
+            let e = parse_manifest(&with(json!({ "write": ["worktree://scripts/"] }), dotdot(arg))).unwrap_err();
+            assert!(e.contains("UNC"), "{}: {}", arg, e);
+        }
+        assert!(parse_manifest(&with(
+            json!({ "write": ["worktree://scripts/"] }),
+            json!({ "exec": "python", "args": ["//srv/x"] })
+        ))
+        .is_err());
+        // `--名前=値` の右辺が、書き込める場所の相対パスなら拒否（cwd はルート）。値が別の場所なら通る
+        let root_cwd = |arg: &str| json!({ "exec": "python", "args": [arg] });
+        let e = parse_manifest(&with(json!({ "write": ["worktree://scripts/"] }), root_cwd("--config=scripts/x.py"))).unwrap_err();
+        assert!(e.contains("相対パス"), "{}", e);
+        for arg in ["--config=conf/x.py", "--level=2", "-X", "--flag"] {
+            assert!(
+                parse_manifest(&with(json!({ "write": ["worktree://scripts/"] }), root_cwd(arg))).is_ok(),
+                "{} は通る",
+                arg
+            );
+        }
         // 絶対パスの exec も `..` を含められない
-        for exec in ["C:\\repo\\work\\..\\scripts\\x.exe", "/repo/work/../scripts/x"] {
+        for exec in ["C:\\repo\\work\\..\\scripts\\x.exe", "/repo/work/../scripts/x", "C:\\repo\\.. \\scripts\\x.exe"] {
             let e = parse_manifest(&with(json!({ "write": ["worktree://scripts/"] }), json!({ "exec": exec }))).unwrap_err();
             assert!(e.contains("'..'"), "{}: {}", exec, e);
         }
