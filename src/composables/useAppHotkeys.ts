@@ -44,7 +44,9 @@ export function useAppHotkeys(deps: UseAppHotkeysDeps) {
         globalShortcutRegistered = false;
         registeredAccelerator = null;
       }
-      await register(accelerator, () => {
+      await register(accelerator, (event) => {
+        // コールバックは Pressed と Released の両方で呼ばれる。見ないと1打鍵で2回開く (#432)
+        if (event.state !== "Pressed") return;
         deps.onTrayButtonClick();
       });
       globalShortcutRegistered = true;

@@ -31,56 +31,118 @@ export interface TrayWorktreeData {
   canArchive: boolean;
 }
 
+const TRAY_LABEL = "tray-popup";
+/** tauri://created / error が届かない場合の保険。待機側を永久に止めないための上限 */
+const CREATE_TIMEOUT_MS = 5000;
+
 let trayWindow: WebviewWindow | null = null;
-let isOpening = false;
+/**
+ * 生成要求を出してから tauri://created / error（または保険のタイムアウト）が来るまで解決しない。
+ * `new WebviewWindow` は要求を投げるだけで完了を待たないため、この間に再度呼ばれると
+ * setFocus が失敗して「無い」と誤判定し、同じラベルでもう1枚作ってしまう (#432)。
+ */
+let openingPromise: Promise<void> | null = null;
+/**
+ * 生成要求は出したが created / error をまだ受け取っていない窓。
+ * 保険のタイムアウトは待機を解くだけで、この窓を「無い」と見なす根拠にはしない。
+ * 生成が CREATE_TIMEOUT_MS を超えて遅いとき、未登録の窓への setFocus 失敗 → getByLabel が null →
+ * 作り直し、と進んで #432 と同じ二重生成になるため。
+ */
+let pendingWin: WebviewWindow | null = null;
 
 export function useTrayPopup() {
   async function openTrayPopup(worktrees: TrayWorktreeData[]): Promise<void> {
-    if (isOpening) return;
-
-    if (trayWindow) {
-      try {
-        await trayWindow.setFocus();
-      } catch {
-        trayWindow = null;
+    // await を挟むたびに状態が変わり得るので、判定はループで毎回やり直す
+    for (;;) {
+      if (openingPromise) {
+        await openingPromise;
+        continue;
       }
-      if (trayWindow) return;
+      const win = trayWindow;
+      if (!win) break;
+
+      try {
+        await win.setFocus();
+        return;
+      } catch {
+        // フォーカス失敗 = 消えたとは限らない。下で実在を確かめる
+      }
+      if (trayWindow !== win) continue; // await 中に close / 差し替えがあった
+
+      const existing = await WebviewWindow.getByLabel(TRAY_LABEL).catch(() => null);
+      if (trayWindow !== win) continue;
+      if (existing) {
+        // 実在するのに作り直すと同ラベルが2枚になる。フォーカスだけ試して終える
+        trayWindow = existing;
+        await existing.setFocus().catch(() => {});
+        return;
+      }
+      // 生成要求がまだ返っていない窓は、実在確認が取れなくても作り直さない
+      if (pendingWin === win) return;
+      trayWindow = null; // 本当に無い。次の周回で生成へ進む
     }
 
-    isOpening = true;
-    try {
-      const baseUrl = window.location.origin + window.location.pathname;
-      const url = `${baseUrl}?mode=tray`;
+    // ここから生成。new WebviewWindow と openingPromise の代入の間に await を挟まない
+    const baseUrl = window.location.origin + window.location.pathname;
+    const url = `${baseUrl}?mode=tray`;
 
-      trayWindow = new WebviewWindow("tray-popup", {
-        url,
-        title: "oretachi - 通知",
-        width: 900,
-        height: 600,
-        resizable: true,
-        decorations: false,
-        dragDropEnabled: false,
-        transparent: true,
-      });
+    const win = new WebviewWindow(TRAY_LABEL, {
+      url,
+      title: "oretachi - 通知",
+      width: 900,
+      height: 600,
+      resizable: true,
+      decorations: false,
+      dragDropEnabled: false,
+      transparent: true,
+    });
+    trayWindow = win;
+    pendingWin = win;
 
-      // ペンディングデータを保持（tray-ready 受信後に main が送信する）
-      // worktrees データは App.vue 側が tray-ready → tray-init で送信する
-      // ここでは参照のために pendingWorktrees に保持しておく
-      pendingWorktrees = worktrees;
+    // ペンディングデータを保持（tray-ready 受信後に main が送信する）
+    // worktrees データは App.vue 側が tray-ready → tray-init で送信する
+    // ここでは参照のために pendingWorktrees に保持しておく
+    pendingWorktrees = worktrees;
 
-      trayWindow.once("tauri://error", (e) => {
-        console.error("トレイポップアップ作成失敗:", e);
-        trayWindow = null;
-        pendingWorktrees = null;
-      });
-    } finally {
-      isOpening = false;
-    }
+    const opening = new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, CREATE_TIMEOUT_MS);
+      const settle = () => {
+        if (pendingWin === win) pendingWin = null;
+      };
+      const done = () => {
+        clearTimeout(timer);
+        resolve();
+      };
+      win
+        .once("tauri://created", () => {
+          settle();
+          done();
+        })
+        .catch(() => {});
+      win
+        .once("tauri://error", (e) => {
+          console.error("トレイポップアップ作成失敗:", e);
+          settle();
+          // close 後に作り直された別個体の状態を壊さないよう、自分が現役のときだけ戻す
+          if (trayWindow === win) {
+            trayWindow = null;
+            pendingWorktrees = null;
+          }
+          done();
+        })
+        .catch(() => {});
+    });
+    openingPromise = opening;
+    void opening.then(() => {
+      if (openingPromise === opening) openingPromise = null;
+    });
   }
 
   async function closeTrayPopup(skipDestroy = false): Promise<void> {
     const win = trayWindow;
     trayWindow = null;
+    openingPromise = null;
+    pendingWin = null;
     pendingWorktrees = null;
     currentTrayWorktreeId = null;
     if (win && !skipDestroy) {
