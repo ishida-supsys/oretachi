@@ -83,7 +83,7 @@ fn validate_artifact_id(id: &str) -> Result<(), McpError> {
 /// `file_path` 引数で読み込めるファイルの上限サイズ。
 /// アーティファクトのモジュール1本としては十分に大きく、巨大バイナリを
 /// 誤って読み込んで JSON へ埋め込む事故だけを防ぐ。
-const ARTIFACT_SOURCE_FILE_MAX_BYTES: u64 = 1024 * 1024;
+const ARTIFACT_SOURCE_FILE_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// `content` の代わりに `file_path` で渡されたファイルを読む。
 ///
@@ -999,7 +999,7 @@ pub struct ArtifactParams {
     pub title: Option<String>,
     #[schemars(description = "アーティファクトの中身 (create/rewrite時は content か file_path のどちらかが必須)。markdown / html / react では `artifact:` リンクで他のアーティファクトへ遷移できる: 同一ワークツリー内は `artifact:<アーティファクトID>`、他ワークツリー宛は `artifact://worktree/<worktreeId>/<アーティファクトID>`、リポジトリ保管庫宛は `artifact://repository/<encodeURIComponent(リポジトリの絶対パス)>/<アーティファクトID>`。react ではメモリー（アーティファクトごとに永続化される JSON ストア）が使える: `import { useMemory } from 'oretachi'` して `const [value, setValue] = useMemory('key', 初期値)`。書き込みはデバウンスされ、ウィンドウを閉じて開き直しても・リポジトリへ転送しても復元される（合計 1MB まで。他に getMemory / setMemory / clearMemory / subscribeMemory がある）。さらに `import { callTool } from 'oretachi'` で oretachi の MCP ツールを呼べる: `await callTool('oretachi_write_terminal', { session_id: 12, text: 'echo hi' })`。呼べるのは oretachi_write_terminal / oretachi_send_keys / oretachi_add_task / notify_worktree / oretachi_poll_inbox / oretachi_ack_message / oretachi_read_terminal / oretachi_list_worktree_notifications / oretachi_inspect_prompt / oretachi_answer_prompt / oretachi_clear_worktree_notification / oretachi_show_worktree / oretachi_show_artifacts だけで、terminal_id / project_dir / notify_worktree の宛先 / add_task の追加先ワークグループはアーティファクトの置き場所のワークツリーへ強制される(session_id は同じワークツリーの稼働中端末、または**アーティファクトの置き場所ワークツリーが oretachi_subscribe_worktree で購読しているワークツリー**の稼働中端末に限る)。戻り値はツールの結果を JSON.parse したもの(パースできなければ文字列)。**制約**: アーティファクトからは oretachi_list_terminals が呼べないため、read/write_terminal に渡す session_id は生成時にコードへ埋め込むこと(アプリ再起動やタブ再作成で無効になる)。oretachi_poll_inbox / oretachi_ack_message / notify_worktree(kind: \"worktree.message\") はそのワークツリーで AI エージェント端末がちょうど1つ走行中でないとエラーになるので、AI セッション終了後も動かしたいボタンには使わないこと。他ワークツリーの端末へ read/write_terminal したい場合は、アーティファクトの置き場所ワークツリー側から宛先を購読しておくこと(逆向き＝宛先側が置き場所を購読しているだけでは通らない)。**宛先がダイアログ(ツール許可 / プラン承認 / AskUserQuestion)で止まっている場合に write_terminal で自由テキストを送ってはいけない**: テキストはダイアログに吸われ、末尾の CR が意図しない選択肢(既定は `1. Yes`)の確定として解釈される。先に oretachi_inspect_prompt(session_id) で画面の形状と実在する選択肢を取り、oretachi_answer_prompt(session_id, expect_fingerprint, kind, ...) で答えること。**oretachi_show_worktree** は宛先のタブを oretachi の前面に出すだけのツールで(端末の内容は読み書きしない)、宛先は worktree_id でのみ指定する(worktree_name / project_dir は落とされる)。session_id を添えるとそのタブまで当たる。許可範囲は read/write_terminal と同じで、自ワークツリーか購読先に限る。**oretachi_show_artifacts** は宛先のアーティファクトウィンドウを開くツールで、宛先の指定方法(worktree_id のみ)も許可範囲も oretachi_show_worktree と同じ。artifact_id を添えるとそのアーティファクトを選択した状態で開く")]
     pub content: Option<String>,
-    #[schemars(description = "create/rewrite時: content の代わりに、このパスのファイルを読んでそのまま中身として登録する。**テンプレートをそのまま登録する場合はこちらを使う** (スキル同梱の templates/*.jsx など)。ファイルを Read してから同じテキストを content に書き戻す往復が消えるので、生成が大幅に速く・安くなる。content とは排他。相対パスはワークツリー追加先ディレクトリ基準。読めるのは**ワークツリー追加先ディレクトリ配下**と **oretachi プラグインディレクトリ (claude-plugins) 配下**のファイルだけで、それ以外の絶対パスはエラーになる (この範囲は設定由来の固定値で、対象ワークツリーの指定では変わらない)。UTF-8 テキスト限定 (BOM は自動で除去)、1MB まで")]
+    #[schemars(description = "create/rewrite時: content の代わりに、このパスのファイルを読んでそのまま中身として登録する。**テンプレートをそのまま登録する場合はこちらを使う** (スキル同梱の templates/*.jsx など)。ファイルを Read してから同じテキストを content に書き戻す往復が消えるので、生成が大幅に速く・安くなる。content とは排他。相対パスはワークツリー追加先ディレクトリ基準。読めるのは**ワークツリー追加先ディレクトリ配下**と **oretachi プラグインディレクトリ (claude-plugins) 配下**のファイルだけで、それ以外の絶対パスはエラーになる (この範囲は設定由来の固定値で、対象ワークツリーの指定では変わらない)。UTF-8 テキスト限定 (BOM は自動で除去)、8MB まで")]
     pub file_path: Option<String>,
     #[schemars(description = "コード言語 (type=application/vnd.ant.code の時のみ)")]
     pub language: Option<String>,
@@ -1362,7 +1362,7 @@ pub struct ArtifactModuleParams {
     pub module_name: Option<String>,
     #[schemars(description = "モジュールのソースコード (create/rewrite時は content か file_path のどちらかが必須)")]
     pub content: Option<String>,
-    #[schemars(description = "create/rewrite時: content の代わりに、このパスのファイルを読んでそのままモジュールとして登録する。**テンプレートをそのまま登録する場合はこちらを使う** (スキル同梱の templates/*.jsx など)。ファイルを Read してから同じテキストを content に書き戻す往復が消えるので、生成が大幅に速く・安くなる。content とは排他。相対パスはワークツリー追加先ディレクトリ基準。読めるのは**ワークツリー追加先ディレクトリ配下**と **oretachi プラグインディレクトリ (claude-plugins) 配下**のファイルだけで、それ以外の絶対パスはエラーになる (この範囲は設定由来の固定値で、対象ワークツリーの指定では変わらない)。UTF-8 テキスト限定 (BOM は自動で除去)、1MB まで")]
+    #[schemars(description = "create/rewrite時: content の代わりに、このパスのファイルを読んでそのままモジュールとして登録する。**テンプレートをそのまま登録する場合はこちらを使う** (スキル同梱の templates/*.jsx など)。ファイルを Read してから同じテキストを content に書き戻す往復が消えるので、生成が大幅に速く・安くなる。content とは排他。相対パスはワークツリー追加先ディレクトリ基準。読めるのは**ワークツリー追加先ディレクトリ配下**と **oretachi プラグインディレクトリ (claude-plugins) 配下**のファイルだけで、それ以外の絶対パスはエラーになる (この範囲は設定由来の固定値で、対象ワークツリーの指定では変わらない)。UTF-8 テキスト限定 (BOM は自動で除去)、8MB まで")]
     pub file_path: Option<String>,
     #[schemars(description = "update時: 置き換え元の文字列 (モジュール内に1箇所だけ存在すること)")]
     pub old_str: Option<String>,
@@ -1425,7 +1425,7 @@ pub struct ArtifactCommentParams {
 }
 
 /// `artifact_file` のパラメータ。アプリ（`app` 付きアーティファクト）の同梱領域 `artifact://` へ
-/// バイナリを届ける。`artifact_module` の `file_path` は UTF-8 テキストで 1MB までなので、wasm や
+/// バイナリを届ける。`artifact_module` の `file_path` は UTF-8 テキストで 8MB までなので、wasm や
 /// 初期 DB のようなバイナリは別ツールにしている。
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ArtifactFileParams {
@@ -2761,7 +2761,7 @@ impl NotifyService {
         Ok(CallToolResult::success(vec![Content::text(text)]))
     }
 
-    #[tool(description = "アプリ（manifest の `app` を持つ React アーティファクト）の同梱領域 `artifact://` を操作する。アプリは承認された fs 権限の範囲でこの領域を読み書きできる。put: スキル同梱の wasm や初期 DB などのバイナリを `file_path` から `artifact://<相対>` へコピー（`artifact_module` の file_path は UTF-8 テキスト 1MB までで、バイナリは通らない）, list: 同梱ファイルの一覧, delete: 同梱ファイル・ディレクトリの削除。同梱領域はアーティファクトを削除すると一緒に消える。アーティファクトの転送・エクスポート・インポートでは持ち出されない（移した先で put し直すこと）。対象は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は project_dir が必須", annotations(read_only_hint = true))]
+    #[tool(description = "アプリ（manifest の `app` を持つ React アーティファクト）の同梱領域 `artifact://` を操作する。アプリは承認された fs 権限の範囲でこの領域を読み書きできる。put: スキル同梱の wasm や初期 DB などのバイナリを `file_path` から `artifact://<相対>` へコピー（`artifact_module` の file_path は UTF-8 テキスト 8MB までで、バイナリは通らない）, list: 同梱ファイルの一覧, delete: 同梱ファイル・ディレクトリの削除。同梱領域はアーティファクトを削除すると一緒に消える。アーティファクトの転送・エクスポート・インポートでは持ち出されない（移した先で put し直すこと）。対象は project_dir(現在の作業ディレクトリ)で指定するのが最も確実。HOMEタブやリポジトリルートで作業している場合は project_dir が必須", annotations(read_only_hint = true))]
     async fn artifact_file(
         &self,
         Parameters(ArtifactFileParams {
