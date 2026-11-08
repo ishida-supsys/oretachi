@@ -506,6 +506,21 @@ describe("ブリッジ本体: net.ws", () => {
     h.onError((e: Error) => errors.push(e.message));
     expect(errors[0]).toMatch(/too many messages/);
   });
+  it("リスナー無しで溜めた累積バイト数が上限を超えたらエラーにして閉じを依頼する", async () => {
+    const b = runBridge({ nonce: "n1" });
+    const p = b.oretachi.net.ws.open("wss://a.example.com/s");
+    reply(b, 0);
+    const h = await p;
+    const chunk = "x".repeat(8 * 1024 * 1024);
+    // 8MiB × 4 = 32MiB は収まり、5 通目で上限超過
+    for (let i = 0; i < 4; i++) push(b, { kind: "message", id: h.id, binary: false, data: chunk });
+    expect(b.sent[b.sent.length - 1].method).not.toBe("net.ws.close");
+    push(b, { kind: "message", id: h.id, binary: false, data: chunk });
+    expect(b.sent[b.sent.length - 1].method).toBe("net.ws.close");
+    const errors: string[] = [];
+    h.onError((e: Error) => errors.push(e.message));
+    expect(errors[0]).toMatch(/too many messages/);
+  });
 });
 
 describe("postArtifactBridgeWsEvent", () => {

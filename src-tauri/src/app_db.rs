@@ -52,7 +52,7 @@ pub const QUERY_TIMEOUT: Duration = Duration::from_secs(5);
 /// 1 回の `query` が返せる行数の上限。
 pub const MAX_ROWS: usize = 10_000;
 /// 1 回の `query` が返せる結果の概算サイズ（FS の 1 回の読み書きの上限と同じ）。
-pub const MAX_RESULT_BYTES: usize = 8 * 1024 * 1024;
+pub const MAX_RESULT_BYTES: usize = 32 * 1024 * 1024;
 /// 書き込み可で開く DB のファイルサイズの上限（`max_page_count` × 既定のページサイズ 4096）。
 /// 超える書き込みは `database or disk is full` で失敗する。既存の DB がこれより大きくても読み取りはできる。
 pub const MAX_DB_BYTES: u64 = 256 * 1024 * 1024;

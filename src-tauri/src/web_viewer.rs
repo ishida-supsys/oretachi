@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use axum::{
     body::Body,
-    extract::{Path as AxumPath, Request, State},
+    extract::{DefaultBodyLimit, Path as AxumPath, Request, State},
     http::{header, HeaderMap, HeaderValue, Method, StatusCode, Uri},
     middleware::{self, Next},
     response::{
@@ -407,6 +407,11 @@ fn asset_response(bytes: Vec<u8>, mime_type: String) -> Response {
 
 /// SPA シェルのアセット名。`index.html` (Tauri 版) とは別エントリ (#339)。
 const WEB_SPA_SHELL: &str = "web.html";
+
+/// 閲覧ルータの POST 本文の上限。axum の暗黙の既定値（2MB）だと、Web ビューア上のアプリが
+/// `callTool` で渡す大きめのパラメータ（`oretachi_write_terminal` の text など）が 413 で落ちるため、
+/// 明示して広げる。認証・CSRF の内側に掛かるので、未認証の本文は読まれない。
+const VIEWER_MAX_BODY_BYTES: usize = 32 * 1024 * 1024;
 
 async fn serve_index(State(state): State<ViewerState>) -> Response {
     match (state.assets)(WEB_SPA_SHELL) {
@@ -937,6 +942,7 @@ fn build_router(
         .route("/api/events", get(api_events))
         .fallback(get(static_fallback))
         .with_state(state.clone())
+        .layer(DefaultBodyLimit::max(VIEWER_MAX_BODY_BYTES))
         .layer(middleware::from_fn_with_state(state.clone(), csrf_guard))
         .layer(middleware::from_fn_with_state(state, viewer_auth))
 }
@@ -1882,6 +1888,48 @@ mod tests {
         assert_eq!(recorded[0].1, "art-1");
         assert_eq!(recorded[0].2, "oretachi_get_worktree_status");
         assert_eq!(recorded[0].3, json!({ "query": "x" }));
+    }
+
+    #[tokio::test]
+    async fn call_tool_accepts_body_larger_than_axum_default_limit() {
+        let data_dir = temp_data_dir("call-tool-big-body");
+        let wt = test_worktree("wt-big");
+        write_test_artifact(&data_dir.join("artifacts").join(&wt.id), "art-1", 100);
+        let calls = Arc::new(std::sync::Mutex::new(vec![]));
+        let router = worktree_router_with(
+            data_dir,
+            wt,
+            stub_tool_caller(calls.clone(), Ok("ok".to_string())),
+            noop_state_notifier(),
+        );
+        let cookie = cookie_for(TEST_KEY);
+
+        // axum の既定（2MB）を超えるが 32MiB 未満
+        let big = "x".repeat(3 * 1024 * 1024);
+        let resp = post_json(
+            &router,
+            "/api/worktrees/wt-big/artifacts/art-1/call-tool",
+            Some(&cookie),
+            Some(&test_origin()),
+            Some(&test_host()),
+            json!({ "tool": "oretachi_get_worktree_status", "params": { "query": big } }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(calls.lock().unwrap().len(), 1);
+
+        // 上限を超える本文は 413
+        let huge = "x".repeat(VIEWER_MAX_BODY_BYTES + 1);
+        let resp = post_json(
+            &router,
+            "/api/worktrees/wt-big/artifacts/art-1/call-tool",
+            Some(&cookie),
+            Some(&test_origin()),
+            Some(&test_host()),
+            json!({ "tool": "oretachi_get_worktree_status", "params": { "query": huge } }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]

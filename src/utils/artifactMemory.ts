@@ -728,16 +728,16 @@ export const ARTIFACT_BRIDGE_JS =
   "  }" +
   "  function fsWrite(path,data,encoding,opts){" +
   "    return fsPath(path)||call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_FS_WRITE) + "," +
-  "      {path:path,data:data,encoding:encoding,createDirs:!!(opts&&opts.createDirs)});" +
+  "      {path:path,data:data,encoding:encoding,createDirs:!!(opts&&opts.createDirs)}," + BRIDGE_LONG_TIMEOUT_MS + ");" +
   "  }" +
   "  var fs={" +
   "    readText:function(path){" +
   "      return fsPath(path)||call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_FS_READ) + "," +
-  "        {path:path,encoding:'utf8'});" +
+  "        {path:path,encoding:'utf8'}," + BRIDGE_LONG_TIMEOUT_MS + ");" +
   "    }," +
   "    readBytes:function(path){" +
   "      return (fsPath(path)||call(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_FS_READ) + "," +
-  "        {path:path,encoding:'base64'})).then(b64ToBytes);" +
+  "        {path:path,encoding:'base64'}," + BRIDGE_LONG_TIMEOUT_MS + ")).then(b64ToBytes);" +
   "    }," +
   "    writeText:function(path,text,opts){return fsWrite(path,String(text),'utf8',opts);}," +
   "    writeBytes:function(path,bytes,opts){" +
@@ -759,7 +759,7 @@ export const ARTIFACT_BRIDGE_JS =
   "      return Promise.reject(new Error('db expects an SQL string'));" +
   "    if(params!=null&&!Array.isArray(params))" +
   "      return Promise.reject(new Error('db params must be an array'));" +
-  "    return call(method,{path:path,sql:sql,params:params||[]});" +
+  "    return call(method,{path:path,sql:sql,params:params||[]}," + BRIDGE_LONG_TIMEOUT_MS + ");" +
   "  }" +
   "  var db={" +
   "    query:function(path,sql,params){return dbCall(" + JSON.stringify(ARTIFACT_BRIDGE_METHOD_DB_QUERY) + ",path,sql,params);}," +
@@ -780,7 +780,7 @@ export const ARTIFACT_BRIDGE_JS =
   // ── WebSocket（`net.ws`。同じ `network` 権限の `ws://` / `wss://` プレフィックスが承認されたアプリだけ）──
   // 接続 ID はここで決める（Rust は受信を open の応答より先に push しうるので、ハンドルを先に登録しておく）。
   // リスナーが付く前に届いたものは溜めておき、最初のリスナー登録で流す。許可・上限・切断の関門は Rust 側
-  "  var WS_QUEUE_MAX=1000,wsSeq=0,wsHandles={};" +
+  "  var WS_QUEUE_MAX=1000,WS_QUEUE_MAX_BYTES=33554432,wsSeq=0,wsHandles={};" +
   "  function wsBytesToB64(u8){" +
   "    var s='',n=8192;" +
   "    for(var i=0;i<u8.length;i+=n)s+=String.fromCharCode.apply(null,u8.subarray(i,i+n));" +
@@ -795,11 +795,12 @@ export const ARTIFACT_BRIDGE_JS =
   "    list.slice().forEach(function(fn){try{fn.apply(null,args);}catch(err){}});" +
   "  }" +
   "  function wsMakeHandle(id,url){" +
-  "    var st={m:[],c:[],e:[],qm:[],qc:[],qe:[],closed:false,over:false};" +
+  "    var st={m:[],c:[],e:[],qm:[],qb:0,qc:[],qe:[],closed:false,over:false};" +
   "    function unsub(list,fn){return function(){var i=list.indexOf(fn);if(i>=0)list.splice(i,1);};}" +
   "    function sub(list,queue,fn){" +
   "      if(typeof fn!=='function')throw new Error('net.ws: the listener must be a function');" +
   "      list.push(fn);" +
+  "      if(queue===st.qm)st.qb=0;" +
   "      var q=queue.splice(0,queue.length);" +
   "      q.forEach(function(a){try{fn.apply(null,a);}catch(err){}});" +
   "      return unsub(list,fn);" +
@@ -841,8 +842,10 @@ export const ARTIFACT_BRIDGE_JS =
   "      try{data=p.binary?wsB64ToBytes(String(p.data||'')):String(p.data==null?'':p.data);}catch(err){return;}" +
   "      var meta={binary:!!p.binary};" +
   "      if(st.m.length){wsRun(st.m,[data,meta]);return;}" +
-  // リスナー無しで溜め続けない: 上限を超えたらエラーにして閉じる
-  "      if(st.qm.length<WS_QUEUE_MAX){st.qm.push([data,meta]);return;}" +
+  // リスナー無しで溜め続けない: 件数または累積バイト数が上限を超えたらエラーにして閉じる
+  // （1 メッセージ上限が大きいので、件数だけだと最悪で数 GB 溜まる。文字列は UTF-16 の文字数での概算）
+  "      var sz=typeof data==='string'?data.length:data.byteLength;" +
+  "      if(st.qm.length<WS_QUEUE_MAX&&st.qb+sz<=WS_QUEUE_MAX_BYTES){st.qb+=sz;st.qm.push([data,meta]);return;}" +
   "      if(!st.over){" +
   "        st.over=true;" +
   "        var oe=new Error('net.ws: too many messages arrived before onMessage was registered');" +

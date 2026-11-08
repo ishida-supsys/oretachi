@@ -36,7 +36,7 @@ pub fn unique_tmp_suffix() -> String {
 }
 
 /// 1 回の read / write の上限。
-pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_FILE_BYTES: u64 = 32 * 1024 * 1024;
 /// 1 回の list が返す件数の上限。
 pub const MAX_LIST_ENTRIES: usize = 1000;
 /// `artifact_file put` で同梱できる 1 ファイルの上限（wasm や初期 DB を想定）。
@@ -1205,6 +1205,19 @@ mod tests {
     }
 
     // ── 上限 ──
+
+    #[test]
+    fn file_limit_is_32mib_and_matches_bundle_limit() {
+        assert_eq!(MAX_FILE_BYTES, 32 * 1024 * 1024);
+        assert_eq!(MAX_FILE_BYTES, MAX_BUNDLE_FILE_BYTES);
+        // 旧上限（8MiB）を超える書き込みが通る
+        let base = temp_dir("limit32");
+        let f = base.join("img.bin");
+        let data = "x".repeat(8 * 1024 * 1024 + 1);
+        assert_eq!(write_file(&f, &data, Encoding::Utf8, false).unwrap(), data.len() as u64);
+        assert_eq!(read_file(&f, Encoding::Utf8).unwrap().len(), data.len());
+        let _ = std::fs::remove_dir_all(&base);
+    }
 
     #[test]
     fn size_and_count_limits() {

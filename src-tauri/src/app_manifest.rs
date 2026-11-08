@@ -24,7 +24,7 @@ pub const AI_TERMINAL_AGENTS: &[&str] = &["claude"];
 pub const AI_TERMINAL_MAX_CONCURRENT_CAP: u32 = 4;
 
 /// `scheduler.jobs` の最大件数と、tool ジョブの `params` の最大バイト数（シリアライズ後）。
-pub const SCHEDULER_MAX_JOBS: usize = 10;
+pub const SCHEDULER_MAX_JOBS: usize = 100;
 pub const SCHEDULER_PARAMS_MAX_BYTES: usize = 16 * 1024;
 const SCHEDULER_MAX_ID_CHARS: usize = 40;
 
@@ -46,9 +46,9 @@ const AUDIO_DEFAULT_SAMPLE_RATE: u32 = 16000;
 const MAX_NAME_CHARS: usize = 100;
 const MAX_DESCRIPTION_CHARS: usize = 500;
 const MAX_VERSION_CHARS: usize = 50;
-const MAX_TARGETS: usize = 20;
+const MAX_TARGETS: usize = 100;
 const MAX_TARGET_CHARS: usize = 200;
-const MAX_FS_SCOPES: usize = 20;
+const MAX_FS_SCOPES: usize = 100;
 
 /// 生成元スキルの記録。**表示専用**で、権限セットには含めない。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -1536,8 +1536,20 @@ mod tests {
         assert!(err(json!({ "name": "x", "permissions": { "fs": { "read": ["artifact://"], "all": true }}})).contains("未知のキー"));
         assert!(err(json!({ "name": "x", "permissions": { "fs": { "read": "artifact://" }}})).contains("配列"));
         assert!(err(json!({ "name": "x", "permissions": { "fs": { "read": ["artifact://"], "allowSensitivePaths": "yes" }}})).contains("真偽値"));
-        let many: Vec<String> = (0..21).map(|i| format!("artifact://d{}/", i)).collect();
+        let many: Vec<String> = (0..=MAX_FS_SCOPES).map(|i| format!("artifact://d{}/", i)).collect();
         assert!(err(json!({ "name": "x", "permissions": { "fs": { "read": many }}})).contains("件まで"));
+    }
+
+    #[test]
+    fn fs_scope_limit_is_100_inclusive() {
+        assert_eq!(MAX_FS_SCOPES, 100);
+        let scopes = |n: usize| -> Vec<String> { (0..n).map(|i| format!("artifact://d{}/", i)).collect() };
+        for key in ["read", "write"] {
+            let at_limit = ok(json!({ "name": "x", "permissions": { "fs": { key: scopes(100) }}}));
+            assert!(at_limit.permissions.fs.is_some(), "{key}: 100 件は通る");
+            let over = err(json!({ "name": "x", "permissions": { "fs": { key: scopes(101) }}}));
+            assert!(over.contains("件まで"), "{key}: {over}");
+        }
     }
 
     #[test]

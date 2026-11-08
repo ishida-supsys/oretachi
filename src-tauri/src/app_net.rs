@@ -39,14 +39,14 @@ use tauri::{AppHandle, Manager};
 
 // ─── 上限 ────────────────────────────────────────────────────────────
 
-pub const MAX_PREFIXES: usize = 20;
+pub const MAX_PREFIXES: usize = 100;
 const MAX_REDIRECTS: usize = 5;
 pub(crate) const MAX_URL_CHARS: usize = 4096;
 const MAX_REQUEST_HEADERS: usize = 32;
 const MAX_HEADER_VALUE_BYTES: usize = 8 * 1024;
 const MAX_RESPONSE_HEADERS: usize = 100;
-const MAX_REQUEST_BODY_BYTES: usize = 1024 * 1024;
-const MAX_RESPONSE_BODY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_REQUEST_BODY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_RESPONSE_BODY_BYTES: usize = 32 * 1024 * 1024;
 /// 全体のタイムアウト。iframe ブリッジの長い待ち（30 秒）より短くしておく
 const TOTAL_TIMEOUT: Duration = Duration::from_secs(20);
 pub(crate) const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);

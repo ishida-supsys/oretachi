@@ -49,7 +49,7 @@ use crate::app_net::{caller_net, loggable_url, own_ports, Lookup, Policy, System
 // ─── 上限 ────────────────────────────────────────────────────────────
 
 /// 1 メッセージの最大サイズ（受信も送信も。バイト）。iframe ブリッジは base64 で運ぶので、その分の余裕も見た値
-const MAX_MESSAGE_BYTES: usize = 1024 * 1024;
+const MAX_MESSAGE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_PER_INSTANCE: usize = 4;
 const MAX_TOTAL: usize = 16;
 /// 送信キューの深さ（メッセージ数）。満杯なら `send` を拒否する（アプリに待たせず、バッファを無限に伸ばさない）
