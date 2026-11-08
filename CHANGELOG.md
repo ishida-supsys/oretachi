@@ -6,6 +6,17 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.38.0] - 2026-11-08
+
+### Fixed
+- MCP `write_terminal(submit=false)` で改行だけの text を CR に正規化するようにした (#426)
+
+### Changed
+- Tauri を 2.12.5 へ上げ、tao の git pin を除去した (#427)
+
+### Documentation
+- `write_terminal` の説明に、複数行 `submit=true` の実測結果を反映した (#426)
+
 ## [0.37.0] - 2026-11-04
 
 ### Added
@@ -947,7 +958,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.37.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.38.0...HEAD
+[0.38.0]: https://github.com/ishida-supsys/oretachi/compare/0.37.0...0.38.0
 [0.37.0]: https://github.com/ishida-supsys/oretachi/compare/0.36.3...0.37.0
 [0.36.3]: https://github.com/ishida-supsys/oretachi/compare/0.36.2...0.36.3
 [0.36.2]: https://github.com/ishida-supsys/oretachi/compare/0.36.1...0.36.2
