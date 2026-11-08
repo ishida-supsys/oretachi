@@ -6,6 +6,14 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.38.1] - 2026-11-08
+
+### Added
+- アプリ manifest の宣言件数とサイズ上限を引き上げた (#434)
+
+### Fixed
+- トレイポップアップの二重生成を防ぐようにした (#432)
+
 ## [0.38.0] - 2026-11-08
 
 ### Fixed
@@ -958,7 +966,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.38.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.38.1...HEAD
+[0.38.1]: https://github.com/ishida-supsys/oretachi/compare/0.38.0...0.38.1
 [0.38.0]: https://github.com/ishida-supsys/oretachi/compare/0.37.0...0.38.0
 [0.37.0]: https://github.com/ishida-supsys/oretachi/compare/0.36.3...0.37.0
 [0.36.3]: https://github.com/ishida-supsys/oretachi/compare/0.36.2...0.36.3
