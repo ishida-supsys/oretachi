@@ -229,6 +229,7 @@ function hhmmss(ms: number): string {
                 <span class="tag">{{ t("granted.audioTag") }}</span>
               </template>
               <template v-else-if="r.kind === 'network'">{{ t("granted.network") }}: <code>{{ r.label }}</code></template>
+              <template v-else-if="r.kind === 'clipboard'">{{ t("granted.clipboard") }}</template>
               <template v-else-if="r.kind === 'mediaRead'">{{ t("granted.mediaRead") }}: <code>{{ r.label }}</code></template>
               <template v-else-if="r.kind === 'mediaNet'">{{ t("granted.mediaNet") }}: <code>{{ r.label }}</code></template>
               <template v-else-if="r.kind === 'subWindow'">{{ t("granted.subWindow", { spec: r.label }) }}</template>
@@ -547,6 +548,7 @@ function hhmmss(ms: number): string {
       "network": "Network",
       "mediaRead": "Media playback (local files)",
       "mediaNet": "Media playback (URL)",
+      "clipboard": "Clipboard (write)",
       "scheduler": "Scheduled job {id} [{cron}]: {detail}",
       "schedulerTag": "runs unattended",
       "subWindow": "Sub-windows (up to {spec})",
@@ -601,6 +603,7 @@ function hhmmss(ms: number): string {
       "network": "ネットワーク",
       "mediaRead": "メディア再生（ローカルファイル）",
       "mediaNet": "メディア再生（URL）",
+      "clipboard": "クリップボード（書き込み）",
       "scheduler": "スケジュールジョブ {id} [{cron}]: {detail}",
       "schedulerTag": "無人で実行",
       "subWindow": "サブウィンドウ（最大 {spec}）",

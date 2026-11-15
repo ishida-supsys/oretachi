@@ -14,6 +14,7 @@ import {
   type ArtifactLinkHover,
 } from "../../utils/artifactFrameLink";
 import { applyFrameLinkHover } from "../../utils/artifactLinkHover";
+import { REACT_ARTIFACT_FRAME_ALLOW } from "../../utils/artifactFrameAllow";
 import {
   ARTIFACT_BRIDGE_METHOD_MEMORY_SET,
   ARTIFACT_BRIDGE_METHOD_MCP_CALL,
@@ -290,7 +291,7 @@ const codeContent = computed(() =>
         ref="frame"
         :srcdoc="srcdocHtml"
         sandbox="allow-scripts"
-        allow="fullscreen"
+        :allow="REACT_ARTIFACT_FRAME_ALLOW"
         allowfullscreen
         class="react-iframe"
       />

@@ -25,6 +25,11 @@ export interface AppAiTerminalPermission {
   maxConcurrent: number;
 }
 
+/** iframe の `clipboard-write`（`navigator.clipboard.writeText`）の申請。読み取りは無い */
+export interface AppClipboardPermission {
+  write: true;
+}
+
 /** 承認時に解決した FS のスコープ 1 件。`path` は解決済みの絶対パス（Windows では拡張長パス接頭辞付きのことがある） */
 export interface AppResolvedFsScope {
   scheme: "worktree" | "artifact";
@@ -109,6 +114,7 @@ export interface AppResolvedPermissions {
   subWindow?: AppSubWindowPermission;
   audio?: AppAudioPermission;
   media?: AppResolvedMedia;
+  clipboard?: AppClipboardPermission;
   scheduler?: AppSchedulerPermission;
 }
 
@@ -122,6 +128,7 @@ export interface AppRequestedPermissions {
   subWindow?: AppSubWindowPermission;
   audio?: AppAudioPermission;
   media?: { read: string[]; allow: string[] };
+  clipboard?: AppClipboardPermission;
   scheduler?: AppSchedulerPermission;
 }
 

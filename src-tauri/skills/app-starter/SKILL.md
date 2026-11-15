@@ -63,6 +63,8 @@ React アーティファクトに **manifest（`app`）** を付けると、権�
 
 - `media`: `<video>` / `<audio>` の `src` に直接使えるローカルファイルと URL の申請。`{ "read": ["worktree://videos/"], "allow": ["https://cdn.example.com/"] }`。**`fs` / `network` の権限とは独立**で、承認ダイアログには「メディア再生」として出る（`media` を申請しても `fs.read` や `net.fetch` は使えない）。`read` は `fs` と同じ `worktree://…` / `artifact://…` のディレクトリのプレフィックスで**読み取り専用**（`write` と `allowSensitivePaths` は書くと manifest ごと拒否される）、`allow` は `network` と同じ URL プレフィックスだが **`http` / `https` だけ**（`ws` / `wss` は拒否）。どちらも最大 100 件で、片方だけでもよい。承認ダイアログには解決済みの絶対パスと URL プレフィックスが出る（平文の `http` は警告つき）。ループバック・プライベート IP・oretachi 自身のポートは `network` と同じく常に拒否される。
 
+- `clipboard`: アプリの中で `navigator.clipboard.writeText` を使う申請。`{ "write": true }`。`write` は**必須で `true`**（書かない・`false`・未知のキー（`read` など）は manifest ごと拒否）。真偽値なので件数やサイズの上限は無い。**承認ダイアログに警告つき（danger）で「クリップボードへ書き込む」と出る**（アプリがクリップボードを書き換え、あなたが端末へ貼る経路になるため）。読み取り（`readText`）はできない。
+
 - `scheduler`: アプリが**起動している間だけ**、cron 式どおりに自動で実行するジョブの申請。ジョブは **manifest に静的に書く**（実行時に増やす API は無い）。承認ダイアログには、ジョブごとに cron 式と実行内容がそのまま出て、人が見ていない所で動くことが明示される（AI ターミナルを開くジョブと危険なツールを呼ぶジョブは最も強い警告）。
   ```json
   "scheduler": { "jobs": [
@@ -284,6 +286,23 @@ import { media } from 'oretachi';
 - 1 つのアプリが同時に出せるメディア要求は 24 本まで（`net.fetch` の枠とは別）。超えた分は 503 になる。アプリの停止・リロードでは進行中の要求が中断される。
 - 応答は `Cache-Control: no-store`。承認を取り消す・`media` を変えて再承認すると、次の要求から新しい権限になる。
 - Content-Type を持たない URL（`/stream?id=1` など）は、拡張子も無ければ再生できない。
+
+## クリップボード API（`clipboard`）
+
+`clipboard` を承認されたアプリだけが、iframe の `allow="clipboard-write"` を受け取り、標準の Web API でクリップボードへ書ける。**ブリッジ（`require('oretachi')` の API）は無い。そのまま呼ぶ。**
+
+```jsx
+<button onClick={async () => {
+  try { await navigator.clipboard.writeText(text); setMsg('コピーしました'); }
+  catch (e) { setMsg('コピーに失敗: ' + e.message); }
+}}>コピー</button>
+```
+
+- **クリックなどのユーザー操作の中で呼ぶ**（ウィンドウにフォーカスが無い・操作と無関係のタイミングでは失敗しうる）。失敗は例外になるので、必ず `catch` して画面に出す。
+- 使えるのは `writeText`（`write` も同じ許可）だけ。**`readText` / `read` は常に拒否される**（読み取りの権限は無い）。
+- `clipboard` を宣言していないアプリは従来どおり失敗する（承認前・再承認待ちの間は旧セットのまま）。宣言を足す・外す変更は権限の変更なので、起動中なら再承認のダイアログが出て、承認後のリロードで反映される。
+- サブウィンドウでも同じ。実行ウィンドウに Tauri の clipboard capability は与えていない（iframe の中の Web API を許すだけ）。
+- 通常の React アーティファクト（アプリ形式ではないもの）は、承認の仕組みが無いので宣言なしで `writeText` が使える。
 
 ## メモリー API
 
