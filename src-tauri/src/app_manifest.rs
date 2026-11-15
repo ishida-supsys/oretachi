@@ -201,6 +201,18 @@ pub struct AudioPermission {
     pub sample_rates: Vec<u32>,
 }
 
+/// manifest の `clipboard`。アプリの iframe へ `allow="clipboard-write"` を付ける申請
+/// （`navigator.clipboard.writeText` を使えるようにする）。**Tauri の capability は増やさない**
+/// （iframe の中の Web API だけを許す）。読み取り（`clipboard-read`）は無い。
+/// AI が書いたアプリがクリップボードを書き換え、ユーザーが端末へ貼る経路になりうるので、
+/// 承認ダイアログでは danger として出す。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ClipboardPermission {
+    /// 書き込みの申請。必須で `true`（将来、読み取りを足しても区別できるように）
+    pub write: bool,
+}
+
 /// manifest の `fs`。`read` / `write` は `worktree://<相対>` / `artifact://<相対>` のディレクトリ
 /// プレフィックス（正規化済み・ソート・重複除去済み）。`write` は `read` を含意しない。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -263,6 +275,9 @@ pub struct RequestedPermissions {
     /// manifest の `media`。動画・音声の再生（`app_media.rs` の appmedia プロトコル）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media: Option<RequestedMedia>,
+    /// manifest の `clipboard`。iframe の `clipboard-write`（#438）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clipboard: Option<ClipboardPermission>,
     /// manifest の `scheduler`。cron 式で動く無人ジョブ（`app_scheduler.rs`）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduler: Option<SchedulerPermission>,
@@ -320,6 +335,9 @@ pub struct ResolvedPermissions {
     /// `read` はパスを解決した形（`fs` と同様）。`allow` はそのまま
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub media: Option<ResolvedMedia>,
+    /// 解決で変わるものがない（承認した値がそのまま iframe の `allow` の入力になる）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub clipboard: Option<ClipboardPermission>,
     /// 解決で変わるものがない（承認した値がそのまま実行の入力になる）
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scheduler: Option<SchedulerPermission>,
@@ -428,6 +446,7 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
             "subWindow" => out.sub_window = parse_sub_window(val)?,
             "audio" => out.audio = parse_audio(val)?,
             "media" => out.media = parse_media(val)?,
+            "clipboard" => out.clipboard = parse_clipboard(val)?,
             "scheduler" => out.scheduler = parse_scheduler(val)?,
             k if RESERVED_PERMISSION_KEYS.contains(&k) => {
                 return Err(format!(
@@ -437,7 +456,7 @@ fn parse_permissions(v: &serde_json::Value) -> Result<RequestedPermissions, Stri
             }
             other => {
                 return Err(format!(
-                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs / db / network / subWindow / aiTerminal / audio / media / scheduler だけです",
+                    "未知の権限 '{}' です。指定できるのは mcp / memory / fs / db / network / subWindow / aiTerminal / audio / media / clipboard / scheduler だけです",
                     other
                 ));
             }
@@ -629,6 +648,19 @@ fn parse_sub_window(v: &serde_json::Value) -> Result<Option<SubWindowPermission>
         always_on_top: flag("alwaysOnTop")?,
         position: flag("position")?,
     }))
+}
+
+fn parse_clipboard(v: &serde_json::Value) -> Result<Option<ClipboardPermission>, String> {
+    let obj = expect_object(v, "app.permissions.clipboard")?;
+    const KEYS: &[&str] = &["write"];
+    if let Some(k) = obj.keys().find(|k| !KEYS.contains(&k.as_str())) {
+        return Err(format!("app.permissions.clipboard の未知のキー '{}' です（{} だけ）", k, KEYS.join(" / ")));
+    }
+    // 書き込みの申請は明示させる（`{}` や `false` で黙って何も起きない承認にしない）
+    match obj.get("write") {
+        Some(serde_json::Value::Bool(true)) => Ok(Some(ClipboardPermission { write: true })),
+        _ => Err("app.permissions.clipboard.write に true を指定してください（クリップボードへ書き込む申請）".to_string()),
+    }
 }
 
 fn parse_audio(v: &serde_json::Value) -> Result<Option<AudioPermission>, String> {
@@ -1247,6 +1279,43 @@ mod tests {
         assert!(!requested_changed(&a.permissions, &c.permissions));
     }
 
+    #[test]
+    fn parses_clipboard_permission() {
+        let m = ok(json!({ "name": "x", "permissions": { "clipboard": { "write": true }}}));
+        assert_eq!(m.permissions.clipboard, Some(ClipboardPermission { write: true }));
+        assert!(ok(json!({ "name": "x" })).permissions.clipboard.is_none());
+    }
+
+    #[test]
+    fn rejects_bad_clipboard_permission() {
+        let p = |v: serde_json::Value| err(json!({ "name": "x", "permissions": { "clipboard": v }}));
+        // 申請は明示させる（黙って何も起きない承認にしない）
+        assert!(p(json!({})).contains("write"));
+        assert!(p(json!({ "write": false })).contains("write"));
+        assert!(p(json!({ "write": "yes" })).contains("write"));
+        // 読み取りは無い
+        assert!(p(json!({ "write": true, "read": true })).contains("未知のキー"));
+        assert!(p(json!(true)).contains("clipboard"));
+    }
+
+    #[test]
+    fn clipboard_change_requires_reapproval() {
+        let none = ok(json!({ "name": "x" }));
+        let with = ok(json!({ "name": "x", "permissions": { "clipboard": { "write": true }}}));
+        let renamed = ok(json!({ "name": "renamed", "permissions": { "clipboard": { "write": true }}}));
+        assert!(requested_changed(&none.permissions, &with.permissions));
+        assert!(requested_changed(&with.permissions, &none.permissions));
+        assert!(!requested_changed(&with.permissions, &renamed.permissions));
+    }
+
+    #[test]
+    fn legacy_grant_without_clipboard_deserializes_as_no_clipboard() {
+        // #438 より前に保存された grant（clipboard キー無し）は、clipboard 権限なしとして読める
+        let raw = r#"{"grantedAt":1,"requested":{"memory":{"maxBytes":10}},"resolved":{"memory":{"maxBytes":10}}}"#;
+        let g: AppGrant = serde_json::from_str(raw).unwrap();
+        assert!(g.resolved.clipboard.is_none() && g.requested.clipboard.is_none());
+    }
+
     fn sched(jobs: serde_json::Value, extra: serde_json::Value) -> serde_json::Value {
         let mut perms = json!({ "scheduler": { "jobs": jobs } });
         if let (Some(o), Some(e)) = (perms.as_object_mut(), extra.as_object()) {
@@ -1692,6 +1761,7 @@ mod tests {
             sub_window: None,
             audio: None,
             media: None,
+            clipboard: None,
             scheduler: None,
         }
     }
@@ -1734,6 +1804,7 @@ mod tests {
                 sub_window: None,
                 audio: None,
                 media: Some(RequestedMedia { read: vec!["worktree://videos/".into()], allow: vec!["https://cdn.example.com/".into()] }),
+                clipboard: Some(ClipboardPermission { write: true }),
                 scheduler: None,
             },
             resolved: resolved(&["notify_worktree"], &["wt-b"]),

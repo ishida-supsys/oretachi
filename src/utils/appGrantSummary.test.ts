@@ -80,6 +80,13 @@ describe("summarizeGrant: audio", () => {
   });
 });
 
+describe("summarizeGrant: clipboard", () => {
+  it("summarizes clipboard write as a non-critical part", () => {
+    const parts = summarizeGrant({ clipboard: { write: true } });
+    expect(parts).toEqual([{ key: "summaryClipboard", critical: false }]);
+  });
+});
+
 describe("row state", () => {
   it("shows stopped + ungranted for an app that was never approved", () => {
     expect(appRowBadges(item({ granted: false, grantedAt: null, resolved: null }))).toEqual(["stopped", "ungranted"]);

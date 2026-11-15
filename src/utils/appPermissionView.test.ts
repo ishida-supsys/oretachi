@@ -274,6 +274,26 @@ describe("buildPermissionView", () => {
     });
   });
 
+  describe("clipboard", () => {
+    it("is a danger row (pastejacking), not critical", () => {
+      const v = buildPermissionView({ clipboard: { write: true } }, null, DANGEROUS);
+      expect(v.rows.map((r) => [r.kind, r.value, r.severity])).toEqual([["clipboard", "write", "danger"]]);
+      expect(v.hasDanger).toBe(true);
+      expect(v.hasCritical).toBe(false);
+    });
+
+    it("is added on re-approval and removed when dropped", () => {
+      const added = buildPermissionView({ clipboard: { write: true } }, {}, DANGEROUS);
+      expect(added.rows.map((r) => [r.kind, r.added])).toEqual([["clipboard", true]]);
+      const dropped = buildPermissionView({}, { clipboard: { write: true } }, DANGEROUS);
+      expect(dropped.removed.map((r) => r.kind)).toEqual(["clipboard"]);
+    });
+
+    it("adds no row without the permission", () => {
+      expect(buildPermissionView({}, null, DANGEROUS).rows).toEqual([]);
+    });
+  });
+
   describe("media", () => {
     const scope = (prefix: string, scheme: "worktree" | "artifact" = "worktree") => ({
       scheme,

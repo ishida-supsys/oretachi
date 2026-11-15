@@ -1565,8 +1565,16 @@ pub async fn app_instance_bootstrap(window: tauri::Window, app: AppHandle) -> Re
     } else {
         serde_json::json!({})
     };
+    // iframe に `allow="clipboard-write"` を付けるか。承認済みの grant だけから決める
+    // （manifest・JS では判定しない。再承認待ちの間は旧セットのまま）
+    let clipboard_write = app
+        .state::<AppGrantStore>()
+        .get(&ctx.worktree_id, &ctx.artifact_id)
+        .and_then(|g| g.resolved.clipboard)
+        .is_some_and(|c| c.write);
     Ok(serde_json::json!({
         "memory": memory,
+        "clipboardWrite": clipboard_write,
         "worktreeId": ctx.worktree_id,
         "artifactId": ctx.artifact_id,
         "title": art.title,
@@ -1688,7 +1696,7 @@ mod tests {
     }
 
     fn perms(max: u64) -> RequestedPermissions {
-        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None, db: None, network: None, sub_window: None, audio: None, media: None, scheduler: None }
+        RequestedPermissions { mcp: None, memory: Some(MemoryPermission { max_bytes: max }), ai_terminal: None, fs: None, db: None, network: None, sub_window: None, audio: None, media: None, clipboard: None, scheduler: None }
     }
 
     #[test]

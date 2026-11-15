@@ -8,6 +8,8 @@
  * - **インスタンスを引数で指定しない。** どのアプリかは Rust がこのウィンドウのラベルから決める。
  *   ブリッジの `mcp.call` も `app_call_mcp_tool`（ラベルで識別）へ素通しするだけで、
  *   許可・拒否の判断はここではしない（唯一の関門は Rust）。
+ * - iframe の `allow="clipboard-write"` は manifest の `clipboard` 権限が承認されたアプリにだけ付ける
+ *   （`bootstrap.clipboardWrite`。iframe の中の Web API を許すだけで、Tauri の capability は与えない）。
  * - 閉じる = 隠す（Rust が prevent_close で hide にする）。インスタンスは継続する。
  *
  * このシェルは**サブウィンドウ（`appinst-<n>-w<k>`、透明・枠なしも可）でも同じものが動く**。
@@ -22,6 +24,7 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { buildVendorHead, buildReactSrcdoc } from "./utils/reactArtifactSrcdoc";
 import { loadVendors } from "./utils/reactArtifactVendors";
 import { createCspNonce } from "./utils/artifactCspViolation";
+import { appFrameAllow } from "./utils/artifactFrameAllow";
 import {
   ARTIFACT_BRIDGE_METHOD_DB_CLOSE,
   ARTIFACT_BRIDGE_METHOD_NET_FETCH,
@@ -70,6 +73,8 @@ interface Bootstrap {
   modules: Record<string, string>;
   /** 保存済みのメモリー。memory 権限が承認されていないアプリには空 */
   memory: Record<string, unknown>;
+  /** clipboard 権限が承認されているか（Rust が grant から決める）。true のときだけ iframe に `allow="clipboard-write"` を付ける */
+  clipboardWrite: boolean;
   /** サブウィンドウのシェルだけ非 null。常駐ウィンドウは null */
   subWindow: { id: string; params: unknown; transparent: boolean; frameless: boolean } | null;
 }
@@ -600,6 +605,7 @@ onBeforeUnmount(() => {
     <iframe
       v-else-if="srcdoc"
       ref="frame"
+      :allow="appFrameAllow(boot?.clipboardWrite ?? false)"
       :srcdoc="srcdoc"
       sandbox="allow-scripts"
       class="app-frame"

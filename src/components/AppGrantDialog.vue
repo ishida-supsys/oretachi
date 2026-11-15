@@ -153,6 +153,11 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
               <div v-if="r.severity === 'danger'" class="why">{{ t("mediaHttpWarning") }}</div>
               <div v-else class="why neutral">{{ t("mediaNetNote") }}</div>
             </template>
+            <template v-else-if="r.kind === 'clipboard'">
+              <span class="kind">{{ t("clipboardKind") }}</span>
+              <strong>{{ t("clipboardSummary") }}</strong>
+              <div class="why">{{ t("clipboardWarning") }}</div>
+            </template>
             <template v-else-if="r.kind === 'db'">
               <span class="kind">{{ r.access === "write" ? t("kindDbWrite") : t("kindDbRead") }}</span>
               <code class="path">{{ r.label }}</code>
@@ -187,6 +192,7 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
               <s v-else-if="r.kind === 'memory'">{{ t("memoryMax", { bytes: r.value }) }}</s>
               <s v-else-if="r.kind === 'aiTerminal'">{{ t("aiTerminalSummary", { spec: r.value }) }}</s>
               <s v-else-if="r.kind === 'audio'">{{ t("audioSummary") }} ({{ r.value }})</s>
+              <s v-else-if="r.kind === 'clipboard'">{{ t("clipboardSummary") }}</s>
               <template v-else-if="r.kind === 'scheduler'">
                 <s>{{ r.label }} <code>{{ r.cron }}</code></s>
                 <pre class="sched-old">{{ r.fullText }}</pre>
@@ -469,6 +475,9 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
     "kindTarget": "Reach worktree",
     "kindMemory": "Memory",
     "kindAudio": "Microphone",
+    "clipboardKind": "Clipboard",
+    "clipboardSummary": "Write to your clipboard",
+    "clipboardWarning": "The app can replace whatever is on your clipboard whenever you click inside it. If you paste into a terminal afterwards, you may run text you did not copy yourself, so check what you paste. The app cannot read the clipboard.",
     "audioSummary": "Listen to your microphone",
     "audioSpec": "(up to {spec})",
     "audioWarning": "The app can hear everything the microphone picks up, including your voice and anything said near your PC, as raw audio. Recording is shown in the launch screen and in the window titles, and stops when the app stops, reloads, or you press Stop recording. The audio is not saved by oretachi.",
@@ -548,6 +557,9 @@ const hasAudio = computed(() => view.value.rows.some((r) => r.kind === "audio"))
     "kindTarget": "届くワークツリー",
     "kindMemory": "メモリー",
     "kindAudio": "マイク",
+    "clipboardKind": "クリップボード",
+    "clipboardSummary": "クリップボードへ書き込む",
+    "clipboardWarning": "アプリの中をクリックしたときに、クリップボードの中身をアプリが書き換えられます。そのあと端末へ貼り付けると、自分でコピーしていない文字列を実行してしまうことがあるので、貼る前に内容を確認してください。クリップボードの読み取りはできません。",
     "audioSummary": "マイクの音声を取得する",
     "audioSpec": "（{spec}）",
     "audioWarning": "あなたの声や PC の近くで話された内容を含む、マイクが拾うすべての音を、生の音声としてアプリが聞けます。録音中は起動画面とウィンドウのタイトルに表示され、アプリの停止・リロード・起動画面の「録音を止める」で止まります。oretachi は音声を保存しません。",

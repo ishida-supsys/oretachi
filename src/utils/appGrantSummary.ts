@@ -46,6 +46,7 @@ export function summarizeGrant(resolved: AppResolvedPermissions): SummaryPart[] 
   if (mediaLocal + mediaNet > 0) {
     parts.push({ key: "summaryMedia", params: { local: mediaLocal, net: mediaNet }, critical: false });
   }
+  if (count("clipboard") > 0) parts.push({ key: "summaryClipboard", critical: false });
   const jobs = v.rows.filter((r) => r.kind === "scheduler");
   if (jobs.length > 0) {
     parts.push({ key: "summaryScheduler", params: { count: jobs.length }, critical: jobs.some((r) => r.severity === "critical") });

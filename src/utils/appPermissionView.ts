@@ -31,6 +31,7 @@ export const PERMISSION_ROW_KINDS = [
   "audio",
   "mediaRead",
   "mediaNet",
+  "clipboard",
   "scheduler",
 ] as const;
 
@@ -174,6 +175,11 @@ function rowsOf(perm: AppResolvedPermissions, dangerous: ReadonlySet<string>): P
       wildcard: false,
       added: false,
     });
+  }
+  // クリップボードへの書き込み（#438）: AI が書いたアプリがクリップボードを書き換え、ユーザーが端末へ貼る
+  // 経路になりうる（pastejacking）ので danger。読み取りは無い
+  if (perm.clipboard?.write) {
+    rows.push({ kind: "clipboard", value: "write", label: "write", severity: "danger", wildcard: false, added: false });
   }
   // スケジューラー（#413）: 無人で動くジョブ 1 件ごとに 1 行。value に実行内容の全体を入れるので、
   // cron・ツール・params・プロンプトのどれが変わっても再承認の差分（追加・外れ）に出る。

@@ -142,6 +142,8 @@ function rowValue(r: ReturnType<typeof detailRows>[number]): string {
       return t("summaryAiTerminal", { spec: r.value });
     case "audio":
       return t("summaryAudio", { spec: r.value });
+    case "clipboard":
+      return t("summaryClipboard");
     case "scheduler":
       return t("schedulerRow", { id: r.label, cron: r.cron ?? "", detail: r.detail ?? "" });
     case "subWindow":
@@ -448,6 +450,7 @@ onBeforeUnmount(() => {
     "kind_network": "Network",
     "kind_mediaRead": "Media (local files)",
     "kind_mediaNet": "Media (URLs)",
+    "kind_clipboard": "Clipboard",
     "kindFsRead": "Files (read)",
     "kindFsWrite": "Files (write)",
     "kindDbRead": "Database (read-only)",
@@ -468,6 +471,7 @@ onBeforeUnmount(() => {
     "summaryDbSensitive": "databases in hook/workflow locations",
     "summaryNetwork": "network ({count} URL prefixes)",
     "summaryMedia": "media playback (local {local} / URL {net})",
+    "summaryClipboard": "clipboard (write)",
     "summarySubWindow": "sub-windows ({spec})",
     "summarySubWindowOverlay": "sub-windows that can overlay other windows ({spec})",
     "summaryNone": "no permissions"
@@ -504,6 +508,7 @@ onBeforeUnmount(() => {
     "kind_network": "ネットワーク",
     "kind_mediaRead": "メディア再生（ローカルファイル）",
     "kind_mediaNet": "メディア再生（URL）",
+    "kind_clipboard": "クリップボード",
     "kindFsRead": "ファイル（読み取り）",
     "kindFsWrite": "ファイル（書き込み）",
     "kindDbRead": "データベース（読み取り専用）",
@@ -524,6 +529,7 @@ onBeforeUnmount(() => {
     "summaryDbSensitive": "フック・ワークフローの場所のデータベース",
     "summaryNetwork": "ネットワーク（URL プレフィックス {count} 件）",
     "summaryMedia": "メディア再生（ローカル {local} / URL {net}）",
+    "summaryClipboard": "クリップボード（書き込み）",
     "summarySubWindow": "サブウィンドウ（{spec}）",
     "summarySubWindowOverlay": "他のウィンドウに重なれるサブウィンドウ（{spec}）",
     "summaryNone": "権限なし"
