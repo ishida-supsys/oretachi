@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.38.2] - 2026-11-16
+
+### Added
+- アプリ iframe で clipboard-write を許可した (#438)
+
 ## [0.38.1] - 2026-11-08
 
 ### Added
@@ -966,7 +971,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.38.1...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.38.2...HEAD
+[0.38.2]: https://github.com/ishida-supsys/oretachi/compare/0.38.1...0.38.2
 [0.38.1]: https://github.com/ishida-supsys/oretachi/compare/0.38.0...0.38.1
 [0.38.0]: https://github.com/ishida-supsys/oretachi/compare/0.37.0...0.38.0
 [0.37.0]: https://github.com/ishida-supsys/oretachi/compare/0.36.3...0.37.0
