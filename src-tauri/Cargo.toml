@@ -107,3 +107,11 @@ windows-version = "0.1"
 # Windows だけ。非 Windows は未対応のスタブ
 cpal = "0.15"
 
+# wry #1924「fix(windows): defer moving focus into the webview on WM_SETFOCUS」を取り込む。
+# 複数ウィンドウが同一 WebView2 ブラウザプロセスを共有する構成で、窓切替後に IME の変換窓が
+# 画面左上に分離し compositionstart が来なくなる問題 (wry #1908 / tauri #16391) の回避。
+# pin 先は v0.57.1 以降の dev 未リリース修正 (#1910, #1914 等) も含む。
+# TODO: #1924 が wry のリリースに入り tauri が採用したら、この patch を除去する。
+[patch.crates-io]
+wry = { git = "https://github.com/TakahiroNago/wry", rev = "bd61972fb83e26fcf0464999e6f7ff12ddcdec07" }
+
