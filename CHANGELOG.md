@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.38.3] - 2026-11-17
+
+### Fixed
+- wry #1924 を pin して、窓切替後に IME 変換窓が左上に分離する問題を回避した (#436)
+
 ## [0.38.2] - 2026-11-16
 
 ### Added
@@ -971,7 +976,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.38.2...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.38.3...HEAD
+[0.38.3]: https://github.com/ishida-supsys/oretachi/compare/0.38.2...0.38.3
 [0.38.2]: https://github.com/ishida-supsys/oretachi/compare/0.38.1...0.38.2
 [0.38.1]: https://github.com/ishida-supsys/oretachi/compare/0.38.0...0.38.1
 [0.38.0]: https://github.com/ishida-supsys/oretachi/compare/0.37.0...0.38.0
