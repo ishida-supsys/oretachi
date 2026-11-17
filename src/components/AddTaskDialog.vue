@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from "vue";
 import { useI18n } from "vue-i18n";
+import { invoke } from "@tauri-apps/api/core";
 import { useWorkgroups } from "../composables/useWorkgroups";
+import { isSafeAgentName } from "../utils/agentLaunchCommand";
 
 const { t } = useI18n();
 const { groups, displayName } = useWorkgroups();
@@ -12,16 +14,18 @@ const props = withDefaults(defineProps<{
   showRemoteExec?: boolean;
   initialRemoteExec?: boolean;
   initialWorkgroupId?: string;
+  initialAgent?: string;
 }>(), {
   initialPrompt: "",
   mode: "add",
   showRemoteExec: false,
   initialRemoteExec: false,
   initialWorkgroupId: "",
+  initialAgent: "",
 });
 
 const emit = defineEmits<{
-  confirm: [prompt: string, remoteExec: boolean, workgroupId: string];
+  confirm: [prompt: string, remoteExec: boolean, workgroupId: string, agent: string | undefined];
   cancel: [];
 }>();
 
@@ -31,16 +35,34 @@ const showConfirm = ref(false);
 const remoteExec = ref(props.initialRemoteExec);
 const selectedWorkgroupId = ref(props.initialWorkgroupId);
 
-const isDirty = computed(() => promptText.value.trim() !== props.initialPrompt.trim());
+const agentName = ref(props.initialAgent);
+const agentCandidates = ref<{ name: string; source: string }[]>([]);
+// 空欄は未指定。入力があるときだけ規則を満たすか検査する
+const agentInvalid = computed(() => {
+  const v = agentName.value.trim();
+  return v !== "" && !isSafeAgentName(v);
+});
+
+const isDirty = computed(
+  () =>
+    promptText.value.trim() !== props.initialPrompt.trim() ||
+    agentName.value.trim() !== props.initialAgent.trim(),
+);
 
 onMounted(() => {
   textareaRef.value?.focus();
+  // 候補の取得に失敗しても手入力はできるので続行する
+  invoke<{ name: string; source: string }[]>("list_claude_agents")
+    .then((list) => { agentCandidates.value = list; })
+    .catch((e) => console.warn("[list_claude_agents] failed:", e));
 });
 
 function confirm() {
   const trimmed = promptText.value.trim();
-  if (!trimmed) return;
-  emit("confirm", trimmed, remoteExec.value, selectedWorkgroupId.value);
+  if (!trimmed || agentInvalid.value) return;
+  // 欄が非表示（Claude Code 以外）のときは、再実行で復元した値も送らない
+  const agent = props.showRemoteExec ? agentName.value.trim() || undefined : undefined;
+  emit("confirm", trimmed, remoteExec.value, selectedWorkgroupId.value, agent);
 }
 
 function tryCancel() {
@@ -109,6 +131,21 @@ function onKeydown(e: KeyboardEvent) {
         </label>
       </div>
 
+      <div v-if="showRemoteExec" class="field">
+        <label class="label">{{ t('agent') }}</label>
+        <input
+          v-model="agentName"
+          class="select"
+          list="add-task-agent-candidates"
+          :placeholder="t('agentPlaceholder')"
+          spellcheck="false"
+        />
+        <datalist id="add-task-agent-candidates">
+          <option v-for="c in agentCandidates" :key="`${c.source}:${c.name}`" :value="c.name">{{ c.source }}</option>
+        </datalist>
+        <p v-if="agentInvalid" class="hint agent-error">{{ t('agentInvalid') }}</p>
+      </div>
+
       <div v-if="showConfirm" class="confirm-bar">
         <span class="confirm-message">{{ t('confirmClose') }}</span>
         <div class="confirm-actions">
@@ -121,7 +158,7 @@ function onKeydown(e: KeyboardEvent) {
         <button class="btn-cancel" @click="tryCancel">{{ t('common.cancel') }}</button>
         <button
           class="btn-confirm"
-          :disabled="!promptText.trim()"
+          :disabled="!promptText.trim() || agentInvalid"
           @click="confirm"
         >
           {{ mode === 'rerun' ? t('rerun') : t('add') }}
@@ -210,6 +247,10 @@ function onKeydown(e: KeyboardEvent) {
   margin: 4px 0 0;
   font-size: 11px;
   color: #6c7086;
+}
+
+.hint.agent-error {
+  color: #f38ba8;
 }
 
 .dialog-actions {
@@ -338,6 +379,9 @@ function onKeydown(e: KeyboardEvent) {
     "promptPlaceholder": "e.g. Implement https://github.com/owner/repo/issues/123",
     "submitHint": "Ctrl+Enter to submit",
     "remoteExec": "Start in web session",
+    "agent": "Agent (--agent)",
+    "agentPlaceholder": "Custom agent name (optional)",
+    "agentInvalid": "Use letters, digits and . _ : - only (up to 100 chars, no leading - or :)",
     "add": "Add",
     "rerun": "Rerun",
     "confirmClose": "You have unsaved input. Are you sure you want to close?",
@@ -352,6 +396,9 @@ function onKeydown(e: KeyboardEvent) {
     "promptPlaceholder": "例: https://github.com/owner/repo/issues/123 を実装してください",
     "submitHint": "Ctrl+Enter で送信",
     "remoteExec": "Webセッションで開始",
+    "agent": "エージェント (--agent)",
+    "agentPlaceholder": "カスタムエージェント名（任意）",
+    "agentInvalid": "英数字と . _ : - のみ使えます（100文字まで。先頭に - と : は使えません）",
     "add": "追加",
     "rerun": "再実行",
     "confirmClose": "入力内容が失われますが、閉じてもよろしいですか？",

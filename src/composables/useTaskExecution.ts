@@ -11,7 +11,7 @@ import type { WebSessionInfo } from "../types/terminal";
 import { decodePtyOutput, type PtyOutputBatchPayload } from "../utils/decodePtyOutput";
 import { useWorkgroups } from "./useWorkgroups";
 import { initialTrayNotification } from "../utils/trayNotification";
-import { buildClaudeLaunchCommand, ownedAiTerminalFlags } from "../utils/agentLaunchCommand";
+import { buildClaudeLaunchCommand, claudeTaskFlags, isSafeAgentName, ownedAiTerminalFlags } from "../utils/agentLaunchCommand";
 
 /**
  * 本文を流してから Enter を送るまでの猶予。
@@ -429,11 +429,15 @@ export function useTaskExecution(deps: {
 
     // 既存エージェントが実行中の場合はプロンプトを直接送信して続行
     if (agentRunning && sessionId != null) {
+      // 実行中のエージェントへは --agent を適用できない（remoteExec と同様に無視して送る）
+      if (code.agent) {
+        console.warn(`[agent_worktree] エージェント実行中のため --agent "${code.agent}" は適用されません: ${wt.name}`);
+      }
       await sendPromptToRunningAgent(sessionId, wt.id, terminal.id, code.prompt);
       return;
     }
 
-    await launchAgentInTerminal(wt, terminal.id, code.prompt, { remoteExec: code.remoteExec });
+    await launchAgentInTerminal(wt, terminal.id, code.prompt, { remoteExec: code.remoteExec, agent: code.agent });
   }
 
   /**
@@ -445,12 +449,20 @@ export function useTaskExecution(deps: {
     wt: Worktree,
     terminalId: number,
     prompt: string,
-    opts?: { remoteExec?: boolean },
+    opts?: { remoteExec?: boolean; agent?: string },
   ): Promise<void> {
     const remoteExec = opts?.remoteExec ?? false;
+    const customAgent = opts?.agent || undefined;
     // タスク実行エージェント・モード・実行プロンプトは所属ワークグループ単位
     const group = groupOf(wt);
     const agentKind = group?.taskAddAgent ?? settings.value.aiAgent?.taskAddAgent ?? settings.value.aiAgent?.approvalAgent ?? "claudeCode";
+    // 検査は一時ファイルを書く前に行う（失敗時に残さない）
+    if (customAgent && agentKind !== "claudeCode") {
+      throw new Error("--agent は Claude Code 専用です");
+    }
+    if (customAgent && !isSafeAgentName(customAgent)) {
+      throw new Error(`agent に使えない文字が含まれています: ${customAgent}`);
+    }
     const isWindows = platform() === "windows";
     const shell = resolveShell(wt.id);
     const shellLower = (shell ?? "").toLowerCase();
@@ -464,9 +476,10 @@ export function useTaskExecution(deps: {
     const tempPath = await invoke<string>("write_temp_prompt", { content: finalPrompt });
 
     const claudeMode = claudeModeFlag(group?.claudeCodeMode);
+    const claudeFlags = claudeTaskFlags(claudeMode, remoteExec, customAgent);
     let agentCmd: string;
     switch (agentKind) {
-      case "claudeCode": agentCmd = remoteExec ? `claude --remote ${claudeMode}` : `claude ${claudeMode}`; break;
+      case "claudeCode": agentCmd = `claude ${claudeFlags}`; break;
       case "geminiCli":  agentCmd = "gemini"; break;
       case "codexCli":   agentCmd = "codex"; break;
       case "clineCli":   agentCmd = "cline"; break;
@@ -477,7 +490,7 @@ export function useTaskExecution(deps: {
     switch (agentKind) {
       case "claudeCode": {
         command = buildClaudeLaunchCommand({
-          flags: remoteExec ? `--remote ${claudeMode}` : claudeMode,
+          flags: claudeFlags,
           tempPath,
           isPowerShell,
         });

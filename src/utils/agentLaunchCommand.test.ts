@@ -3,7 +3,40 @@ import { spawnSync } from "node:child_process";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildClaudeLaunchCommand, isSafeModelName, ownedAiTerminalFlags } from "./agentLaunchCommand";
+import { buildClaudeLaunchCommand, claudeTaskFlags, isSafeAgentName, isSafeModelName, ownedAiTerminalFlags } from "./agentLaunchCommand";
+
+describe("isSafeAgentName", () => {
+  it("accepts plain, dotted and plugin:agent names", () => {
+    for (const ok of ["foo", "plugin:agent", "a.b_c-d", "_x", "A1"]) {
+      expect(isSafeAgentName(ok)).toBe(true);
+    }
+  });
+
+  it("rejects names that could inject shell syntax or another flag", () => {
+    for (const bad of ["", "-x", "--dangerously-skip-permissions", "a b", 'a"b', "a;b", "$(x)", "a`b", "a\nb", "x".repeat(101)]) {
+      expect(isSafeAgentName(bad)).toBe(false);
+    }
+  });
+});
+
+describe("claudeTaskFlags", () => {
+  const mode = "--permission-mode plan";
+  it("keeps the existing flags when no agent is given", () => {
+    expect(claudeTaskFlags(mode, false)).toBe(mode);
+    expect(claudeTaskFlags(mode, true)).toBe(`--remote ${mode}`);
+    expect(claudeTaskFlags(mode, false, "")).toBe(mode);
+  });
+
+  it("appends a quoted --agent in both remote and local modes", () => {
+    expect(claudeTaskFlags(mode, false, "xxx")).toBe(`${mode} --agent "xxx"`);
+    expect(claudeTaskFlags(mode, true, "plugin:a")).toBe(`--remote ${mode} --agent "plugin:a"`);
+  });
+
+  it("throws on an unsafe agent name", () => {
+    expect(() => claudeTaskFlags(mode, false, "-x")).toThrow();
+    expect(() => claudeTaskFlags(mode, false, "a b")).toThrow();
+  });
+});
 
 describe("buildClaudeLaunchCommand", () => {
   it("keeps the exact task-execution commands (PowerShell / POSIX)", () => {

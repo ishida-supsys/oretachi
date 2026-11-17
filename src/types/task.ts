@@ -12,6 +12,8 @@ export type AgentWorktreeTaskCode = {
   branch: string;
   prompt: string;
   remoteExec?: boolean;
+  /** Claude Code の `--agent` に渡すカスタムエージェント名（タスク単位。設定には保存しない） */
+  agent?: string;
 };
 
 export type TaskCode = AddWorktreeTaskCode | AgentWorktreeTaskCode;

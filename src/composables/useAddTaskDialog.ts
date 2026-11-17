@@ -61,6 +61,16 @@ export function useAddTaskDialog(executeStep: StepExecutor, autoReturnHome?: Aut
     return sortedTasks.value.find((t) => t.id === rerunTaskId.value)?.prompt ?? "";
   });
 
+  // 再実行元タスクの最初の agent_worktree ステップの agent（ダイアログの初期値）
+  const rerunAgent = computed(() => {
+    if (!rerunTaskId.value) return "";
+    const task = sortedTasks.value.find((t) => t.id === rerunTaskId.value);
+    for (const step of task?.steps ?? []) {
+      if (step.code.type === "agent_worktree") return step.code.agent ?? "";
+    }
+    return "";
+  });
+
   let activeTaskToast: ToastMessageOptions | null = null;
   /** 失敗トーストの枠。進捗トーストとは別に持つ理由は showTaskToast のコメント参照。 */
   let activeErrorToast: ToastMessageOptions | null = null;
@@ -146,6 +156,8 @@ export function useAddTaskDialog(executeStep: StepExecutor, autoReturnHome?: Aut
     remoteExec: boolean = false,
     workgroupId?: string,
     switchActiveWorkgroup: boolean = true,
+    // Claude Code の --agent。タスク単位の指定なので settings には保存しない
+    agent?: string,
   ): Promise<void> {
     const trimmed = prompt.trim();
     if (!trimmed) return;
@@ -181,6 +193,13 @@ export function useAddTaskDialog(executeStep: StepExecutor, autoReturnHome?: Aut
         for (const code of taskProcessCode.code) {
           if (code.type === "agent_worktree") {
             code.remoteExec = true;
+          }
+        }
+      }
+      if (agent) {
+        for (const code of taskProcessCode.code) {
+          if (code.type === "agent_worktree") {
+            code.agent = agent;
           }
         }
       }
@@ -322,6 +341,7 @@ export function useAddTaskDialog(executeStep: StepExecutor, autoReturnHome?: Aut
     showAddTaskDialog,
     rerunTaskId,
     rerunPrompt,
+    rerunAgent,
     showTaskToast,
     onAddTaskConfirm,
     onAddTaskCancel,
