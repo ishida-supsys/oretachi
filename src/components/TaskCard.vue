@@ -17,7 +17,8 @@ function stepLabel(code: TaskItem["steps"][number]["code"]): string {
   if (code.type === "add_worktree") {
     return `${t("stepAddWorktree")}: ${code.repository}/${code.branch}`;
   }
-  return `${t("stepAgent")}: ${code.repository}/${code.branch}`;
+  const agent = code.agent ? ` (@${code.agent})` : "";
+  return `${t("stepAgent")}: ${code.repository}/${code.branch}${agent}`;
 }
 
 function statusLabel(status: TaskItem["status"]): string {

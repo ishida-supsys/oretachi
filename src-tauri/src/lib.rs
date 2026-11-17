@@ -2527,6 +2527,7 @@ pub fn run() {
             task_executor::task_generate,
             task_executor::cancel_task_generate,
             task_executor::write_temp_prompt,
+            task_executor::list_claude_agents,
             list_artifacts,
             read_artifact,
             delete_artifacts,

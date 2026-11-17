@@ -545,7 +545,7 @@ function onHomeMenuSelect(worktreeId: string) {
 }
 // 複製ダイアログの「セッション引継ぎ元」候補。ホーム/リポジトリは git ワークツリーではないので出さない
 const sessionSourceWorktrees = computed(() => settings.value.worktrees.filter((w) => !isPseudoWorktree(w)));
-const { showAddTaskDialog, rerunTaskId, rerunPrompt, onAddTaskConfirm, onAddTaskCancel } =
+const { showAddTaskDialog, rerunTaskId, rerunPrompt, rerunAgent, onAddTaskConfirm, onAddTaskCancel } =
   useAddTaskDialog(async (code) => {
     if (code.type === "add_worktree") {
       return await executeAddWorktree(code);
@@ -1785,7 +1785,7 @@ onMounted(async () => {
   });
 
   // MCPからのタスク追加
-  await listen<{ prompt: string; remote_exec: boolean; workgroup_id?: string | null }>(
+  await listen<{ prompt: string; remote_exec: boolean; workgroup_id?: string | null; agent?: string | null }>(
     "mcp-add-task",
     (event) => {
       onAddTaskConfirm(
@@ -1794,6 +1794,7 @@ onMounted(async () => {
         event.payload.workgroup_id ?? undefined,
         // MCP 由来の追加ではホームの表示ワークグループを切り替えない（#181）
         false,
+        event.payload.agent ?? undefined,
       );
     },
   );
@@ -2951,7 +2952,8 @@ onMounted(async () => {
       :show-remote-exec="activeTaskExecAgent === 'claudeCode'"
       :initial-remote-exec="settings.aiAgent?.remoteExec ?? false"
       :initial-workgroup-id="taskDialogDefaultWorkgroupId"
-      @confirm="(prompt, remoteExec, workgroupId) => onAddTaskConfirm(prompt, remoteExec, workgroupId)"
+      :initial-agent="rerunTaskId ? rerunAgent : ''"
+      @confirm="(prompt, remoteExec, workgroupId, agent) => onAddTaskConfirm(prompt, remoteExec, workgroupId, true, agent)"
       @cancel="onAddTaskCancel"
     />
 

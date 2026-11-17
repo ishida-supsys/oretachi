@@ -398,6 +398,137 @@ pub fn write_temp_prompt(content: String) -> Result<String, String> {
     Ok(path.to_string_lossy().to_string())
 }
 
+/// タスク追加ダイアログの `--agent` 候補。
+#[derive(Debug, Clone, serde::Serialize, PartialEq)]
+pub struct ClaudeAgentEntry {
+    pub name: String,
+    /// 出典: `"user"`（~/.claude/agents）またはリポジトリ名
+    pub source: String,
+}
+
+/// エージェント定義 (`*.md`) の frontmatter から `name:` を取り出す。
+/// BOM・CRLF・引用符付きの値を許容する。frontmatter が無い / `name:` が無いときは None。
+fn parse_agent_frontmatter_name(content: &str) -> Option<String> {
+    let content = content.strip_prefix('\u{feff}').unwrap_or(content);
+    let mut lines = content.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    for line in lines {
+        let line = line.trim_end();
+        if line.trim() == "---" {
+            break;
+        }
+        if let Some(rest) = line.strip_prefix("name:") {
+            // YAML の行末コメント（` # ...`）を落とす。引用符内の `#` は対象外にするため、引用符で始まる値には適用しない
+            let v = rest.trim();
+            let v = if v.starts_with('"') || v.starts_with('\'') {
+                v
+            } else {
+                v.split(" #").next().unwrap_or(v).trim_end()
+            };
+            let v = v
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .or_else(|| v.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+                .unwrap_or(v)
+                .trim();
+            return if v.is_empty() { None } else { Some(v.to_string()) };
+        }
+    }
+    None
+}
+
+/// `dir/*.md` を走査して候補を足す。読めないファイルと、検証を通らない名前はスキップする。
+fn collect_agents_in(dir: &std::path::Path, source: &str, out: &mut Vec<ClaudeAgentEntry>) {
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).map(|e| e.path()).collect();
+    entries.sort();
+    for path in entries {
+        if path.extension().and_then(|e| e.to_str()) != Some("md") {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else { continue };
+        let name = parse_agent_frontmatter_name(&content).or_else(|| {
+            path.file_stem().and_then(|s| s.to_str()).map(|s| s.to_string())
+        });
+        let Some(name) = name else { continue };
+        if crate::ai_terminal::validate_agent_name(&name).is_err() {
+            continue;
+        }
+        let entry = ClaudeAgentEntry { name, source: source.to_string() };
+        if !out.contains(&entry) {
+            out.push(entry);
+        }
+    }
+}
+
+/// Claude Code のカスタムエージェント候補を返す（`~/.claude/agents` と登録済み全リポジトリの `.claude/agents`）。
+/// 対象リポジトリはタスク生成後にしか決まらないので和集合で返す。プラグイン提供のものは含まない（手入力）。
+#[tauri::command]
+pub async fn list_claude_agents(
+    settings: State<'_, SettingsManager>,
+) -> Result<Vec<ClaudeAgentEntry>, String> {
+    let repos: Vec<(String, String)> = settings
+        .get()
+        .repositories
+        .iter()
+        .map(|r| (r.name.clone(), r.path.clone()))
+        .collect();
+    tokio::task::spawn_blocking(move || {
+        let mut out = Vec::new();
+        if let Ok(home) = std::env::var("USERPROFILE").or_else(|_| std::env::var("HOME")) {
+            collect_agents_in(&std::path::Path::new(&home).join(".claude").join("agents"), "user", &mut out);
+        }
+        for (name, path) in repos {
+            collect_agents_in(&std::path::Path::new(&path).join(".claude").join("agents"), &name, &mut out);
+        }
+        out
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod agent_list_tests {
+    use super::*;
+
+    #[test]
+    fn agent_frontmatter_name_parsing() {
+        assert_eq!(parse_agent_frontmatter_name("---\nname: reviewer\ndescription: x\n---\nbody"), Some("reviewer".into()));
+        // BOM + CRLF
+        assert_eq!(parse_agent_frontmatter_name("\u{feff}---\r\nname: reviewer\r\n---\r\nbody"), Some("reviewer".into()));
+        // 引用符
+        assert_eq!(parse_agent_frontmatter_name("---\nname: \"q-agent\"\n---\n"), Some("q-agent".into()));
+        assert_eq!(parse_agent_frontmatter_name("---\nname: 'q2'\n---\n"), Some("q2".into()));
+        // 行末コメント
+        assert_eq!(parse_agent_frontmatter_name("---\nname: foo # note\n---\n"), Some("foo".into()));
+        // name が無い / frontmatter が無い / frontmatter の外の name:
+        assert_eq!(parse_agent_frontmatter_name("---\ndescription: x\n---\nname: no\n"), None);
+        assert_eq!(parse_agent_frontmatter_name("name: x\n"), None);
+        assert_eq!(parse_agent_frontmatter_name(""), None);
+    }
+
+    #[test]
+    fn collect_agents_falls_back_to_file_stem_and_filters_unsafe() {
+        let dir = std::env::temp_dir().join(format!("oretachi-agents-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.md"), "---\nname: alpha\n---\n").unwrap();
+        std::fs::write(dir.join("beta.md"), "no frontmatter").unwrap();
+        std::fs::write(dir.join("bad.md"), "---\nname: -evil\n---\n").unwrap();
+        std::fs::write(dir.join("note.txt"), "---\nname: skipped\n---\n").unwrap();
+        let mut out = Vec::new();
+        collect_agents_in(&dir, "user", &mut out);
+        let names: Vec<_> = out.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "beta"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        // 存在しないディレクトリは空
+        let mut none = Vec::new();
+        collect_agents_in(&dir, "user", &mut none);
+        assert!(none.is_empty());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

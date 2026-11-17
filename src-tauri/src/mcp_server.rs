@@ -1529,12 +1529,16 @@ pub struct AddTaskParams {
     pub workgroup_id: Option<String>,
     #[schemars(description = "追加先ワークグループの表示名 (oretachi_list_workgroups の name)。workgroup_id 指定時は無視される")]
     pub workgroup_name: Option<String>,
+    #[schemars(description = "Claude Code の --agent に渡すカスタムエージェント名。worktree の起動エージェントが Claude Code のときのみ有効")]
+    pub agent: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
 struct AddTaskEvent {
     prompt: String,
     remote_exec: bool,
+    /// Claude Code の `--agent` に渡す名前（検証済み。None なら指定なし）
+    agent: Option<String>,
     /// 追加先ワークグループID。None ならフロントに委ね、UI で現在選択中の WG に入る
     /// （ワークグループが1件も定義されていないときだけこの経路に入る）。
     workgroup_id: Option<String>,
@@ -3908,12 +3912,14 @@ impl NotifyService {
     #[tool(description = "タスク追加リクエストを送信する。AIがタスクコードを生成し、ワークツリー作成やエージェント実行を非同期で行う。追加先ワークグループは省略時はデフォルトワークグループ (isDefault: true) になる。別のワークグループへ入れたい場合は oretachi_list_workgroups で一覧を取得してから workgroup_id / workgroup_name を渡す。実行は非同期でこのツールは結果を返さないので、成否や生成されたコードは oretachi_list_tasks で確認する。失敗した場合はホームワークツリーへ通知(バッジ / OS 通知)が出るので人も気付けるが、投げた側が結果を知るには oretachi_list_tasks を叩くしかない")]
     fn oretachi_add_task(
         &self,
-        Parameters(AddTaskParams { prompt, remote_exec, workgroup_id, workgroup_name }): Parameters<AddTaskParams>,
+        Parameters(AddTaskParams { prompt, remote_exec, workgroup_id, workgroup_name, agent }): Parameters<AddTaskParams>,
     ) -> Result<CallToolResult, McpError> {
         let prompt = prompt.trim().to_string();
         if prompt.is_empty() {
             return Err(McpError::invalid_params("prompt must not be empty", None));
         }
+        let agent = crate::ai_terminal::normalize_agent(agent)
+            .map_err(|e| McpError::invalid_params(e, None))?;
         let resolved_workgroup_id = {
             let settings_manager = self.app_handle.state::<SettingsManager>();
             let settings = settings_manager.get();
@@ -3926,15 +3932,17 @@ impl NotifyService {
         let event = AddTaskEvent {
             prompt: prompt.clone(),
             remote_exec: remote,
+            agent: agent.clone(),
             workgroup_id: resolved_workgroup_id.clone(),
         };
         self.app_handle
             .emit("mcp-add-task", &event)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
         log::info!(
-            "[mcp] oretachi_add_task: prompt={} remote_exec={} workgroup_id={}",
+            "[mcp] oretachi_add_task: prompt={} remote_exec={} agent={} workgroup_id={}",
             prompt,
             remote,
+            agent.as_deref().unwrap_or("(none)"),
             resolved_workgroup_id.as_deref().unwrap_or("(none)")
         );
         Ok(CallToolResult::success(vec![Content::text(
@@ -6902,6 +6910,9 @@ pub(crate) fn normalize_artifact_tool_params(
         // 受け側（useAddTaskDialog）が settings.aiAgent.remoteExec として**永続化**するため、
         // 渡すとアーティファクトの JS からユーザーのダイアログ既定値を書き換えられる
         obj.remove("remote_exec");
+        // エージェント定義の frontmatter は権限モードやツールを変えられるので、
+        // 信頼できない呼び出し元（アーティファクト / アプリ）には選ばせない
+        obj.remove("agent");
         match workgroup_id {
             Some(id) => {
                 obj.insert(
@@ -10332,11 +10343,14 @@ mod tests {
                 "workgroup_id": "wg-secret",
                 "workgroup_name": "secret",
                 "remote_exec": true,
+                "agent": "x",
             }),
         )
         .expect("normalized");
         assert_eq!(obj["workgroup_id"], serde_json::json!("wg-1"));
         assert!(!obj.contains_key("workgroup_name"));
+        // agent は frontmatter で権限モードやツールを変えられるので、信頼できない呼び出し元には選ばせない
+        assert!(!obj.contains_key("agent"));
         // remote_exec は受け側がユーザー設定として永続化するので渡さない
         assert!(!obj.contains_key("remote_exec"));
         let prompt = obj["prompt"].as_str().expect("prompt is a string");

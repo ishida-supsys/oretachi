@@ -847,6 +847,35 @@ pub fn validate_model(model: &str) -> Result<(), String> {
     }
 }
 
+/// エージェント名: `claude --agent <name>` にそのままシェルへ渡るので、安全な文字種だけ受理する。
+/// `plugin:agent` 形式のため `:` を許可する（TS の `isSafeAgentName` と同じ規則）。
+pub fn validate_agent_name(name: &str) -> Result<(), String> {
+    let mut chars = name.chars();
+    let first_ok = chars
+        .next()
+        .map(|c| c.is_ascii_alphanumeric() || c == '_')
+        .unwrap_or(false);
+    let ok = first_ok
+        && name.chars().count() <= 100
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ':' | '-'));
+    if ok {
+        Ok(())
+    } else {
+        Err("agent には英数字と . _ : - だけを使えます（100 文字まで。先頭に - と : は使えません）".to_string())
+    }
+}
+
+/// 省略可能な agent を整える: trim し、空なら None、そのうえで検証する。
+pub fn normalize_agent(agent: Option<String>) -> Result<Option<String>, String> {
+    match agent.map(|a| a.trim().to_string()) {
+        None => Ok(None),
+        Some(a) if a.is_empty() => Ok(None),
+        Some(a) => validate_agent_name(&a).map(|_| Some(a)),
+    }
+}
+
 /// `worktree://` 相対の作業ディレクトリを、ワークツリー配下の絶対パスへ解決する。
 ///
 /// - 省略・空・`worktree://` だけならワークツリーのルート。
@@ -1050,6 +1079,28 @@ mod tests {
         for bad in ["", "a b", "a;b", "$(x)", "a\"b", "a`b", "a|b", "a&b", "a\nb", "-x", "--dangerously-skip-permissions"] {
             assert!(validate_model(bad).is_err(), "{bad:?}");
         }
+    }
+
+    #[test]
+    fn agent_name_charset() {
+        for ok in ["foo", "plugin:agent", "a.b_c-d", "_x", "A1"] {
+            assert!(validate_agent_name(ok).is_ok(), "{ok:?}");
+        }
+        let too_long = "x".repeat(101);
+        for bad in ["", "-x", ":x", "--dangerously-skip-permissions", "a b", "a\"b", "a;b", "$(x)", "a`b", "a\nb", too_long.as_str()] {
+            assert!(validate_agent_name(bad).is_err(), "{bad:?}");
+        }
+        assert!(validate_agent_name(&"x".repeat(100)).is_ok());
+    }
+
+    #[test]
+    fn agent_normalization() {
+        assert_eq!(normalize_agent(None), Ok(None));
+        assert_eq!(normalize_agent(Some("".into())), Ok(None));
+        assert_eq!(normalize_agent(Some("  ".into())), Ok(None));
+        assert_eq!(normalize_agent(Some(" reviewer ".into())), Ok(Some("reviewer".into())));
+        assert!(normalize_agent(Some("-x".into())).is_err());
+        assert!(normalize_agent(Some("a b".into())).is_err());
     }
 
     #[test]

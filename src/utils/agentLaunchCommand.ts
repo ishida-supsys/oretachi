@@ -15,6 +15,30 @@ export function isSafeModelName(model: string): boolean {
   return model.length > 0 && model.length <= 100 && /^[A-Za-z0-9._[\]][A-Za-z0-9._\-[\]]*$/.test(model);
 }
 
+/**
+ * `claude --agent <name>` にそのままシェルへ渡るので、安全な文字種だけを受理する（Rust の `validate_agent_name` と同じ）。
+ * `plugin:agent` 形式のため `:` を許可する。先頭が `-` だと別のフラグとして解釈されるので拒否する。
+ */
+export function isSafeAgentName(name: string): boolean {
+  return name.length > 0 && name.length <= 100 && /^[A-Za-z0-9_][A-Za-z0-9._:-]*$/.test(name);
+}
+
+/**
+ * タスク実行で claude に渡すフラグを組む。`--remote` / 権限モード / `--agent` の順。
+ * agent が不正な名前なら throw する（呼び出し側でステップを error にする）。
+ */
+export function claudeTaskFlags(claudeMode: string, remoteExec: boolean, agent?: string): string {
+  const parts: string[] = [];
+  if (remoteExec) parts.push("--remote");
+  if (claudeMode) parts.push(claudeMode);
+  if (agent) {
+    if (!isSafeAgentName(agent)) throw new Error(`agent に使えない文字が含まれています: ${agent}`);
+    // 引用符で包む理由は ownedAiTerminalFlags と同じ
+    parts.push(`--agent "${agent}"`);
+  }
+  return parts.join(" ");
+}
+
 export interface ClaudeLaunchOptions {
   /** claude に渡すフラグ（例: `--permission-mode plan`）。省略なら素の `claude` */
   flags?: string;
