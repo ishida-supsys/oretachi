@@ -64,6 +64,7 @@ defineEmits<{
   justify-content: center;
   padding: 0 3px;
   pointer-events: none;
+  z-index: 1;
 }
 
 /* 広がる輪は ::after の transform/opacity で描く(box-shadow のアニメは再描画が走り続ける: #419) */
@@ -73,18 +74,14 @@ defineEmits<{
   inset: 0;
   border-radius: 50%;
   pointer-events: none;
-  box-shadow: 0 0 0 4px rgba(243, 139, 168, 0.4);
+  box-shadow: 0 0 0 2px rgba(243, 139, 168, 0.5);
   opacity: 0;
   animation: pulse 2s ease-in-out infinite;
 }
 
 @keyframes pulse {
-  0%, 100% { transform: scale(1); opacity: 1; }
+  0%, 100% { transform: scale(1); opacity: 0.6; }
   50% { transform: scale(1.33); opacity: 0; }
-}
-
-:global(html.window-hidden) .tray-btn--pulse::after {
-  animation-play-state: paused;
 }
 </style>
 

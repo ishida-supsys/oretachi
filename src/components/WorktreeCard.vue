@@ -425,10 +425,6 @@ const terminalList = computed(() =>
   50% { opacity: 1; }
 }
 
-:global(html.window-hidden) .card-notified::after {
-  animation-play-state: paused;
-}
-
 .card-header {
   display: flex;
   align-items: center;

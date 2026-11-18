@@ -270,9 +270,10 @@ function onDragEnd() {
 }
 
 /* 通知パルス: 輪は静的な box-shadow、脈動は ::after の opacity だけで行う。
+   隠れている間の一時停止は styles.css の html.window-hidden 規則で行う。
    box-shadow を毎フレーム変えるアニメは再描画が走り続けて Compositor を占有する(#419) */
 .wg-chip.notified {
-  box-shadow: 0 0 0 2px rgba(243, 139, 168, 0.8);
+  box-shadow: 0 0 0 2px rgba(243, 139, 168, 0.6);
 }
 
 .wg-chip.notified::after {
@@ -289,10 +290,6 @@ function onDragEnd() {
 @keyframes wg-notification-pulse {
   0%, 100% { opacity: 0; }
   50% { opacity: 1; }
-}
-
-:global(html.window-hidden) .wg-chip.notified::after {
-  animation-play-state: paused;
 }
 
 /* ドラッグ中はカーソル位置にゴースト画像が重なってチップ本体が隠れるので、

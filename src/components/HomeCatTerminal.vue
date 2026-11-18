@@ -43,6 +43,8 @@ function scheduleMeow() {
 }
 
 async function fetchReport() {
+  // 隠れている間は IPC を発行しない(再開時に次の周期で取得される)
+  if (!props.active) return;
   try {
     const now = new Date();
     const today = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
