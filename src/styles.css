@@ -208,3 +208,12 @@ body {
   font-size: 11px;
   white-space: pre-line;
 }
+
+/* ウィンドウが完全に隠れている間(最小化・トレイ非表示)は通知パルスの無限アニメを止める (#419)。
+   html.window-hidden は App.vue が useWindowHidden の状態に合わせて付け外しする。
+   scoped style 内の :global() は先頭セレクタごと置き換えられて効かないので、ここに置く */
+html.window-hidden .wg-chip.notified::after,
+html.window-hidden .tray-btn--pulse::after,
+html.window-hidden .card-notified::after {
+  animation-play-state: paused;
+}

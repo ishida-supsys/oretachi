@@ -4,7 +4,6 @@ import type { Terminal } from "@xterm/xterm";
 // 猫AA最大表示幅: " じしˍ,)ノ" = 1+2(じ)+2(し)+1(ˍ)+1(,)+1())+2(ノ) = 10列
 const CAT_DISPLAY_WIDTH = 10;
 const BLINK_DURATION_MS = 200;
-const REDRAW_INTERVAL_MS = 1000;
 const BLINK_MIN_MS = 7000;
 const BLINK_MAX_MS = 13000;
 
@@ -76,7 +75,8 @@ export function useCat() {
 
   // 猫アニメーション状態
   let isBlinking = false;
-  let redrawTimer: ReturnType<typeof setInterval> | null = null;
+  // 一時停止中(ホーム非表示・ウィンドウが隠れている間)は描画もタイマーも止める
+  let paused = false;
   let blinkScheduleTimer: ReturnType<typeof setTimeout> | null = null;
   let blinkRestoreTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -84,6 +84,8 @@ export function useCat() {
   let metricsLines: string[] = [];
   // 前回描画したメトリクスの最大行幅（桁数が減ったときの残骸クリア用）
   let metricsDrawnWidth = 0;
+  // 前回描画した内容(同じ内容なら書き直さない)
+  let metricsDrawnKey = "";
 
   // セリフ状態
   const topics: Topic[] = [];
@@ -124,17 +126,21 @@ export function useCat() {
 
   // 受信したメトリクスを表示用の行配列へ整形して再描画する
   function setMetrics(m: SystemMetrics) {
-    metricsLines = [
+    const next = [
       `CPU ${Math.round(m.cpu_percent)}%`,
       `MEM ${(m.mem_used / 1024 ** 3).toFixed(1)}/${(m.mem_total / 1024 ** 3).toFixed(0)}G`,
       `NET ↓${fmtBytes(m.net_rx_per_sec)} ↑${fmtBytes(m.net_tx_per_sec)}`,
     ];
-    drawMetrics();
+    metricsLines = next;
+    if (!paused) drawMetrics();
   }
 
   // 左下（最下行から上方・列1）へ固定位置描画。猫=右下・セリフ=右側上方なので衝突しない。
-  function drawMetrics() {
+  function drawMetrics(force = false) {
     if (!terminal || terminal.rows < 6 || terminal.cols < METRICS_WIDTH || metricsLines.length === 0) return;
+    // 端末は disableStdin で自分しか書かないので、内容が変わっていなければ描き直さない(#419)
+    const key = `${terminal.rows}x${terminal.cols}:${metricsLines.join("|")}`;
+    if (!force && key === metricsDrawnKey) return;
     // 今回の最大行幅と前回描画幅の大きい方をクリア（桁数が減ったときの右側残骸を消す）
     const curWidth = metricsLines.reduce((m, l) => Math.max(m, measureWidth(l)), 0);
     const clearWidth = Math.min(terminal.cols, Math.max(curWidth, metricsDrawnWidth));
@@ -151,6 +157,9 @@ export function useCat() {
     seq += "\x1b8";
     terminal.write(seq);
     metricsDrawnWidth = curWidth;
+    metricsDrawnKey = key;
+    // 狭い幅ではクリア範囲が右下の猫に食い込むので、猫を描き直して戻す
+    if (!isBlinking && terminal.cols - CAT_DISPLAY_WIDTH + 1 <= clearWidth) drawCatFrame(catFrames.normal);
   }
 
   // ----- テキスト折り返し -----
@@ -268,7 +277,6 @@ export function useCat() {
           speechState = "typing";
           speechTimer = setTimeout(advanceSpeech, TYPING_INTERVAL_MS);
         } else {
-          clearSpeechLines();
           speechTimer = setTimeout(advanceSpeech, IDLE_RECHECK_MS);
         }
         break;
@@ -292,6 +300,7 @@ export function useCat() {
         // セリフ表示後はキューをリセット（連続して喋らない）
         topics.length = 0;
         speechState = "idle";
+        clearSpeechLines(); // 表示を消すのはこの 1 回だけ(idle の再チェックでは描画しない)
         speechTimer = setTimeout(advanceSpeech, 0);
         break;
       }
@@ -320,36 +329,47 @@ export function useCat() {
     drawCatFrame(catFrames.normal);
     scheduleNextBlink();
     advanceSpeech();
-
-    redrawTimer = setInterval(() => {
-      // 猫本体
-      if (!isBlinking) drawCatFrame(catFrames.normal);
-      // セリフ（表示中なら再描画してターミナル出力による上書きから復元）
-      if (speechState === "typing" || speechState === "holding") {
-        drawSpeechLines(currentSpeechLines, displayedCharCount);
-      }
-      // 左下メトリクス（上書きからの復元）
-      drawMetrics();
-    }, REDRAW_INTERVAL_MS);
   }
 
-  function stop() {
-    if (redrawTimer) { clearInterval(redrawTimer); redrawTimer = null; }
+  function clearTimers() {
     if (blinkScheduleTimer) { clearTimeout(blinkScheduleTimer); blinkScheduleTimer = null; }
     if (blinkRestoreTimer) { clearTimeout(blinkRestoreTimer); blinkRestoreTimer = null; }
     clearSpeechTimer();
+  }
+
+  function stop() {
+    clearTimers();
     terminal = null;
   }
 
+  // 一時停止: タイマーを止め、メトリクスは保持だけして描かない
+  function pause() {
+    if (paused || !terminal) return;
+    paused = true;
+    clearTimers();
+    isBlinking = false;
+  }
+
+  // 再開: 全面を描き直してからタイマーを再開する
+  function resume() {
+    if (!paused || !terminal) return;
+    paused = false;
+    redraw();
+    scheduleNextBlink();
+    advanceSpeech();
+  }
+
+  // 全面描画(リサイズ・再開時)。画面が消えている可能性があるのでメトリクスも強制的に描く
   function redraw() {
+    if (paused) return;
     if (!isBlinking) drawCatFrame(catFrames.normal);
     if (speechState === "typing" || speechState === "holding") {
       drawSpeechLines(currentSpeechLines, displayedCharCount);
     }
-    drawMetrics();
+    drawMetrics(true);
   }
 
   onUnmounted(stop);
 
-  return { start, stop, redraw, topic, setMetrics };
+  return { start, stop, pause, resume, redraw, topic, setMetrics };
 }

@@ -1,0 +1,24 @@
+diff --git a/index.mjs b/index.mjs
+index 7ad811ceb4015ab48c02b7f22894afdd823cedb1..f2bbd1f41b58c08e0fb9f7b7b04a8ac1488e558c 100644
+--- a/index.mjs
++++ b/index.mjs
+@@ -173,7 +173,18 @@ function updateAllPos() {
+  */
+ function poll(el) {
+     setTimeout(() => {
+-        intervals.set(el, setInterval(() => lowPriority(updatePos.bind(null, el)), 2000));
++        // PATCH(oretachi #419): DOM から外れた要素の interval を残さない
++        if (!el.isConnected)
++            return;
++        const id = setInterval(() => {
++            if (!el.isConnected) {
++                clearInterval(id);
++                intervals.delete(el);
++                return;
++            }
++            lowPriority(updatePos.bind(null, el));
++        }, 2000);
++        intervals.set(el, id);
+     }, Math.round(2000 * Math.random()));
+ }
+ /**

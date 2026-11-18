@@ -36,7 +36,7 @@ import {
 } from "../composables/useEventSubscriptions";
 import { isPseudoWorktree } from "../utils/repositoryWorktree";
 import { computeNaturalCardWidth } from "../utils/cardWidth";
-import { computed, nextTick, reactive, ref, watch } from "vue";
+import { computed, nextTick, onUnmounted, reactive, ref, watch } from "vue";
 import autoAnimate from "@formkit/auto-animate";
 import type { AnimationController } from "@formkit/auto-animate";
 
@@ -98,17 +98,38 @@ function animateFlip(oldPositions: Map<string, DOMRect>) {
 }
 
 // auto-animate: 各カラムのコントローラーを管理
-const columnControllers = new Map<number, AnimationController>();
+// 列要素が作り直されるたびに旧コントローラーを destroy しないと、MutationObserver と
+// 子要素ごとの 2 秒周期タイマーが残り続けて Compositor 負荷が積み上がる (#419)。
+// なお @formkit/auto-animate 本体にも、DOM から外れた子要素のタイマーを解除しない問題があり、
+// patches/ で解除するパッチを当てている。auto-animate を更新するときはパッチを当て直すこと。
+const columnControllers = new Map<number, { el: HTMLElement; ctrl: AnimationController }>();
 
 function registerColumn(el: HTMLElement | null, index: number) {
   if (!el) {
-    columnControllers.delete(index);
+    // null は再描画のたびにも呼ばれる(インライン ref 関数)ので、DOM から外れたものだけ描画後に掃除する
+    nextTick(pruneDetachedColumns);
     return;
   }
-  if (!columnControllers.has(index)) {
-    columnControllers.set(index, autoAnimate(el, { duration: 250 }));
+  const current = columnControllers.get(index);
+  if (current?.el === el) return;
+  current?.ctrl.destroy?.();
+  columnControllers.set(index, { el, ctrl: autoAnimate(el, { duration: 250 }) });
+}
+
+// 列要素が DOM から外れて登録だけ残ったものを掃除する(列数が減った場合など)
+function pruneDetachedColumns() {
+  for (const [index, { el, ctrl }] of columnControllers) {
+    if (!el.isConnected) {
+      ctrl.destroy?.();
+      columnControllers.delete(index);
+    }
   }
 }
+
+onUnmounted(() => {
+  for (const { ctrl } of columnControllers.values()) ctrl.destroy?.();
+  columnControllers.clear();
+});
 
 // 削除アニメーション用
 const hiddenWorktrees = reactive(new Set<string>());
@@ -130,7 +151,7 @@ function hideCard(worktreeId: string): Map<string, DOMRect> {
   // splice 前に残りカードの位置を記録し、autoAnimate を無効化（FLIP に委ねる）
   const positions = capturePositions();
   if (++autoAnimateDisableDepth === 1) {
-    for (const ctrl of columnControllers.values()) ctrl.disable();
+    for (const { ctrl } of columnControllers.values()) ctrl.disable();
   }
   return positions;
 }
@@ -139,7 +160,7 @@ function animateAfterRemove(positions: Map<string, DOMRect>): void {
   animateFlip(positions);
   if (--autoAnimateDisableDepth <= 0) {
     autoAnimateDisableDepth = 0;
-    for (const ctrl of columnControllers.values()) ctrl.enable();
+    for (const { ctrl } of columnControllers.values()) ctrl.enable();
   }
 }
 
@@ -158,7 +179,7 @@ defineExpose({ fadeOutCard, hideCard, animateAfterRemove, unhideCard, sendCatTop
 
 // D&D中はauto-animateを無効化してカスタムFLIPに委ねる
 watch(draggingId, (id) => {
-  for (const ctrl of columnControllers.values()) {
+  for (const { ctrl } of columnControllers.values()) {
     if (id) ctrl.disable();
     else ctrl.enable();
   }
@@ -234,6 +255,8 @@ const props = defineProps<{
   aiJudgingWorktrees: Set<string>;
   cardTooltips?: Map<string, string | undefined>;
   descriptionOpens?: Map<string, boolean>;
+  /** ホームが表示中かつウィンドウが隠れていない。false の間は猫の再描画とメトリクス取得を止める */
+  homeVisible?: boolean;
 }>();
 
 // json の開閉状態を一時的に無視して全カードの description を開く（セッション限り・非永続）
@@ -345,13 +368,13 @@ const tasksRef = sortedTasks;
 // 退場アニメ中の旧カード DOM が約250ms 残り、高速連打で DOM 二重化（重複表示）や
 // 旧グループカードの残留（別グループ漏れ）を招く。切替時はアニメを無効化して即時入れ替えにする。
 watch(activeWorkgroupId, () => {
-  for (const ctrl of columnControllers.values()) ctrl.disable();
+  for (const { ctrl } of columnControllers.values()) ctrl.disable();
   nextTick(() => {
     resetAllCardTransforms();
     // 削除（autoAnimateDisableDepth>0）/ drag（draggingId）進行中は、その完了処理に
     // enable を委ね、ここでは再有効化しない（二重 enable・進行中アニメ破壊を防ぐ）。
     if (autoAnimateDisableDepth === 0 && !draggingId.value) {
-      for (const ctrl of columnControllers.values()) ctrl.enable();
+      for (const { ctrl } of columnControllers.values()) ctrl.enable();
     }
   });
 });
@@ -406,7 +429,7 @@ watch(
   <div class="home-view">
     <!-- 背景: ターミナル猫 -->
     <div v-if="settings.enableHomeCat === true" class="home-cat-bg">
-      <HomeCatTerminal ref="catRef" />
+      <HomeCatTerminal ref="catRef" :active="homeVisible !== false" />
     </div>
 
     <!-- フォアグラウンドコンテンツ -->

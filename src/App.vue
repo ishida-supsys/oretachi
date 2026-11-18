@@ -35,6 +35,7 @@ import { useArtifactWindow } from "./composables/useArtifactWindow";
 import { useNotifications, sendOsNotification, playSoundForKind } from "./composables/useNotifications";
 import { useTrayPopup } from "./composables/useTrayPopup";
 import { useWindowFocus } from "./composables/useWindowFocus";
+import { useWindowHidden } from "./composables/useWindowHidden";
 import { useTasks } from "./composables/useTasks";
 import type { TrayWorktreeData, TrayTerminalData } from "./composables/useTrayPopup";
 import type { NotifyKind, TrayNotificationMode, WorktreeEntry } from "./types/settings";
@@ -100,6 +101,14 @@ const toast = useToast();
 
 // ウィンドウのフォーカス状態
 const { isWindowFocused } = useWindowFocus();
+// 最小化・トレイ非表示などで完全に隠れている間は、通知パルス等の無限アニメを止める
+// (各コンポーネントが html.window-hidden を見て animation-play-state を paused にする)
+const { isWindowHidden } = useWindowHidden();
+watch(
+  isWindowHidden,
+  (hidden) => document.documentElement.classList.toggle("window-hidden", hidden),
+  { immediate: true },
+);
 const { checkForUpdate, downloadAndInstall, setBeforeInstallHook } = useUpdater();
 
 // サブウィンドウフォーカス状態: ワークツリー ID → フォーカス中か (useSubWindowEvents で管理)
@@ -2820,6 +2829,7 @@ onMounted(async () => {
         ref="homeViewRef"
         v-show="viewMode === 'home'"
         class="absolute inset-0"
+        :home-visible="viewMode === 'home' && !isWindowHidden"
         :worktrees="worktrees"
         :thumbnail-urls="thumbnailUrls"
         :detached-worktrees="detachedWorktrees"
