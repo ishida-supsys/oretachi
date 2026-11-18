@@ -66,13 +66,25 @@ defineEmits<{
   pointer-events: none;
 }
 
-@keyframes pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(243, 139, 168, 0.4); }
-  50% { box-shadow: 0 0 0 8px rgba(243, 139, 168, 0); }
+/* 広がる輪は ::after の transform/opacity で描く(box-shadow のアニメは再描画が走り続ける: #419) */
+.tray-btn--pulse::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  pointer-events: none;
+  box-shadow: 0 0 0 4px rgba(243, 139, 168, 0.4);
+  opacity: 0;
+  animation: pulse 2s ease-in-out infinite;
 }
 
-.tray-btn--pulse {
-  animation: pulse 2s ease-in-out infinite;
+@keyframes pulse {
+  0%, 100% { transform: scale(1); opacity: 1; }
+  50% { transform: scale(1.33); opacity: 0; }
+}
+
+:global(html.window-hidden) .tray-btn--pulse::after {
+  animation-play-state: paused;
 }
 </style>
 

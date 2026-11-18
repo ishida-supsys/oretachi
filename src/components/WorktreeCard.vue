@@ -406,12 +406,27 @@ const terminalList = computed(() =>
 
 .card-notified {
   border-color: #f38ba8;
+}
+
+/* 脈動は ::after の opacity だけで行う(box-shadow のアニメは再描画が走り続ける: #419) */
+.card-notified::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 8px 2px rgba(243, 139, 168, 0.3);
+  opacity: 0;
   animation: notification-pulse 2s ease-in-out infinite;
 }
 
 @keyframes notification-pulse {
-  0%, 100% { box-shadow: 0 0 0 0 rgba(243, 139, 168, 0.2); }
-  50%       { box-shadow: 0 0 8px 2px rgba(243, 139, 168, 0.3); }
+  0%, 100% { opacity: 0; }
+  50% { opacity: 1; }
+}
+
+:global(html.window-hidden) .card-notified::after {
+  animation-play-state: paused;
 }
 
 .card-header {

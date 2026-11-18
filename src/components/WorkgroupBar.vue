@@ -234,6 +234,7 @@ function onDragEnd() {
 }
 
 .wg-chip {
+  position: relative;
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -268,18 +269,30 @@ function onDragEnd() {
   color: #cdd6f4;
 }
 
+/* 通知パルス: 輪は静的な box-shadow、脈動は ::after の opacity だけで行う。
+   box-shadow を毎フレーム変えるアニメは再描画が走り続けて Compositor を占有する(#419) */
 .wg-chip.notified {
-  box-shadow: 0 0 0 2px #f38ba8;
+  box-shadow: 0 0 0 2px rgba(243, 139, 168, 0.8);
+}
+
+.wg-chip.notified::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  box-shadow: 0 0 0 2px #f38ba8, 0 0 8px 2px rgba(243, 139, 168, 0.3);
+  opacity: 0;
   animation: wg-notification-pulse 2s ease-in-out infinite;
 }
 
 @keyframes wg-notification-pulse {
-  0%, 100% {
-    box-shadow: 0 0 0 2px rgba(243, 139, 168, 0.6);
-  }
-  50% {
-    box-shadow: 0 0 0 2px rgba(243, 139, 168, 1), 0 0 8px 2px rgba(243, 139, 168, 0.3);
-  }
+  0%, 100% { opacity: 0; }
+  50% { opacity: 1; }
+}
+
+:global(html.window-hidden) .wg-chip.notified::after {
+  animation-play-state: paused;
 }
 
 /* ドラッグ中はカーソル位置にゴースト画像が重なってチップ本体が隠れるので、
@@ -291,7 +304,10 @@ function onDragEnd() {
   border-color: #cba6f7;
   color: #cdd6f4;
   box-shadow: 0 0 0 3px rgba(203, 166, 247, 0.9), 0 0 12px 4px rgba(203, 166, 247, 0.45);
-  animation: none;
+}
+
+.wg-chip.drop-hover::after {
+  display: none;
 }
 
 .wg-count {

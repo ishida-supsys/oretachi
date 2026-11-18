@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted } from "vue";
+import { ref, onMounted, onUnmounted, watch } from "vue";
 import { useI18n } from "vue-i18n";
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
@@ -15,10 +15,15 @@ interface ReportSummary {
   ai_result_count: number;
 }
 
+const props = withDefaults(defineProps<{
+  /** false の間(ホーム非表示・ウィンドウが隠れている間)は猫の描画とメトリクス取得を止める */
+  active?: boolean;
+}>(), { active: true });
+
 const { t } = useI18n();
 const containerRef = ref<HTMLDivElement | null>(null);
 
-const { start, stop, redraw, topic, setMetrics } = useCat();
+const { start, stop, pause, resume, redraw, topic, setMetrics } = useCat();
 
 let terminal: Terminal | null = null;
 let fitAddon: FitAddon | null = null;
@@ -104,7 +109,9 @@ onMounted(() => {
   reportTimer = setInterval(fetchReport, 60000);
 
   // システムメトリクスのポーリングを開始し、更新イベントを購読する
-  invoke("system_metrics_start").catch(() => {});
+  // (非アクティブで起動した場合は resume 時に開始する)
+  if (props.active) invoke("system_metrics_start").catch(() => {});
+  else pause();
   listen<SystemMetrics>("system-metrics", (e) => setMetrics(e.payload))
     .then((un) => {
       // 購読完了前にアンマウントされていた場合は即座に解除（リスナーリーク防止）
@@ -120,6 +127,17 @@ onMounted(() => {
     }
   });
   resizeObserver.observe(containerRef.value);
+});
+
+watch(() => props.active, (active) => {
+  if (!terminal || unmounted) return;
+  if (active) {
+    invoke("system_metrics_start").catch(() => {});
+    resume();
+  } else {
+    invoke("system_metrics_stop").catch(() => {});
+    pause();
+  }
 });
 
 onUnmounted(() => {
