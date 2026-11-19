@@ -6,6 +6,11 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+## [0.39.1] - 2026-11-19
+
+### Changed
+- メイン WebView2 の常時 Compositor 負荷を削減した。通知パルスのアニメを opacity/transform 化し、ウィンドウ非表示中は一時停止、ホームの猫の描画とメトリクス取得も非表示中は止める (#419)
+
 ## [0.39.0] - 2026-11-18
 
 ### Added
@@ -981,7 +986,8 @@ This project adheres to [Semantic Versioning](https://semver.org/).
 ### Fixed
 - Position gaming border fixed to viewport to remain visible and static relative to the viewport when page content scrolls
 
-[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.39.0...HEAD
+[Unreleased]: https://github.com/ishida-supsys/oretachi/compare/0.39.1...HEAD
+[0.39.1]: https://github.com/ishida-supsys/oretachi/compare/0.39.0...0.39.1
 [0.39.0]: https://github.com/ishida-supsys/oretachi/compare/0.38.3...0.39.0
 [0.38.3]: https://github.com/ishida-supsys/oretachi/compare/0.38.2...0.38.3
 [0.38.2]: https://github.com/ishida-supsys/oretachi/compare/0.38.1...0.38.2
